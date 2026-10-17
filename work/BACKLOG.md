@@ -8,8 +8,8 @@ See [batch 001](batches/001-parallel-coordination.md). Its acceptance milestone 
 
 | ID | Task | Status | Acceptance |
 | --- | --- | --- | --- |
-| C-02 | Read-only session Git/worktree context | In progress in batch 001 | Main/linked/detached/non-Git states; branch/path/commit visible on desktop and phone; no repository mutation |
-| C-03 | Durable completion claims | In progress in batch 001 | Self-authored scoped MCP reports; idempotency; restart persistence; visible claims with commits, checks and blockers; no automatic work |
+| C-02 | Read-only session Git/worktree context | Delivered in batch 001 | Main/linked/detached/non-Git states; branch/path/commit visible on desktop and phone; no repository mutation |
+| C-03 | Durable completion claims | Delivered in batch 001 | Self-authored scoped MCP reports; idempotency; restart persistence; visible claims with commits, checks and blockers; no automatic work |
 
 ## Next coordination work
 

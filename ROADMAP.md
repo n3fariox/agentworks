@@ -23,6 +23,8 @@ Workspace navigation now shares project/directory context across Sessions, Files
 
 Implemented: durable agent-to-agent text inboxes and a native Rust Agentworks MCP interface, with browser-managed per-session capabilities and project-scoped coordinator actions. Actual message delivery works with Claude, Codex, and OpenCode. Automatic wake-up, cross-project grants, and cross-host routing remain deferred. See [communication and MCP execution plan](AGENT-COMMUNICATION.md). MCP permissions do not isolate agents running as the service's OS user.
 
+Batch 001 established the Git baseline and proved two concurrent Codex sessions in separate worktrees with MCP handoffs and sequential reviewed merges. Read-only session workspace context and durable completion reports are now delivered; see [the batch record](work/batches/001-parallel-coordination.md).
+
 Pending: further Claude/Codex tool-use and resume validation, question/elicitation forms, model attachments, provider-specific configuration, application login, terminal mode, and multi-host execution. Prototype sessions persist in SQLite, support configurable private-network binding, and do not mark the full MVP phases complete.
 
 ## 1. Proposed scope
