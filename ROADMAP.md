@@ -1,6 +1,6 @@
 # Agentworks roadmap
 
-Status: proposed architecture and execution plan, October 17, 2026.
+Status: architecture reference and execution plan, October 17, 2026. Current task status is tracked in [the execution backlog](work/BACKLOG.md).
 
 Confirmed decisions: Linux hosting for MVP; keep the architecture portable to Windows. Select chat or terminal when creating a session, with no switching. Reuse existing Claude/Codex host CLI sign-ins by default, with API keys as an optional explicit mode and the user's existing VPN for remote browser access. Add multiple execution hosts after MVP using a persistent host service connected over SSH.
 
@@ -47,7 +47,7 @@ Pending: further Claude/Codex tool-use and resume validation, question/elicitati
 
 - This is a personal local application. Team accounts and public hosting are outside the first release.
 - The application launches and manages its own sessions. Attaching to arbitrary already-running terminal processes is a later investigation.
-- Each project can have several sessions, but concurrent editing of the same checkout is warned about. Worktree isolation follows later unless required immediately.
+- Each project can have several sessions. Parallel implementation work now uses separate Git branches/worktrees, with one coordinator reviewing and integrating changes sequentially. Managed worktree creation/cleanup in the app remains follow-up work.
 - Local execution means files and processes live on the host; Claude/Codex model requests still use their configured remote providers.
 - Read-only file previews are in scope; a full browser IDE is deferred.
 - Linux is the first hosting target. Keep PTY creation, process control, paths, and service installation behind platform interfaces so Windows can be added later using ConPTY. macOS is not a launch requirement.
@@ -263,4 +263,4 @@ These are optional refinements; the initial assumptions above allow implementati
 1. Should the app discover existing provider histories or only manage sessions launched here?
 2. Is one project root per session plus explicitly added directories enough, and should concurrent edits use separate worktrees immediately?
 
-The next implementation step is Phase 0. Validate ACP first, then build the chat interface. Probe PTY/Ghostty behavior when starting Phase 3.
+ACP/chat, persistence, workspace files, manual automations and scoped MCP messaging/control have been implemented and exercised. Continue from [the execution backlog](work/BACKLOG.md), beginning with the coordination batch; the phase descriptions above remain architecture/acceptance references, not a claim that completed prototype work must be repeated. Probe PTY/Ghostty behavior when starting terminal work.
