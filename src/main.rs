@@ -1,6 +1,7 @@
 mod automations;
 mod catalog;
 mod communication;
+mod git_context;
 mod mcp;
 mod runtime;
 mod store;
@@ -495,6 +496,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route(
+            "/git-context.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../web/git-context.js"),
+                )
+            }),
+        )
+        .route(
             "/workspace.css",
             get(|| async {
                 (
@@ -567,6 +577,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/{id}/approvals/{approval}", post(approve))
         .route("/api/sessions/{id}/events", get(events))
         .route("/api/sessions/{id}/file", get(file))
+        .route("/api/sessions/{id}/workspace", get(git_context::workspace))
         .route("/api/markdown", post(markdown))
         .layer(DefaultBodyLimit::max(128 * 1024))
         .layer(middleware::from_fn_with_state(app.clone(), guard))
