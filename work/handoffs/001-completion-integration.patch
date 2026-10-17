@@ -1,0 +1,23 @@
+diff --git a/src/main.rs b/src/main.rs
+index 88bfc44..0f3c09e 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,6 +1,7 @@
+ mod automations;
+ mod catalog;
+ mod communication;
++mod completion;
+ mod mcp;
+ mod runtime;
+ mod store;
+@@ -547,6 +548,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
+             "/api/sessions/{id}/agent-access",
+             get(communication::get_access).put(communication::set_access),
+         )
++        .route(
++            "/api/sessions/{id}/completion",
++            get(completion::get_completion),
++        )
+         .route("/api/sessions/{id}/peers", get(communication::get_peers))
+         .route(
+             "/api/sessions/{id}/mailbox",

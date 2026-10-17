@@ -1,6 +1,8 @@
 export function setupCommunication({api,getActive,getSessions,selectSession,toast,uuid}) {
   const $=id=>document.getElementById(id);
   const capabilities=[['communicate','Exchange messages with project peers'],['startSessions','Create sessions in this project'],['promptSessions','Start turns in project sessions'],['cancelSessions','Cancel turns in project sessions'],['runAutomations','Run existing project automations']];
+  const reportPanel=nodePanel();
+  function nodePanel(){const panel=document.createElement('article');panel.id='agent-completion';panel.className='agent-message';panel.hidden=true;$('agent-inbox').before(panel);return panel;}
   let id=null,after=0,messages=[],timer=null,loading=false,openGeneration=0;
   const node=(tag,text)=>{const n=document.createElement(tag);n.textContent=text;return n;};
   for(const [key,label] of capabilities){const row=node('label','');row.className='workspace-check';const input=document.createElement('input');input.type='checkbox';input.id='agent-grant-'+key;input.addEventListener('change',()=>$('agent-preset').value='custom');row.append(input,document.createTextNode(label));$('agent-grants').append(row);}
@@ -26,9 +28,18 @@ export function setupCommunication({api,getActive,getSessions,selectSession,toas
       card.append(actions);list.append(card);
     }
   }
+  function renderReport(report){
+    reportPanel.replaceChildren();reportPanel.hidden=!report;if(!report)return;
+    reportPanel.append(node('strong','Agent report · '+report.status),node('small','Agent claim; not proof of review, merge, or test success.'),node('pre',report.summary));
+    reportPanel.append(node('small',`${report.authorTitle} · ${new Date(report.created).toLocaleString()} · #${report.id}`));
+    if(report.branch)reportPanel.append(node('small','Branch: '+report.branch));
+    if(report.commit)reportPanel.append(node('small','Commit: '+report.commit));
+    for(const check of report.checks||[])reportPanel.append(node('small',check.name+': '+check.result));
+  }
   async function refresh(reset=false){
     if(loading||!id)return;loading=true;const current=id;
     try{
+      const completion=await api(`/api/sessions/${current}/completion`);if(current!==id)return;renderReport(completion.report);
       const data=await api(`/api/sessions/${current}/mailbox?after=${reset?0:after}`);if(current!==id)return;
       if(reset)messages=[];
       const seen=new Set(messages.map(m=>m.id));messages.push(...data.messages.filter(m=>!seen.has(m.id)));after=data.nextCursor;
@@ -40,7 +51,7 @@ export function setupCommunication({api,getActive,getSessions,selectSession,toas
   $('agent-more-messages').addEventListener('click',()=>refresh());
   $('agent-refresh-messages').addEventListener('click',()=>refresh(true));
   $('session-agents').addEventListener('click',async()=>{
-    const active=getActive();if(!active)return;const ticket=++openGeneration;id=active.id;after=0;messages=[];$('agent-preset').disabled=true;for(const [key] of capabilities)$('agent-grant-'+key).disabled=true;$('agent-error').textContent='';$('agent-inbox').replaceChildren();
+    const active=getActive();if(!active)return;const ticket=++openGeneration;id=active.id;after=0;messages=[];renderReport(null);$('agent-preset').disabled=true;for(const [key] of capabilities)$('agent-grant-'+key).disabled=true;$('agent-error').textContent='';$('agent-inbox').replaceChildren();
     $('agent-scope').textContent=active.projectId?'Scope: this session’s logical project, including its registered directories.':'Assign this session to a project to discover or contact peers.';
     $('agents-dialog').showModal();$('save-agent-access').disabled=true;
     try{const access=await api(`/api/sessions/${id}/agent-access`);if(ticket!==openGeneration||!id)return;$('agent-preset').disabled=false;for(const [key] of capabilities)$('agent-grant-'+key).disabled=false;for(const [key] of capabilities)$('agent-grant-'+key).checked=!!access[key];const all=capabilities.every(([k])=>access[k]);$('agent-preset').value=all?'coordinator':access.communicate&&capabilities.slice(1).every(([k])=>!access[k])?'participant':capabilities.every(([k])=>!access[k])?'off':'custom';$('save-agent-access').disabled=false;await refresh(true);timer=setInterval(()=>refresh(),3000);}catch(e){$('agent-error').textContent=e.message;}

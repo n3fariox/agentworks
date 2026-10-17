@@ -124,6 +124,12 @@ fn tools(a: &mail::Access) -> Value {
         tools.push(tool("send_message","Persist a message to a participating project peer. Does not wake or interrupt it. Reuse requestId only for the same message.",json!({"recipient":{"type":"string"},"text":{"type":"string","maxLength":16384},"requestId":{"type":"string","maxLength":100},"replyTo":{"type":"integer"}}),&["recipient","text","requestId"]));
         tools.push(tool("acknowledge_message","Acknowledge receipt of a message in your own inbox; does not indicate task completion.",json!({"messageId":{"type":"integer"}}),&["messageId"]));
     }
+    if a.communicate {
+        tools.push(tool("report_completion", "Persist your own completion claim. Does not review, merge, test, or change turn status. Reuse requestId only for identical payloads.", json!({"status":{"type":"string","enum":["completed","blocked"]},"summary":{"type":"string","maxLength":4096},"branch":{"type":"string","maxLength":256},"commit":{"type":"string","pattern":"^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"},"checks":{"type":"array","maxItems":32,"items":{"type":"object","properties":{"name":{"type":"string","maxLength":256},"result":{"type":"string","maxLength":2048}},"required":["name","result"],"additionalProperties":false}},"requestId":{"type":"string","maxLength":100}}), &["status","summary","requestId"]));
+    }
+    if a.communicate || mail::coordinator(a) {
+        tools.push(tool("get_completion", "Read the latest agent claim for yourself or a permitted same-project session. Claims are not proof of review or success.", json!({"sessionId":{"type":"string"}}), &[]));
+    }
     if a.start_sessions {
         tools.push(tool("start_session","Start an unprivileged session in this project. Does not submit a prompt. Reuse requestId on retry.",json!({"provider":{"type":"string","enum":["demo","claude","codex","opencode"]},"cwd":{"type":"string"},"title":{"type":"string"},"model":{"type":"string"},"requestId":{"type":"string","maxLength":50}}),&["provider","cwd","requestId"]));
     }
@@ -182,6 +188,18 @@ async fn dispatch(app: &App, s: &Session, operation: &str, args: Value) -> mail:
                 .transpose()?
                 .unwrap_or(0);
             app.store.lock().unwrap().mailbox(&s.id, after)
+        }
+        "report_completion" => {
+            let req = serde_json::from_value(args).map_err(|_| {
+                crate::fail(StatusCode::BAD_REQUEST, "Invalid completion report fields")
+            })?;
+            crate::completion::report(app, s, req)
+        }
+        "get_completion" => {
+            let req = serde_json::from_value(args).map_err(|_| {
+                crate::fail(StatusCode::BAD_REQUEST, "Invalid completion query fields")
+            })?;
+            crate::completion::get(app, s, req)
         }
         "send_message" => {
             let req = serde_json::from_value(args)
@@ -348,7 +366,7 @@ pub async fn serve_bridge(app: App, listener: TcpListener) {
                 let actor=app.sessions.lock().unwrap().values().find(|s|s.mcp_token.lock().unwrap().as_str()==token).cloned();
                 let response=if let Some(s)=actor {
                     let operation=v["operation"].as_str().unwrap_or("");
-                    let mutation=!matches!(operation,"tools/list"|"read_inbox"|"list_sessions"|"list_automations");
+                    let mutation=!matches!(operation,"tools/list"|"read_inbox"|"list_sessions"|"list_automations"|"get_completion");
                     let action=operation.chars().take(80).collect::<String>();
                     let argument_target=v["arguments"]["sessionId"].as_str().or(v["arguments"]["recipient"].as_str()).or(v["arguments"]["automationId"].as_str()).unwrap_or("").chars().take(128).collect::<String>();
                     let request=v["arguments"]["requestId"].as_str().unwrap_or("").chars().take(100).collect::<String>();

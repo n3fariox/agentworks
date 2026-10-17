@@ -1,6 +1,7 @@
 mod automations;
 mod catalog;
 mod communication;
+mod completion;
 mod git_context;
 mod mcp;
 mod runtime;
@@ -556,6 +557,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/sessions/{id}/agent-access",
             get(communication::get_access).put(communication::set_access),
+        )
+        .route(
+            "/api/sessions/{id}/completion",
+            get(completion::get_completion),
         )
         .route("/api/sessions/{id}/peers", get(communication::get_peers))
         .route(

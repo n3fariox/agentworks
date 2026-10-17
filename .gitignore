@@ -1,6 +1,6 @@
 /target/
 /.cache/
-/node_modules/
+/node_modules
 /.agentworks/
 .env
 *.log

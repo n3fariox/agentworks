@@ -97,6 +97,10 @@ In **Automations**, create a named definition with a harness, optional model, pr
 
 Definitions and run records are saved in SQLite alongside sessions. Completed, failed, cancelled, and interrupted outcomes describe the initial automation turn, independently of later manual conversation turns. Updates/crashes do not automatically repeat an interrupted or queued initial prompt. Deleting a definition keeps its sessions and run records. Deleting a session removes its transcript and marks its run as deleted while keeping the run record. Removing a project moves its definitions/sessions to Ungrouped.
 
+## Session workspace context
+
+Open **Workspace info** in a session to see its current Git branch, commit, repository/worktree paths, and whether it is a linked worktree. Detached HEAD, new branches without commits, non-Git directories and unavailable paths have explicit states. The dialog refreshes on open and preserves the chat stream and draft. This is read-only inspection; managed worktree creation/cleanup and merge controls are later work. See [workspace details and checks](WORKTREES.md).
+
 ## Agent communication and MCP control
 
 Each normal chat session is connected to the native **Agentworks MCP** server (`agentworks mcp`). Claude, Codex, and OpenCode have each sent a real message through this connection. Temporary model-discovery/history-listing processes receive no Agentworks control connection. The MCP subprocess uses the official Rust SDK and a credential-protected loopback bridge to the running service; credentials rotate when the harness restarts and are not included in browser snapshots.
@@ -123,6 +127,8 @@ Deterministic MCP checks use isolated data and no model calls:
 ```bash
 npm run test:mcp-wire
 npm run test:communication
+npm run test:completion
+npm run test:git-context
 ```
 
 The wire check covers both legacy initialization and modern MCP discovery, including the response/cache fields needed by the installed Claude SDK. The communication check exercises actual ACP → native stdio MCP → service operations, denied actions, coordinator work, retry deduplication, revocation during a turn, restart persistence, and retained sender identity.
@@ -133,6 +139,12 @@ Opt-in real-harness verification makes one short model request per selected harn
 AGENTWORKS_TEST_MCP_HARNESSES=claude,codex,opencode \
 AGENTWORKS_URL=http://127.0.0.1:4323 npm run test:mcp-harnesses
 ```
+
+## Agent completion reports
+
+Participating agents can call **report_completion** to persist a completed/blocked claim with a summary, branch/commit, checks and a retry request ID. **get_completion** reads a permitted session's latest report. Reports appear in **Agents & inbox**, survive updates/restarts and retain authenticated author identity. They do not end turns, start work, approve changes or merge commits. Review and integration remain separate from an agent's claim. See [report schemas, permissions and checks](COMPLETION-REPORTS.md).
+
+The first parallel development batch ran two real Codex sessions in separate branches/worktrees, with MCP handoffs and sequential reviewed merges. See [the batch record](work/batches/001-parallel-coordination.md) and [remaining work](work/BACKLOG.md).
 
 ## Hosts and projects
 
@@ -229,7 +241,7 @@ npx playwright test
 
 Browser checks cover desktop/mobile layout, session switching, permission requests across reload, cancellation, images, and Markdown file preview.
 
-After `cargo build --locked`, `npm run verify` starts an isolated server on port 4318, runs the API, project, settings/model, import, workspace/automation, and browser suites, checks shutdown with an open browser connection, and stops its server. Use `AGENTWORKS_VERIFY_PORT` to change the test port.
+After `cargo build --locked`, `npm run verify` starts an isolated server on port 4318, runs the API, project, settings/model, import, workspace/automation, completion-report, Git-context and browser suites, checks shutdown with an open browser connection, and stops its server. Use `AGENTWORKS_VERIFY_PORT` to change the test port.
 
 Architecture and follow-up work: [ROADMAP.md](ROADMAP.md), [Rust/ACP assessment](RUST-INTEGRATION.md), and [morsh reuse notes](MORSH-REUSE.md).
 

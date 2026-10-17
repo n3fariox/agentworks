@@ -153,6 +153,9 @@ pub fn require(app: &App, s: &Session, capability: &str) -> Result<Access> {
     }
     Ok(a)
 }
+pub fn coordinator(a: &Access) -> bool {
+    a.start_sessions || a.prompt_sessions || a.cancel_sessions || a.run_automations
+}
 pub fn peers(app: &App, s: &Session) -> Result<Value> {
     let grants = access(app, s)?;
     if !grants.enabled() {
@@ -161,10 +164,7 @@ pub fn peers(app: &App, s: &Session) -> Result<Value> {
             "Agentworks discovery is not granted",
         ));
     }
-    let coordinator = grants.start_sessions
-        || grants.prompt_sessions
-        || grants.cancel_sessions
-        || grants.run_automations;
+    let coordinator = coordinator(&grants);
     let scope = project(s);
     let candidates: Vec<_> = app.sessions.lock().unwrap().values().cloned().collect();
     let mut values = Vec::new();
