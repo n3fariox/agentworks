@@ -1,3 +1,4 @@
+import {setupWorktreeControls,setupPolicyEditor} from '/worktree-controls.js';
 import {setupGitContext} from '/git-context.js';
 import {createWorkspace} from '/workspace.js';
 import {setupCommunication} from '/communication.js';
@@ -11,7 +12,7 @@ let workspace;
 let projects=[],hosts=[{id:'local',name:'Local',status:'connected'}];
 let sidebarView=localStorage.getItem('agentworks-sidebar-view')==='hosts'?'hosts':'projects';
 let collapsedGroups=new Set(readStorage(localStorage,'agentworks-tree-collapsed',[]));
-let editingProject=null;
+let editingProject=null,savingProject=false;
 const drafts=readStorage(sessionStorage,'agentworks-drafts',{});
 const scrollPositions=new Map();let restoreScroll=null;
 let config, sessions=[], active=null, socket=null, generation=0, connected=false;
@@ -21,6 +22,9 @@ let discoveryGeneration=0;
 let externalSessions=[], externalSelection=null, externalCursor=null, externalGeneration=0, externalLoading=false, externalImporting=false;
 let drawTimer=null, retryTimer=null, reconnectDelay=500, pendingSend=null, creating=false;
 const nodes=new Map();
+let pendingCreate=readStorage(sessionStorage,'agentworks-pending-create',null);
+const worktrees=setupWorktreeControls({$,api,onChange:()=>{if(config)providerNote();}});
+const policyEditor=setupPolicyEditor({$,api});
 
 async function api(path, options={}) {
   const response=await fetch(path,{...options,headers:{'Content-Type':'application/json',...options.headers}});
@@ -36,7 +40,7 @@ function basename(path) {return path.replaceAll('\\','/').split('/').filter(Bool
 function providerNote() {
   const p=config.providers.find(p=>p.id===$('provider').value);
   $('provider-note').textContent=p.id==='demo'?'Local test agent. No model calls, API key, or file changes.':p.id==='opencode'?(p.installed?'Native ACP. Choose an advertised free model. Availability and limits may change.':'Install OpenCode on this host or set AGENTWORKS_OPENCODE_PATH.'):!p.installed?'Adapter not installed. Run npm ci --ignore-scripts.':p.authMode==='existing'?'Uses the existing agent sign-in on this host. If it has expired, sign in with the CLI and try again.':!p.keyPresent?`Set ${p.id==='claude'?'ANTHROPIC_API_KEY':'OPENAI_API_KEY or CODEX_API_KEY'} before starting the server.`:'API key available on the host. Messages use your provider account.';
-  $('create-submit').disabled=!p.installed||(p.authMode==='api_key'&&!p.keyPresent)||creating;
+  $('create-submit').disabled=!p.installed||(p.authMode==='api_key'&&!p.keyPresent)||creating||worktrees.blocked();
 }
 function openCreate(context={}) {
   if(!config)return;
@@ -46,7 +50,7 @@ function openCreate(context={}) {
   $('create-project').value=projectId||'';
   const locations=readStorage(localStorage,'agentworks-project-locations',{});
   $('create-agent-access').value='off';$('create-error').textContent='';$('directory').value=context.cwd||workspaceContext?.cwd||locations[projectId||'ungrouped']||active?.cwd||config.roots[0];$('session-title').value='';
-  resetCreateModels();providerNote();$('create-dialog').showModal();
+  resetCreateModels();worktrees.projectChanged();providerNote();$('create-dialog').showModal();
 }
 function resetCreateModels(){
   discoveryGeneration++;
@@ -232,9 +236,10 @@ async function refreshSessions(){
   sidebar();workspace?.sync(catalog,sessions);
 }
 function openProjectDialog(project=null){
+  if(savingProject)return;
   editingProject=project?.id||null;$('project-dialog-title').textContent=project?'Edit project':'New project';
   $('project-name').value=project?.name||'';$('project-error').textContent='';$('delete-project').hidden=!project;
-  $('project-dialog').showModal();$('project-name').focus();
+  policyEditor.open(editingProject);$('project-dialog').showModal();$('project-name').focus();
 }
 function resetTranscript(){transcript=[];tools=new Map();approvals=new Map();assistant=null;nodes.clear();$('messages').replaceChildren();$('approval-area').replaceChildren();}
 function selectSession(s) {
@@ -467,14 +472,21 @@ async function previewFile(path){
 $('new-session').onclick=()=>openCreate();$('welcome-new').onclick=()=>openCreate();
 $('view-hosts').onclick=()=>setSidebarView('hosts');$('view-projects').onclick=()=>setSidebarView('projects');
 $('new-project').onclick=()=>openProjectDialog();$('create-project-new').onclick=()=>openProjectDialog();
-$('dismiss-project').onclick=()=>$('project-dialog').close();
-$('create-project').onchange=()=>{const remembered=readStorage(localStorage,'agentworks-project-locations',{})[$('create-project').value||'ungrouped'];if(remembered)$('directory').value=remembered;};
+$('dismiss-project').onclick=()=>{if(!savingProject)$('project-dialog').close();};
+$('project-dialog').addEventListener('cancel',event=>{if(savingProject)event.preventDefault();});
+$('create-project').onchange=()=>{const remembered=readStorage(localStorage,'agentworks-project-locations',{})[$('create-project').value||'ungrouped'];if(remembered)$('directory').value=remembered;worktrees.projectChanged();};
 $('project-form').onsubmit=async event=>{
-  event.preventDefault();$('save-project').disabled=true;$('project-error').textContent='';
+  event.preventDefault();if(savingProject)return;savingProject=true;
+  for(const id of ['save-project','project-name','project-default-mode','project-require-worktree','delete-project','dismiss-project'])$(id).disabled=true;
+  $('project-error').textContent='';
   try{
+    const policy=policyEditor.value();
     const project=await api(editingProject?`/api/projects/${editingProject}`:'/api/projects',{method:editingProject?'PATCH':'POST',body:JSON.stringify({name:$('project-name').value})});
-    await refreshSessions();if($('create-dialog').open)$('create-project').value=project.id;$('project-dialog').close();
-  }catch(error){$('project-error').textContent=error.message;}finally{$('save-project').disabled=false;}
+    editingProject=project.id;$('delete-project').hidden=false;
+    try{await api(`/api/projects/${project.id}/workspace-policy`,{method:'PUT',body:JSON.stringify(policy)});}
+    catch(error){throw new Error(`Project name saved. Workspace policy was not saved: ${error.message}. Retry Save project.`);}
+    await refreshSessions();if($('create-dialog').open){$('create-project').value=project.id;worktrees.projectChanged();}$('project-dialog').close();
+  }catch(error){$('project-error').textContent=error.message;}finally{savingProject=false;for(const id of ['save-project','project-name','project-default-mode','project-require-worktree','delete-project','dismiss-project'])$(id).disabled=false;}
 };
 $('delete-project').onclick=async()=>{
   if(!editingProject||!confirm('Delete this project group? Its sessions will move to Ungrouped and keep running.'))return;
@@ -501,9 +513,14 @@ $('model-picker').onchange=async event=>{
   catch(error){toast(error.message);event.target.value=modelConfig.currentValue;}
 };
 $('create-form').onsubmit=async event=>{
-  event.preventDefault();creating=true;providerNote();$('create-error').textContent='';
+  event.preventDefault();if(creating||worktrees.blocked())return;creating=true;providerNote();$('create-error').textContent='';
   try{
-    const created=await api('/api/sessions',{method:'POST',body:JSON.stringify({provider:$('provider').value,cwd:$('directory').value,title:$('session-title').value,projectId:$('create-project').value||null,hostId:$('create-host').value,model:$('create-model').value,agentAccess:{communicate:$('create-agent-access').value!=='off',...Object.fromEntries(['startSessions','promptSessions','cancelSessions','runAutomations'].map(key=>[key,$('create-agent-access').value==='coordinator']))}})});
+    const payload={provider:$('provider').value,...worktrees.submission(),title:$('session-title').value,projectId:$('create-project').value||null,hostId:$('create-host').value,model:$('create-model').value,agentAccess:{communicate:$('create-agent-access').value!=='off',...Object.fromEntries(['startSessions','promptSessions','cancelSessions','runAutomations'].map(key=>[key,$('create-agent-access').value==='coordinator']))}};
+    const signature=JSON.stringify(payload);
+    if(!pendingCreate||pendingCreate.signature!==signature)pendingCreate={signature,requestId:uuid()};
+    sessionStorage.setItem('agentworks-pending-create',JSON.stringify(pendingCreate));
+    const created=await api('/api/sessions',{method:'POST',body:JSON.stringify({...payload,requestId:pendingCreate.requestId})});
+    pendingCreate=null;sessionStorage.removeItem('agentworks-pending-create');
     const locations=readStorage(localStorage,'agentworks-project-locations',{});locations[created.projectId||'ungrouped']=created.cwd;localStorage.setItem('agentworks-project-locations',JSON.stringify(locations));
     sessions.unshift(created);$('create-dialog').close();selectSession(created);
   }catch(e){$('create-error').textContent=e.message;}finally{creating=false;providerNote();}
@@ -522,7 +539,7 @@ $('resume-session').onclick=()=>{if(active)resumeSession(active.id);};
 $('stop').onclick=async()=>{try{await api(`/api/sessions/${active.id}/cancel`,{method:'POST',body:'{}'});}catch(e){toast(e.message);}};
 $('close-session').onclick=async()=>{
   if(!active)return;
-  if(!confirm('Delete this session and its saved transcript? Its agent process will stop. This cannot be undone.'))return;
+  if(!confirm('Delete this session and its saved transcript? Its agent process will stop. Worktree files and branches remain. This cannot be undone.'))return;
   const id=active.id;
   try{await api(`/api/sessions/${id}`,{method:'DELETE'});generation++;socket?.close();clearTimeout(retryTimer);active=null;localStorage.removeItem('agentworks-session');$('conversation').hidden=true;$('welcome').hidden=false;$('header-title').textContent='Overview';await refreshSessions();}catch(e){toast(e.message);}
 };
