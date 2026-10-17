@@ -4,12 +4,13 @@ This board distinguishes delivered behavior from the older architecture proposal
 
 ## Current batch
 
-See [batch 001](batches/001-parallel-coordination.md). Its acceptance milestone is two real Codex sessions working in Agentworks, reporting through MCP, followed by review, sequential merges, combined checks and a safe deployment.
+See [batch 002](batches/002-worktree-policy.md), now running two Codex sessions for enforced worktree launches and their browser controls. [Batch 001](batches/001-parallel-coordination.md) is deployed. The coordinator owns continued dispatch, review, sequential integration, validation and safe deployment.
 
 | ID | Task | Status | Acceptance |
 | --- | --- | --- | --- |
 | C-02 | Read-only session Git/worktree context | Delivered in batch 001 | Main/linked/detached/non-Git states; branch/path/commit visible on desktop and phone; no repository mutation |
 | C-03 | Durable completion claims | Delivered in batch 001 | Self-authored scoped MCP reports; idempotency; restart persistence; visible claims with commits, checks and blockers; no automatic work |
+| C-04a | Enforced worktree launches | In progress in batch 002 | Project defaults and mandatory isolation; new/existing worktree selection; common browser/MCP/automation checks; durable retry behavior; preserved history |
 
 ## Next coordination work
 
