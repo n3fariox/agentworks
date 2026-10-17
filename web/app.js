@@ -1,3 +1,4 @@
+import {setupGitContext} from '/git-context.js';
 import {createWorkspace} from '/workspace.js';
 import {setupCommunication} from '/communication.js';
 const $ = id => document.getElementById(id);
@@ -586,3 +587,5 @@ async function init(){
 init().catch(error=>toast('Cannot reach the local server: '+error.message));
 
 setupCommunication({api,getActive:()=>active,getSessions:()=>sessions,selectSession,toast,uuid});
+
+setupGitContext({api,getActive:()=>active});
