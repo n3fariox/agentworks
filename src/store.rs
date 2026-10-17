@@ -51,7 +51,7 @@ impl Store {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
         )?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 3 {
+        if version > 4 {
             return Err("Session database was created by a newer Agentworks version".into());
         }
         connection.execute_batch("BEGIN; CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, metadata TEXT NOT NULL, state TEXT NOT NULL);
@@ -65,7 +65,9 @@ impl Store {
           CREATE INDEX IF NOT EXISTS agent_messages_sender ON agent_messages(sender,id);
           CREATE TABLE IF NOT EXISTS agent_audit(id INTEGER PRIMARY KEY AUTOINCREMENT,actor TEXT NOT NULL,action TEXT NOT NULL,target TEXT NOT NULL,outcome TEXT NOT NULL,created INTEGER NOT NULL);
           CREATE TABLE IF NOT EXISTS agent_starts(actor TEXT NOT NULL,request_id TEXT NOT NULL,session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,PRIMARY KEY(actor,request_id));
-          PRAGMA user_version=3; COMMIT;")?;
+          CREATE TABLE IF NOT EXISTS agent_completions(id INTEGER PRIMARY KEY AUTOINCREMENT,author TEXT NOT NULL,author_title TEXT NOT NULL,project_id TEXT,request_id TEXT NOT NULL,payload TEXT NOT NULL,report TEXT NOT NULL,created INTEGER NOT NULL,UNIQUE(author,request_id));
+          CREATE INDEX IF NOT EXISTS agent_completions_latest ON agent_completions(author,id DESC);
+          PRAGMA user_version=4; COMMIT;")?;
         Ok(Self {
             connection,
             _lock: lock,
@@ -330,6 +332,78 @@ impl Store {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn migrates_v3_without_changing_existing_data() {
+        let path = std::env::temp_dir().join(format!(
+            "agentworks-migration-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ));
+        {
+            let store = Store::open(&path).unwrap();
+            store.connection.execute_batch("DROP TABLE agent_completions;
+                INSERT INTO sessions VALUES ('old','{\"title\":\"Original\"}','{\"status\":\"suspended\"}');
+                INSERT INTO events VALUES ('old',7,'{\"seq\":7}');
+                INSERT INTO agent_access VALUES ('old','{\"communicate\":true}');
+                INSERT INTO agent_messages(sender,sender_title,recipient,recipient_title,text,created,request_id) VALUES ('old','Original','peer','Peer','Retain me',1,'request');
+                INSERT INTO agent_audit(actor,action,target,outcome,created) VALUES ('old','send_message','peer','accepted',1);
+                PRAGMA user_version=3;").unwrap();
+        }
+        {
+            let store = Store::open(&path).unwrap();
+            let db = &store.connection;
+            assert_eq!(
+                db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                4
+            );
+            for (sql, expected) in [
+                (
+                    "SELECT metadata FROM sessions WHERE id='old'",
+                    "{\"title\":\"Original\"}",
+                ),
+                (
+                    "SELECT state FROM sessions WHERE id='old'",
+                    "{\"status\":\"suspended\"}",
+                ),
+                (
+                    "SELECT payload FROM events WHERE session_id='old'",
+                    "{\"seq\":7}",
+                ),
+                (
+                    "SELECT grants FROM agent_access WHERE session_id='old'",
+                    "{\"communicate\":true}",
+                ),
+                (
+                    "SELECT text FROM agent_messages WHERE sender='old'",
+                    "Retain me",
+                ),
+                (
+                    "SELECT outcome FROM agent_audit WHERE actor='old'",
+                    "accepted",
+                ),
+            ] {
+                assert_eq!(
+                    db.query_row(sql, [], |r| r.get::<_, String>(0)).unwrap(),
+                    expected
+                );
+            }
+            assert_eq!(
+                store.latest_completion("old", None).unwrap()["report"],
+                serde_json::Value::Null
+            );
+            // Historical identity intentionally survives deletion, as with mailbox senders.
+            db.execute("INSERT INTO agent_completions(author,author_title,project_id,request_id,payload,report,created) VALUES ('old','Original','project','done','{}','{\"author\":\"old\",\"authorTitle\":\"Original\"}',1)", []).unwrap();
+            db.execute("DELETE FROM sessions WHERE id='old'", [])
+                .unwrap();
+            assert_eq!(
+                store.latest_completion("old", None).unwrap()["report"]["authorTitle"],
+                "Original"
+            );
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(path.with_extension("sqlite3.lock")).unwrap();
+    }
+
     #[test]
     fn legacy_snapshot_import_preserves_identity_and_transcript() {
         let dir = std::env::temp_dir().join(format!("agentworks-import-{}", uuid::Uuid::new_v4()));
