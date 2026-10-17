@@ -10,6 +10,8 @@ use uuid::Uuid;
 pub struct Project {
     pub id: String,
     pub name: String,
+    #[serde(default, rename = "workspacePolicy")]
+    pub workspace_policy: crate::worktrees::Policy,
     #[serde(default, rename = "locationIds")]
     pub location_ids: Vec<String>,
 }
@@ -96,6 +98,7 @@ impl Catalog {
                 id: Uuid::new_v4().to_string(),
                 name: name.into(),
                 location_ids: Vec::new(),
+                workspace_policy: Default::default(),
             };
             data.projects.push(project.clone());
             project
@@ -103,6 +106,20 @@ impl Catalog {
         self.save(data)
             .map_err(|_| "Could not save project metadata")?;
         Ok(project)
+    }
+    pub fn workspace_policy(
+        &mut self,
+        id: &str,
+        policy: crate::worktrees::Policy,
+    ) -> Result<(), String> {
+        let mut data = self.data.clone();
+        data.projects
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or("Project not found")?
+            .workspace_policy = policy;
+        self.save(data)
+            .map_err(|_| "Could not save workspace policy".into())
     }
     pub fn remove(&mut self, id: &str) -> Result<(), String> {
         if !self.contains(id) {

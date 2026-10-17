@@ -278,6 +278,8 @@ pub async fn run(
     let Json(session) = create_session(
         State(app.clone()),
         Json(Create {
+            workspace: None,
+            request_id: None,
             agent_access: None,
             provider: def.provider,
             cwd: def.cwd,

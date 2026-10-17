@@ -7,6 +7,7 @@ mod mcp;
 mod runtime;
 mod store;
 mod workspace;
+mod worktrees;
 use catalog::{Catalog, Settings};
 
 use axum::{
@@ -47,6 +48,8 @@ struct App {
     discovery: Arc<tokio::sync::Semaphore>,
     store: Arc<Mutex<store::Store>>,
     run_lock: Arc<tokio::sync::Mutex<()>>,
+    // Last async lock: communication -> run -> workspace -> short std guards.
+    workspace_lock: Arc<tokio::sync::Mutex<()>>,
     communication_lock: Arc<tokio::sync::Mutex<()>>,
     mcp_endpoint: std::net::SocketAddr,
 }
@@ -421,6 +424,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         catalog: Arc::new(Mutex::new(Catalog::open(catalog_path)?)),
         store: Arc::new(Mutex::new(store)),
         run_lock: Arc::new(tokio::sync::Mutex::new(())),
+        workspace_lock: Arc::new(tokio::sync::Mutex::new(())),
         communication_lock: Arc::new(tokio::sync::Mutex::new(())),
         mcp_endpoint,
     };
@@ -548,6 +552,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/projects/{id}",
             axum::routing::patch(rename_project).delete(delete_project),
         )
+        .route(
+            "/api/projects/{id}/workspace-policy",
+            get(worktrees::get_policy).put(worktrees::put_policy),
+        )
+        .route("/api/worktrees/list", post(worktrees::list))
         .route("/api/sessions/{id}/project", post(assign_project))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route(
@@ -699,6 +708,7 @@ async fn get_settings(State(app): State<App>) -> Json<Value> {
     )
 }
 async fn save_settings(State(app): State<App>, Json(mut settings): Json<Settings>) -> ApiResult {
+    let _workspace = app.workspace_lock.lock().await;
     let roots = settings
         .roots
         .as_ref()
@@ -750,7 +760,7 @@ async fn save_settings(State(app): State<App>, Json(mut settings): Json<Settings
         .unwrap()
         .settings(settings)
         .map_err(|_| fail(StatusCode::INTERNAL_SERVER_ERROR, "Could not save settings"))?;
-    Ok(get_settings(State(app)).await)
+    Ok(get_settings(State(app.clone())).await)
 }
 #[derive(Deserialize)]
 struct ModelDiscovery {
@@ -872,6 +882,8 @@ async fn import_session(State(app): State<App>, Json(req): Json<ImportSession>) 
     create_session(
         State(app),
         Json(Create {
+            workspace: None,
+            request_id: None,
             agent_access: None,
             provider: req.provider.clone(),
             cwd: req.cwd,
@@ -923,6 +935,7 @@ async fn rename_project(
 }
 async fn delete_project(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     let _gate = app.communication_lock.lock().await;
+    let _workspace = app.workspace_lock.lock().await;
     let mut catalog = app.catalog.lock().unwrap();
     app.store
         .lock()
@@ -999,6 +1012,9 @@ async fn list_sessions(State(app): State<App>) -> Json<Value> {
     Json(json!(list))
 }
 async fn activity(State(app): State<App>) -> Json<Value> {
+    // The async preparation guard releases on success, failure and cancellation.
+    // It also covers brief policy/root edits, conservatively reporting those as busy.
+    let workspace_preparing = app.workspace_lock.try_lock().is_err();
     let sessions: Vec<_> = app
         .sessions
         .lock()
@@ -1029,7 +1045,7 @@ async fn activity(State(app): State<App>) -> Json<Value> {
         .filter_map(|s| s["pendingApprovals"].as_u64())
         .sum();
     Json(
-        json!({"safeToClose":busy.is_empty(),"activeTurns":active,"pendingApprovals":approvals,
+        json!({"safeToClose":busy.is_empty() && !workspace_preparing,"workspacePreparing":workspace_preparing,"activeTurns":active,"pendingApprovals":approvals,
         "busySessions":busy,"sessions":sessions}),
     )
 }
@@ -1037,8 +1053,11 @@ async fn get_session(State(app): State<App>, Path(id): Path<String>) -> ApiResul
     Ok(Json(session(&app, &id)?.snapshot()))
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct Create {
+    workspace: Option<worktrees::Workspace>,
+    #[serde(rename = "requestId")]
+    request_id: Option<String>,
     #[serde(rename = "agentAccess")]
     agent_access: Option<communication::Access>,
     provider: String,
@@ -1061,6 +1080,29 @@ struct Create {
     control_origin: Option<communication::ControlOrigin>,
 }
 async fn create_session(State(app): State<App>, Json(req): Json<Create>) -> ApiResult {
+    let _workspace = app.workspace_lock.lock().await;
+    let key = worktrees::creation_key(&req)?;
+    if let Some(key) = &key {
+        let payload = worktrees::creation_payload(&req);
+        let prior = app
+            .store
+            .lock()
+            .unwrap()
+            .reserve_creation(key, &payload)
+            .map_err(|e| fail(StatusCode::CONFLICT, e.to_string()))?;
+        if let Some(id) = prior {
+            return session(&app, &id)
+                .map(|s| Json(s.meta()))
+                .map_err(|_| fail(StatusCode::GONE, "Previously created session was deleted"));
+        }
+    }
+    let result = create_session_inner(&app, req, key.as_deref()).await;
+    if let (Some(key), Err((_, message))) = (&key, &result) {
+        let _ = app.store.lock().unwrap().creation_error(key, message);
+    }
+    result
+}
+async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>) -> ApiResult {
     if req.model.as_ref().is_some_and(|m| m.len() > 256) {
         return Err(fail(StatusCode::BAD_REQUEST, "Model ID is too long"));
     }
@@ -1083,13 +1125,68 @@ async fn create_session(State(app): State<App>, Json(req): Json<Create>) -> ApiR
             },
         ));
     }
-    let cwd = checked_cwd(&app, &req.cwd)?;
+    let source = checked_cwd(app, &req.cwd)?;
+    // Registered imports/resume retain their original context, even after policy changes.
+    if let Some(external) = &req.external_id {
+        let existing = app
+            .sessions
+            .lock()
+            .unwrap()
+            .values()
+            .find(|s| {
+                let d = s.data.lock().unwrap();
+                s.provider == req.provider
+                    && d.opencode_host == req.external_host
+                    && d.provider_session_id.as_ref() == Some(external)
+            })
+            .cloned();
+        if let Some(existing) = existing {
+            if existing.cwd != source {
+                return Err(fail(
+                    StatusCode::CONFLICT,
+                    "This harness session is already registered with a different directory",
+                ));
+            }
+            return Ok(Json(existing.meta()));
+        }
+    }
+    worktrees::verify_import(app, &req, &source).await?;
     if req.host_id.as_deref().is_some_and(|id| id != "local") {
         return Err(fail(
             StatusCode::BAD_REQUEST,
             "Only the Local host is available in this prototype",
         ));
     }
+    if app
+        .sessions
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|s| {
+            !matches!(
+                s.data.lock().unwrap().status.as_str(),
+                "suspended" | "error" | "closed"
+            )
+        })
+        .count()
+        >= 12
+    {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "Limit: 12 active harnesses. Suspend idle sessions first.",
+        ));
+    }
+    let cwd = tokio::time::timeout(
+        std::time::Duration::from_secs(12),
+        worktrees::prepare(app, &req, source, creation_key),
+    )
+    .await
+    .map_err(|_| {
+        fail(
+            StatusCode::CONFLICT,
+            "Workspace preparation timed out; inspect retained branch and files before retrying",
+        )
+    })??;
     let mut catalog = app.catalog.lock().unwrap();
     if req
         .project_id
@@ -1208,6 +1305,7 @@ async fn create_session(State(app): State<App>, Json(req): Json<Create>) -> ApiR
                 "Limit: 12 active harnesses. Restart the server to suspend idle sessions first.",
             ));
         }
+        worktrees::arm_creation(app, creation_key)?;
         app.store
             .lock()
             .unwrap()
@@ -1215,6 +1313,7 @@ async fn create_session(State(app): State<App>, Json(req): Json<Create>) -> ApiR
                 &s.metadata(),
                 &s.data.lock().unwrap(),
                 req.agent_access.as_ref(),
+                creation_key,
             )
             .map_err(|_| {
                 fail(
