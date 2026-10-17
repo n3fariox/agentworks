@@ -1,0 +1,7 @@
+/target/
+/.cache/
+/node_modules/
+/.agentworks/
+.env
+*.log
+/.worktrees/
