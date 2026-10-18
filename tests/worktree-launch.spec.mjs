@@ -4,7 +4,7 @@ import {readFile} from 'node:fs/promises';
 import {resolve,extname} from 'node:path';
 
 // Static UI only: all API traffic is intercepted, no provider or live data access.
-const base='http://127.0.0.1:4362';let server;
+const port=Number(process.env.AGENTWORKS_WORKTREE_UI_PORT||4362),base=`http://127.0.0.1:${port}`;let server;
 test.beforeAll(async()=>{
   server=createServer(async(req,res)=>{
     const name=req.url==='/'?'index.html':req.url.slice(1);
@@ -12,7 +12,7 @@ test.beforeAll(async()=>{
     try{const data=await readFile(resolve('web',name));res.setHeader('Content-Type',({'.js':'text/javascript','.css':'text/css','.html':'text/html'})[extname(name)]||'text/plain');res.end(data);}
     catch{res.writeHead(404);res.end();}
   });
-  await new Promise((ok,fail)=>{server.once('error',fail);server.listen(4362,'127.0.0.1',ok);});
+  await new Promise((ok,fail)=>{server.once('error',fail);server.listen(port,'127.0.0.1',ok);});
 });
 test.afterAll(async()=>{await new Promise(ok=>server.close(ok));});
 const ordinary={defaultMode:'directory',requireWorktree:false};
@@ -114,7 +114,7 @@ test('ordinary directory creation stays compatible',async({page})=>{
   expect(s.creates[0]).toMatchObject({cwd:'/repo/subdir',projectId:null,workspace:{mode:'directory'}});
   await page.locator('#prompt').fill('Keep my draft');await page.locator('#new-session').click();await page.locator('#workspace-mode').selectOption('newWorktree');await page.locator('#dismiss-create').click();
   await expect(page.locator('#prompt')).toHaveValue('Keep my draft');
-  let wording='';page.on('dialog',async d=>{wording=d.message();await d.dismiss();});await page.locator('#close-session').click();expect(wording).toContain('Worktree files and branches remain');
+  let wording='';page.on('dialog',async d=>{wording=d.message();await d.dismiss();});await page.locator('#lifecycle-menu > summary').click();await page.locator('#close-session').click();expect(wording).toContain('Worktree files and branches remain');
 });
 test('slow policy response cannot overwrite the next project, and errors block launch',async({page})=>{
   let release,started;const waiting=new Promise(r=>release=r),seen=new Promise(r=>started=r);

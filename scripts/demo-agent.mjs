@@ -124,7 +124,9 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         session.cancelled=false;sessions.set(params.sessionId,session);mcpConfigs.set(params.sessionId,params.mcpServers||[]);
         if(method==='session/load')for(const update of session.history||[])send({method:'session/update',params:{sessionId:params.sessionId,update}});
         if(method==='session/load'&&session.failLoad){send({id,error:{code:-32603,message:'Demo history load failed'}});break;}
-        reply(id,{configOptions:modelConfig(session.model)});commands(params.sessionId);
+        // Deterministic native-opening race fixture; never delays ordinary demo sessions.
+        const ready=()=>{reply(id,{configOptions:modelConfig(session.model)});commands(params.sessionId);};
+        if(Number.isInteger(session.resumeDelayMs)&&session.resumeDelayMs>0&&session.resumeDelayMs<=2000)setTimeout(ready,session.resumeDelayMs);else ready();
       }catch{send({id,error:{code:-32002,message:'Saved demo session is unavailable'}});}
       break;
     }

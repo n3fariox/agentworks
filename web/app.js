@@ -113,11 +113,11 @@ function renderExternal(){
   if(!items.length)list.append(el('p','field-note',externalLoading?'Loading sessions…':externalCursor?'No matching sessions on this page. Try Load more.':'No matching sessions. Check allowed roots or try another directory.'));
   for(const session of items){
     const label=el('label','external-session'),radio=el('input');radio.type='radio';radio.name='external-session';radio.value=session.sessionId;radio.checked=externalSelection?.sessionId===session.sessionId;radio.disabled=externalImporting;
-    radio.onchange=()=>{externalSelection=session;$('import-note').textContent=session.agentworksId?'Already in Agentworks. Opens the existing conversation.':'History and agent context will be loaded.';externalControls();};
+    radio.onchange=()=>{externalSelection=session;$('import-note').textContent=session.agentworksId?(session.archived?'Archived in Agentworks. Opens the saved conversation.':'Already in Agentworks. Opens the existing conversation.'):'History and agent context will be loaded.';externalControls();};
     const content=el('span','external-description');content.append(el('strong','',session.title||'Untitled session'),el('small','',session.cwd));
     const date=session.updatedAt?new Date(session.updatedAt):null;
     content.append(el('small','external-id',(date&&!Number.isNaN(+date)?date.toLocaleString()+' · ':'')+session.sessionId));
-    if(session.agentworksId)content.append(el('small','', 'Already in Agentworks'));
+    if(session.agentworksId)content.append(el('small','',session.archived?'Archived in Agentworks':'Already in Agentworks'));
     label.append(radio,content);list.append(label);
   }
 }
@@ -190,12 +190,13 @@ function treeGroup(key,label,items,{host=false,projectId=null,level=0}={}){
 function sessionButton(s){
   const button=el('button','session-item'+(active?.id===s.id?' selected':''));button.type='button';button.dataset.sessionId=s.id;button.title=s.cwd;
   button.append(el('span','session-icon',icons[s.provider]));
-  const copy=el('span','session-copy');copy.append(el('strong','',s.title),el('small','',`${s.automation?'Automation · ':''}${labels[s.provider]} · ${basename(s.cwd)}`));
+  const copy=el('span','session-copy');copy.append(el('strong','',s.title),el('small','',`${s.archived?'Archived · ':''}${s.automation?'Automation · ':''}${labels[s.provider]} · ${basename(s.cwd)}`));
   button.append(copy,el('span','status-dot '+s.status));button.onclick=()=>selectSession(s);
   if(active?.id===s.id)button.setAttribute('aria-current','true');return button;
 }
 function sidebar(){
-  $('session-count').textContent=sessions.length;
+  const visibleSessions=sessions.filter(s=>$('session-filter').value==='all'||!!s.archived===($('session-filter').value==='archived'));
+  $('session-count').textContent=visibleSessions.length;
   for(const view of ['hosts','projects'])$('view-'+view).setAttribute('aria-selected',String(sidebarView===view));
   const area=$('sessions'),scroll=area.scrollTop;area.replaceChildren();
   const buckets=[...projects.map(p=>({id:p.id,name:p.name})).sort((a,b)=>a.name.localeCompare(b.name)),{id:null,name:'Ungrouped'}];
@@ -205,7 +206,7 @@ function sidebar(){
   }
   if(sidebarView==='hosts'){
     for(const host of hosts){
-      const hostItems=sessions.filter(s=>s.hostId===host.id);
+      const hostItems=visibleSessions.filter(s=>s.hostId===host.id);
       const top=treeGroup('host:'+host.id,host.name,hostItems,{host:true});
       for(const project of buckets){
         const items=hostItems.filter(s=>(s.projectId||null)===project.id);
@@ -217,7 +218,7 @@ function sidebar(){
     }
   }else{
     for(const project of buckets){
-      const projectItems=sessions.filter(s=>(s.projectId||null)===project.id);
+      const projectItems=visibleSessions.filter(s=>(s.projectId||null)===project.id);
       if(project.id===null&&!projectItems.length&&projects.length)continue;
       const top=treeGroup('project:'+(project.id||'ungrouped'),project.name,projectItems,{projectId:project.id});
       for(const host of hosts){
@@ -231,7 +232,7 @@ function sidebar(){
   area.scrollTop=scroll;updateProjectControls();
 }
 async function refreshSessions(){
-  const [list,catalog]=await Promise.all([api('/api/sessions'),api('/api/catalog')]);
+  const [list,catalog]=await Promise.all([api('/api/sessions?archived=all'),api('/api/catalog')]);
   sessions=list;projects=catalog.projects;hosts=catalog.hosts;
   if(active){const current=sessions.find(s=>s.id===active.id);if(current){active.projectId=current.projectId;active.hostId=current.hostId;active.automation=current.automation;}}
   sidebar();workspace?.sync(catalog,sessions);
@@ -254,7 +255,7 @@ function selectSession(s) {
   $('header-title').textContent=s.title;$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;
   $('session-notice').hidden=true;document.body.classList.remove('menu-open');sidebar();updateControls();connect(generation);
   workspace?.sessionSelected(s);
-  if(s.status==='suspended')resumeSession(s.id);
+  if(s.status==='suspended'&&!s.explicitlySuspended)resumeSession(s.id);
 }
 function connect(gen){
   if(gen!==generation||!active)return;
@@ -266,9 +267,10 @@ function connect(gen){
     const e=JSON.parse(event.data);
     if(e.kind==='snapshot'){
       resetTranscript();status=e.session.status;Object.assign(active,e.session);
-      for(const item of e.events)consume(item);
+      for(const item of e.events)if(item.kind!=='session_updated')consume(item);
+      Object.assign(active,e.session);$('header-title').textContent=active.title;
       active.continuation=e.session.continuation;
-      approvals=new Map(e.approvals.map(a=>[a.id,a.request]));status=e.session.status;modelConfig=e.models;if(status==='suspended')resumeSession(active.id);availableCommands=e.commands||[];renderCommands();
+      approvals=new Map(e.approvals.map(a=>[a.id,a.request]));status=e.session.status;modelConfig=e.models;if(status==='suspended'&&!e.session.explicitlySuspended)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();
       if(e.storageError){$('session-notice').textContent=e.storageError;$('session-notice').hidden=false;}
       if(e.truncated){$('session-notice').textContent='Showing recent output. The full transcript is saved on this host.';$('session-notice').hidden=false;}
     }else consume(e);
@@ -295,14 +297,14 @@ function consume(e){
   const d=e.data;
   if(d?.continuationState&&active)active.continuation=d.continuationState;
   if(e.kind==='session_updated'){
-    Object.assign(active,d);const row=sessions.find(s=>s.id===active.id);if(row)Object.assign(row,d);sidebar();
+    Object.assign(active,d);$('header-title').textContent=active.title;const row=sessions.find(s=>s.id===active.id);if(row)Object.assign(row,d);sidebar();
   }
   else if(e.kind==='continuation'){renderContinuation();}
   else if(e.kind==='models'){modelConfig=d;}
   else if(e.kind==='commands'){availableCommands=Array.isArray(d)?d:[];renderCommands();}
   else if(e.kind==='user'){assistant=null;if(d.initiatedBy)transcript.push({id:uuid(),type:'notice',text:'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});addMessage('user',d.text);}
   else if(e.kind==='status'){
-    status=d.status;if(active){active.status=status;const s=sessions.find(s=>s.id===active.id);if(s)s.status=status;}sidebar();
+    status=d.status;if(active){active.status=status;if(d.explicitlySuspended!==undefined)active.explicitlySuspended=d.explicitlySuspended;const s=sessions.find(s=>s.id===active.id);if(s)s.status=status;}sidebar();
   }else if(e.kind==='approval'){approvals.set(d.id,d.request);}
   else if(e.kind==='approval_resolved'){approvals.delete(d.id);}
   else if(e.kind==='interrupted'){transcript.push({id:uuid(),type:'notice',text:d.message});assistant=null;}
@@ -346,6 +348,8 @@ async function resumeSession(id){
   try{await api(`/api/sessions/${id}/resume`,{method:'POST',body:'{}'});}catch(e){toast(e.message);}
 }
 function updateControls(){
+  $('archive-session').textContent=active?.archived?'Unarchive session':'Archive session';
+  $('suspend-session').disabled=!connected||status==='suspended'||status==='closed';
   $('resume-session').hidden=!['suspended','error'].includes(status);
   $('resume-session').disabled=!connected;
   $('show-commands').disabled=!connected||status!=='idle';
@@ -365,7 +369,7 @@ function updateControls(){
   const busy=['running','waiting','cancelling'].includes(status);
   $('session-state').textContent=status==='waiting'?'Needs your approval':status==='idle'?'Ready':status[0]?.toUpperCase()+status.slice(1);
   $('prompt').disabled=!connected||status!=='idle';$('send').disabled=!connected||status!=='idle';
-  $('send').hidden=busy;$('stop').hidden=!busy&&!active?.continuation?.dueAt;$('stop').disabled=!connected||status==='cancelling';
+  $('send').hidden=busy;$('stop').hidden=!busy&&!['starting','resuming','configuring'].includes(status)&&!active?.continuation?.enabled;$('stop').disabled=!connected||status==='cancelling';
   $('prompt').placeholder=status==='starting'?'Starting your agent…':status==='waiting'?'Respond to the permission request above…':busy?'Your agent is working…':status==='error'?'Session unavailable. Use Resume session to try again.':'What would you like to work on?';
 }
 function scheduleDraw(){if(!drawTimer)drawTimer=setTimeout(()=>{drawTimer=null;draw();},70);}
@@ -543,7 +547,7 @@ $('resume-session').onclick=()=>{if(active)resumeSession(active.id);};
 $('stop').onclick=async()=>{try{await api(`/api/sessions/${active.id}/cancel`,{method:'POST',body:'{}'});}catch(e){toast(e.message);}};
 $('close-session').onclick=async()=>{
   if(!active)return;
-  if(!confirm('Delete this session and its saved transcript? Its agent process will stop. Worktree files and branches remain. This cannot be undone.'))return;
+  if(!confirm('Permanently delete this session and its saved transcript? Its harness will stop. Worktree files and branches remain. To keep history, choose Suspend harness instead. This cannot be undone.'))return;
   const id=active.id;
   try{await api(`/api/sessions/${id}`,{method:'DELETE'});generation++;socket?.close();clearTimeout(retryTimer);active=null;localStorage.removeItem('agentworks-session');$('conversation').hidden=true;$('welcome').hidden=false;$('header-title').textContent='Overview';await refreshSessions();}catch(e){toast(e.message);}
 };
@@ -657,3 +661,23 @@ $('continuation-now').onclick=async()=>{
   }catch(e){toast(e.message);}finally{delete button.dataset.busy;renderContinuation();}
 };
 setInterval(()=>{if(active?.continuation?.dueAt)renderContinuation();},1000);
+
+$('session-filter').value=readStorage(localStorage,'agentworks-session-filter','active');
+$('session-filter').onchange=()=>{localStorage.setItem('agentworks-session-filter',JSON.stringify($('session-filter').value));sidebar();};
+$('rename-session').onclick=()=>{$('rename-title').value=active.title;$('rename-error').textContent='';$('rename-dialog').showModal();$('rename-title').focus();};
+$('rename-dismiss').onclick=()=>$('rename-dialog').close();
+$('rename-form').onsubmit=async event=>{
+  event.preventDefault();const id=active?.id;if(!id)return;
+  try{const updated=await api(`/api/sessions/${id}`,{method:'PATCH',body:JSON.stringify({title:$('rename-title').value})});if(active?.id===id){Object.assign(active,updated);$('header-title').textContent=updated.title;}await refreshSessions();$('rename-dialog').close();}catch(e){$('rename-error').textContent=e.message;}
+};
+$('archive-session').onclick=async()=>{
+  const id=active?.id;if(!id)return;
+  try{const updated=await api(`/api/sessions/${id}`,{method:'PATCH',body:JSON.stringify({archived:!active.archived})});if(active?.id===id)Object.assign(active,updated);await refreshSessions();updateControls();}catch(e){toast(e.message);}
+};
+$('suspend-session').onclick=async()=>{
+  const id=active?.id;if(!id)return;
+  try{const updated=await api(`/api/sessions/${id}/suspend`,{method:'POST',body:'{}'});if(active?.id===id){Object.assign(active,updated);status=updated.status;updateControls();}await refreshSessions();}catch(e){toast(e.message);}
+};
+
+$('dismiss-lifecycle').onclick=()=>{$('lifecycle-menu').open=false;$('lifecycle-menu').querySelector('summary').focus();};
+$('lifecycle-menu').addEventListener('keydown',event=>{if(event.key==='Escape'){$('dismiss-lifecycle').click();event.stopPropagation();}});

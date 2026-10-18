@@ -161,6 +161,15 @@ impl Store {
         )?;
         Ok(())
     }
+    pub fn save_state(&mut self, id: &str, state: &SessionData) -> Result<()> {
+        if self.connection.execute(
+            "UPDATE sessions SET state=?2 WHERE id=?1",
+            params![id, serde_json::to_string(state)?],
+        )? != 1 {
+            return Err("Session no longer exists".into());
+        }
+        Ok(())
+    }
     pub fn event(&mut self, id: &str, state: &SessionData, event: &Value) -> Result<()> {
         let transaction = self.connection.transaction()?;
         // A late callback after deletion must never recreate a session.
@@ -333,6 +342,7 @@ impl Store {
                 .and_then(|e| e["data"]["providerSessionId"].as_str())
                 .map(str::to_owned);
             let state = SessionData {
+                lifecycle: Default::default(),
                 status: "suspended".into(),
                 seq: snapshot["seq"].as_u64().unwrap_or(0),
                 events: VecDeque::new(),
@@ -638,6 +648,7 @@ mod tests {
             location_id: "location".into(),
         };
         let mut state = SessionData {
+            lifecycle: Default::default(),
             status: "starting".into(),
             seq: 0,
             events: VecDeque::new(),

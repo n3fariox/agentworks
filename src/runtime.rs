@@ -402,9 +402,20 @@ pub async fn run(
             let id=Uuid::new_v4().to_string();
             let value=serde_json::to_value(&request).unwrap_or(Value::Null);
             let (tx,rx)=oneshot::channel();
-            permission_s.approvals.lock().unwrap().insert(id.clone(),Approval{request:value.clone(),answer:tx});
-            permission_s.emit("approval",json!({"id":id,"request":value}));
-            permission_s.status("waiting");
+            {
+                let mut approvals = permission_s.approvals.lock().unwrap();
+                let mut data = permission_s.data.lock().unwrap();
+                if data.lifecycle.suspended || !data.turn_active || data.status == "cancelling" {
+                    return responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
+                }
+                approvals.insert(id.clone(), Approval{request:value.clone(),answer:tx});
+                data.status = "waiting".into();
+                drop(data);
+                // Publish before cancellation can remove this approval. Otherwise a
+                // late approval event could follow approval_resolved in the browser.
+                permission_s.emit("approval",json!({"id":id,"request":value}));
+                permission_s.emit("status",json!({"status":"waiting"}));
+            }
             let outcome=match rx.await {
                 Ok(Some(option))=>RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option)),
                 _=>RequestPermissionOutcome::Cancelled,

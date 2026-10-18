@@ -173,7 +173,7 @@ pub fn peers(app: &App, s: &Session) -> Result<Value> {
             if p.id != s.id && project(&p) == scope && (coordinator || access(app, &p)?.communicate)
             {
                 let d = p.data.lock().unwrap();
-                values.push(json!({"id":p.id,"title":p.title,"provider":p.provider,"status":d.status,"hostId":p.host_id}));
+                values.push(json!({"id":p.id,"title":d.lifecycle.title.as_deref().unwrap_or(&p.title),"archived":d.lifecycle.archived,"provider":p.provider,"status":d.status,"hostId":p.host_id}));
             }
         }
     }
@@ -196,6 +196,8 @@ pub fn send(app: &App, s: &Session, req: SendMessage) -> Result<Value> {
     if target.id == s.id {
         return Err(fail(StatusCode::BAD_REQUEST, "Choose another session"));
     }
+    let sender_title = s.display_title();
+    let target_title = target.display_title();
     let mut store = app.store.lock().unwrap();
     let tx = store.connection.transaction().map_err(db_error)?;
     let previous:Option<(i64,String,String,Option<i64>)>=tx.query_row("SELECT id,recipient,text,reply_to FROM agent_messages WHERE sender=?1 AND request_id=?2",params![s.id,req.request_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(db_error)?;
@@ -243,7 +245,7 @@ pub fn send(app: &App, s: &Session, req: SendMessage) -> Result<Value> {
             "Message rate exceeded; retry later",
         ));
     }
-    tx.execute("INSERT INTO agent_messages(sender,sender_title,recipient,recipient_title,text,reply_to,created,request_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![s.id,s.title,target.id,target.title,req.text,req.reply_to,now(),req.request_id]).map_err(db_error)?;
+    tx.execute("INSERT INTO agent_messages(sender,sender_title,recipient,recipient_title,text,reply_to,created,request_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![s.id,sender_title,target.id,target_title,req.text,req.reply_to,now(),req.request_id]).map_err(db_error)?;
     let id = tx.last_insert_rowid();
     tx.execute("INSERT INTO agent_audit(actor,action,target,outcome,created) VALUES (?1,'send_message',?2,'accepted',?3)",params![s.id,target.id,now()]).map_err(db_error)?;
     tx.commit().map_err(db_error)?;
@@ -290,7 +292,7 @@ pub async fn set_access(
         "idle" | "suspended" | "error"
     );
     let attached = s.commands.lock().unwrap().is_some();
-    if idle && (attached || req.enabled()) {
+    if idle && !s.data.lock().unwrap().lifecycle.suspended && (attached || req.enabled()) {
         s.status("suspended");
         if let Err((code, error)) = crate::resume(State(app.clone()), Path(id.clone())).await {
             return Err(fail(
