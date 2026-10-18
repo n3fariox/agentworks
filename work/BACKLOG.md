@@ -29,6 +29,31 @@ See [batch 002](batches/002-worktree-policy.md), deployed after two Codex sessio
 | L-02 | Questions/elicitation | Render supported harness forms, submit validated answers, and recover safely across browser disconnect/cancellation |
 | L-03 | Model attachments | Attach supported images/files to chat with explicit storage, size/type limits and harness capability checks |
 | L-04 | Usage dashboard and harness configuration | Build on verified Claude/Codex usage commands; show supported data accurately without silent model work or credential exposure |
+| L-05 | Running activity words and queued inputs | Show an animated running/activity label and elapsed time, distinguishing running, tool activity and waiting for approval. Allow inputs to queue during a turn, with visible order, edit/remove controls and clear queued/sending/sent states. Dispatch after the current turn ends; persist request IDs, prevent duplicate sends, and define cancellation, errors and restart recovery without blindly replaying work |
+| L-06 | Switch harness with fresh context | Let the user choose another harness and what context to carry over into a fresh provider session. Preserve the original session/history and link the successor; make the context reset explicit, apply normal model/workspace policy, and leave the original usable if startup fails |
+
+## Chat interface and navigation
+
+These additions are recorded for a later round; implementation remains stopped after batch 002.
+
+| ID | Task | Acceptance |
+| --- | --- | --- |
+| U-01 | Code/literal block wrapping and highlighting preferences | Offer wrapping and syntax-highlighting controls, including plain rendering for prose placed in code blocks. Preserve whitespace, raw copy contents and readable code; remember preferences and handle long lines on phones |
+| U-02 | Browser notifications | Opt-in notifications for turn completion, approvals/questions and failures; request permission through a user action, detect browser/origin support, avoid duplicate notices across reconnects/tabs, and open the relevant session when selected |
+| U-03 | Declutter mobile session chat | Prioritize transcript, composer and essential running/approval controls. Collapse secondary model/project/workspace/inbox/file actions into an accessible menu or sheet; preserve discoverability, draft state, touch targets and keyboard usability |
+| U-04 | Fuzzy command and session palettes | Provide a fuzzy action/command palette and a dedicated fuzzy session-activation palette. Support keyboard navigation and shortcuts plus a touch entry point; match titles, project, host and directory, show enough context to distinguish sessions, and preserve drafts/running turns when switching |
+
+## Session changes and review
+
+| ID | Task | Acceptance |
+| --- | --- | --- |
+| D-01 | Per-session diff viewer | Read-only views for current unstaged changes, branch changes against a selected base using its merge base, and a specific commit. Show the actual session worktree and compared refs/commit; define staged/untracked handling, support file selection and mobile layout, and bound large/binary diffs with existing Git/root protections |
+
+## Known interface bugs
+
+| ID | Bug | Acceptance |
+| --- | --- | --- |
+| B-01 | Settings success toast appears red | Successful saves use success/neutral styling; failures retain error styling. Feedback remains accessible and distinguishes saved settings from partial/failed saves |
 
 ## Automations
 
