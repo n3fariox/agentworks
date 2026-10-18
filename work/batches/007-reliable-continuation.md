@@ -20,4 +20,16 @@ Require focused deterministic Rust/API/MCP/restart/browser checks with temporary
 
 ## Dispatch and results
 
-Prepared before launch. Worker IDs, actual confirmed modes and accepted assignments will be recorded after creation. No implementation is integrated or deployed yet.
+All three workers accepted their assignments with communication-only grants, 1800-second turn limits and disabled quota continuation. The native Codex permission mode is `agent` (advertised as **Auto review**); Claude's mode is confirmed `auto` (**Auto**). No full-access/bypass mode was selected.
+
+| Work | Active worker session | Native session |
+| --- | --- | --- |
+| B-02 | `da07bf56-a10c-4327-af6f-707566ab90c2` | `01a150b6-52a2-7192-948a-da43732e599f` |
+| C-06 | `a86deeb4-11de-4199-a9ad-1658b0651c8c` | `01a150b6-52b4-7811-8b73-85a5e94d443f` |
+| L-05 | `69137be9-2abf-4112-8ae2-353f9dedf206` | `1ecb4869-71be-4920-8724-bbfe2b1bfbee` |
+
+Stable task request IDs are `b007-task-<quota-status|inbox-wake|queued-inputs>`.
+
+Startup correction: the first empty Codex launches (`126eef53-ba4c-41f1-8365-a36d7fc26d4f`, `4a90808d-250f-4db3-801e-fdcdb374f180`) had no task turns. Applying a grant to an idle fresh Codex session reconnects its harness, and the adapter cannot yet resume its unsaved rollout (`no rollout found for thread id`). Both empty launches were explicitly suspended/archived, preserving their records. Their original clean, separate worktrees were reused through the normal human creation API with communication-only grants set at creation, using stable IDs `b007-ready-quota-status` and `b007-ready-inbox-wake`. The actual task turns are attributed to this coordinator through MCP; no task prompt was replayed and no worked native context was replaced. Claude's original launch was retained.
+
+No implementation is integrated or deployed yet. Inbox wake-up itself remains unavailable until C-06 is reviewed and installed; the current manual coordinator must read inbox at active checkpoints rather than assume messages start turns.
