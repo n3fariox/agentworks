@@ -348,6 +348,7 @@ impl Store {
                 .map(str::to_owned);
             let state = SessionData {
                 lifecycle: Default::default(),
+                inbox_turn: None,
                 status: "suspended".into(),
                 seq: snapshot["seq"].as_u64().unwrap_or(0),
                 events: VecDeque::new(),
@@ -656,6 +657,7 @@ mod tests {
         };
         let mut state = SessionData {
             lifecycle: Default::default(),
+            inbox_turn: None,
             status: "starting".into(),
             seq: 0,
             events: VecDeque::new(),

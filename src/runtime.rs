@@ -24,9 +24,24 @@ use uuid::Uuid;
 
 pub enum Command {
     Prompt(String),
+    InboxPrompt {
+        text: String,
+        owner: crate::inbox_delivery::Turn,
+    },
     Cancel,
+    CancelInbox(crate::inbox_delivery::Turn),
     Model(String),
     PermissionMode(String),
+}
+
+impl Command {
+    pub(crate) fn cancels(&self, active: Option<&crate::inbox_delivery::Turn>) -> bool {
+        match self {
+            Self::Cancel => true,
+            Self::CancelInbox(owner) => active == Some(owner),
+            _ => false,
+        }
+    }
 }
 
 fn agent_config(provider: &str, api_key_mode: bool, host_profile: bool) -> AcpAgentConfig {
@@ -483,7 +498,7 @@ pub async fn run(
             if !s.start_queued_prompt().map_err(|e|agent_client_protocol::Error::internal_error().data(e))? {s.status("idle");}
             while let Some(command)=commands.recv().await {
                 match command {
-                    Command::Cancel=>{},
+                    Command::Cancel | Command::CancelInbox(_)=>{},
                     Command::Model(model)=>{
                         let request=SetSessionConfigOptionRequest::new(provider_id.clone(),model_config["configId"].as_str().unwrap_or("model").to_owned(),SessionConfigOptionValue::value_id(model.clone()));
                         match tokio::time::timeout(Duration::from_secs(30),connection.send_request(request).block_task()).await {
@@ -509,7 +524,12 @@ pub async fn run(
                         }
                         s.status("idle");
                     }
-                    Command::Prompt(text)=>{
+                    command @ (Command::Prompt(_) | Command::InboxPrompt{..})=>{
+                        let (text,inbox_owner)=match command {Command::Prompt(text)=>(text,None),Command::InboxPrompt{text,owner}=>(text,Some(owner)),_=>unreachable!()};
+                        if let Some(owner)=&inbox_owner {
+                            if !crate::inbox_delivery::begin(&s,owner,&provider_id.to_string()) {continue;}
+                        }else{s.data.lock().unwrap().inbox_turn=None;}
+
                         let request=connection.send_request(PromptRequest::new(provider_id.clone(),vec![ContentBlock::Text(TextContent::new(text))])).block_task();
                         tokio::pin!(request);
                         // Policy is fixed at launch; later edits apply to later turns.
@@ -534,13 +554,13 @@ pub async fn run(
                                         (Ok(result),None)=>{crate::limit_resume::finish(&s, Some(&serde_json::to_value(&result.stop_reason).unwrap_or(Value::Null)), None);s.emit("turn_end",json!({"stopReason":result.stop_reason}));},
                                         (Err(error),None)=>{let raw=serde_json::to_value(&error).unwrap_or(Value::Null);crate::limit_resume::enrich_codex(&s,&raw).await;crate::limit_resume::finish(&s,None,Some(&raw));s.emit("error",json!({"message":safe_error(&error.to_string())}));},
                                     }
-                                    crate::inbox_delivery::finished(&s);
+                                    crate::inbox_delivery::finished(&s,inbox_owner.as_ref());
                                     s.status("idle");
                                     break;
                                 }
                                 command=commands.recv()=>match command {
-                                    Some(Command::Cancel)=>{
-                                        if !cancelled {
+                                    Some(command @ (Command::Cancel | Command::CancelInbox(_)))=>{
+                                        if command.cancels(inbox_owner.as_ref()) && !cancelled {
                                             s.clear_approvals();
                                             connection.send_notification(CancelNotification::new(provider_id.clone()))?;
                                             s.status("cancelling");
@@ -548,7 +568,7 @@ pub async fn run(
                                             cancelled=true;
                                         }
                                     }
-                                    Some(Command::Prompt(_))=>{},
+                                    Some(Command::Prompt(_) | Command::InboxPrompt{..})=>{},
                                     Some(Command::Model(_)|Command::PermissionMode(_))=>{},
                                     None=>return Ok(()),
                                 },

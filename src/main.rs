@@ -86,6 +86,8 @@ struct Session {
 struct SessionData {
     status: String,
     #[serde(default)]
+    inbox_turn: Option<inbox_delivery::Turn>,
+    #[serde(default)]
     lifecycle: lifecycle::Metadata,
     seq: u64,
     #[serde(skip)]
@@ -223,6 +225,7 @@ impl Session {
             };
             if matches!(status, "idle" | "error" | "closed" | "suspended") {
                 data.turn_active = false;
+                data.inbox_turn = None;
             }
         }
         self.emit("status", json!({"status":status}));
@@ -264,8 +267,10 @@ impl Session {
         }
     }
     fn send_command(&self, command: runtime::Command) -> Result<(), (StatusCode, String)> {
-        if !matches!(command, runtime::Command::Cancel)
-            && self.data.lock().unwrap().storage_error.is_some()
+        if !matches!(
+            command,
+            runtime::Command::Cancel | runtime::Command::CancelInbox(_)
+        ) && self.data.lock().unwrap().storage_error.is_some()
         {
             return Err(fail(
                 StatusCode::INSUFFICIENT_STORAGE,
@@ -311,6 +316,7 @@ impl Session {
             if let Some(origin) = data.automation.as_mut() {
                 origin.outcome = None;
             }
+            data.inbox_turn = None;
             data.requests.insert(id.clone());
             data.status = "running".into();
             data.turn_active = true;
@@ -499,6 +505,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         timeouts::set_default(policy);
     }
     for (metadata, mut data) in restored {
+        inbox_delivery::restore(&mut data);
         data.continuation.reconcile();
         let pending = data.queued_prompt.take().is_some();
         let interrupted = data.turn_active
@@ -512,6 +519,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         data.status = "suspended".into();
         data.turn_active = false;
+        data.inbox_turn = None;
         let (tx, _) = broadcast::channel(128);
         let s = Arc::new(Session {
             id: metadata.id,
@@ -1190,8 +1198,8 @@ async fn rename_project(
 }
 async fn delete_project(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     let _gate = app.communication_lock.lock().await;
+    let _run = app.run_lock.lock().await;
     let _workspace = app.workspace_lock.lock().await;
-    let mut catalog = app.catalog.lock().unwrap();
     app.store
         .lock()
         .unwrap()
@@ -1202,7 +1210,9 @@ async fn delete_project(State(app): State<App>, Path(id): Path<String>) -> ApiRe
                 "Could not update automation projects",
             )
         })?;
-    catalog
+    app.catalog
+        .lock()
+        .unwrap()
         .remove(&id)
         .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
     let affected: Vec<_> = app.sessions.lock().unwrap().values().cloned().collect();
@@ -1234,6 +1244,7 @@ async fn assign_project(
     Json(req): Json<ProjectChoice>,
 ) -> ApiResult {
     let _gate = app.communication_lock.lock().await;
+    let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
     let mut catalog = app.catalog.lock().unwrap();
     if req
@@ -1253,6 +1264,7 @@ async fn assign_project(
                 )
             })?;
     }
+    drop(catalog);
     inbox_delivery::revoke_related(&app, &s, "Project assignment changed")?;
     s.data.lock().unwrap().project_id = req.project_id.clone();
     s.emit("session_updated", json!({"projectId":req.project_id}));
@@ -1521,6 +1533,7 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             .as_millis() as u64,
         data: Mutex::new(SessionData {
             lifecycle: Default::default(),
+            inbox_turn: None,
             status: "starting".into(),
             seq: 0,
             events: VecDeque::new(),
@@ -1723,6 +1736,7 @@ async fn prompt(
                 "Wait for this session to become idle",
             ));
         }
+        data.inbox_turn = None;
         data.continuation.cancel("New human or controller turn");
         data.status = "running".into();
         data.turn_active = true;

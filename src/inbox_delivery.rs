@@ -28,6 +28,14 @@ CREATE TABLE IF NOT EXISTS inbox_deliveries(message_id INTEGER PRIMARY KEY REFER
 CREATE INDEX IF NOT EXISTS inbox_delivery_pending ON inbox_deliveries(recipient,state,message_id);
 ";
 
+/// Persisted ownership of one particular native inbox submission, not an authorization.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Turn {
+    pub request_id: String,
+    pub generation: u64,
+    pub native: String,
+}
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Policy {
@@ -108,63 +116,137 @@ pub(crate) fn cancel_db(db: &rusqlite::Connection, id: &str, reason: &str) -> Re
     db.execute("UPDATE inbox_deliveries SET state='cancelled',reason=?2 WHERE recipient=?1 AND state IN ('queued','claimed')",params![id,reason]).map_err(error)?;
     Ok(())
 }
-/// Caller holds run lock (or communication lock for grant/project mutations).
+/// Only a captured active turn token can authorize cancellation. Ledger history never can.
 pub(crate) fn interrupt_inflight(s: &Session, reason: &str) -> Result<()> {
-    let active = s.data.lock().unwrap().turn_active;
-    let automatic:bool=s.store.lock().unwrap().connection.query_row("SELECT EXISTS(SELECT 1 FROM inbox_deliveries WHERE recipient=?1 AND state='sent' AND reason IS NULL)",[&s.id],|r|r.get(0)).map_err(error)?;
-    if active && automatic {
-        // Request cancellation of only the native turn submitted by this ledger.
-        // Do not mistake an unrelated human turn for automatic work.
-        let unavailable = s.send_command(crate::runtime::Command::Cancel).is_err();
-        if unavailable {
-            // If the bounded command channel is unavailable, terminate this worker;
-            // never leave an automatic turn running beyond a revoked deadline.
-            if let Some(worker) = s.worker.lock().unwrap().take() {
-                worker.abort();
-            }
-            *s.commands.lock().unwrap() = None;
+    let mut d = s.data.lock().unwrap();
+    let Some(owner) = d
+        .inbox_turn
+        .clone()
+        .filter(|o| d.turn_active && d.provider_session_id.as_deref() == Some(o.native.as_str()))
+    else {
+        return Ok(());
+    };
+    // The runtime independently matches this token against the command currently executing.
+    // An old cancel left in the channel is ignored while idle or during another turn.
+    let unavailable = s
+        .send_command(crate::runtime::Command::CancelInbox(owner.clone()))
+        .is_err();
+    if unavailable {
+        if let Some(worker) = s.worker.lock().unwrap().take() {
+            worker.abort();
         }
-        s.store.lock().unwrap().connection.execute("UPDATE inbox_deliveries SET reason=?2 WHERE recipient=?1 AND state='sent' AND reason IS NULL",params![s.id,format!("Cancellation requested: {reason}")]).map_err(error)?;
-        {
-            let mut d = s.data.lock().unwrap();
-            d.status = if unavailable { "error" } else { "cancelling" }.into();
-            if unavailable {
-                d.turn_active = false;
-            }
-        }
-        s.emit(
-            "inbox_delivery",
-            json!({"decision":"automatic native turn cancellation requested","reason":reason}),
-        );
+        *s.commands.lock().unwrap() = None;
+        d.inbox_turn = None;
+        d.turn_active = false;
+        d.status = "error".into();
+    } else {
+        d.status = "cancelling".into();
     }
+    let result=s.store.lock().unwrap().connection.execute("UPDATE inbox_deliveries SET reason=?4 WHERE recipient=?1 AND request_id=?2 AND generation=?3",params![s.id,owner.request_id,owner.generation as i64,format!("Cancellation requested: {reason}")]);
+    drop(d);
+    if !matches!(result,Ok(n) if n>0) {
+        fail_closed(s, "Could not persist exact inbox cancellation");
+        return Err(error("Missing exact cancellation ledger"));
+    }
+    s.emit("inbox_delivery",json!({"requestId":owner.request_id,"decision":"automatic native turn cancellation requested","reason":reason}));
     Ok(())
 }
-pub fn cancel(s: &Session, reason: &str) -> Result<()> {
+/// Latch admission closed and preserve ambiguous ledger records for inspection/restart.
+/// No historical row may trigger cancellation of an unrelated current turn.
+pub(crate) fn fail_closed(s: &Session, reason: &str) {
+    let owner = {
+        let mut d = s.data.lock().unwrap();
+        let owner = d.inbox_turn.take();
+        if owner.is_some() {
+            d.continuation.due_at = None;
+            if d.continuation.limited {
+                d.continuation.phase = Some("paused".into());
+                d.continuation.reason =
+                    Some("Inbox storage failure; inspect before deliberate continuation".into());
+            }
+        }
+        d.storage_error = Some(reason.into());
+        d.status = "error".into();
+        d.turn_active = false;
+        owner
+    };
+    if let Some(owner) = &owner {
+        let _ = s.send_command(crate::runtime::Command::CancelInbox(owner.clone()));
+    }
     {
+        let mut store = s.store.lock().unwrap();
+        // Best effort when the underlying disk is unavailable. A durable pre-submission
+        // claim already exists; startup reconciliation never replays it.
+        if let Ok(tx) = store.connection.transaction() {
+            let outcome = (|| -> Result<()> {
+                if let Some(owner) = &owner {
+                    tx.execute("UPDATE inbox_deliveries SET state='paused',reason=?4 WHERE recipient=?1 AND request_id=?2 AND generation=?3",params![s.id,owner.request_id,owner.generation as i64,reason]).map_err(error)?;
+                }
+                cancel_db(&tx, &s.id, reason)
+            })();
+            if outcome.is_ok() {
+                let _ = tx.commit();
+            }
+        }
+    }
+    s.emit(
+        "inbox_delivery",
+        json!({"decision":"storage failure; automatic admission closed","reason":reason}),
+    );
+}
+pub fn cancel(s: &Session, reason: &str) -> Result<()> {
+    let result = (|| -> Result<()> {
         let mut store = s.store.lock().unwrap();
         let tx = store.connection.transaction().map_err(error)?;
         cancel_db(&tx, &s.id, reason)?;
-        tx.commit().map_err(error)?;
+        tx.commit().map_err(error)
+    })();
+    let interrupted = interrupt_inflight(s, reason);
+    if result.is_err() || interrupted.is_err() {
+        fail_closed(s, "Could not persist inbox revocation; inspection required");
     }
-    interrupt_inflight(s, reason)
+    result.and(interrupted)
 }
 /// Revoke both the recipient policy and any pending policies relying on this sender.
 pub fn revoke_related(app: &App, s: &Session, reason: &str) -> Result<()> {
-    let mut store = app.store.lock().unwrap();
-    let tx = store.connection.transaction().map_err(error)?;
-    let ids = {
-        let mut q=tx.prepare("SELECT DISTINCT d.recipient FROM inbox_deliveries d JOIN agent_messages m ON m.id=d.message_id WHERE m.sender=?1 AND (d.state='queued' OR (d.state='sent' AND d.reason IS NULL))").map_err(error)?;
-        q.query_map([&s.id], |r| r.get::<_, String>(0))
-            .map_err(error)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(error)?
+    let candidates = {
+        let store = app.store.lock().unwrap();
+        let mut q=store.connection.prepare("SELECT DISTINCT d.recipient,d.generation,d.request_id,d.state FROM inbox_deliveries d JOIN agent_messages m ON m.id=d.message_id WHERE m.sender=?1 AND (d.state IN ('queued','claimed') OR (d.state='sent' AND d.reason IS NOT 'Native turn terminated'))").map_err(error)?;
+        q.query_map([&s.id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)? as u64,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(error)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(error)?
     };
-    cancel_db(&tx, &s.id, reason)?;
-    for id in &ids {
-        cancel_db(&tx, id, reason)?;
+    let mut ids = std::collections::HashSet::new();
+    for (id, generation, request, state) in candidates {
+        let Ok(target) = session(app, &id) else {
+            continue;
+        };
+        // Never acquire a session guard while holding store/catalog guards.
+        let active = target.data.lock().unwrap().inbox_turn.clone();
+        let current = load(&app.store.lock().unwrap().connection, &id)?;
+        if (state == "queued" && generation == current.generation)
+            || active.is_some_and(|o| o.generation == generation && Some(o.request_id) == request)
+        {
+            ids.insert(id);
+        }
     }
-    tx.commit().map_err(error)?;
-    drop(store);
+    {
+        let mut store = app.store.lock().unwrap();
+        let tx = store.connection.transaction().map_err(error)?;
+        cancel_db(&tx, &s.id, reason)?;
+        for id in &ids {
+            cancel_db(&tx, id, reason)?;
+        }
+        tx.commit().map_err(error)?;
+    }
     interrupt_inflight(s, reason)?;
     for id in ids {
         if let Ok(target) = session(app, &id) {
@@ -173,43 +255,82 @@ pub fn revoke_related(app: &App, s: &Session, reason: &str) -> Result<()> {
     }
     Ok(())
 }
-/// Successful transport termination resolves submission uncertainty, not task completion.
-pub fn finished(s: &Session) {
-    let automatic_result=s.store.lock().unwrap().connection.query_row("SELECT EXISTS(SELECT 1 FROM inbox_deliveries WHERE recipient=?1 AND state IN ('claimed','sent') AND reason IS NOT 'Native turn terminated')",[&s.id],|r|r.get::<_,bool>(0));
-    let automatic = match automatic_result {
-        Ok(value) => value,
-        Err(_) => {
-            s.data.lock().unwrap().storage_error =
-                Some("Could not inspect inbox termination ledger".into());
-            return;
+/// Recheck the exact queued owner at the native boundary. An obsolete command is
+/// harmless; revocation before the worker receives it must not start inference.
+pub(crate) fn begin(s: &Session, owner: &Turn, native: &str) -> bool {
+    let mut d = s.data.lock().unwrap();
+    if d.inbox_turn.as_ref() != Some(owner) {
+        return false;
+    }
+    if d.turn_active
+        && d.status == "running"
+        && d.storage_error.is_none()
+        && owner.native == native
+        && d.provider_session_id.as_deref() == Some(native)
+    {
+        return true;
+    }
+    if d.status == "cancelling" && d.storage_error.is_none() {
+        let result=s.store.lock().unwrap().connection.execute("UPDATE inbox_deliveries SET state='cancelled',reason='Revoked before native submission' WHERE recipient=?1 AND request_id=?2 AND generation=?3",params![s.id,owner.request_id,owner.generation as i64]);
+        if matches!(result,Ok(n) if n>0) {
+            d.inbox_turn = None;
+            d.turn_active = false;
+            d.status = "idle".into();
+            drop(d);
+            s.emit("inbox_delivery",json!({"requestId":owner.request_id,"decision":"cancelled before native submission"}));
+            s.emit("status", json!({"status":"idle"}));
+            return false;
         }
+    }
+    drop(d);
+    fail_closed(
+        s,
+        "Exact inbox native admission unavailable; inspect before resuming",
+    );
+    false
+}
+/// Exact runtime completion token, never a query over historical claimed/sent rows.
+/// A human turn passes None; a stale callback cannot touch a newer owner's state.
+pub fn finished(s: &Session, owner: Option<&Turn>) {
+    let Some(owner) = owner else {
+        return;
     };
-    if automatic {
-        let quota_paused = {
-            let mut d = s.data.lock().unwrap();
-            if d.continuation.limited {
-                // A separate quota policy must not expand the bounded inbox turn budget.
-                // Preserve authorization/evidence; require a deliberate human continuation.
-                d.continuation.due_at = None;
-                d.continuation.phase = Some("paused".into());
-                d.continuation.reason=Some("Inbox turn paused by quota; automatic inbox bounds cannot authorize extra quota turns. Inspect and continue deliberately".into());
-                true
-            } else {
-                false
-            }
-        };
-        if quota_paused {
-            s.emit(
-                "continuation",
-                json!({"decision":"inbox quota pause requires human inspection"}),
-            );
-        }
+    let mut d = s.data.lock().unwrap();
+    if d.inbox_turn.as_ref() != Some(owner) {
+        return;
     }
-    let result=s.store.lock().unwrap().connection.execute("UPDATE inbox_deliveries SET reason='Native turn terminated' WHERE recipient=?1 AND state IN ('claimed','sent')",[&s.id]);
-    if result.is_err() {
-        s.data.lock().unwrap().storage_error =
-            Some("Could not persist inbox turn termination".into());
+    let result=s.store.lock().unwrap().connection.execute("UPDATE inbox_deliveries SET state='sent',reason='Native turn terminated' WHERE recipient=?1 AND request_id=?2 AND generation=?3",params![s.id,owner.request_id,owner.generation as i64]);
+    if !matches!(result,Ok(n) if n>0) {
+        drop(d);
+        fail_closed(s, "Could not persist exact inbox turn termination");
+        return;
     }
+    d.inbox_turn = None;
+    let quota_paused = d.continuation.limited;
+    if quota_paused {
+        d.continuation.due_at = None;
+        d.continuation.phase = Some("paused".into());
+        d.continuation.reason=Some("Inbox turn paused by quota; automatic inbox bounds cannot authorize extra quota turns. Inspect and continue deliberately".into());
+    }
+    drop(d);
+    if quota_paused {
+        s.emit("continuation",json!({"decision":"inbox quota pause requires human inspection","requestId":owner.request_id}));
+    }
+}
+/// Submission bookkeeping is conditional: a fast completion may already have
+/// closed this exact claim. It cannot reopen or rewrite that completed record.
+fn submission_record(s: &Session, owner: &Turn, sent: bool) -> Result<()> {
+    let mut store = s.store.lock().unwrap();
+    let tx = store.connection.transaction().map_err(error)?;
+    tx.execute("UPDATE inbox_deliveries SET state=?4,reason=?5 WHERE recipient=?1 AND request_id=?2 AND generation=?3 AND state='claimed' AND reason IS NOT 'Native turn terminated'",params![s.id,owner.request_id,owner.generation as i64,if sent{"sent"}else{"paused"},if sent{None}else{Some("Native submission uncertain; inspect before reauthorization")}]).map_err(error)?;
+    if !sent {
+        cancel_db(
+            &tx,
+            &s.id,
+            "Native submission uncertain; human inspection required",
+        )?;
+    }
+    tx.commit().map_err(error)
 }
 /// Enroll only a newly committed message; this never creates/enables a policy.
 pub fn enqueue(tx: &Transaction<'_>, recipient: &str, message: i64) -> Result<()> {
@@ -343,6 +464,20 @@ pub async fn configure(
     s.emit("inbox_delivery", json!({"decision":"human policy change"}));
     snapshot(&app, &id)
 }
+/// Restore never transfers a persisted inbox owner's possibly submitted work to
+/// the independent quota scheduler, even if its last termination write failed.
+pub(crate) fn restore(data: &mut crate::SessionData) {
+    if data.inbox_turn.take().is_some() {
+        data.continuation.due_at = None;
+        if data.continuation.limited {
+            data.continuation.phase = Some("paused".into());
+            data.continuation.reason = Some(
+                "Inbox-owned native turn interrupted; inspect before deliberate continuation"
+                    .into(),
+            );
+        }
+    }
+}
 /// Startup never replays a possibly submitted native turn. All persisted authorizations pause.
 pub fn reconcile(store: &mut crate::store::Store) -> Result<()> {
     let tx = store.connection.transaction().map_err(error)?;
@@ -377,6 +512,16 @@ fn instruction(request: &str, messages: &[Value]) -> String {
 }
 /// Caller holds communication_lock -> run_lock -> workspace_lock. No native resume/start.
 pub fn dispatch_one(app: &App, s: &Session, human_pending: bool) -> Result<()> {
+    let result = dispatch_inner(app, s, human_pending);
+    if result.is_err() {
+        fail_closed(
+            s,
+            "Could not persist inbox claim/submission; inspect before resuming",
+        );
+    }
+    result
+}
+fn dispatch_inner(app: &App, s: &Session, human_pending: bool) -> Result<()> {
     let mut p = load(&app.store.lock().unwrap().connection, &s.id)?;
     if !p.enabled {
         return Ok(());
@@ -461,12 +606,24 @@ pub fn dispatch_one(app: &App, s: &Session, human_pending: bool) -> Result<()> {
         let tx = store.connection.transaction().map_err(error)?;
         save(&tx, &s.id, &p)?;
         for m in &messages {
-            tx.execute("UPDATE inbox_deliveries SET state='claimed',request_id=?2 WHERE message_id=?1 AND state='queued'",params![m["id"].as_i64(),request]).map_err(error)?;
+            let claimed=tx.execute("UPDATE inbox_deliveries SET state='claimed',request_id=?2 WHERE message_id=?1 AND state='queued'",params![m["id"].as_i64(),request]).map_err(error)?;
+            if claimed != 1 {
+                return Err(error("Queued message was not durably claimed"));
+            }
         }
         tx.commit().map_err(error)?;
     }
+    let owner = Turn {
+        request_id: request.clone(),
+        generation: p.generation,
+        native: p
+            .native
+            .clone()
+            .ok_or_else(|| fail(StatusCode::CONFLICT, "Missing saved native identity"))?,
+    };
     {
         let mut d = s.data.lock().unwrap();
+        d.inbox_turn = Some(owner.clone());
         d.requests.insert(request.clone());
         d.turn_active = true;
         d.status = "running".into();
@@ -477,21 +634,12 @@ pub fn dispatch_one(app: &App, s: &Session, human_pending: bool) -> Result<()> {
     );
     s.emit("status", json!({"status":"running"}));
     let sent = s
-        .send_command(crate::runtime::Command::Prompt(text))
+        .send_command(crate::runtime::Command::InboxPrompt {
+            text,
+            owner: owner.clone(),
+        })
         .is_ok();
-    {
-        let mut store = app.store.lock().unwrap();
-        let tx = store.connection.transaction().map_err(error)?;
-        tx.execute("UPDATE inbox_deliveries SET state=?2,reason=CASE WHEN reason='Native turn terminated' THEN reason ELSE ?3 END WHERE recipient=?1 AND request_id=?4 AND state='claimed'",params![s.id,if sent{"sent"}else{"paused"},if sent{None}else{Some("Native submission uncertain; inspect before reauthorization")},request]).map_err(error)?;
-        if !sent {
-            cancel_db(
-                &tx,
-                &s.id,
-                "Native submission uncertain; human inspection required",
-            )?;
-        }
-        tx.commit().map_err(error)?;
-    }
+    submission_record(s, &owner, sent)?;
     if !sent {
         s.status("error");
     }
@@ -507,14 +655,7 @@ pub async fn scheduler(app: App) {
         let _workspace = app.workspace_lock.lock().await;
         let sessions: Vec<_> = app.sessions.lock().unwrap().values().cloned().collect();
         for s in sessions {
-            if let Err((_, reason)) = dispatch_one(&app, &s, explicit_input_pending(&s)) {
-                // Storage failure is terminal for automatic admission in this process.
-                if s.data.lock().unwrap().turn_active {
-                    let _ = s.send_command(crate::runtime::Command::Cancel);
-                }
-                s.data.lock().unwrap().storage_error = Some(reason.clone());
-                s.status("error");
-            }
+            let _ = dispatch_one(&app, &s, explicit_input_pending(&s));
         }
     }
 }
@@ -702,7 +843,7 @@ mod tests {
         assert_eq!(f.p().attempts, 1);
         assert!(matches!(
             f.receiver.try_recv(),
-            Ok(crate::runtime::Command::Prompt(_))
+            Ok(crate::runtime::Command::InboxPrompt { .. })
         ));
         f.dispatch(false);
         assert_eq!(f.p().attempts, 1);
@@ -809,7 +950,7 @@ mod tests {
         f.dispatch(false);
         assert!(matches!(
             f.receiver.try_recv(),
-            Ok(crate::runtime::Command::Prompt(_))
+            Ok(crate::runtime::Command::InboxPrompt { .. })
         ));
         let mut p = f.p();
         p.deadline = now() - 1;
@@ -818,7 +959,7 @@ mod tests {
         assert!(!f.p().enabled);
         assert!(matches!(
             f.receiver.try_recv(),
-            Ok(crate::runtime::Command::Cancel)
+            Ok(crate::runtime::Command::CancelInbox(_))
         ));
         let mut f = Fixture::new();
         f.recipient.data.lock().unwrap().turn_active = true;
@@ -888,7 +1029,8 @@ mod tests {
             d.continuation.limited = true;
             d.continuation.due_at = Some(now() + 1000);
         }
-        finished(&f.recipient);
+        let owner = f.recipient.data.lock().unwrap().inbox_turn.clone();
+        finished(&f.recipient, owner.as_ref());
         let d = f.recipient.data.lock().unwrap();
         assert!(d.continuation.enabled);
         assert!(d.continuation.limited);
@@ -896,5 +1038,411 @@ mod tests {
         assert!(d.continuation.deadline.is_some());
         assert!(d.continuation.due_at.is_none());
         assert_eq!(d.continuation.phase.as_deref(), Some("paused"));
+    }
+    impl Fixture {
+        fn owner(&self) -> Turn {
+            self.recipient
+                .data
+                .lock()
+                .unwrap()
+                .inbox_turn
+                .clone()
+                .unwrap()
+        }
+        fn row(&self) -> Value {
+            snapshot(&self.app, &self.recipient.id).unwrap().0["deliveries"][0].clone()
+        }
+        fn sql(&self, sql: &str) {
+            self.app
+                .store
+                .lock()
+                .unwrap()
+                .connection
+                .execute_batch(sql)
+                .unwrap();
+        }
+        fn human_turn(&self) {
+            self.recipient.status("idle");
+            let mut d = self.recipient.data.lock().unwrap();
+            d.status = "running".into();
+            d.turn_active = true;
+            d.continuation.limited = true;
+            d.continuation.due_at = Some(now() + 10000);
+        }
+        fn drain(&mut self) {
+            while self.receiver.try_recv().is_ok() {}
+        }
+    }
+    #[test]
+    fn fast_native_completion_before_submit_record_cannot_reopen_owner() {
+        let mut f = Fixture::new();
+        f.message("one");
+        f.dispatch(false);
+        let owner = f.owner();
+        f.drain();
+        // Deterministically execute the native completion callback before the submitter's
+        // claimed->sent bookkeeping, rather than relying on thread timing.
+        f.sql("UPDATE inbox_deliveries SET state='claimed',reason=NULL");
+        finished(&f.recipient, Some(&owner));
+        submission_record(&f.recipient, &owner, true).unwrap();
+        assert_eq!(f.row()["state"], "sent");
+        assert_eq!(f.row()["reason"], "Native turn terminated");
+        assert!(f.recipient.data.lock().unwrap().inbox_turn.is_none());
+        f.human_turn();
+        interrupt_inflight(&f.recipient, "deadline after fast finish").unwrap();
+        assert!(f.receiver.try_recv().is_err());
+    }
+    #[test]
+    fn old_generations_and_reasons_never_own_new_human_or_queued_turn() {
+        for old_state in ["claimed", "sent"] {
+            for reason in ["NULL", "'Cancellation requested: prior Stop'"] {
+                let mut f = Fixture::new();
+                f.message("old");
+                f.dispatch(false);
+                let old = f.owner();
+                f.drain();
+                f.sql(&format!(
+                    "UPDATE inbox_deliveries SET state='{old_state}',reason={reason}"
+                ));
+                let mut p = f.p();
+                p.generation += 10;
+                save(&f.app.store.lock().unwrap().connection, &f.recipient.id, &p).unwrap();
+                f.human_turn();
+                let due = f.recipient.data.lock().unwrap().continuation.due_at;
+                // Includes late completion callbacks and every C-06 revocation entry point.
+                finished(&f.recipient, None);
+                finished(&f.recipient, Some(&old));
+                interrupt_inflight(&f.recipient, "policy replacement").unwrap();
+                revoke_related(&f.app, &f.sender, "sender revoked").unwrap();
+                assert!(
+                    f.p().enabled,
+                    "historical sender row revoked a newer policy"
+                );
+                cancel(&f.recipient, "Explicit Stop / deadline / completion").unwrap();
+                assert_eq!(f.recipient.data.lock().unwrap().continuation.due_at, due);
+                assert!(f.receiver.try_recv().is_err());
+                assert!(!crate::runtime::Command::CancelInbox(old).cancels(None));
+            }
+        }
+    }
+    #[test]
+    fn cancellation_and_late_callback_are_bound_to_exact_request_generation_native() {
+        let mut f = Fixture::new();
+        f.message("one");
+        f.dispatch(false);
+        let old = f.owner();
+        f.drain();
+        let targeted = crate::runtime::Command::CancelInbox(old.clone());
+        assert!(targeted.cancels(Some(&old)));
+        for changed in 0..3 {
+            let mut new = old.clone();
+            match changed {
+                0 => new.request_id.push_str("-new"),
+                1 => new.generation += 1,
+                _ => new.native.push_str("-new"),
+            };
+            f.recipient.data.lock().unwrap().inbox_turn = Some(new.clone());
+            finished(&f.recipient, Some(&old));
+            assert_eq!(f.owner(), new);
+            assert!(!targeted.cancels(Some(&new)));
+        }
+        assert_eq!(f.row()["reason"], Value::Null);
+    }
+    #[test]
+    fn revoke_and_policy_replacement_cancel_only_current_owner_even_after_generation_changes() {
+        for action in ["sender", "replacement", "completion"] {
+            let mut f = Fixture::new();
+            f.message("one");
+            f.dispatch(false);
+            let old = f.owner();
+            f.drain();
+            if action == "sender" {
+                revoke_related(&f.app, &f.sender, "sender revoked").unwrap();
+            } else {
+                let mut p = f.p();
+                p.generation += 1;
+                save(&f.app.store.lock().unwrap().connection, &f.recipient.id, &p).unwrap();
+                cancel(&f.recipient, action).unwrap();
+            }
+            let command = f.receiver.try_recv().unwrap();
+            assert!(command.cancels(Some(&old)));
+            assert!(!command.cancels(None));
+            finished(&f.recipient, Some(&old));
+            assert!(f.recipient.data.lock().unwrap().inbox_turn.is_none());
+            f.human_turn();
+            interrupt_inflight(&f.recipient, "late repeated revocation").unwrap();
+            assert!(f.receiver.try_recv().is_err());
+        }
+    }
+    #[test]
+    fn finish_storage_failure_latches_closed_and_persists_pause_without_replay() {
+        let mut f = Fixture::new();
+        f.message("one");
+        f.dispatch(false);
+        let owner = f.owner();
+        f.drain();
+        f.sql("CREATE TRIGGER fail_finish BEFORE UPDATE ON inbox_deliveries WHEN NEW.reason='Native turn terminated' BEGIN SELECT RAISE(FAIL,'fixture finish disk failure'); END;");
+        finished(&f.recipient, Some(&owner));
+        assert!(f.recipient.data.lock().unwrap().storage_error.is_some());
+        assert!(f.recipient.data.lock().unwrap().inbox_turn.is_none());
+        assert!(!f.p().enabled);
+        assert_eq!(f.row()["state"], "paused");
+        let cancel = f.receiver.try_recv().unwrap();
+        assert!(cancel.cancels(Some(&owner)));
+        assert!(!cancel.cancels(None));
+        // This reads the committed session state, not just the in-memory latch.
+        let state: String = f
+            .app
+            .store
+            .lock()
+            .unwrap()
+            .connection
+            .query_row("SELECT state FROM sessions WHERE id='recipient'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let saved: crate::SessionData = serde_json::from_str(&state).unwrap();
+        assert_eq!(saved.status, "error");
+        assert!(saved.inbox_turn.is_none());
+        *f.recipient.data.lock().unwrap() = saved;
+        f.sql("DROP TRIGGER fail_finish");
+        reconcile(&mut f.app.store.lock().unwrap()).unwrap();
+        f.dispatch(false);
+        assert!(f.receiver.try_recv().is_err());
+    }
+    #[test]
+    fn claim_storage_failure_rolls_back_and_closes_admission_before_native_send() {
+        let mut f = Fixture::new();
+        f.message("one");
+        f.sql("CREATE TRIGGER fail_claim BEFORE UPDATE ON inbox_deliveries WHEN NEW.state='claimed' BEGIN SELECT RAISE(FAIL,'fixture claim disk failure'); END;");
+        assert!(dispatch_one(&f.app, &f.recipient, false).is_err());
+        assert!(f.receiver.try_recv().is_err());
+        assert!(f.recipient.data.lock().unwrap().storage_error.is_some());
+        assert!(!f.p().enabled);
+        assert_eq!(f.p().attempts, 0);
+        let state: String = f
+            .app
+            .store
+            .lock()
+            .unwrap()
+            .connection
+            .query_row("SELECT state FROM sessions WHERE id='recipient'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let saved: crate::SessionData = serde_json::from_str(&state).unwrap();
+        assert_eq!(saved.status, "error");
+        assert!(saved.inbox_turn.is_none());
+        f.sql("DROP TRIGGER fail_claim");
+        *f.recipient.data.lock().unwrap() = saved;
+        reconcile(&mut f.app.store.lock().unwrap()).unwrap();
+        f.dispatch(false);
+        assert!(f.receiver.try_recv().is_err());
+    }
+    #[test]
+    fn post_claim_event_failure_never_reaches_native_and_restart_never_replays() {
+        let mut f = Fixture::new();
+        f.message("one");
+        f.sql("CREATE TRIGGER fail_user_event BEFORE INSERT ON events BEGIN SELECT RAISE(FAIL,'fixture event write failure'); END;");
+        // Claim is durable but session/event persistence fails before the native send.
+        f.dispatch(false);
+        assert!(f.receiver.try_recv().is_err());
+        assert!(f.recipient.data.lock().unwrap().storage_error.is_some());
+        assert!(!f.p().enabled);
+        assert_eq!(f.row()["state"], "paused");
+        f.sql("DROP TRIGGER fail_user_event");
+        reconcile(&mut f.app.store.lock().unwrap()).unwrap();
+        f.dispatch(false);
+        assert!(f.receiver.try_recv().is_err());
+    }
+    #[test]
+    fn revoked_before_native_receives_command_is_never_submitted() {
+        let mut f = Fixture::new();
+        f.message("one");
+        f.dispatch(false);
+        let owner = f.owner();
+        f.drain();
+        interrupt_inflight(&f.recipient, "Stop before worker receive").unwrap();
+        assert!(!begin(&f.recipient, &owner, &owner.native));
+        assert_eq!(f.row()["state"], "cancelled");
+        assert!(f.recipient.data.lock().unwrap().inbox_turn.is_none());
+        f.drain();
+        f.human_turn();
+        assert!(!begin(&f.recipient, &owner, &owner.native));
+        assert_eq!(f.recipient.data.lock().unwrap().status, "running");
+        assert!(f.receiver.try_recv().is_err());
+    }
+    #[test]
+    fn completion_report_does_not_cancel_human_from_an_old_ledger() {
+        let mut f = Fixture::new();
+        f.message("old");
+        f.dispatch(false);
+        f.drain();
+        f.human_turn();
+        let report=serde_json::from_value(json!({"requestId":"review-completion","status":"completed","summary":"Human owned current turn"})).unwrap();
+        crate::completion::report(&f.app, &f.recipient, report).unwrap();
+        assert!(f.receiver.try_recv().is_err());
+    }
+    #[tokio::test]
+    async fn policy_replacement_does_not_cancel_human_from_an_old_ledger() {
+        let mut f = Fixture::new();
+        f.message("old");
+        f.dispatch(false);
+        f.drain();
+        f.human_turn();
+        let _ = configure(
+            State(f.app.clone()),
+            Path(f.recipient.id.clone()),
+            Json(Input {
+                enabled: true,
+                request_id: "human-replacement".into(),
+                deadline: Some(now() + 60000),
+                max_turns: Some(2),
+                cooldown_seconds: Some(5),
+                max_batch: Some(2),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(f.p().enabled);
+        assert!(f.receiver.try_recv().is_err());
+        assert_eq!(f.recipient.data.lock().unwrap().status, "running");
+    }
+    #[test]
+    fn failed_finish_or_restart_never_hands_owned_work_to_quota_scheduler() {
+        let mut f = Fixture::new();
+        f.message("one");
+        f.dispatch(false);
+        let owner = f.owner();
+        f.drain();
+        {
+            let mut d = f.recipient.data.lock().unwrap();
+            d.continuation.enabled = true;
+            d.continuation.authorization = 17;
+            d.continuation.limited = true;
+            d.continuation.phase = Some("scheduled".into());
+            d.continuation.due_at = Some(now() + 1000);
+        }
+        let mut crash = f.recipient.data.lock().unwrap().clone();
+        f.sql("CREATE TRIGGER fail_finish_quota BEFORE UPDATE ON inbox_deliveries WHEN NEW.reason='Native turn terminated' BEGIN SELECT RAISE(FAIL,'fixture finish failure'); END;");
+        finished(&f.recipient, Some(&owner));
+        assert!(
+            f.recipient
+                .data
+                .lock()
+                .unwrap()
+                .continuation
+                .due_at
+                .is_none()
+        );
+        restore(&mut crash);
+        crash.continuation.reconcile();
+        assert!(crash.inbox_turn.is_none());
+        assert!(crash.continuation.due_at.is_none());
+        assert!(crash.continuation.enabled);
+        assert_eq!(crash.continuation.authorization, 17);
+        // An unrelated human quota pause has no inbox owner and is preserved.
+        crash.continuation.phase = Some("scheduled".into());
+        crash.continuation.due_at = Some(now() + 1000);
+        let due = crash.continuation.due_at;
+        restore(&mut crash);
+        assert_eq!(crash.continuation.due_at, due);
+    }
+    #[test]
+    fn scope_and_completion_callbacks_do_not_invert_catalog_session_store_locks() {
+        for action in ["reassign", "delete", "completion"] {
+            let mut f = Fixture::new();
+            let project = f
+                .app
+                .catalog
+                .lock()
+                .unwrap()
+                .project(None, "Owned scope")
+                .unwrap()
+                .id;
+            let other = f
+                .app
+                .catalog
+                .lock()
+                .unwrap()
+                .project(None, "Other scope")
+                .unwrap()
+                .id;
+            f.recipient.data.lock().unwrap().project_id = Some(project.clone());
+            f.sender.data.lock().unwrap().project_id = Some(project.clone());
+            let mut p = f.p();
+            p.project = Some(project.clone());
+            save(&f.app.store.lock().unwrap().connection, &f.recipient.id, &p).unwrap();
+            f.message("one");
+            f.dispatch(false);
+            let owner = f.owner();
+            f.drain();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+            let (done, completed) = std::sync::mpsc::channel();
+            let target = f.recipient.clone();
+            let ready = barrier.clone();
+            let sent = done.clone();
+            std::thread::spawn(move || {
+                ready.wait();
+                finished(&target, Some(&owner));
+                sent.send(()).unwrap();
+            });
+            let app = f.app.clone();
+            let target = f.recipient.clone();
+            let ready = barrier.clone();
+            std::thread::spawn(move || {
+                ready.wait();
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                match action {
+                    "reassign" => {
+                        let _ = runtime
+                            .block_on(crate::assign_project(
+                                State(app),
+                                Path(target.id.clone()),
+                                Json(crate::ProjectChoice {
+                                    project_id: Some(other),
+                                }),
+                            ))
+                            .unwrap();
+                    }
+                    "delete" => {
+                        let _ = runtime
+                            .block_on(crate::delete_project(State(app), Path(project)))
+                            .unwrap();
+                    }
+                    _ => {
+                        let report=serde_json::from_value(json!({"requestId":"lock-order-report","status":"completed","summary":"Finished exact owned turn"})).unwrap();
+                        crate::completion::report(&app, &target, report).unwrap();
+                    }
+                }
+                done.send(()).unwrap();
+            });
+            barrier.wait();
+            completed
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("finish/scope callback lock inversion");
+            completed
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("finish/completion callback lock inversion");
+            assert!(f.recipient.data.lock().unwrap().inbox_turn.is_none());
+            assert!(!f.p().enabled);
+            while let Ok(command) = f.receiver.try_recv() {
+                assert!(!command.cancels(None));
+            }
+        }
+    }
+    #[test]
+    fn silently_refused_claim_is_not_a_durable_submission() {
+        let mut f = Fixture::new();
+        f.message("one");
+        f.sql("CREATE TRIGGER skip_claim BEFORE UPDATE ON inbox_deliveries WHEN NEW.state='claimed' BEGIN SELECT RAISE(IGNORE); END;");
+        assert!(dispatch_one(&f.app, &f.recipient, false).is_err());
+        assert!(f.receiver.try_recv().is_err());
+        assert!(!f.p().enabled);
+        assert_eq!(f.p().attempts, 0);
+        assert!(f.recipient.data.lock().unwrap().storage_error.is_some());
     }
 }
