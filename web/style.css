@@ -18,3 +18,19 @@
 @media(max-width:650px){.lifecycle-actions{position:fixed;left:12px;right:12px;bottom:12px;top:auto;width:auto;max-width:none;max-height:65dvh;overflow:auto}}
 
 #lifecycle-menu .lifecycle-actions .text-button{font-size:14px;color:#d7dbe4}#lifecycle-menu .lifecycle-actions .text-button:disabled{color:#89919e}#lifecycle-menu .lifecycle-actions #close-session{color:#efaaaa}
+/* The diff stays inside the dialog on narrow screens; long code scrolls locally. */
+#diff-dialog{width:min(1100px,96vw);max-width:96vw;max-height:92dvh;overflow:auto}
+#diff-context,#diff-comparison{white-space:pre-wrap;overflow-wrap:anywhere}
+.diff-controls{display:flex;align-items:end;gap:12px;flex-wrap:wrap}
+.diff-controls label{flex:1;min-width:160px;margin:0}
+.diff-controls [hidden]{display:none}
+.diff-layout{display:grid;grid-template-columns:minmax(160px,25%) minmax(0,1fr);gap:16px}
+#diff-file-label{min-width:0;margin:0}
+#diff-files{width:100%;min-height:160px;max-width:100%;font-family:monospace}
+.diff-patch-area{min-width:0}
+#diff-patch,#diff-other{white-space:pre;overflow:auto;max-height:50dvh;max-width:100%;font:12px/1.6 monospace;tab-size:4;padding:12px;background:#101216;border:1px solid #333;border-radius:6px}
+#diff-patch:empty{display:none}
+#diff-patch-note{font-size:12px;overflow-wrap:anywhere}
+#diff-dialog details{margin-top:12px}
+#diff-dialog summary{cursor:pointer}
+@media(max-width:650px){.diff-layout{grid-template-columns:minmax(0,1fr)}#diff-files{min-height:100px;height:120px}#diff-dialog{padding:16px}#diff-dialog .dialog-heading h2{overflow-wrap:anywhere;min-width:0}#diff-patch{max-height:45dvh}}
