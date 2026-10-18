@@ -5,11 +5,15 @@ import {createWorkspace} from '/workspace.js';
 import {setupCommunication} from '/communication.js';
 import {setupPalettes} from '/palettes.js';
 import {setupDisplayPreferences} from '/display-preferences.js';
+import {setupUsageStatus} from '/usage-status.js';
 const $ = id => document.getElementById(id);
 // randomUUID is unavailable on plain HTTP remote origins; getRandomValues is supported.
 const uuid = () => globalThis.crypto.randomUUID?.() ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
 const labels = {demo:'Demo agent',claude:'Claude',codex:'Codex',opencode:'OpenCode'};
 const icons = {demo:'◈',claude:'✳',codex:'⌘',opencode:'▣'};
+// U-07: per-session composer usage statusline; only this session's own events feed it.
+const usageStatus=setupUsageStatus({root:$('usage-status'),getProvider:()=>active?.provider});
+setInterval(()=>usageStatus.render(),60000);
 function readStorage(storage,key,fallback){try{return JSON.parse(storage.getItem(key))??fallback;}catch{return fallback;}}
 let workspace;
 let projects=[],hosts=[{id:'local',name:'Local',status:'connected'}];
@@ -268,7 +272,7 @@ function selectSession(s) {
   if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));scrollPositions.set(active.id,$('messages').scrollTop);}
   $('prompt').value=drafts[s.id]||'';restoreScroll=scrollPositions.get(s.id)??null;
   clearTimeout(retryTimer);generation++;socket?.close();socket=null;connected=false;
-  active=s;status=s.status;pendingSend=null;modelConfig=null;availableCommands=[];commandsOpen=false;renderCommands();resetTranscript();
+  active=s;status=s.status;pendingSend=null;modelConfig=null;availableCommands=[];commandsOpen=false;renderCommands();resetTranscript();usageStatus.reset();
   localStorage.setItem('agentworks-session',s.id);$('welcome').hidden=true;$('conversation').hidden=false;
   $('header-title').textContent=s.title;$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;
   $('session-notice').hidden=true;document.body.classList.remove('menu-open');sidebar();updateControls();connect(generation);
@@ -284,7 +288,7 @@ function connect(gen){
     if(gen!==generation)return;
     const e=JSON.parse(event.data);
     if(e.kind==='snapshot'){
-      resetTranscript();status=e.session.status;Object.assign(active,e.session);
+      resetTranscript();usageStatus.reset();status=e.session.status;Object.assign(active,e.session);
       for(const item of e.events)if(item.kind!=='session_updated')consume(item);
       Object.assign(active,e.session);$('header-title').textContent=active.title;
       active.continuation=e.session.continuation;
@@ -292,7 +296,7 @@ function connect(gen){
       if(e.storageError){$('session-notice').textContent=e.storageError;$('session-notice').hidden=false;}
       if(e.truncated){$('session-notice').textContent='Showing recent output. The full transcript is saved on this host.';$('session-notice').hidden=false;}
     }else consume(e);
-    scheduleDraw();updateControls();renderContinuation();
+    scheduleDraw();updateControls();renderContinuation();usageStatus.render();
   };
   ws.onclose=()=>{
     if(gen!==generation)return;
@@ -313,6 +317,7 @@ function connect(gen){
 function addMessage(role,text){const message={id:uuid(),type:'message',role,text};transcript.push(message);return message;}
 function consume(e){
   const d=e.data;
+  usageStatus.consume(e);
   if(d?.continuationState&&active)active.continuation=d.continuationState;
   if(e.kind==='session_updated'){
     Object.assign(active,d);$('header-title').textContent=active.title;const row=sessions.find(s=>s.id===active.id);if(row)Object.assign(row,d);sidebar();

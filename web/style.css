@@ -92,3 +92,9 @@ body[data-code-wrap=scroll] .tool-card pre,body[data-code-wrap=scroll] .approval
 #toast[data-tone=success]::before{content:'✓ ';color:var(--green)}
 
 #service-controls{display:flex;flex-direction:column;gap:10px;margin-top:20px;min-width:0;border:1px solid var(--border,#555);border-radius:8px;padding:14px}#service-controls p{overflow-wrap:anywhere;margin:0}#service-controls input,#service-controls select,#service-controls button{min-height:44px;max-width:100%;box-sizing:border-box}#service-controls legend{font-weight:600}#service-controls [hidden]{display:none}
+/* U-07 composer usage statusline */
+.usage-status{display:flex;flex-direction:column;align-items:flex-end;font-size:12px;margin:0 0 4px}
+.usage-status-toggle{background:none;border:0;color:inherit;opacity:.75;cursor:pointer;font:inherit;padding:4px 6px;min-height:28px}
+.usage-status-toggle.stale,.usage-status-toggle.unknown{opacity:.55;font-style:italic}
+.usage-status-details{width:100%;max-width:640px;padding:8px 10px;border:1px solid rgba(127,127,127,.35);border-radius:8px;display:grid;gap:4px;overflow-wrap:anywhere}
+@media (max-width:640px){.usage-status{align-items:stretch}.usage-status-toggle{text-align:left;min-height:36px}}
