@@ -105,5 +105,10 @@ pub async fn suspend_locked(s: &Session) -> ApiResult {
 pub async fn suspend(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
-    suspend_locked(&s).await
+    let restart_error = crate::service_restart::stop_requester(&app, &id).err();
+    let result = suspend_locked(&s).await;
+    if let Some(error) = restart_error {
+        return Err(error);
+    }
+    result
 }

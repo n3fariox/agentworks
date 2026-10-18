@@ -130,6 +130,16 @@ fn tools(a: &mail::Access) -> Value {
     if a.communicate || mail::coordinator(a) {
         tools.push(tool("get_completion", "Read the latest agent claim for yourself or a permitted same-project session. Claims are not proof of review or success.", json!({"sessionId":{"type":"string"}}), &[]));
     }
+    if a.restart_service {
+        tools.push(tool("get_service_status", "Read global service activity and durable restart/handoff outcomes. Requires live restartService grant.",json!({}), &[]));
+        tools.push(tool(
+            "cancel_service_restart",
+            "Cancel your own pending global restart or native handoff.",
+            json!({"requestId":{"type":"string"}}),
+            &["requestId"],
+        ));
+        tools.push(tool("restart_service", "GLOBAL service restart. Explicit human restartService grant required. Returns durable identity immediately. wait drains all sessions; interrupt stops all harnesses. Optional handoff resumes only your saved native context once, after finishing this turn.", json!({"requestId":{"type":"string"},"mode":{"type":"string","enum":["wait","interrupt"]},"expiresInSeconds":{"type":"integer","minimum":5,"maximum":900},"release":{"type":"string"},"handoff":{"type":"boolean"},"handoffDeadline":{"type":"integer"}}), &["requestId","mode","expiresInSeconds"]));
+    }
     if a.start_sessions {
         tools.push(tool("start_session","Start an unprivileged session in this project. Does not submit a prompt. Reuse requestId on retry.",json!({"provider":{"type":"string","enum":["demo","claude","codex","opencode"]},"cwd":{"type":"string"},"inheritResumePolicy":{"type":"boolean","default":false},"title":{"type":"string"},"model":{"type":"string"},"requestId":{"type":"string","maxLength":50},"workspace":{"type":"object","properties":{"mode":{"type":"string","enum":["directory","newWorktree","existingWorktree"]},"branch":{"type":"string"},"baseRef":{"type":"string"},"path":{"type":"string"}},"required":["mode"],"additionalProperties":false}}),&["provider","cwd","requestId"]));
     }
@@ -176,6 +186,22 @@ async fn dispatch(app: &App, s: &Session, operation: &str, args: Value) -> mail:
     let a = mail::access(app, s)?;
     match operation {
         "tools/list" => Ok(tools(&a)),
+        "get_service_status" => {
+            mail::require(app, s, "restart_service")?;
+            crate::service_restart::status(State(app.clone()))
+                .await
+                .map(|j| j.0)
+        }
+        "cancel_service_restart" => {
+            mail::require(app, s, "restart_service")?;
+            crate::service_restart::cancel_own(app, &s.id, &field(&args, "requestId")?).await
+        }
+        "restart_service" => {
+            mail::require(app, s, "restart_service")?;
+            let req = serde_json::from_value(args)
+                .map_err(|_| crate::fail(StatusCode::BAD_REQUEST, "Invalid restart request"))?;
+            crate::service_restart::request(app, &s.id, req).await
+        }
         "list_sessions" => mail::peers(app, s),
         "read_inbox" => {
             mail::require(app, s, "communicate")?;
@@ -388,7 +414,7 @@ pub async fn serve_bridge(app: App, listener: TcpListener) {
                 let actor=app.sessions.lock().unwrap().values().find(|s|s.mcp_token.lock().unwrap().as_str()==token).cloned();
                 let response=if let Some(s)=actor {
                     let operation=v["operation"].as_str().unwrap_or("");
-                    let mutation=!matches!(operation,"tools/list"|"read_inbox"|"list_sessions"|"list_automations"|"get_completion");
+                    let mutation=!matches!(operation,"tools/list"|"read_inbox"|"list_sessions"|"list_automations"|"get_completion"|"get_service_status");
                     let action=operation.chars().take(80).collect::<String>();
                     let argument_target=v["arguments"]["sessionId"].as_str().or(v["arguments"]["recipient"].as_str()).or(v["arguments"]["automationId"].as_str()).unwrap_or("").chars().take(128).collect::<String>();
                     let request=v["arguments"]["requestId"].as_str().unwrap_or("").chars().take(100).collect::<String>();

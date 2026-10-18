@@ -220,6 +220,7 @@ pub async fn run(
         ));
     }
     let _guard = app.run_lock.lock().await;
+    crate::service_restart::allow_start(&app)?;
     let previous = app
         .store
         .lock()

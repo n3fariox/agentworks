@@ -24,6 +24,8 @@ pub struct Access {
     pub cancel_sessions: bool,
     #[serde(default)]
     pub run_automations: bool,
+    #[serde(default)]
+    pub restart_service: bool,
 }
 impl Access {
     pub fn enabled(&self) -> bool {
@@ -32,6 +34,7 @@ impl Access {
             || self.prompt_sessions
             || self.cancel_sessions
             || self.run_automations
+            || self.restart_service
     }
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -143,6 +146,7 @@ pub fn require(app: &App, s: &Session, capability: &str) -> Result<Access> {
         "prompt_sessions" => a.prompt_sessions,
         "cancel_sessions" => a.cancel_sessions,
         "run_automations" => a.run_automations,
+        "restart_service" => a.restart_service,
         _ => false,
     };
     if !permitted {
@@ -292,7 +296,11 @@ pub async fn set_access(
         "idle" | "suspended" | "error"
     );
     let attached = s.commands.lock().unwrap().is_some();
-    if idle && !s.data.lock().unwrap().lifecycle.suspended && (attached || req.enabled()) {
+    if idle
+        && crate::service_restart::allow_start(&app).is_ok()
+        && !s.data.lock().unwrap().lifecycle.suspended
+        && (attached || req.enabled())
+    {
         s.status("suspended");
         if let Err((code, error)) = crate::resume(State(app.clone()), Path(id.clone())).await {
             return Err(fail(
@@ -317,6 +325,9 @@ pub async fn set_access(
                 let status = s.data.lock().unwrap().status.clone();
                 if matches!(status.as_str(), "idle" | "suspended" | "error" | "closed") {
                     if status == "idle" {
+                        if crate::service_restart::allow_start(&app).is_err() {
+                            continue;
+                        }
                         s.status("suspended");
                         let _ = crate::resume(State(app.clone()), Path(s.id.clone())).await;
                     }
