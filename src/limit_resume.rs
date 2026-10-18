@@ -355,6 +355,9 @@ pub async fn scheduler(app: App) {
         let _communication = app.communication_lock.lock().await;
         let _gate = app.run_lock.lock().await;
         let _workspace = app.workspace_lock.lock().await;
+        if crate::service_restart::allow_start(&app).is_err() {
+            continue;
+        }
         let sessions: Vec<Arc<Session>> = app.sessions.lock().unwrap().values().cloned().collect();
         for s in &sessions {
             let p = s.data.lock().unwrap().continuation.clone();

@@ -90,3 +90,5 @@ body[data-code-wrap=scroll] .tool-card pre,body[data-code-wrap=scroll] .approval
 @media(max-width:650px){.display-field{grid-template-columns:minmax(0,1fr)}.display-field select{width:100%;min-height:40px}}
 #toast[data-tone=success]{background:#1f2e27;border-color:#4d7a62;color:#cfe9d9}
 #toast[data-tone=success]::before{content:'✓ ';color:var(--green)}
+
+#service-controls{display:flex;flex-direction:column;gap:10px;margin-top:20px;min-width:0;border:1px solid var(--border,#555);border-radius:8px;padding:14px}#service-controls p{overflow-wrap:anywhere;margin:0}#service-controls input,#service-controls select,#service-controls button{min-height:44px;max-width:100%;box-sizing:border-box}#service-controls legend{font-weight:600}#service-controls [hidden]{display:none}

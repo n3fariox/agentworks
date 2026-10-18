@@ -8,6 +8,7 @@ mod lifecycle;
 mod limit_resume;
 mod mcp;
 mod runtime;
+mod service_restart;
 mod store;
 mod workspace;
 mod worktrees;
@@ -55,6 +56,7 @@ struct App {
     workspace_lock: Arc<tokio::sync::Mutex<()>>,
     communication_lock: Arc<tokio::sync::Mutex<()>>,
     mcp_endpoint: std::net::SocketAddr,
+    restart: Arc<service_restart::Manager>,
 }
 
 struct Session {
@@ -397,6 +399,10 @@ fn installed(provider: &str) -> bool {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|a| a == "--service-protocol") {
+        println!("{}", json!({"serviceProtocol":1}));
+        return Ok(());
+    }
     if args.get(1).is_some_and(|a| a == "mcp") {
         return mcp::stdio().await.map_err(|e| e.to_string().into());
     }
@@ -456,6 +462,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         workspace_lock: Arc::new(tokio::sync::Mutex::new(())),
         communication_lock: Arc::new(tokio::sync::Mutex::new(())),
         mcp_endpoint,
+        restart: Arc::new(service_restart::Manager::new()),
     };
     for (metadata, mut data) in restored {
         data.continuation.reconcile();
@@ -497,9 +504,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         s.status("suspended");
         app.sessions.lock().unwrap().insert(s.id.clone(), s);
     }
+    service_restart::initialize(&app)?;
+    tokio::spawn(service_restart::scheduler(app.clone()));
     let scheduler = tokio::spawn(limit_resume::scheduler(app.clone()));
     tokio::spawn(mcp::serve_bridge(app.clone(), mcp_listener));
     let router = Router::new()
+        .route(
+            "/api/service/restart",
+            get(service_restart::status).post(service_restart::post),
+        )
+        .route("/api/service/restart/cancel", post(service_restart::cancel))
         .route(
             "/",
             get(|| async { Html(include_str!("../web/index.html")) }),
@@ -846,6 +860,8 @@ struct ModelDiscovery {
     cwd: String,
 }
 async fn discover_models(State(app): State<App>, Json(req): Json<ModelDiscovery>) -> ApiResult {
+    let _workspace = app.workspace_lock.lock().await;
+    service_restart::allow_start(&app)?;
     if !["demo", "claude", "codex", "opencode"].contains(&req.provider.as_str())
         || !installed(&req.provider)
     {
@@ -1182,6 +1198,7 @@ struct Create {
 async fn create_session(State(app): State<App>, Json(req): Json<Create>) -> ApiResult {
     limit_resume::new_policy(req.resume_policy.clone())?;
     let _workspace = app.workspace_lock.lock().await;
+    service_restart::allow_start(&app)?;
     let key = worktrees::creation_key(&req)?;
     if let Some(key) = &key {
         let payload = worktrees::creation_payload(&req);
@@ -1464,6 +1481,7 @@ fn start_worker(s: &Arc<Session>) {
 }
 async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     let _run = app.run_lock.lock().await;
+    service_restart::allow_start(&app)?;
     let s = session(&app, &id)?;
     if !installed(&s.provider) || !s.cwd.is_dir() {
         return Err(fail(
@@ -1520,6 +1538,7 @@ async fn prompt(
     Json(req): Json<Prompt>,
 ) -> ApiResult {
     let _run = app.run_lock.lock().await;
+    service_restart::allow_start(&app)?;
     let s = session(&app, &id)?;
     if req.text.trim().is_empty()
         || req.text.len() > 32768
@@ -1560,6 +1579,7 @@ async fn prompt(
 }
 async fn cancel(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     let _run = app.run_lock.lock().await;
+    let restart_error = service_restart::stop_requester(&app, &id).err();
     let s = session(&app, &id)?;
     let status = {
         let mut data = s.data.lock().unwrap();
@@ -1587,6 +1607,9 @@ async fn cancel(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
             "Stop requested, but saving failed; inspect server storage",
         ));
     }
+    if let Some(error) = restart_error {
+        return Err(error);
+    }
     Ok(Json(json!({"ok":true})))
 }
 #[derive(Deserialize)]
@@ -1599,6 +1622,7 @@ async fn set_model(
     Json(req): Json<ModelChoice>,
 ) -> ApiResult {
     let _run = app.run_lock.lock().await;
+    service_restart::allow_start(&app)?;
     let s = session(&app, &id)?;
     {
         let mut data = s.data.lock().unwrap();

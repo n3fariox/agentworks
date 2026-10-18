@@ -720,3 +720,27 @@ $('suspend-session').onclick=async()=>{
 
 $('dismiss-lifecycle').onclick=()=>{$('lifecycle-menu').open=false;$('lifecycle-menu').querySelector('summary').focus();};
 $('lifecycle-menu').addEventListener('keydown',event=>{if(event.key==='Escape'){$('dismiss-lifecycle').click();event.stopPropagation();}});
+
+// Polling never submits or replays a restart request. Identity is server-owned and durable.
+const serviceSection=document.createElement('fieldset');serviceSection.id='service-controls';
+serviceSection.innerHTML=`<legend>Service · all projects</legend><p id="service-status" role="status" aria-live="polite">Loading service status…</p><label for="service-mode">Restart behavior</label><select id="service-mode"><option value="wait">Wait until all work is idle</option><option value="interrupt">Interrupt ALL active sessions</option></select><label for="service-expiry">Drain expiry (seconds, 5–900)</label><input id="service-expiry" type="number" min="5" max="900" value="300"><label for="service-release">Prepared release (blank keeps current executable)</label><input id="service-release" maxlength="128" placeholder="Immutable release basename"><button type="button" id="service-restart">Restart service</button><button type="button" id="service-cancel" hidden>Cancel pending restart</button><p id="service-error" class="error-text" role="alert"></p>`;
+$('display-preferences').after(serviceSection);
+let servicePending=null,servicePolling=false;
+async function refreshService(){
+ if(servicePolling||!$('settings-dialog').open)return;servicePolling=true;
+ try{
+  const s=await api('/api/service/restart');const a=s.activity;servicePending=s.requests.find(r=>['draining','dispatching'].includes(r.phase)||['pending','opening'].includes(r.handoffPhase));
+  const latest=s.requests[0];const remaining=servicePending?Math.max(0,Math.ceil((servicePending.expiresAt-Date.now())/1000)):0;
+  $('service-status').textContent=`Instance ${s.instanceId.slice(0,8)} · ${s.restartSupported?'Supervised restart available':'Restart unavailable: external supervisor required'}. ${a.activeTurns} active turns, ${a.approvals} approvals, ${a.workspacePreparations} workspace preparations, ${a.startingHarnesses} harnesses starting.`+(latest?` Request ${latest.request.requestId}: ${latest.phase} · ${latest.detail}${latest.handoffPhase?' · handoff '+latest.handoffPhase:''}.`:'')+(servicePending?` Drain expires in ${remaining}s.`:'')+(s.managerError?' '+s.managerError:'')+(s.supervisorOutcome?.phase==='failed'?` Supervisor failed: ${s.supervisorOutcome.detail}`:'');
+  $('service-restart').disabled=!s.restartSupported||!!servicePending;$('service-cancel').hidden=!servicePending||servicePending.phase==='dispatching';
+ }catch(e){$('service-status').textContent='Service disconnected. Waiting to reconnect and read the durable outcome…';}finally{servicePolling=false;}
+}
+$('service-restart').onclick=async()=>{
+ const interrupt=$('service-mode').value==='interrupt';
+ if(!confirm(interrupt?'GLOBAL service restart will interrupt active turns and approvals in ALL projects. Restart now?':'GLOBAL service restart will block new work in ALL projects, wait until idle, then disconnect all sessions. Continue?'))return;
+ const requestId=uuid();$('service-restart').disabled=true;$('service-error').textContent='';
+ try{await api('/api/service/restart',{method:'POST',body:JSON.stringify({requestId,mode:$('service-mode').value,expiresInSeconds:Number($('service-expiry').value),release:$('service-release').value.trim()||null})});}
+ catch(e){$('service-error').textContent=e.message+' Check durable status before requesting again.';}await refreshService();
+};
+$('service-cancel').onclick=async()=>{if(!servicePending)return;try{await api('/api/service/restart/cancel',{method:'POST',body:JSON.stringify({actor:servicePending.actor,requestId:servicePending.request.requestId})});await refreshService();}catch(e){$('service-error').textContent=e.message;}};
+setInterval(refreshService,1000);$('open-settings').addEventListener('click',()=>setTimeout(refreshService,150));

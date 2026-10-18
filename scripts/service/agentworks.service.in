@@ -1,0 +1,18 @@
+[Unit]
+Description=Agentworks supervised local service
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=@WORKING_DIRECTORY@
+EnvironmentFile=%h/.config/agentworks/service.env
+ExecStart=/usr/bin/python3 @SUPERVISOR@ --release-dir @RELEASE_DIRECTORY@ --release @RELEASE@ --control-dir @CONTROL_DIRECTORY@
+Restart=no
+KillMode=control-group
+KillSignal=SIGINT
+TimeoutStopSec=15
+UMask=0077
+
+[Install]
+WantedBy=default.target
