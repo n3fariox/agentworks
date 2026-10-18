@@ -585,6 +585,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
             }),
         )
+        .route(
+            "/display-preferences.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../web/display-preferences.js"),
+                )
+            }),
+        )
+            }),
+        )
         .route("/api/locations", post(workspace::register_location))
         .route("/api/locations/{id}/files", get(workspace::list_files))
         .route("/api/locations/{id}/file", get(workspace::read_file))
@@ -1750,6 +1761,26 @@ fn render_markdown(text: &str) -> String {
     pulldown_cmark::html::push_html(&mut out, parser);
     ammonia::Builder::default()
         .url_relative(ammonia::UrlRelative::PassThrough)
+        .add_tag_attributes("code", &["class"])
+        .attribute_filter(|element, attribute, value| {
+            if element != "code" || attribute != "class" {
+                return Some(value.into());
+            }
+            // Keep only fenced-code language hints for display preferences.
+            let languages = value
+                .split_whitespace()
+                .filter(|class| {
+                    class.strip_prefix("language-").is_some_and(|language| {
+                        (1..=32).contains(&language.len())
+                            && language
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b"+#._-".contains(&b))
+                    })
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            (!languages.is_empty()).then(|| languages.into())
+        })
         .clean(&out)
         .to_string()
 }
@@ -1777,5 +1808,15 @@ mod tests {
         assert!(!html.contains("<script"));
         assert!(!html.contains("javascript:"));
         assert!(!html.contains("onerror"));
+    }
+    #[test]
+    fn markdown_keeps_only_code_language_classes() {
+        let html = render_markdown(
+            "```rust\nfn main() {}\n```\n<code class=\"toast language-x\">a</code><p class=\"language-js\">b</p>",
+        );
+        assert!(html.contains("<code class=\"language-rust\">"));
+        assert!(html.contains("<code class=\"language-x\">"));
+        assert!(!html.contains("toast"));
+        assert!(!html.contains("<p class"));
     }
 }

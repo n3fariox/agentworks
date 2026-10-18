@@ -4,6 +4,7 @@ import {setupGitContext} from '/git-context.js';
 import {createWorkspace} from '/workspace.js';
 import {setupCommunication} from '/communication.js';
 import {setupPalettes} from '/palettes.js';
+import {setupDisplayPreferences} from '/display-preferences.js';
 const $ = id => document.getElementById(id);
 // randomUUID is unavailable on plain HTTP remote origins; getRandomValues is supported.
 const uuid = () => globalThis.crypto.randomUUID?.() ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -27,14 +28,17 @@ const nodes=new Map();
 let pendingCreate=readStorage(sessionStorage,'agentworks-pending-create',null);
 const worktrees=setupWorktreeControls({$,api,onChange:()=>{if(config)providerNote();}});
 const policyEditor=setupPolicyEditor({$,api});
+const display=setupDisplayPreferences();display.mount($('display-preferences'));
 
 async function api(path, options={}) {
   const response=await fetch(path,{...options,headers:{'Content-Type':'application/json',...options.headers}});
   if(!response.ok){const error=new Error(await response.text());error.status=response.status;throw error;}
   return response.json();
 }
-function toast(message) {
-  $('toast').textContent=message;$('toast').hidden=false;
+// tone: 'error' (default) or 'success'; success uses a polite status region.
+function toast(message,tone='error') {
+  const node=$('toast');node.hidden=true;node.dataset.tone=tone==='success'?'success':'error';node.setAttribute('role',tone==='success'?'status':'alert');
+  node.textContent=message;node.hidden=false;
   clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('toast').hidden=true,6500);
 }
 function el(tag,className,text) {const node=document.createElement(tag);if(className)node.className=className;if(text!==undefined)node.textContent=text;return node;}
@@ -406,7 +410,7 @@ function updateMarkdown(message,body){
     const text=message.text;message.markdownPending=true;
     try{
       const result=await api('/api/markdown',{method:'POST',body:JSON.stringify({text})});
-      message.html=result.html;body.innerHTML=result.html;body.classList.add('markdown');decorateMarkdown(body);
+      message.html=result.html;body.innerHTML=result.html;body.classList.add('markdown');decorateMarkdown(body);display.enhance(body,message.id);
     }catch{body.textContent=message.text;}finally{
       message.markdownPending=false;
       if(text!==message.text){delete body.dataset.source;updateMarkdown(message,body);}
@@ -474,8 +478,8 @@ async function previewFile(path){
       const text=await response.text();
       if(/\.md$/i.test(path)){
         const {html}=await api('/api/markdown',{method:'POST',body:JSON.stringify({text:text.slice(0,100000)})});content.innerHTML=html;
-        const base=path.includes('/')?path.slice(0,path.lastIndexOf('/')+1):'';decorateMarkdown(content,base);
-      }else content.append(el('pre','',text));
+        const base=path.includes('/')?path.slice(0,path.lastIndexOf('/')+1):'';decorateMarkdown(content,base);display.enhance(content,'file:'+path);
+      }else{content.append(el('pre','',text));display.enhance(content,'file:'+path,{language:/\.([\w+-]+)$/.exec(basename(path))?.[1]||''});}
     }else content.append(el('p','','Preview is not available for this format. Use Download to save the file.'));
   }catch(e){$('file-content').textContent=e.message;}
 }
@@ -594,8 +598,8 @@ $('settings-form').onsubmit=async event=>{
   try{
     const defaultModels={};for(const input of $('default-model-fields').querySelectorAll('input')){if(input.value.trim())defaultModels[input.dataset.provider]=input.value.trim();}
     const settings=await api('/api/settings',{method:'PUT',body:JSON.stringify({roots:rootValues().filter(Boolean),defaultModels})});
-    config.roots=settings.roots;config.defaultModels=settings.defaultModels;applyRoots();$('settings-dialog').close();toast('Settings saved. They apply to new sessions.');
-  }catch(e){$('settings-error').textContent=e.message;}finally{$('save-settings').disabled=false;}
+    config.roots=settings.roots;config.defaultModels=settings.defaultModels;applyRoots();$('settings-dialog').close();toast('Settings saved. They apply to new sessions.','success');
+  }catch(e){$('settings-error').textContent='Host settings were not saved: '+e.message+' Display preferences are stored separately in this browser.';}finally{$('save-settings').disabled=false;}
 };
 document.addEventListener('keydown',event=>{if(event.key==='n'&&!event.ctrlKey&&!event.metaKey&&!event.altKey&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)&&!document.querySelector('dialog[open]')){event.preventDefault();openCreate();}});
 setupDiff({api,getActive:()=>active});
