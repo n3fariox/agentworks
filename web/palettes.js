@@ -1,57 +1,71 @@
 // Command/action palette and session-activation palette. Ranking is pure and side-effect free so it can be
 // tested without a browser; setupPalettes only wires the dialog, keyboard shortcuts and existing UI actions.
 const BOUNDARY=/[\s/\\\-_.:,;·()[\]{}@#]/;
-const START_BONUS=12,WORD_BONUS=9,CONSECUTIVE_BONUS=7,GAP_PENALTY=.4;
+// Word starts beat mid-word characters, but never enough to beat a contiguous run.
+const START_BONUS=12,WORD_BONUS=7,CONSECUTIVE_BONUS=7,GAP_PENALTY=.4;
 const ACTION_WEIGHTS={label:1,search:.6,hint:.35,detail:.5,group:.25};
-const SESSION_WEIGHTS={label:1.4,search:.9,detail:.7,group:.2};
+// The full path is searchable so a query can name any part of it, but it scores below the tail because the
+// leading directories are usually shared by every session.
+const SESSION_WEIGHTS={label:1.4,search:.9,detail:.7,group:.2,path:.5};
 
-// Score one term against one field, or null when the term is not a subsequence of it. Optimal alignment is
-// found with a small dynamic program: word starts, consecutive runs and earlier matches earn the score.
+// Score one term against one field, or null when the term is not a subsequence of it. The dynamic program
+// scores the alignment it actually reports, gap penalty included, so the result is the best complete match.
 export function fuzzyScore(term,text,original=text){
   if(!term)return {score:0,positions:[]};
   const needle=term.toLowerCase(),hay=String(text??'').toLowerCase(),source=String(original??text??'');
   const width=needle.length,length=hay.length;
   if(!length||width>length)return null;
   const score=Array.from({length:width},()=>new Float64Array(length).fill(-Infinity));
-  const streak=Array.from({length:width},()=>new Int32Array(length));
+  const via=Array.from({length:width},()=>new Int8Array(length).fill(-1)); // 0 continued in the previous column, 1 skipped columns
   let best=-Infinity,bestEnd=-1;
   for(let i=0;i<width;i++){
-    let run=-Infinity; // best score of row i-1 strictly before the current column
+    // Best predecessor score plus the gap penalty already paid to reach each of its columns. Every skipped
+    // column costs GAP_PENALTY, and those costs telescope into the gap between the first and last match.
+    let run=-Infinity; // best (row i-1 value + GAP_PENALTY * column) for columns at least two back
+    // Only the final needle row decides the answer: a strong partial prefix must never outrank, or stand in
+    // for, an alignment that matches the whole term.
+    let rowBest=-Infinity,rowEnd=-1;
     for(let j=0;j<length;j++){
       if(needle[i]===hay[j]){
-        const diagonal=i>0&&j>0?score[i-1][j-1]:-Infinity;
-        const diagonalStreak=i>0&&j>0?streak[i-1][j-1]:0;
-        let base,runLength;
-        if(i===0){base=0;runLength=1;}
+        const boundary=j===0?START_BONUS:(BOUNDARY.test(hay[j-1])||(/[a-z0-9]/.test(source[j-1]??'')&&/[A-Z]/.test(source[j]??''))?WORD_BONUS:0);
+        let base,continued;
+        if(i===0){base=0;continued=false;}
         else{
-          const consecutive=diagonal>=run;
-          base=consecutive?diagonal:run;
-          runLength=consecutive?diagonalStreak+1:1;
+          const diagonal=j>0?score[i-1][j-1]:-Infinity; // matching the previous column pays no gap
+          const skipped=run-GAP_PENALTY*(j-1);
+          continued=diagonal+CONSECUTIVE_BONUS>=skipped; // ties prefer the tighter, consecutive alignment
+          base=continued?diagonal:skipped;
         }
         if(base>-Infinity){
-          const boundary=j===0?START_BONUS:(BOUNDARY.test(hay[j-1])||(/[a-z0-9]/.test(source[j-1]??'')&&/[A-Z]/.test(source[j]??''))?WORD_BONUS:0);
-          const value=base+boundary+(runLength>1?(runLength-1)*CONSECUTIVE_BONUS:0);
-          score[i][j]=value;streak[i][j]=runLength;
-          if(value>best){best=value;bestEnd=j;}
+          // Each consecutive character adds one step of CONSECUTIVE_BONUS, so a run of n scores (n-1) of them.
+          const value=base+boundary+(continued?CONSECUTIVE_BONUS:0);
+          score[i][j]=value;via[i][j]=continued?0:1;
+          if(value>rowBest){rowBest=value;rowEnd=j;}
         }
       }
-      if(i>0&&j<length-1&&score[i-1][j]>run)run=score[i-1][j];
+      if(i>0&&j>0&&j<length-1){
+        const carried=score[i-1][j-1]+GAP_PENALTY*(j-1); // usable as a skipped predecessor from column j+1
+        if(carried>run)run=carried;
+      }
     }
+    best=rowBest;bestEnd=rowEnd;
   }
-  if(bestEnd<0)return null;
+  if(bestEnd<0||score[width-1][bestEnd]===-Infinity)return null;
   const positions=new Array(width);
   let end=bestEnd;
-  for(let i=width-1;i>=0;i--){
+  for(let i=width-1;i>0;i--){
     positions[i]=end;
-    if(i===0)break;
-    if(streak[i][end]>1){end--;continue;}
+    if(via[i][end]===0){end--;continue;}
     let pick=-1,pickScore=-Infinity;
-    for(let k=end-1;k>=0;k--)if(score[i-1][k]>pickScore){pickScore=score[i-1][k];pick=k;}
-    if(pick<0)return null;
+    for(let k=end-2;k>=0;k--){
+      const value=score[i-1][k]+GAP_PENALTY*k;
+      if(value>pickScore){pickScore=value;pick=k;}
+    }
+    if(pick<0||pickScore===-Infinity)return null;
     end=pick;
   }
-  const gaps=Math.max(0,bestEnd-positions[0]-(width-1));
-  return {score:best-GAP_PENALTY*gaps,positions};
+  positions[0]=end;
+  return {score:best,positions};
 }
 
 // Rank items against a fuzzy query. Every whitespace-separated term must match at least one field (AND), so
@@ -109,9 +123,9 @@ export function sessionItems(sessions,{labels={},hosts=[],projects=[],activeId=n
     // similarly named sessions apart: current marker, automation, agent, project, host and directory.
     const detail=[session.id===activeId?'Current':null,session.automation?'Automation':null,labels[session.provider]||session.provider,project,host,directory].filter(Boolean).join(' · ');
     return {id:session.id,label:session.title,group:statusLabel(session.status),detail,hint:session.cwd,
-      // Search the tail of the path: the shared prefix of every session would otherwise match anything.
+      // The searchable tail keeps ordinary matches strong; path holds the whole directory at a lower weight.
       search:[session.title,project,host,pathTail(session.cwd,3),labels[session.provider]||session.provider,statusLabel(session.status)].filter(Boolean).join(' '),
-      status:session.status,current:session.id===activeId,session};
+      path:session.cwd,status:session.status,current:session.id===activeId,session};
   });
   // Unprompted lists keep running work visible first; the session API already returns newest first.
   const busy=items.filter(item=>['running','waiting','starting','resuming','configuring','cancelling'].includes(item.status));
@@ -119,7 +133,7 @@ export function sessionItems(sessions,{labels={},hosts=[],projects=[],activeId=n
 }
 
 export function sessionRanking(query,items,options={}){
-  return rankItems(query,items,{fields:['label','search','detail','group'],weights:SESSION_WEIGHTS,...options});
+  return rankItems(query,items,{fields:['label','search','path','detail','group'],weights:SESSION_WEIGHTS,...options});
 }
 
 function readiness(hasSession,connected,status){
@@ -172,7 +186,7 @@ export function setupPalettes({$,state=()=>({}),handlers={},selectSession,labels
   if(!dialog||!input||!list)return null;
   const tabs=[$('palette-mode-actions'),$('palette-mode-sessions')].filter(Boolean);
   const placeholders={actions:'Search actions and harness commands…',sessions:'Search session titles, projects, hosts or directories…'};
-  let mode='actions',ranked=[],active=0,restoreFocus=null;
+  let mode='actions',ranked=[],active=0,restoreFocus=null,cleaned=true,keepFocus=false;
   const list0=()=>state().sessions||sessions,hosts0=()=>state().hosts||hosts,projects0=()=>state().projects||projects;
 
   function build(){
@@ -251,13 +265,14 @@ export function setupPalettes({$,state=()=>({}),handlers={},selectSession,labels
     const item=ranked[active];
     if(!item)return;
     if(item.disabled){status.textContent=item.reason||'This entry is unavailable right now.';return;}
-    close();
+    // The chosen action owns focus afterwards, so the palette must not pull it back when it closes.
+    close(true);
     if(item.session)selectSession?.(item.session);
     else item.run?.();
   }
   function show(next='actions'){
     if(document.querySelector('dialog[open]:not(#palette-dialog)'))return false;
-    mode=next;input.value='';active=0;restoreFocus=document.activeElement;
+    mode=next;input.value='';active=0;cleaned=false;keepFocus=false;restoreFocus=document.activeElement;
     for(const tab of tabs)tab.setAttribute('aria-pressed',String(tab.id==='palette-mode-'+mode));
     $('palette-title').textContent=mode==='sessions'?'Switch session':'Command palette';
     input.placeholder=placeholders[mode];
@@ -265,35 +280,43 @@ export function setupPalettes({$,state=()=>({}),handlers={},selectSession,labels
     render();input.focus();onOpen?.(mode);
     return true;
   }
-  function close(){if(dialog.open)dialog.close();}
-  function toggle(next){dialog.open&&mode===next?close():show(next);}
-
-  dialog.addEventListener('close',()=>{
+  // Run now as well as from the dialog's own close event: the event is queued, and a palette reopened
+  // before it fires must not inherit the previous run's state or lose its focus.
+  function cleanup(){
+    if(cleaned)return;
+    cleaned=true;
     ranked=[];active=0;input.removeAttribute('aria-activedescendant');
-    const previous=restoreFocus;restoreFocus=null;
+    const previous=restoreFocus,preserve=keepFocus;
+    restoreFocus=null;keepFocus=false;
+    if(preserve)return;
     const usable=node=>node&&node.isConnected&&node!==document.body&&typeof node.focus==='function';
     const target=usable(previous)?previous:(usable(fallbackFocus?.())?fallbackFocus():null);
     target?.focus();
-  });
-  $('dismiss-palette').onclick=close;
+  }
+  function close(preserve=false){
+    keepFocus=preserve;
+    if(dialog.open)dialog.close();
+    cleanup();
+  }
+  function toggle(next){dialog.open&&mode===next?close():show(next);}
+
+  // The dialog's close event is queued, so cleanup also runs synchronously in close(). A close event that
+  // arrives while the palette is open again belongs to an earlier open and must not touch the new state.
+  dialog.addEventListener('close',()=>{if(!dialog.open)cleanup();});
+  $('dismiss-palette').onclick=()=>close();
   for(const tab of tabs)tab.onclick=()=>show(tab.id==='palette-mode-sessions'?'sessions':'actions');
   input.addEventListener('input',()=>{active=0;render();});
   input.addEventListener('keydown',event=>{
     if(event.isComposing)return;
+    // Only vertical keys are claimed: horizontal keys, Home/End and Tab keep their normal text-editing and
+    // focus-traversal meaning inside the search box and the dialog.
     switch(event.key){
-      case 'ArrowDown':case 'ArrowRight':event.preventDefault();move(1);break;
-      case 'ArrowUp':case 'ArrowLeft':event.preventDefault();move(-1);break;
-      case 'Home':if(input.value){event.preventDefault();active=0;paint();}break;
-      case 'End':if(input.value){event.preventDefault();active=Math.max(0,ranked.length-1);paint();}break;
+      case 'ArrowDown':event.preventDefault();move(1);break;
+      case 'ArrowUp':event.preventDefault();move(-1);break;
       case 'PageDown':event.preventDefault();move(8);break;
       case 'PageUp':event.preventDefault();move(-8);break;
       case 'Enter':event.preventDefault();activate();break;
       case 'Escape':event.preventDefault();close();break;
-      case 'Tab':{
-        event.preventDefault();
-        show(mode==='actions'?'sessions':'actions');
-        break;
-      }
       default:break;
     }
   });

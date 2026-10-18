@@ -91,9 +91,11 @@ Navigation preserves running sessions and drafts. The chosen project, directory,
 
 ## Command and session palettes
 
-**Ctrl/Cmd+K** opens the command palette and **Ctrl/Cmd+P** opens the session palette; the header ⌕ button and the sidebar **⌕ Commands & sessions** entry open them by touch or mouse. Neither shortcut is taken while another modal is open, and **Esc** always closes the palette. The **Actions & commands** / **Sessions** buttons, or **Tab**, switch lists.
+**Ctrl/Cmd+K** opens the command palette and **Ctrl/Cmd+P** opens the session palette; the header ⌕ button and the sidebar **⌕ Commands & sessions** entry open them by touch or mouse. Neither shortcut is taken while another modal is open, and **Esc** always closes the palette. The **Actions & commands** and **Sessions** buttons switch lists; **Tab** walks the palette's own controls as in any dialog.
 
-Entries are ranked by fuzzy matching, where every typed word must match something: the title first, then project, host, directory and status. Session rows show the status plus the current marker, agent, project, host and directory, and show more of the path when titles repeat so two sessions stay distinguishable. Running and waiting sessions are listed first until you type. **↑ ↓**, **Home/End**, and **Page Up/Down** move the highlighted option; **Enter** runs it.
+Entries are ranked by fuzzy matching, where every typed word must match something. A session is matched on its title first, then project, host and status, then its directory: the end of the path counts more than the leading directories shared by many sessions, which still match at a lower weight. Session rows show the status plus the current marker, agent, project, host and directory, and show more of the path when titles repeat so two sessions stay distinguishable. Running and waiting sessions are listed first until you type. Matching is scored over the whole alignment, so a word that only partly matches never displaces a complete one.
+
+**↑ ↓** and **Page Up/Down** move the highlighted option and **Enter** runs it. Left/right arrows, **Home**, **End** and **Tab** keep their normal meaning in the search box.
 
 Actions call existing controls only (new/resumed session, new project, files, automations, settings, agents and inbox, workspace info, resume, stop, usage, delete). Entries that cannot run right now stay readable, explain why, and refuse to run. Advertised harness commands are typed into the composer for review; choosing one never submits a turn. Switching sessions uses the same path as the sidebar, so each draft and every running turn is preserved.
 

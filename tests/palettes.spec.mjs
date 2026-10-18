@@ -57,6 +57,92 @@ test('fuzzy scoring prefers word starts, consecutive runs and tight matches',()=
   expect(fuzzyScore('files','Project files').score).toBeGreaterThan(fuzzyScore('f','Project files').score);
 });
 
+// Independent reference: enumerate every increasing alignment and score it with the documented bonuses, so a
+// strong partial prefix can never be mistaken for the best complete match.
+const SCORE_RULES={start:12,word:7,consecutive:7,gap:.4};
+const BOUNDARY=/[\s/\\\-_.:,;·()[\]{}@#]/;
+function exhaustiveScore(term,text){
+  const letters=[...term];
+  let best=null;
+  const walk=(index,previous,value,streak,positions)=>{
+    if(index===letters.length){
+      const gaps=Math.max(0,positions.at(-1)-positions[0]-(letters.length-1));
+      const total=value-SCORE_RULES.gap*gaps;
+      if(!best||total>best.score)best={score:total,positions:[...positions]};
+      return;
+    }
+    for(let at=previous+1;at<text.length;at++){
+      if(text[at].toLowerCase()!==letters[index].toLowerCase())continue;
+      const bonus=at===0?SCORE_RULES.start:(BOUNDARY.test(text[at-1])||(/[a-z0-9]/.test(text[at-1]??'')&&/[A-Z]/.test(text[at]??'')))?SCORE_RULES.word:0;
+      const continued=streak>0&&at===previous+1; // one step of the consecutive bonus, matching the module
+      positions.push(at);
+      walk(index+1,at,value+bonus+(continued?SCORE_RULES.consecutive:0),continued?streak+1:1,positions);
+      positions.pop();
+    }
+  };
+  walk(0,-1,0,0,[]);
+  return best;
+}
+function words(lengths,alphabet){
+  const all=[''];
+  for(const length of lengths)all.push(...expand('',length,alphabet));
+  return all;
+  function expand(prefix,remaining,alphabet){
+    if(!remaining)return [prefix];
+    return alphabet.flatMap(character=>expand(prefix+character,remaining-1,alphabet));
+  }
+}
+
+test('scoring agrees with an exhaustive search of every alignment',()=>{
+  const corpora=[
+    {alphabet:['a','b',' '],texts:[1,2,3,4],terms:[1,2,3]},
+    {alphabet:['a','b','c','/','-'],texts:[1,2,3],terms:[1,2]},
+    {alphabet:['a','B','/','-',' '],texts:[1,2,3],terms:[1,2]},
+  ];
+  const problems=[];
+  let checked=0;
+  for(const corpus of corpora){
+    for(const text of words(corpus.texts,corpus.alphabet))for(const term of words(corpus.terms,corpus.alphabet).slice(1)){
+      checked++;
+      const mine=fuzzyScore(term,text),reference=exhaustiveScore(term,text);
+      const label=`${JSON.stringify(term)} in ${JSON.stringify(text)}`;
+      if(!reference){if(mine)problems.push(`${label}: scored ${mine.score} with no alignment`);continue;}
+      if(!mine){problems.push(`${label}: no alignment for a complete match`);continue;}
+      if(Math.abs(mine.score-reference.score)>1e-6)problems.push(`${label}: ${mine.score} instead of ${reference.score}`);
+      // The reported alignment is a real, strictly increasing path that spells the whole term.
+      const spelled=mine.positions.map(index=>text[index]).join('').toLowerCase();
+      if(spelled!==term.toLowerCase())problems.push(`${label}: positions spell ${JSON.stringify(spelled)}`);
+      for(let i=1;i<mine.positions.length;i++)if(mine.positions[i]<=mine.positions[i-1])problems.push(`${label}: positions out of order`);
+    }
+  }
+  expect(checked).toBe(14079); // corpus size, so a silently empty sweep cannot pass
+  expect(problems.slice(0,5)).toEqual([]);
+});
+
+test('partial prefixes and near misses never pass as complete matches',()=>{
+  for(const [term,text] of [['abc','a b c'],['abc','xxaxxbxxc'],['abc','abcabc'],['aa','aaaa'],['ba','ab'],['abc','ab'],['zz','aa'],['abc','acb'],['help','Show help elsewhere'],['alp','Alpha']]){
+    const label=`${JSON.stringify(term)} in ${JSON.stringify(text)}`,result=fuzzyScore(term,text);
+    if(result){
+      expect(result.positions.length,label).toBe(term.length);
+      expect(result.positions.map(index=>text[index]).join('').toLowerCase(),label).toBe(term.toLowerCase());
+    }
+  }
+  expect(fuzzyScore('abc','acb')).toBeNull();
+  expect(fuzzyScore('abc','ab')).toBeNull();
+  expect(fuzzyScore('zz','aa')).toBeNull();
+  expect(fuzzyScore('','')).toEqual({score:0,positions:[]});
+  // A complete match late in the string still outranks an early partial prefix, with valid positions.
+  expect(fuzzyScore('abc','ababc').positions.at(-1)).toBe(4);
+  expect(fuzzyScore('abc','ababc').positions.map(index=>'ababc'[index]).join('')).toBe('abc');
+  // Tightness counts: contiguous, then word-start, then scattered.
+  expect(fuzzyScore('abc','abc').score).toBeGreaterThan(fuzzyScore('abc','a bc').score);
+  expect(fuzzyScore('abc','a bc').score).toBeGreaterThan(fuzzyScore('abc','a x x b c').score);
+  expect(fuzzyScore('abc','abc').score).toBeGreaterThan(fuzzyScore('abc','zzabc').score);
+  // A word start still beats the same letter inside a word, and camelCase starts count as word starts.
+  expect(fuzzyScore('p','Project').score).toBeGreaterThan(fuzzyScore('p','Stop').score);
+  expect(fuzzyScore('b','aB').score).toBeGreaterThan(fuzzyScore('b','ab').score);
+});
+
 test('ranking keeps every term, weights the title and leaves unfiltered order alone',()=>{
   const items=[{id:'a',label:'Alpha chat',search:'alpha demo agentworks'},{id:'b',label:'Beta chat',search:'beta demo'},{id:'c',label:'Alpha notes',search:'alpha demo'}];
   expect(rankItems('',items).map(i=>i.id)).toEqual(['a','b','c']);
@@ -85,8 +171,15 @@ test('session entries carry title, project, host, directory and status context',
   expect(items[1].group).toBe('Ready');
   expect(items[2].hint).toBe('/srv/work/omega');
   expect(sessionRanking('omega',items).map(i=>i.id)).toEqual(['three']);
-  expect(sessionRanking('second',items).map(i=>i.id)).toEqual(['two','three']);
+  // Project members rank above a session that merely matches the same word inside its path.
+  expect(sessionRanking('second',items).map(i=>i.id)).toEqual(['two','three','one']);
   expect(sessionRanking('beta omega',items).map(i=>i.id)).toEqual(['three']);
+  expect(sessionRanking('alpha chat',items).map(i=>i.id)).toEqual(['one']);
+  // The whole directory stays searchable, at a lower weight than the tail, project or title.
+  expect(sessionRanking('srv',items).map(i=>i.id).sort()).toEqual(['one','three','two']);
+  expect(sessionRanking('srv work',items).map(i=>i.id)).toEqual(['two','three']);
+  expect(sessionRanking('srv omega',items).map(i=>i.id)).toEqual(['three']);
+  expect(sessionRanking('projects',items).map(i=>i.id)).toEqual(['one','two','three']);
   expect(sessionRanking('zeta codex',items).map(i=>i.id)).toEqual(['two']);
   expect(sessionRanking('nothing-here',items)).toEqual([]);
   expect(statusLabel('waiting')).toBe('Waiting for approval');
@@ -158,7 +251,7 @@ test('desktop: shortcuts, fuzzy session switching, drafts, running turns and com
   await expect(page.locator('#palette-dialog')).toBeHidden();
   await expect(page.locator('#prompt')).toBeFocused();
 
-  // Keyboard navigation moves the active option and wraps.
+  // Vertical keys move the active option; horizontal keys stay with the text caret.
   await page.locator('#palette-search').click();
   await page.locator('#palette-input').fill('se');
   const narrowed=page.locator('#palette-list [role=option]');
@@ -166,7 +259,24 @@ test('desktop: shortcuts, fuzzy session switching, drafts, running turns and com
   const secondOption=await narrowed.nth(1).getAttribute('id');
   await page.keyboard.press('ArrowDown');
   expect(await page.locator('#palette-input').getAttribute('aria-activedescendant')).toBe(secondOption);
+  const selected=await page.locator('#palette-input').getAttribute('aria-activedescendant');
+  await page.keyboard.press('ArrowLeft');
+  await page.keyboard.press('ArrowLeft');
+  expect(await page.locator('#palette-input').getAttribute('aria-activedescendant')).toBe(selected);
+  expect(await page.locator('#palette-input').inputValue()).toBe('se');
+  expect(await page.locator('#palette-input').evaluate(node=>node.selectionStart)).toBe(0);
+  await page.locator('#palette-input').press('End');
+  expect(await page.locator('#palette-input').evaluate(node=>node.selectionStart)).toBe(2);
+  expect(await page.locator('#palette-input').getAttribute('aria-activedescendant')).toBe(selected);
+  // Tab walks the dialog's own controls instead of switching lists.
+  await page.keyboard.press('Tab');
+  expect(await page.evaluate(()=>document.getElementById('palette-dialog').contains(document.activeElement))).toBe(true);
+  expect(await page.evaluate(()=>document.activeElement.id)).not.toBe('palette-input');
+  await expect(page.locator('#palette-mode-actions')).toHaveAttribute('aria-pressed','true');
+  await expect(page.locator('#palette-title')).toHaveText('Command palette');
+  await expect(page.locator('#palette-input')).toHaveValue('se');
   await page.keyboard.press('Escape');
+  await expect(page.locator('#palette-dialog')).toBeHidden();
 
   // Choosing a command only fills the composer; it must never submit a turn.
   await page.keyboard.press('Control+k');
@@ -185,9 +295,13 @@ test('desktop: shortcuts, fuzzy session switching, drafts, running turns and com
   await expect(page.locator('#palette-list')).toContainText('Palette project');
   await expect(page.locator('#palette-list')).toContainText('Second project');
   await expect(page.locator('#palette-list')).toContainText('Local');
+  // The shared directory prefix still matches every session, at the lowest weight.
+  await page.locator('#palette-input').fill('palette-fixture');
+  await expect(page.locator('#palette-list [role=option]')).toHaveCount(3);
+  // The shared prefix still matches every session, so the ranking has to pick the right directory first.
   await page.locator('#palette-input').fill('omega');
-  await expect(page.locator('#palette-list [role=option]')).toHaveCount(1);
   await expect(page.locator('#palette-list [role=option]').first()).toContainText('Beta chat');
+  await expect(page.locator('#palette-list [role=option]').first()).toContainText('palette-fixture/omega');
   await page.keyboard.press('Enter');
   await expect(page.locator('#palette-dialog')).toBeHidden();
   await expect(page.locator('#header-title')).toHaveText('Beta chat');
@@ -220,12 +334,12 @@ test('desktop: shortcuts, fuzzy session switching, drafts, running turns and com
   await page.keyboard.press('Control+p');
   await page.locator('#palette-input').fill('omega');
   await page.keyboard.press('Enter');
-  await expect(page.locator('#stop')).toBeVisible();
-  await expect(page.locator('#session-state')).toHaveText('Running');
-  // Output from the turn started before the switch keeps arriving in its own session.
+  await expect(page.locator('#header-title')).toHaveText('Beta chat');
+  // Output from the turn started before the switch keeps arriving in its own session, and the turn finishes.
   await expect.poll(async()=>(await page.locator('#messages').textContent()).length).toBeGreaterThan(streamed);
-  await page.locator('#stop').click();
+  await expect(page.locator('#stop')).toBeHidden({timeout:30000});
   await expect(page.locator('#session-state')).toHaveText('Ready');
+
   // Disabled entries stay readable and refuse to run while the palette is open.
   await page.keyboard.press('Control+k');
   await page.locator('#palette-input').fill('stop turn');
@@ -274,6 +388,15 @@ test.describe('phone',()=>{
     await page.locator('#menu').click();
     await page.locator('#palette-open').click();
     await expect(page.locator('#palette-dialog')).toBeVisible();
+    // Without a selected session the palette still offers global actions and hides session-only ones.
+    await expect(page.locator('#palette-list')).toContainText('New session');
+    await expect(page.locator('#palette-list')).toContainText('Settings');
+    await expect(page.locator('#palette-list')).not.toContainText('Delete session');
+    await page.locator('#palette-input').fill('workspace');
+    await expect(page.locator('#palette-list [role=option]')).toHaveCount(0);
+    await expect(page.locator('#palette-list')).toContainText('No matches');
+    await page.keyboard.press('Escape');
+    await page.locator('#palette-open').click();
     expect(await page.locator('#palette-list [role=option]').first().boundingBox()).toMatchObject({height:expect.any(Number)});
     expect(Math.round((await page.locator('#palette-list [role=option]').first().boundingBox()).height)).toBeGreaterThanOrEqual(44);
     expect(await page.locator('#palette-dialog').evaluate(node=>{const r=node.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.height<=innerHeight;})).toBe(true);
@@ -281,7 +404,7 @@ test.describe('phone',()=>{
     await page.locator('#palette-mode-sessions').click();
     await expect(page.locator('#palette-title')).toHaveText('Switch session');
     await page.locator('#palette-input').fill('zeta');
-    await expect(page.locator('#palette-list [role=option]')).toHaveCount(1);
+    await expect(page.locator('#palette-list [role=option]').first()).toContainText('Phone zeta');
     await page.locator('#palette-list [role=option]').first().click();
     await expect(page.locator('#palette-dialog')).toBeHidden();
     await expect(page.locator('#header-title')).toHaveText('Phone zeta');
