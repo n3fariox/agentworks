@@ -6,6 +6,7 @@ mod diff;
 mod git_context;
 mod lifecycle;
 mod limit_resume;
+mod timeouts;
 mod mcp;
 mod runtime;
 mod service_restart;
@@ -464,6 +465,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mcp_endpoint,
         restart: Arc::new(service_restart::Manager::new()),
     };
+    if let Some(policy) = app.catalog.lock().unwrap().data.settings.timeouts.clone().filter(|p| p.validate().is_ok()) {
+        timeouts::set_default(policy);
+    }
     for (metadata, mut data) in restored {
         data.continuation.reconcile();
         let pending = data.queued_prompt.take().is_some();
@@ -624,6 +628,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/status", get(status))
         .route("/api/activity", get(activity))
         .route("/api/settings", get(get_settings).put(save_settings))
+        .route("/api/timeouts", get(get_timeouts).put(save_timeouts))
         .route("/api/models", post(discover_models))
         .route("/api/external-sessions", post(list_external_sessions))
         .route("/api/sessions/import", post(import_session))
@@ -847,12 +852,30 @@ async fn save_settings(State(app): State<App>, Json(mut settings): Json<Settings
         }
     }
     settings.roots = Some(normalized);
+    // The roots/models form does not carry timeouts; keep the saved default.
+    let saved = app.catalog.lock().unwrap().data.settings.timeouts.clone();
+    settings.timeouts = settings.timeouts.take().or(saved);
     app.catalog
         .lock()
         .unwrap()
         .settings(settings)
         .map_err(|_| fail(StatusCode::INTERNAL_SERVER_ERROR, "Could not save settings"))?;
     Ok(get_settings(State(app.clone())).await)
+}
+async fn get_timeouts() -> Json<Value> {
+    Json(json!({"default":timeouts::default_policy()}))
+}
+async fn save_timeouts(State(app): State<App>, Json(policy): Json<timeouts::Policy>) -> ApiResult {
+    policy.validate().map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    let _workspace = app.workspace_lock.lock().await;
+    let mut catalog = app.catalog.lock().unwrap();
+    let mut settings = catalog.data.settings.clone();
+    settings.timeouts = Some(policy.clone());
+    catalog
+        .settings(settings)
+        .map_err(|_| fail(StatusCode::INTERNAL_SERVER_ERROR, "Could not save settings"))?;
+    timeouts::set_default(policy);
+    Ok(Json(json!({"default":timeouts::default_policy()})))
 }
 #[derive(Deserialize)]
 struct ModelDiscovery {

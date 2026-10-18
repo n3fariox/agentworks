@@ -394,6 +394,7 @@ pub async fn run(
             }
             if !notify_replaying.load(Ordering::SeqCst) || matches!(update["sessionUpdate"].as_str(),Some("available_commands_update"|"config_option_update")) {
                 crate::limit_resume::observe(&notify_s, &update);
+                crate::timeouts::observe(&notify_s.id,&update,crate::timeouts::now_ms());
                 notify_s.emit("acp",update);
             }
             Ok(())
@@ -485,9 +486,16 @@ pub async fn run(
                     Command::Prompt(text)=>{
                         let request=connection.send_request(PromptRequest::new(provider_id.clone(),vec![ContentBlock::Text(TextContent::new(text))])).block_task();
                         tokio::pin!(request);
-                        let deadline=tokio::time::sleep(Duration::from_secs(900));
+                        // Policy is fixed at launch; later edits apply to later turns.
+                        let mut clock=crate::timeouts::Clock::new(crate::timeouts::effective(None),crate::timeouts::now_ms());
+                        s.emit("timeout_policy",json!({"policy":clock.policy}));
+                        let grace=clock.policy.cancel_grace_seconds;
+                        // Far-future sleep until a cancel/timeout arms the grace deadline.
+                        let deadline=tokio::time::sleep(Duration::from_secs(400*86400));
                         tokio::pin!(deadline);
+                        let mut tick=tokio::time::interval(Duration::from_secs(1));
                         let mut cancelled=false;
+                        let mut timed_out:Option<&str>=None;
                         loop {
                             tokio::select! {
                                 result=&mut request=>{
@@ -505,7 +513,7 @@ pub async fn run(
                                             s.clear_approvals();
                                             connection.send_notification(CancelNotification::new(provider_id.clone()))?;
                                             s.status("cancelling");
-                                            deadline.as_mut().reset(tokio::time::Instant::now()+Duration::from_secs(15));
+                                            deadline.as_mut().reset(tokio::time::Instant::now()+Duration::from_secs(grace));
                                             cancelled=true;
                                         }
                                     }
@@ -513,7 +521,26 @@ pub async fn run(
                                     Some(Command::Model(_))=>{},
                                     None=>return Ok(()),
                                 },
-                                _=&mut deadline=>return Err(agent_client_protocol::Error::internal_error().data(if cancelled {"Agent did not stop within 15 seconds; session closed"} else {"Prototype turn timed out after 15 minutes; session closed"})),
+                                _=tick.tick(),if !cancelled=>{
+                                    // Lock order: approvals guard released before any emit/status.
+                                    let waiting=!s.approvals.lock().unwrap().is_empty();
+                                    for event in clock.step(crate::timeouts::now_ms(),crate::timeouts::last_activity(&s.id),waiting) {
+                                        match event {
+                                            crate::timeouts::Event::InactivityWarning{quiet_seconds}=>s.emit("timeout_warning",json!({"kind":"inactivity","quietSeconds":quiet_seconds})),
+                                            crate::timeouts::Event::TotalApproaching{remaining_seconds}=>s.emit("timeout_warning",json!({"kind":"total","remainingSeconds":remaining_seconds})),
+                                            crate::timeouts::Event::Expired{reason}=>{
+                                                // Cancel once and wait for the agent; never retry the tool or turn.
+                                                timed_out=Some(reason);cancelled=true;
+                                                s.clear_approvals();
+                                                connection.send_notification(CancelNotification::new(provider_id.clone()))?;
+                                                s.emit("timeout",json!({"kind":reason,"graceSeconds":grace}));
+                                                s.status("cancelling");
+                                                deadline.as_mut().reset(tokio::time::Instant::now()+Duration::from_secs(grace));
+                                            }
+                                        }
+                                    }
+                                }
+                                _=&mut deadline=>return Err(agent_client_protocol::Error::internal_error().data(format!("Agent did not stop within {grace} seconds after {}; session closed",match timed_out {Some("total")=>"the total turn limit",Some(_)=>"the inactivity timeout",None=>"cancellation"}))),
                             }
                         }
                     }
