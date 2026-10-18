@@ -168,6 +168,21 @@ test('tokenizer: real categories, exact reconstruction, bounded on pathological 
   expect(result.langs).toEqual(['rust','js',null,null]);
 });
 
+test('workspace and beside-chat previews share display preferences',async({page})=>{
+  await openSession(page);
+  await page.locator('#prompt').fill('Keep this draft');
+  await page.locator('#nav-files').click();
+  await page.locator('.file-entry').filter({hasText:'sample.rs'}).click();
+  await expect(page.locator('#workspace-file-detail .tok-keyword').first()).toHaveText('pub');
+  await page.getByRole('button',{name:'Open beside chat',exact:true}).click();
+  await expect(page.locator('#workspace-preview .tok-keyword').first()).toHaveText('pub');
+  await setPreference(page,'highlight','off');
+  await expect(page.locator('#workspace-preview [class^=tok-]')).toHaveCount(0);
+  await setPreference(page,'wrap','wrap');
+  expect(await page.locator('#workspace-preview pre').evaluate(n=>getComputedStyle(n).whiteSpace)).toBe('pre-wrap');
+  await expect(page.locator('#prompt')).toHaveValue('Keep this draft');
+});
+
 test('copy fallback selects the raw block when clipboard access is unavailable',async({page})=>{
   await page.addInitScript(()=>{
     Object.defineProperty(navigator,'clipboard',{value:{writeText:()=>Promise.reject(new Error('insecure origin'))},configurable:true});

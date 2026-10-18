@@ -57,6 +57,12 @@ test('fuzzy scoring prefers word starts, consecutive runs and tight matches',()=
   expect(fuzzyScore('files','Project files').score).toBeGreaterThan(fuzzyScore('f','Project files').score);
 });
 
+test('oversized queries and fields are bounded before allocating the matching table',()=>{
+  expect(fuzzyScore('a'.repeat(129),'a'.repeat(200))).toBeNull();
+  expect(fuzzyScore('a','a'.repeat(9000))).toBeNull();
+  expect(rankItems('a'.repeat(129),[{label:'a'.repeat(200)}])).toEqual([]);
+});
+
 // Independent reference: enumerate every increasing alignment and score it with the documented bonuses, so a
 // strong partial prefix can never be mistaken for the best complete match.
 const SCORE_RULES={start:12,word:7,consecutive:7,gap:.4};

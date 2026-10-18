@@ -1,6 +1,6 @@
 # Agentworks execution backlog
 
-This board distinguishes delivered behavior from the older architecture proposals in ROADMAP.md. The user has authorized Codex implementation sessions in separate worktrees, reviewed and merged sequentially by the coordinating conversation. Cross-host execution remains post-MVP; Linux is first and Windows portability remains a constraint.
+This board distinguishes delivered behavior from the older architecture proposals in ROADMAP.md. The user has authorized Claude, Codex and OpenCode implementation sessions in separate worktrees, reviewed and merged sequentially by the coordinating conversation. Cross-host execution remains post-MVP; Linux is first and Windows portability remains a constraint.
 
 ## Current batch
 
@@ -14,7 +14,7 @@ See [batch 004](batches/004-overnight.md): an eight-hour autonomous backlog run 
 
 ## Completed priority feature
 
-**L-09: Resume when usage limits reset** was the user's highest-priority feature and is now delivered in batch 003. It enables explicitly authorized long-running backlog work to continue across recognized provider limit windows. Policies remain off by default; other backlog items remain deferred.
+**L-09: Resume when usage limits reset** was the user's highest-priority feature and is now delivered in batch 003. It enables explicitly authorized long-running backlog work to continue across recognized provider limit windows. Policies remain off by default. Batch 004 adds the daily-use features recorded below.
 
 ## Next coordination work
 
@@ -29,7 +29,7 @@ See [batch 004](batches/004-overnight.md): an eight-hour autonomous backlog run 
 
 | ID | Task | Acceptance |
 | --- | --- | --- |
-| L-01 | Rename, archive and suspend/stop controls | History deletion remains separate from stopping a harness; changes persist and activity state remains accurate |
+| L-01 | Rename, archive and suspend/stop controls — implemented batch 004 | History deletion remains separate from stopping a harness; changes persist and activity state remains accurate |
 | L-02 | Questions/elicitation | Render supported harness forms, submit validated answers, and recover safely across browser disconnect/cancellation |
 | L-03 | Model attachments | Attach supported images/files to chat with explicit storage, size/type limits and harness capability checks |
 | L-04 | Usage dashboard and harness configuration | Build on verified Claude/Codex usage commands; show supported data accurately without silent model work or credential exposure; supply the compact composer statusline in U-07 |
@@ -41,14 +41,14 @@ See [batch 004](batches/004-overnight.md): an eight-hour autonomous backlog run 
 
 ## Chat interface and navigation
 
-These additions remain planned; batch 003 delivered L-09 and the controls it requires only.
+Batch 004 implements U-01 and U-04; the other additions below remain planned. Batch 003 delivered L-09 and its controls.
 
 | ID | Task | Acceptance |
 | --- | --- | --- |
-| U-01 | Code/literal block wrapping and highlighting preferences | Offer wrapping and syntax-highlighting controls, including plain rendering for prose placed in code blocks. Preserve whitespace, raw copy contents and readable code; remember preferences and handle long lines on phones |
+| U-01 | Code/literal block wrapping and highlighting preferences — implemented batch 004 | Offer wrapping and syntax-highlighting controls, including plain rendering for prose placed in code blocks. Preserve whitespace, raw copy contents and readable code; remember preferences and handle long lines on phones |
 | U-02 | Browser notifications | Opt-in notifications for turn completion, approvals/questions and failures; request permission through a user action, detect browser/origin support, avoid duplicate notices across reconnects/tabs, and open the relevant session when selected |
 | U-03 | Declutter mobile session chat | Prioritize transcript, composer and essential running/approval controls. Collapse secondary model/project/workspace/inbox/file actions into an accessible menu or sheet; preserve discoverability, draft state, touch targets and keyboard usability |
-| U-04 | Fuzzy command and session palettes | Provide a fuzzy action/command palette and a dedicated fuzzy session-activation palette. Support keyboard navigation and shortcuts plus a touch entry point; match titles, project, host and directory, show enough context to distinguish sessions, and preserve drafts/running turns when switching |
+| U-04 | Fuzzy command and session palettes — implemented batch 004 | Provide a fuzzy action/command palette and a dedicated fuzzy session-activation palette. Support keyboard navigation and shortcuts plus a touch entry point; match titles, project, host and directory, show enough context to distinguish sessions, and preserve drafts/running turns when switching |
 | U-05 | Extensible tool progress rendering | Normalize tool output across harnesses, correctly distinguish snapshots from deltas, and feed a versioned parser interface. Start with Bazel phases/action counts and configurable match rules; support richer user-installed parsers without changing the chat renderer. Preserve raw output, handle ANSI/carriage returns and dynamic totals, and fall back to elapsed activity when no live output is available. See [design](TOOL-ACTIVITY.md) |
 | U-06 | Compact turn work logs | Group chained tool activity into a turn-level work log that collapses after completion, with counts, duration, outcome and progress summaries. Preserve chronology and access to raw details; keep approvals, failures and continuing background work visible, respect manual expansion, and reproduce grouping after reconnect/replay. Offer compact/expanded preferences; see [design](TOOL-ACTIVITY.md) |
 | U-07 | Prompt-bar context and usage statusline | Show reported context used/size and percentage beside the composer; include available 5-hour/7-day subscription quota values with explicit used/remaining labels, and optional reported session cost labeled appropriately for the account type. Tap/click opens token counts, reset times, data source and freshness. Use persisted ACP usage events where available; keep context occupancy, cumulative consumption/cost and account quota distinct, handle compaction/model changes and parent/subagent attribution, mark stale/unknown data, and never query usage by silently submitting turns. Compact mobile layout exposes details on demand. Existing stored events confirm usage updates from Claude, Codex and OpenCode; account quota retrieval remains a separate capability investigation |
@@ -57,13 +57,13 @@ These additions remain planned; batch 003 delivered L-09 and the controls it req
 
 | ID | Task | Acceptance |
 | --- | --- | --- |
-| D-01 | Per-session diff viewer | Read-only views for current unstaged changes, branch changes against a selected base using its merge base, and a specific commit. Show the actual session worktree and compared refs/commit; define staged/untracked handling, support file selection and mobile layout, and bound large/binary diffs with existing Git/root protections |
+| D-01 | Per-session diff viewer — implemented batch 004 | Read-only views for current unstaged changes, branch changes against a selected base using its merge base, and a specific commit. Show the actual session worktree and compared refs/commit; define staged/untracked handling, support file selection and mobile layout, and bound large/binary diffs with existing Git/root protections |
 
 ## Known interface bugs
 
 | ID | Bug | Acceptance |
 | --- | --- | --- |
-| B-01 | Settings success toast appears red | Successful saves use success/neutral styling; failures retain error styling. Feedback remains accessible and distinguishes saved settings from partial/failed saves |
+| B-01 | Settings success toast appears red — implemented batch 004 | Successful saves use success/neutral styling; failures retain error styling. Feedback remains accessible and distinguishes saved settings from partial/failed saves |
 
 ## Automations
 

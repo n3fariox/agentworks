@@ -94,6 +94,7 @@ export function createWorkspace(hooks){
     else if(file.type?.startsWith('image/')){const image=el('img','file-image');image.src=fileUrl(file);image.alt=file.path;body.append(image);}
     else if(file.type?.startsWith('text/')){
       if(!file.source&&file.html){body.innerHTML=file.html;decorate(body,file,side);}else body.append(el('pre','workspace-source',file.text.slice(0,100000)));
+      hooks.enhanceBlocks?.(body,`workspace:${file.location.id}:${file.path}`,{language:!file.source&&file.html?'':/\.([\w+-]+)$/.exec(file.path)?.[1]||''});
       const limit=!file.source&&file.html?24000:100000;if(file.text.length>limit)body.append(el('p','field-note','Preview shortened. Download the file to read it in full.'));
     }else body.append(el('p','field-note','Preview is unavailable for this format. Use Download to save it.'));
     const footer=el('div','workspace-preview-footer'),ask=el('button','text-button','Ask about this file ↗');ask.disabled=!!file.error||file.loading;ask.onclick=()=>askAbout(file);footer.append(ask);

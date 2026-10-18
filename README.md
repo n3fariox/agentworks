@@ -281,3 +281,9 @@ AGENTWORKS_URL=http://127.0.0.1:4318 npm run test:import-capabilities
 ```
 
 Usage-limit continuation is opt-in per session (off for existing and new sessions). Use the new-session checkbox or the composer’s **Usage-limit continuation** controls to authorize bounded continuation, inspect reset freshness/countdown, disable a timer, or resume deliberately. Verified Claude reset events and native Codex quota errors/read-only account quota queries support durable scheduling; unavailable resets remain manual and OpenCode automatic detection is unsupported. Stop, explicit completion reports and newer accepted instructions cancel pending work. See [L-09 behavior, provider evidence, durability and APIs](work/LIMIT-RESUME.md).
+
+**Session actions** provides rename, archive, suspend and separate history deletion. Archive hides a session without stopping its work; Suspend releases its harness and cancels continuation while preserving context/history. The sidebar filter finds archived sessions. See [lifecycle behavior](work/LIFECYCLE.md). **Diff** inspects unstaged changes, branch changes from a selected merge base, or a commit, without modifying the worktree; staged/untracked paths are identified separately. See [diff limits and APIs](work/DIFF.md).
+
+Settings includes browser-local wrapping, syntax-highlighting and plain-prose preferences for chat blocks and file previews. Blocks offer original-text copy and a plain/code toggle; unsupported or large blocks remain unhighlighted. Tool/approval literals follow wrapping preferences. Successful settings saves use green status feedback; failures remain explicit.
+
+For development coordinated by a saved Agentworks session, see the [bounded self-improvement workflow and transfer helper](work/SELF-IMPROVEMENT.md). Service restart controls remain planned in R-06; the helper grants selected project controls but does not start turns, enable timers or deploy.

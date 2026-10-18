@@ -594,8 +594,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
             }),
         )
-            }),
-        )
         .route("/api/locations", post(workspace::register_location))
         .route("/api/locations/{id}/files", get(workspace::list_files))
         .route("/api/locations/{id}/file", get(workspace::read_file))

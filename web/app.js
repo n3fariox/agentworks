@@ -603,7 +603,7 @@ $('settings-form').onsubmit=async event=>{
 };
 document.addEventListener('keydown',event=>{if(event.key==='n'&&!event.ctrlKey&&!event.metaKey&&!event.altKey&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)&&!document.querySelector('dialog[open]')){event.preventDefault();openCreate();}});
 setupDiff({api,getActive:()=>active});
-workspace=createWorkspace({api,toast,labels,uuid,getConfig:()=>config,getActive:()=>active,selectSession,openCreate,refreshSessions,openSettings:()=>$('open-settings').click(),
+workspace=createWorkspace({api,toast,labels,uuid,getConfig:()=>config,getActive:()=>active,selectSession,openCreate,refreshSessions,enhanceBlocks:display.enhance,openSettings:()=>$('open-settings').click(),
   overview(){ $('conversation').hidden=true;$('welcome').hidden=false;localStorage.removeItem('agentworks-session'); },
   appendDraft(text){if(!active)return;const current=$('prompt').value;$('prompt').value=current?current+'\n\n'+text:text;drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));},
 });
@@ -644,6 +644,8 @@ setupPalettes({
     settings:()=>$('open-settings').click(),
     agents:()=>{if(active)$('session-agents').click();},
     workspaceInfo:()=>{if(active)$('session-workspace').click();},
+    diff:()=>{if(active)$('session-diff').click();},
+    lifecycle:()=>{if(active){$('lifecycle-menu').open=true;$('lifecycle-menu').querySelector('button').focus();}},
     resume:()=>{if(active&&connected&&['suspended','error'].includes(status))resumeSession(active.id);},
     stop:()=>{if(active&&connected&&['running','waiting'].includes(status))$('stop').click();},
     usage:()=>{if(active&&connected&&status==='idle')$('show-usage').click();},

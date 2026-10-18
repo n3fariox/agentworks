@@ -7,6 +7,7 @@ const ACTION_WEIGHTS={label:1,search:.6,hint:.35,detail:.5,group:.25};
 // The full path is searchable so a query can name any part of it, but it scores below the tail because the
 // leading directories are usually shared by every session.
 const SESSION_WEIGHTS={label:1.4,search:.9,detail:.7,group:.2,path:.5};
+const QUERY_LIMIT=128,FIELD_LIMIT=8192,CELL_LIMIT=262144;
 
 // Score one term against one field, or null when the term is not a subsequence of it. The dynamic program
 // scores the alignment it actually reports, gap penalty included, so the result is the best complete match.
@@ -14,7 +15,7 @@ export function fuzzyScore(term,text,original=text){
   if(!term)return {score:0,positions:[]};
   const needle=term.toLowerCase(),hay=String(text??'').toLowerCase(),source=String(original??text??'');
   const width=needle.length,length=hay.length;
-  if(!length||width>length)return null;
+  if(!length||width>length||width>QUERY_LIMIT||length>FIELD_LIMIT||width*length>CELL_LIMIT)return null;
   const score=Array.from({length:width},()=>new Float64Array(length).fill(-Infinity));
   const via=Array.from({length:width},()=>new Int8Array(length).fill(-1)); // 0 continued in the previous column, 1 skipped columns
   let best=-Infinity,bestEnd=-1;
@@ -71,6 +72,7 @@ export function fuzzyScore(term,text,original=text){
 // Rank items against a fuzzy query. Every whitespace-separated term must match at least one field (AND), so
 // "alpha api" finds a session whose title and directory both contribute. Input items are never mutated.
 export function rankItems(query,items,{fields=['label','search','hint','detail','group'],weights=ACTION_WEIGHTS,limit=200}={}){
+  if(String(query??'').length>QUERY_LIMIT)return [];
   const terms=String(query??'').trim().toLowerCase().split(/\s+/).filter(Boolean);
   const ranked=[];
   for(let index=0;index<items.length;index++){
@@ -158,6 +160,8 @@ export function actionItems(state={},handlers={}){
   if(views.automations)add('view-automations','Automations','Go to','Saved repeatable instructions',views.automations);
   add('settings','Settings','Go to','Allowed roots and default models',()=>handlers.settings?.());
   if(hasSession){
+    if(handlers.diff)add('session-diff','Session diff','Current session','Inspect unstaged, branch or commit changes',handlers.diff);
+    if(handlers.lifecycle)add('session-actions','Session actions','Current session','Rename, archive, suspend or delete history',handlers.lifecycle);
     add('session-agents','Agents and inbox','Current session','Access, messages and control activity',()=>handlers.agents?.());
     add('session-workspace','Workspace info','Current session','Directory, branch and commit',()=>handlers.workspaceInfo?.());
     if(['suspended','error'].includes(status))
@@ -184,6 +188,7 @@ export function actionItems(state={},handlers={}){
 export function setupPalettes({$,state=()=>({}),handlers={},selectSession,labels={},hosts=[],projects=[],sessions=[],onOpen,fallbackFocus}={}){
   const dialog=$('palette-dialog'),input=$('palette-input'),list=$('palette-list'),status=$('palette-status');
   if(!dialog||!input||!list)return null;
+  input.maxLength=QUERY_LIMIT;
   const tabs=[$('palette-mode-actions'),$('palette-mode-sessions')].filter(Boolean);
   const placeholders={actions:'Search actions and harness commands…',sessions:'Search session titles, projects, hosts or directories…'};
   let mode='actions',ranked=[],active=0,restoreFocus=null,cleaned=true,keepFocus=false;
