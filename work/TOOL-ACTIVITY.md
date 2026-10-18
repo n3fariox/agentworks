@@ -14,6 +14,8 @@ Expose saved defaults and per-session overrides for an optional total-turn limit
 
 Use distinct clocks for total duration, meaningful last activity and time waiting for human input. Pause inactivity timing during approvals/questions; state explicitly whether a configured total limit includes that wait. Transport heartbeats must not indefinitely defeat an inactivity timeout. Quiet commands can still be healthy: default to a warning before stopping them. Never automatically repeat a potentially mutating tool after timeout/restart. Coordinate timeout/cancel outcomes with queued inputs so a failed or interrupted turn pauses automatic dispatch for review.
 
+[L-09 limit-reset continuation](LIMIT-RESUME.md) is the explicitly opt-in exception for recognized provider quota exhaustion: a durable timer may start a new continuation turn after the reset, retaining native context and checking current state. It does not retry arbitrary timeouts, replay a tool invocation or override a human stop. This is now the highest-priority next feature, ahead of the suggested tool-display implementation order below.
+
 ## Progress parser interface — U-05
 
 Build a host-side normalization layer keyed by session, turn, tool-call and terminal IDs. Its events distinguish start, output snapshot, output delta and exit, with stable sequence information for deduplication. Handle output arriving before its tool card, mixed content types, carriage-return updates, ANSI sequences and incomplete lines across chunks. Snapshots replace prior output; deltas append. Raw transcript events remain available and progress is derived presentation data.
