@@ -24,6 +24,8 @@
     "test:diff": "playwright test tests/diff.spec.mjs",
     "test:palettes": "playwright test tests/palettes.spec.mjs",
     "test:display": "playwright test tests/display-preferences.spec.mjs",
+    "test:service-restart": "node scripts/service-restart-smoke.mjs",
+    "test:supervisor": "python3 scripts/service/supervisor-test.py",
     "prepare:coordinator": "node scripts/prepare-self-improvement.mjs"
   },
   "dependencies": {
