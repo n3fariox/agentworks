@@ -4,6 +4,7 @@ mod communication;
 mod completion;
 mod diff;
 mod git_context;
+mod input_queue;
 mod lifecycle;
 mod limit_resume;
 mod mcp;
@@ -118,6 +119,9 @@ struct SessionData {
     /// L-07 per-session override; None uses the saved default at turn launch.
     #[serde(default)]
     timeouts: Option<timeouts::Policy>,
+    /// L-05 explicit human queued inputs (distinct from `queued_prompt`).
+    #[serde(default)]
+    input_queue: input_queue::Queue,
 }
 
 struct Approval {
@@ -236,7 +240,7 @@ impl Session {
         let approvals = self.approvals.lock().unwrap();
         let data = self.data.lock().unwrap();
         json!({"kind":"snapshot","seq":data.seq,"session":{"id":self.id,"provider":self.provider,
-            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone())},"events":data.events,
+            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"inputQueue":data.input_queue},"events":data.events,
             "truncated":data.events.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
             "permissionModes":data.permission_modes,"models":data.models,"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|json!({"id":id,"request":a.request})).collect::<Vec<_>>()})
@@ -498,6 +502,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     for (metadata, mut data) in restored {
         data.continuation.reconcile();
+        data.input_queue.recover();
         let pending = data.queued_prompt.take().is_some();
         let interrupted = data.turn_active
             || pending
@@ -736,6 +741,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             axum::routing::put(limit_resume::configure),
         )
         .route("/api/sessions/{id}/prompt", post(prompt))
+        .route(
+            "/api/sessions/{id}/queue",
+            get(input_queue::get).post(input_queue::enqueue),
+        )
+        .route("/api/sessions/{id}/queue/resume", post(input_queue::resume))
+        .route(
+            "/api/sessions/{id}/queue/{item}",
+            axum::routing::patch(input_queue::edit).delete(input_queue::remove),
+        )
         .route("/api/sessions/{id}/cancel", post(cancel))
         .route("/api/sessions/{id}/stop", post(cancel))
         .route("/api/sessions/{id}/suspend", post(lifecycle::suspend))
@@ -1516,6 +1530,7 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             opencode_host: req.external_host,
             automation: req.automation,
             queued_prompt: req.queued_prompt,
+            input_queue: Default::default(),
             control_origin: req.control_origin,
             storage_error: None,
             continuation: req
