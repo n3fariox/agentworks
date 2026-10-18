@@ -8,6 +8,7 @@ import {setupDisplayPreferences} from '/display-preferences.js';
 import {setupWorkLogs,observeTool} from '/work-logs.js';
 import {setupUsageStatus} from '/usage-status.js';
 import {setupTimeoutControls} from '/timeout-controls.js';
+import {setupInputQueue,BUSY} from '/input-queue.js';
 const $ = id => document.getElementById(id);
 // randomUUID is unavailable on plain HTTP remote origins; getRandomValues is supported.
 const uuid = () => globalThis.crypto.randomUUID?.() ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -27,6 +28,8 @@ const usageStatus=setupUsageStatus({root:$('usage-status'),getProvider:()=>activ
 setInterval(()=>usageStatus.render(),60000);
 let timeoutControls=null;
 let transcript=[], tools=new Map(), approvals=new Map(), assistant=null, status='starting';
+// L-05 hook: activity indicator and explicit queued inputs (server-owned state).
+const inputQueue=setupInputQueue({$,api,uuid:()=>uuid(),getActive:()=>active,getStatus:()=>status,toolActive:()=>[...tools.values()].some(t=>['pending','in_progress'].includes(t.status))});
 let permissionModes=null;
 let replaying=false,workLogs=null,turnEnds=new Map();
 let modelConfig=null, availableCommands=[], commandsOpen=false;
@@ -278,7 +281,7 @@ function selectSession(s) {
   if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));scrollPositions.set(active.id,$('messages').scrollTop);}
   $('prompt').value=drafts[s.id]||'';restoreScroll=scrollPositions.get(s.id)??null;
   clearTimeout(retryTimer);generation++;socket?.close();socket=null;connected=false;
-  active=s;status=s.status;pendingSend=null;modelConfig=null;permissionModes=null;availableCommands=[];commandsOpen=false;renderCommands();resetTranscript();usageStatus.reset();
+  active=s;status=s.status;pendingSend=null;modelConfig=null;permissionModes=null;availableCommands=[];commandsOpen=false;renderCommands();resetTranscript();usageStatus.reset();inputQueue.reset();
   localStorage.setItem('agentworks-session',s.id);$('welcome').hidden=true;$('conversation').hidden=false;
   $('header-title').textContent=s.title;$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;
   $('session-notice').hidden=true;document.body.classList.remove('menu-open');sidebar();updateControls();connect(generation);
@@ -293,12 +296,13 @@ function connect(gen){
   ws.onmessage=event=>{
     if(gen!==generation)return;
     const e=JSON.parse(event.data);
+    if(e.kind==='input_queue'){inputQueue.set(e.data);updateControls();return;}
     if(e.kind==='snapshot'){
       resetTranscript();usageStatus.reset();status=e.session.status;Object.assign(active,e.session);
       replaying=true;try{for(const item of e.events)if(item.kind!=='session_updated')consume(item);}finally{replaying=false;}
       Object.assign(active,e.session);$('header-title').textContent=active.title;
       active.continuation=e.session.continuation;
-      approvals=new Map(e.approvals.map(a=>[a.id,a.request]));status=e.session.status;modelConfig=e.models;permissionModes=e.permissionModes;if(status==='suspended'&&!e.session.explicitlySuspended)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();
+      approvals=new Map(e.approvals.map(a=>[a.id,a.request]));status=e.session.status;modelConfig=e.models;permissionModes=e.permissionModes;if(status==='suspended'&&!e.session.explicitlySuspended)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();inputQueue.set(e.session.inputQueue);inputQueue.observe(status,{live:false});
       if(e.storageError){$('session-notice').textContent=e.storageError;$('session-notice').hidden=false;}
       if(e.truncated){$('session-notice').textContent='Showing recent output. The full transcript is saved on this host.';$('session-notice').hidden=false;}
     }else consume(e,true);
@@ -335,7 +339,7 @@ function consume(e,live=false){
   else if(e.kind==='commands'){availableCommands=Array.isArray(d)?d:[];renderCommands();}
   else if(e.kind==='user'){assistant=null;if(d.initiatedBy)transcript.push({id:uuid(),type:'notice',text:'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});addMessage('user',d.text).seq=e.seq;}
   else if(e.kind==='status'){
-    status=d.status;if(active){active.status=status;if(d.explicitlySuspended!==undefined)active.explicitlySuspended=d.explicitlySuspended;const s=sessions.find(s=>s.id===active.id);if(s)s.status=status;}sidebar();
+    status=d.status;if(!replaying)inputQueue.observe(status,{live});if(active){active.status=status;if(d.explicitlySuspended!==undefined)active.explicitlySuspended=d.explicitlySuspended;const s=sessions.find(s=>s.id===active.id);if(s)s.status=status;}sidebar();
   }else if(e.kind==='approval'){approvals.set(d.id,d.request);}
   else if(e.kind==='approval_resolved'){approvals.delete(d.id);}
   else if(e.kind==='interrupted'){transcript.push({id:uuid(),type:'notice',text:d.message,interrupted:true});assistant=null;}
@@ -406,9 +410,11 @@ function updateControls(){
   }
   const busy=['running','waiting','cancelling'].includes(status);
   $('session-state').textContent=status==='waiting'?'Needs your approval':status==='idle'?'Ready':status[0]?.toUpperCase()+status.slice(1);
-  $('prompt').disabled=!connected||status!=='idle';$('send').disabled=!connected||status!=='idle';
-  $('send').hidden=busy;$('stop').hidden=!busy&&!['starting','resuming','configuring'].includes(status)&&!active?.continuation?.enabled;$('stop').disabled=!connected||status==='cancelling';
-  $('prompt').placeholder=status==='starting'?'Starting your agent…':status==='waiting'?'Respond to the permission request above…':busy?'Your agent is working…':status==='error'?'Session unavailable. Use Resume session to try again.':'What would you like to work on?';
+  // Busy sessions keep the composer usable so input can be queued without losing the draft.
+  $('prompt').disabled=!connected||!(status==='idle'||busy);$('send').disabled=!connected||!(status==='idle'||busy);
+  $('send').setAttribute('aria-label',busy?'Queue message':'Send message');$('send').textContent=busy?'＋':'↑';$('send').title=busy?'Queue to send after this turn ends':'';
+  inputQueue.render();inputQueue.renderActivity();$('stop').hidden=!busy&&!['starting','resuming','configuring'].includes(status)&&!active?.continuation?.enabled;$('stop').disabled=!connected||status==='cancelling';
+  $('prompt').placeholder=status==='starting'?'Starting your agent…':status==='waiting'?'Respond to the permission request above…':busy?'Your agent is working… type to queue a follow-up':status==='error'?'Session unavailable. Use Resume session to try again.':'What would you like to work on?';
 }
 function scheduleDraw(){if(!drawTimer)drawTimer=setTimeout(()=>{drawTimer=null;draw();},70);}
 function fileUrl(path,download=false){return `/api/sessions/${active.id}/file?path=${encodeURIComponent(path)}${download?'&download=true':''}`;}
@@ -579,7 +585,15 @@ $('create-form').onsubmit=async event=>{
   }catch(e){$('create-error').textContent=e.message;}finally{creating=false;providerNote();}
 };
 $('composer').onsubmit=async event=>{
-  event.preventDefault();const text=$('prompt').value;if(!active||status!=='idle'||!text.trim())return;
+  event.preventDefault();const text=$('prompt').value;if(!active||!text.trim())return;
+  if(BUSY.includes(status)){
+    // L-05: queue during a turn; the draft is cleared only after the server accepts it.
+    const sid=active.id;$('send').disabled=true;
+    try{await inputQueue.enqueue(text);if(active?.id===sid&&$('prompt').value===text)$('prompt').value='';if(drafts[sid]===text){delete drafts[sid];sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));}}
+    catch(e){toast(e.message);}finally{updateControls();}
+    return;
+  }
+  if(status!=='idle')return;
   if(!pendingSend||pendingSend.text!==text||pendingSend.sid!==active.id)pendingSend={text,sid:active.id,requestId:uuid()};
   $('send').disabled=true;
   const submission={...pendingSend};

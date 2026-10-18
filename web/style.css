@@ -99,3 +99,25 @@ body[data-code-wrap=scroll] .tool-card pre,body[data-code-wrap=scroll] .approval
 .usage-status-toggle.stale,.usage-status-toggle.unknown{opacity:.55;font-style:italic}
 .usage-status-details{width:100%;max-width:640px;padding:8px 10px;border:1px solid rgba(127,127,127,.35);border-radius:8px;display:grid;gap:4px;overflow-wrap:anywhere}
 @media (max-width:640px){.usage-status{align-items:stretch}.usage-status-toggle{text-align:left;min-height:36px}}
+/* L-05 activity indicator and queued inputs */
+.activity-indicator{display:flex;align-items:center;gap:.5rem;font-size:.85rem;padding:.35rem .25rem;color:var(--muted,#aaa)}
+.activity-indicator[hidden]{display:none}
+.activity-indicator[data-kind="waiting"]{color:var(--warning,#e0b050)}
+.activity-indicator[data-kind="cancelling"]{color:var(--danger,#e07070)}
+.activity-dots{display:inline-flex;gap:3px}
+.activity-dots i{width:5px;height:5px;border-radius:50%;background:currentColor;animation:activity-pulse 1.2s infinite ease-in-out}
+.activity-dots i:nth-child(2){animation-delay:.2s}.activity-dots i:nth-child(3){animation-delay:.4s}
+@keyframes activity-pulse{0%,80%,100%{opacity:.25}40%{opacity:1}}
+@media (prefers-reduced-motion:reduce){.activity-dots i{animation:none;opacity:.7}}
+.input-queue{border:1px solid var(--border,#333);border-radius:8px;padding:.5rem;margin:.25rem 0;font-size:.85rem}
+.input-queue[hidden]{display:none}
+.queue-head{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;margin-bottom:.25rem}
+.queue-paused{color:var(--warning,#e0b050)}
+.input-queue ol{margin:0;padding-left:1.25rem;max-height:30vh;overflow:auto}
+.queue-item{display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;padding:.2rem 0}
+.queue-item .text-button{min-height:44px;min-width:44px}
+.queue-text{flex:1 1 12rem;white-space:pre-wrap;overflow-wrap:anywhere;max-height:4.5em;overflow:hidden}
+.queue-item textarea{flex:1 1 100%}
+.queue-state{font-size:.75rem;padding:0 .4rem;border-radius:4px;border:1px solid currentColor}
+.queue-item[data-state="error"] .queue-state,.queue-note{color:var(--danger,#e07070)}
+.queue-item[data-state="sent"]{opacity:.6}

@@ -312,7 +312,17 @@ pub fn after_turn(s: &Session, mut outcome: Outcome) -> bool {
         }
         claimed
     };
-    publish(s);
+    // The sending claim must be durable before dispatch so a crash is detectable as ambiguous.
+    if !publish(s) {
+        let mut data = s.data.lock().unwrap();
+        for item in &mut data.input_queue.items {
+            if item.state == ItemState::Sending {
+                item.state = ItemState::Paused;
+            }
+        }
+        data.input_queue.paused = Some("Storage failure; queue paused before sending.".into());
+        return false;
+    }
     let Some((text, id)) = claimed else {
         return false;
     };
@@ -326,15 +336,26 @@ pub fn after_turn(s: &Session, mut outcome: Outcome) -> bool {
         data.input_queue.finish_turn(&Outcome::Error);
         drop(data);
         s.emit("error", json!({"message":e}));
-        publish(s);
+        let _ = publish(s);
         return false;
     }
     true
 }
 
-fn publish(s: &Session) {
-    let queue = s.data.lock().unwrap().input_queue.clone();
-    s.emit("input_queue", json!(queue));
+/// Persists queue state with the session and broadcasts it unsequenced, so queue
+/// edits do not consume the bounded transcript event history.
+fn publish(s: &Session) -> bool {
+    let mut data = s.data.lock().unwrap();
+    let saved = s.store.lock().unwrap().save_state(&s.id, &data);
+    if saved.is_err() && data.storage_error.is_none() {
+        data.storage_error = Some(
+            "Session could not be saved to disk. Check server storage before continuing.".into(),
+        );
+        data.input_queue.pause("Storage failure; queue paused.");
+    }
+    let _ =
+        s.tx.send(json!({"kind":"input_queue","data":data.input_queue}));
+    saved.is_ok()
 }
 
 #[derive(Deserialize)]
@@ -350,7 +371,12 @@ pub struct Edit {
 }
 
 fn reply(s: &Session, extra: Value) -> ApiResult {
-    publish(s);
+    if !publish(s) {
+        return Err(fail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Queue change could not be saved; queue paused",
+        ));
+    }
     let queue = s.data.lock().unwrap().input_queue.clone();
     Ok(Json(json!({"queue":queue,"result":extra})))
 }

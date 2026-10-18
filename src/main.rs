@@ -601,6 +601,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route(
+            "/input-queue.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../web/input-queue.js"),
+                )
+            }),
+        )
+        .route(
             "/timeout-controls.js",
             get(|| async {
                 (
@@ -1895,8 +1904,8 @@ async fn event_socket(socket: WebSocket, s: Arc<Session>) {
             next=rx.recv()=>{
                 let event=match next {Ok(event)=>event,Err(broadcast::error::RecvError::Lagged(_))=>s.snapshot(),Err(_)=>break};
                 let n=event["seq"].as_u64().unwrap_or(0);
-                if n<=seq {continue;}
-                seq=n;
+                // L-05 hook: queue state is broadcast unsequenced (not stored in event history).
+                if event["kind"]!="input_queue" {if n<=seq {continue;} seq=n;}
                 let closed=event["kind"]=="status" && (event["data"]["status"]=="closed" || event["data"]["status"]=="suspended");
                 if sink.send(Message::Text(event.to_string().into())).await.is_err(){break;}
                 if closed {let _=sink.send(Message::Close(None)).await;break;}
