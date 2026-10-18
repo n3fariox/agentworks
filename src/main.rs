@@ -543,6 +543,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.sessions.lock().unwrap().insert(s.id.clone(), s);
     }
     service_restart::initialize(&app)?;
+    input_queue::initialize(&app)?;
     tokio::spawn(service_restart::scheduler(app.clone()));
     let scheduler = tokio::spawn(limit_resume::scheduler(app.clone()));
     tokio::spawn(input_queue::scheduler(app.clone()));
@@ -1717,11 +1718,15 @@ async fn prompt(
             "Enter a message of up to 32 KB and a request ID",
         ));
     }
-    if s.data.lock().unwrap().input_queue.bound(&req.request_id) {
-        // L-05: a request ID already accepted into the explicit queue is never also sent directly.
-        return Ok(Json(
-            json!({"accepted":true,"duplicate":true,"queued":true}),
-        ));
+    // L-05: a request ID bound into the explicit queue is never also sent directly.
+    match input_queue::check_binding(&s, &req.request_id, &req.text)? {
+        input_queue::Bound::Duplicate(_) => {
+            return Ok(Json(
+                json!({"accepted":true,"duplicate":true,"queued":true}),
+            ));
+        }
+        input_queue::Bound::Conflict => return Err(input_queue::conflict()),
+        input_queue::Bound::New => {}
     }
     accept_prompt(&s, req.text, req.request_id, req.initiated_by)
 }

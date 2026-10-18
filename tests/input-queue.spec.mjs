@@ -97,6 +97,7 @@ test('duplicate request IDs, changed payloads, stale revisions and bounds',async
   await api(`${path}/${id}`,{text:'one v2',revision:0},'PATCH');
   expect((await call(`${path}/${id}`,{text:'stale',revision:0},'PATCH')).status).toBe(409);
   expect((await api(path,{text:'one',requestId:'r1'})).result.duplicate).toBe(true);
+  expect((await call(path,{text:'one v2',requestId:'r1'})).status).toBe(409);
   expect((await call(path,{text:'x'.repeat(32769),requestId:'big'})).status).toBe(400);
   expect((await call(path,{text:'   ',requestId:'blank'})).status).toBe(400);
   expect((await api(path)).queue.items.length).toBe(1);
@@ -188,6 +189,9 @@ test('restart during queued dispatch pauses as ambiguous and never replays',asyn
     const users=(await api(`/api/sessions/${s.id}`,undefined,undefined,url)).events.filter(e=>e.kind==='user');
     expect(users.filter(e=>e.data.text==='slow mutating queued work').length).toBe(1);
     expect(users.some(e=>e.data.text==='later')).toBe(false);
+    // Request bindings survive restart: original payload is a duplicate, changed payload is refused.
+    expect((await api(`/api/sessions/${s.id}/queue`,{text:'later',requestId:'qb'},undefined,url)).result.duplicate).toBe(true);
+    expect((await call(`/api/sessions/${s.id}/queue`,{text:'later changed',requestId:'qb'},undefined,url)).status).toBe(409);
   }finally{proc.child.kill();}
 });
 
@@ -204,6 +208,7 @@ test('late idempotency: removed/sent IDs stay bound and direct prompts never dup
   // A late direct prompt with a queued request ID is a duplicate, not a new turn.
   const direct=await api(`/api/sessions/${session.id}/prompt`,{text:'bound text',requestId:'late-1'});
   expect(direct.duplicate).toBe(true);
+  expect((await call(`/api/sessions/${session.id}/prompt`,{text:'changed via prompt',requestId:'late-1'})).status).toBe(409);
   // A request ID already sent directly cannot also be queued.
   await api(`/api/sessions/${session.id}/prompt`,{text:'hello direct',requestId:'direct-1'});
   const dup=await api(path,{text:'hello direct',requestId:'direct-1'});
@@ -244,6 +249,13 @@ test('Stop and Suspend win over turn-end dispatch',async()=>{
   await api(`/api/sessions/${session.id}/stop`,{});
   expect((await api(path)).queue.paused).toContain('Stop');
   await api(`${path}/q1`,undefined,'DELETE');
+  // Stop on an empty-flight queue keeps its pause across a later successful turn.
+  await api(`/api/sessions/${session.id}/prompt`,{text:'hello after stop',requestId:'has'});
+  await until(async()=>await state()==='idle');
+  await api(path,{text:'still paused',requestId:'sp'});
+  await new Promise(r=>setTimeout(r,800));
+  expect((await api(path)).queue.items.find(i=>i.text==='still paused').state).toBe('paused');
+  await api(`${path}/q2`,undefined,'DELETE');
   // Suspend mid-turn: the turn ends but nothing is dispatched; resume of the queue is refused while suspended.
   await api(`/api/sessions/${session.id}/prompt`,{text:'slow suspend me',requestId:'sm'});
   await api(path,{text:'must not run',requestId:'mn'});
@@ -252,7 +264,7 @@ test('Stop and Suspend win over turn-end dispatch',async()=>{
   await new Promise(r=>setTimeout(r,800));
   expect((await api(path)).queue.items[0].state).toBe('paused');
   expect((await call(`${path}/resume`,{})).status).toBe(409);
-  expect((await api(`/api/sessions/${session.id}`)).events.filter(e=>e.kind==='user').map(e=>e.data.text)).toEqual(['slow suspend me']);
+  expect((await api(`/api/sessions/${session.id}`)).events.filter(e=>e.kind==='user').map(e=>e.data.text)).toEqual(['hello after stop','slow suspend me']);
 });
 
 test('Send then Enter race queues the second input exactly once without losing it',async({page})=>{
@@ -284,7 +296,6 @@ test('storage fault: queue changes are not acknowledged or applied when persiste
     expect((await call(`${path}/${ok.result.id}`,{text:'fault-me edit',revision:0},'PATCH',url)).status).toBe(500);
     const q=(await api(path,undefined,undefined,url)).queue;
     expect(q.items.map(i=>[i.text,i.revision])).toEqual([['kept',0]]);
-    expect(q.bindings.map(b=>b.requestId)).toEqual(['k']);
     db.exec('DROP TRIGGER inject_fault');db.close();
     // After the fault clears, the same request ID is accepted normally (it was never bound).
     expect((await api(path,{text:'fault-me',requestId:'f'},undefined,url)).result.duplicate).toBe(false);

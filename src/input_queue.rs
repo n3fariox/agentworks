@@ -1,19 +1,22 @@
 //! L-05 explicit human queued inputs. Distinct from the internal `queued_prompt`
-//! used by automation/handoff. State persists inside session state (serde default),
-//! so no table or schema version change is required.
+//! used by automation/handoff. Queue items persist inside session state (serde
+//! default); request-ID bindings live in the module-owned `input_queue_bindings`
+//! table created at startup, so there is no schema version change.
 //!
 //! Every API mutation is saved before it is acknowledged and rolled back if the save
 //! fails. The runtime only records a turn outcome; `scheduler` dispatches under the
-//! shared `run_lock` through the same acceptance path as a direct prompt, after drain,
-//! idle, suspend, storage, quota and pause gates. Anything other than a clean `end_turn`
-//! pauses the queue for deliberate resume. An item found `sending` after restart is
-//! ambiguous: it is marked `error` and never replayed automatically.
+//! shared communication -> run -> workspace locks through the same acceptance path as
+//! a direct prompt, after drain, root, idle, suspend, storage, quota and pause gates.
+//! Anything other than a clean `end_turn` pauses the queue for deliberate resume. An
+//! item found `sending` after restart is ambiguous: it is marked `error` and never
+//! replayed automatically.
 use crate::{ApiResult, App, Session, fail, session};
 use axum::{
     Json,
     extract::{Path, State},
     http::StatusCode,
 };
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -22,9 +25,11 @@ pub const MAX_ITEMS: usize = 20;
 pub const MAX_ITEM_BYTES: usize = 32768;
 pub const MAX_TOTAL_BYTES: usize = 65536;
 pub const MAX_REQUEST_ID: usize = 100;
-/// Request-ID bindings outlive display pruning, removal, sending and restarts.
-/// Bounded so storage cannot grow; only the oldest of this many IDs is forgotten.
-pub const MAX_BINDINGS: usize = 512;
+/// Request-ID bindings keep the exact original payload and outlive display pruning,
+/// removal, sending and restarts. When full, new enrollment is refused rather than
+/// forgetting old IDs.
+pub const MAX_BINDINGS: i64 = 1000;
+pub const MAX_BINDING_BYTES: i64 = 4 * 1024 * 1024;
 const KEEP_SENT: usize = 5;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,7 +47,7 @@ pub enum ItemState {
 #[serde(rename_all = "camelCase")]
 pub struct Item {
     pub id: String,
-    /// Client enqueue request ID; retried enqueues with the original payload are duplicates.
+    /// Client enqueue request ID (bound durably to the original payload).
     pub request_id: String,
     pub text: String,
     pub revision: u32,
@@ -59,15 +64,6 @@ impl Item {
     }
 }
 
-/// Durable tombstone: request ID bound to the originally submitted payload.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Binding {
-    pub request_id: String,
-    pub digest: String,
-    pub item: String,
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Queue {
@@ -76,8 +72,6 @@ pub struct Queue {
     pub paused: Option<String>,
     #[serde(default)]
     pub next_id: u64,
-    #[serde(default)]
-    pub bindings: Vec<Binding>,
     /// Set only when the last turn ended cleanly; the scheduler may then dispatch.
     #[serde(default)]
     pub ready: bool,
@@ -97,16 +91,6 @@ pub enum Outcome {
 }
 
 type Res<T> = Result<T, (StatusCode, String)>;
-
-/// Stable FNV-1a digest plus length; independent of Rust's hasher versions.
-pub fn digest(text: &str) -> String {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in text.as_bytes() {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("{hash:016x}:{}", text.len())
-}
 
 /// Status-only probes the UI sends (`/usage`, `/status`); they must not start queued work.
 pub fn is_diagnostic(text: &str) -> bool {
@@ -133,25 +117,14 @@ impl Queue {
             .find(|i| i.id == id)
             .ok_or_else(|| fail(StatusCode::NOT_FOUND, "Queued input not found"))
     }
-    pub fn bound(&self, request_id: &str) -> bool {
-        self.bindings.iter().any(|b| b.request_id == request_id)
-    }
-    /// Returns (item id, duplicate).
+    /// Appends an item. Request-ID deduplication is done against the durable bindings
+    /// before this is called. Returns (item id, duplicate=false).
     pub fn enqueue(&mut self, request_id: &str, text: &str, now: u64) -> Res<(String, bool)> {
         validate(text)?;
         if request_id.is_empty() || request_id.len() > MAX_REQUEST_ID {
             return Err(fail(
                 StatusCode::BAD_REQUEST,
                 "Missing or oversized request ID",
-            ));
-        }
-        if let Some(b) = self.bindings.iter().find(|b| b.request_id == request_id) {
-            if b.digest == digest(text) {
-                return Ok((b.item.clone(), true));
-            }
-            return Err(fail(
-                StatusCode::CONFLICT,
-                "Request ID was already used for a different message",
             ));
         }
         if self.live() >= MAX_ITEMS || self.pending_bytes() + text.len() > MAX_TOTAL_BYTES {
@@ -175,19 +148,10 @@ impl Queue {
             created: now,
             note: None,
         });
-        self.bindings.push(Binding {
-            request_id: request_id.into(),
-            digest: digest(text),
-            item: id.clone(),
-        });
-        if self.bindings.len() > MAX_BINDINGS {
-            let excess = self.bindings.len() - MAX_BINDINGS;
-            self.bindings.drain(..excess);
-        }
         Ok((id, false))
     }
     /// Edits a pending (or errored, deliberately re-queued) item if `revision` matches.
-    /// The request-ID binding keeps the original payload.
+    /// The durable request-ID binding keeps the original payload.
     pub fn edit(&mut self, id: &str, revision: u32, text: &str) -> Res<()> {
         validate(text)?;
         let others = self.pending_bytes();
@@ -205,12 +169,7 @@ impl Queue {
                 "Input changed elsewhere; reload the queue",
             ));
         }
-        let previous = if item.state == ItemState::Error {
-            0
-        } else {
-            item.text.len()
-        };
-        if others - previous + text.len() > MAX_TOTAL_BYTES {
+        if others - item.text.len() + text.len() > MAX_TOTAL_BYTES {
             return Err(fail(StatusCode::CONFLICT, "Queue is full"));
         }
         item.text = text.into();
@@ -249,10 +208,12 @@ impl Queue {
             }
         }
     }
-    /// Stop/Suspend/completion: no dispatch until a deliberate resume.
+    /// Stop/Suspend/completion: no dispatch until a deliberate resume. The pause is kept
+    /// even if the queue is empty or the turn later ends with `end_turn`.
     pub fn block(&mut self, reason: &str) {
         self.ready = false;
         self.pause(reason);
+        self.paused = Some(reason.into());
     }
     /// Deliberate human resume. Errored items stay errored until edited.
     pub fn resume(&mut self) {
@@ -263,13 +224,13 @@ impl Queue {
             }
         }
     }
-    /// Explicit-input priority predicate: pending human input (including paused) outranks
-    /// automatic inbox wakes.
+    /// Explicit-input priority predicate: pending or unresolved human input (including
+    /// paused and errored items awaiting inspection) outranks automatic inbox wakes.
     pub fn has_pending(&self) -> bool {
         self.items.iter().any(|i| {
             matches!(
                 i.state,
-                ItemState::Queued | ItemState::Paused | ItemState::Sending
+                ItemState::Queued | ItemState::Paused | ItemState::Sending | ItemState::Error
             )
         })
     }
@@ -296,7 +257,7 @@ impl Queue {
             self.pause(&format!(
                 "Previous turn ended: {outcome:?}. Inspect, then resume."
             ));
-        } else if !diagnostic {
+        } else if !diagnostic && self.paused.is_none() {
             self.ready = true;
         }
         let sent: Vec<usize> = (0..self.items.len())
@@ -353,15 +314,76 @@ fn validate(text: &str) -> Res<()> {
     Ok(())
 }
 
-/// Coordinator hook for inbox wake integration: true when explicit human input is pending.
+fn db(error: impl std::fmt::Display) -> (StatusCode, String) {
+    eprintln!(
+        "Queue binding storage error: {}",
+        crate::runtime::safe_error(&error.to_string())
+    );
+    fail(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Queue storage is unavailable",
+    )
+}
+
+/// Module-owned table, created at startup (no schema version change).
+pub fn initialize(app: &App) -> Result<(), String> {
+    app.store
+        .lock()
+        .unwrap()
+        .connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS input_queue_bindings(session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,request_id TEXT NOT NULL,payload TEXT NOT NULL,item_id TEXT NOT NULL,created INTEGER NOT NULL,PRIMARY KEY(session_id,request_id));",
+        )
+        .map_err(|e| e.to_string())
+}
+
+pub enum Bound {
+    New,
+    Duplicate(String),
+    Conflict,
+}
+
+/// Exact-payload check of a request ID against the durable bindings.
+pub fn check_binding(s: &Session, request_id: &str, text: &str) -> Res<Bound> {
+    let store = s.store.lock().unwrap();
+    let row: Option<(String, String)> = store
+        .connection
+        .query_row(
+            "SELECT payload,item_id FROM input_queue_bindings WHERE session_id=?1 AND request_id=?2",
+            params![s.id, request_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(db)?;
+    Ok(match row {
+        Some((payload, item)) if payload == text => Bound::Duplicate(item),
+        Some(_) => Bound::Conflict,
+        None => Bound::New,
+    })
+}
+
+pub fn conflict() -> (StatusCode, String) {
+    fail(
+        StatusCode::CONFLICT,
+        "Request ID was already used for a different message",
+    )
+}
+
+/// Coordinator hook for inbox wake integration: true when explicit human input is
+/// pending or unresolved.
 #[allow(dead_code)]
 pub fn has_pending(s: &Session) -> bool {
     s.data.lock().unwrap().input_queue.has_pending()
 }
 
-/// Applies `change` and persists it; on save failure the queue is restored and
-/// the change is not acknowledged.
-fn transact<T>(s: &Session, change: impl FnOnce(&mut Queue) -> Res<T>) -> Res<T> {
+/// Applies `change` and persists it (plus an optional request binding for the newest
+/// item) in one SQLite transaction; on failure the queue is restored and nothing is
+/// acknowledged.
+fn transact<T>(
+    s: &Session,
+    bind: Option<(&str, &str)>,
+    change: impl FnOnce(&mut Queue) -> Res<T>,
+) -> Res<T> {
     let result = {
         let mut data = s.data.lock().unwrap();
         if data.storage_error.is_some() {
@@ -373,12 +395,47 @@ fn transact<T>(s: &Session, change: impl FnOnce(&mut Queue) -> Res<T>) -> Res<T>
         let before = data.input_queue.clone();
         let value = change(&mut data.input_queue)?;
         if data.input_queue != before {
-            if let Err(error) = s.store.lock().unwrap().save_state(&s.id, &data) {
+            let item = data
+                .input_queue
+                .items
+                .last()
+                .map(|i| i.id.clone())
+                .unwrap_or_default();
+            let mut store = s.store.lock().unwrap();
+            let saved = match store.connection.execute_batch("BEGIN IMMEDIATE") {
+                Err(e) => Err(e.to_string()),
+                Ok(()) => {
+                    let inner = (|| -> Result<(), String> {
+                        if let Some((request_id, text)) = bind {
+                            store
+                                .connection
+                                .execute(
+                                    "INSERT INTO input_queue_bindings(session_id,request_id,payload,item_id,created) VALUES (?1,?2,?3,?4,?5)",
+                                    params![s.id, request_id, text, item, crate::timeouts::now_ms() as i64],
+                                )
+                                .map_err(|e| e.to_string())?;
+                        }
+                        store.save_state(&s.id, &data).map_err(|e| e.to_string())
+                    })();
+                    match inner {
+                        Ok(()) => store
+                            .connection
+                            .execute_batch("COMMIT")
+                            .map_err(|e| e.to_string()),
+                        Err(e) => {
+                            let _ = store.connection.execute_batch("ROLLBACK");
+                            Err(e)
+                        }
+                    }
+                }
+            };
+            drop(store);
+            if let Err(error) = saved {
                 data.input_queue = before;
                 eprintln!(
                     "Could not persist queue for {}: {}",
                     s.id,
-                    crate::runtime::safe_error(&error.to_string())
+                    crate::runtime::safe_error(&error)
                 );
                 return Err(fail(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -422,9 +479,25 @@ pub fn record_outcome(s: &Session, mut outcome: Outcome) {
     broadcast(s);
 }
 
-/// Dispatches one queued item. Caller holds `run_lock` and passed `allow_start`.
-/// Returns true when a turn was accepted.
-fn dispatch_next(s: &Session, deliberate: bool) -> bool {
+/// Dispatches one queued item. Caller holds communication/run/workspace locks and
+/// passed `allow_start`. Returns true when a turn was accepted.
+fn dispatch_next(app: &App, s: &Session, deliberate: bool) -> bool {
+    {
+        let data = s.data.lock().unwrap();
+        if !(deliberate || data.input_queue.ready) {
+            return false;
+        }
+    }
+    // Root policy is re-validated at dispatch, like other launches.
+    if crate::checked_cwd(app, &s.cwd.to_string_lossy()).is_err() {
+        let mut data = s.data.lock().unwrap();
+        data.input_queue
+            .block("Session directory is outside allowed roots; queue paused.");
+        let _ = s.store.lock().unwrap().save_state(&s.id, &data);
+        drop(data);
+        broadcast(s);
+        return false;
+    }
     let (text, id) = {
         let mut data = s.data.lock().unwrap();
         let eligible = (deliberate || data.input_queue.ready)
@@ -475,8 +548,8 @@ fn dispatch_next(s: &Session, deliberate: bool) -> bool {
     }
 }
 
-/// Queue scheduler: same locks and drain gate as other dispatchers; never recurses
-/// through HTTP handlers.
+/// Queue scheduler: same lock order and drain gate as the limit-resume scheduler;
+/// never recurses through HTTP handlers.
 pub async fn scheduler(app: App) {
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
     loop {
@@ -499,7 +572,7 @@ pub async fn scheduler(app: App) {
             continue;
         }
         for s in &ready {
-            dispatch_next(s, false);
+            dispatch_next(&app, s, false);
         }
     }
 }
@@ -532,14 +605,43 @@ pub async fn enqueue(
 ) -> ApiResult {
     let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
+    validate(&req.text)?;
+    if req.request_id.is_empty() || req.request_id.len() > MAX_REQUEST_ID {
+        return Err(fail(
+            StatusCode::BAD_REQUEST,
+            "Missing or oversized request ID",
+        ));
+    }
     if s.data.lock().unwrap().requests.contains(&req.request_id) {
         // Already accepted as a direct prompt; never queue it again.
         return reply(&s, json!({"duplicate":true,"sentDirectly":true}));
     }
-    let (item, duplicate) = transact(&s, |q| {
+    match check_binding(&s, &req.request_id, &req.text)? {
+        Bound::Duplicate(item) => return reply(&s, json!({"id":item,"duplicate":true})),
+        Bound::Conflict => return Err(conflict()),
+        Bound::New => {}
+    }
+    let (count, bytes): (i64, i64) = s
+        .store
+        .lock()
+        .unwrap()
+        .connection
+        .query_row(
+            "SELECT COUNT(*),COALESCE(SUM(length(payload)),0) FROM input_queue_bindings WHERE session_id=?1",
+            params![s.id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(db)?;
+    if count >= MAX_BINDINGS || bytes + req.text.len() as i64 > MAX_BINDING_BYTES {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "This session's queued-input history is full; send directly or continue in a new session",
+        ));
+    }
+    let (item, _) = transact(&s, Some((&req.request_id, &req.text)), |q| {
         q.enqueue(&req.request_id, &req.text, crate::timeouts::now_ms())
     })?;
-    reply(&s, json!({"id":item,"duplicate":duplicate}))
+    reply(&s, json!({"id":item,"duplicate":false}))
 }
 pub async fn edit(
     State(app): State<App>,
@@ -548,22 +650,24 @@ pub async fn edit(
 ) -> ApiResult {
     let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
-    transact(&s, |q| q.edit(&item, req.revision, &req.text))?;
+    transact(&s, None, |q| q.edit(&item, req.revision, &req.text))?;
     reply(&s, Value::Null)
 }
 pub async fn remove(State(app): State<App>, Path((id, item)): Path<(String, String)>) -> ApiResult {
     let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
-    transact(&s, |q| q.remove(&item))?;
+    transact(&s, None, |q| q.remove(&item))?;
     reply(&s, Value::Null)
 }
-/// Deliberate resume; admission is checked first. If idle, sends the first queued item now.
+/// Deliberate resume. All admission checks finish before the persisted pause is
+/// cleared; if idle, the first queued item is sent now.
 pub async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     let _communication = app.communication_lock.lock().await;
     let _run = app.run_lock.lock().await;
     let _workspace = app.workspace_lock.lock().await;
     let s = session(&app, &id)?;
     crate::service_restart::allow_start(&app)?;
+    crate::checked_cwd(&app, &s.cwd.to_string_lossy())?;
     {
         let data = s.data.lock().unwrap();
         if data.lifecycle.suspended {
@@ -579,11 +683,11 @@ pub async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult
             ));
         }
     }
-    transact(&s, |q| {
+    transact(&s, None, |q| {
         q.resume();
         Ok(())
     })?;
-    let dispatched = dispatch_next(&s, true);
+    let dispatched = dispatch_next(&app, &s, true);
     reply(&s, json!({ "dispatched": dispatched }))
 }
 
@@ -610,61 +714,6 @@ mod tests {
         q.finish_turn(&Outcome::Success);
         assert!(q.ready);
         assert_eq!(q.claim().unwrap().0, "three");
-    }
-
-    #[test]
-    fn request_binding_survives_edit_remove_send_prune_and_restart() {
-        let mut q = q();
-        let (a, dup) = q.enqueue("r1", "hello", 1).unwrap();
-        assert!(!dup);
-        assert_eq!(q.enqueue("r1", "hello", 2).unwrap(), (a.clone(), true));
-        assert_eq!(
-            q.enqueue("r1", "changed", 2).unwrap_err().0,
-            StatusCode::CONFLICT
-        );
-        q.edit(&a, 0, "edited").unwrap();
-        assert_eq!(q.enqueue("r1", "hello", 3).unwrap(), (a.clone(), true));
-        assert_eq!(
-            q.enqueue("r1", "anything else", 3).unwrap_err().0,
-            StatusCode::CONFLICT,
-            "edited items do not accept arbitrary payloads"
-        );
-        q.remove(&a).unwrap();
-        assert!(
-            q.enqueue("r1", "hello", 4).unwrap().1,
-            "tombstone after removal"
-        );
-        assert!(q.items.is_empty());
-        // Send and prune well past the display history.
-        for i in 0..10 {
-            q.enqueue(&format!("s{i}"), "x", 1).unwrap();
-            q.claim().unwrap();
-            q.finish_turn(&Outcome::Success);
-        }
-        assert_eq!(q.items.len(), KEEP_SENT);
-        assert!(
-            q.enqueue("s0", "x", 5).unwrap().1,
-            "pruned item stays bound"
-        );
-        assert!(q.enqueue("s0", "y", 5).is_err());
-        let mut restored: Queue =
-            serde_json::from_value(serde_json::to_value(&q).unwrap()).unwrap();
-        restored.recover();
-        assert!(
-            restored.enqueue("s1", "x", 6).unwrap().1,
-            "binding survives restart"
-        );
-        assert!(restored.bound("r1"));
-    }
-
-    #[test]
-    fn bindings_are_bounded() {
-        let mut q = q();
-        for i in 0..MAX_BINDINGS + 10 {
-            q.enqueue(&format!("r{i}"), "x", 1).unwrap();
-            q.remove(&format!("q{}", i + 1)).unwrap();
-        }
-        assert_eq!(q.bindings.len(), MAX_BINDINGS);
     }
 
     #[test]
@@ -727,6 +776,28 @@ mod tests {
         q.block("Explicit Stop");
         assert!(!q.ready);
         assert!(q.claim().is_none());
+    }
+
+    #[test]
+    fn stop_pause_survives_successful_end_and_errors_count_as_pending() {
+        let mut q = q();
+        q.enqueue("r1", "a", 1).unwrap();
+        q.claim().unwrap();
+        q.block("Explicit Stop");
+        q.finish_turn(&Outcome::Success);
+        assert!(!q.ready, "Stop wins even if the turn reports end_turn");
+        assert!(q.paused.is_some());
+        q.enqueue("r2", "b", 1).unwrap();
+        assert_eq!(q.items[1].state, ItemState::Paused);
+        let mut e = Queue::default();
+        e.enqueue("r", "x", 1).unwrap();
+        e.claim().unwrap();
+        e.finish_turn(&Outcome::Error);
+        e.resume();
+        assert!(
+            e.has_pending(),
+            "unresolved error items block optional inbox wakes"
+        );
     }
 
     #[test]

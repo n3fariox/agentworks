@@ -45,8 +45,9 @@ export function setupInputQueue({$,api,uuid,getActive,getStatus,toolActive}){
   }
 
   function set(next){queue=next&&Array.isArray(next.items)?next:{items:[],paused:null};render();}
+  // Apply a delayed response only if the same session is still active.
   async function call(suffix,options){
-    const r=await api(path(suffix),options);set(r.queue);return r;
+    const id=sid(),r=await api(path(suffix),options);if(id===sid())set(r.queue);return r;
   }
   // The caller owns the stable per-session request identity; retries reuse it.
   async function enqueue(id,{text,requestId}){
@@ -102,5 +103,5 @@ export function setupInputQueue({$,api,uuid,getActive,getStatus,toolActive}){
     }
     list.append(head,ol);
   }
-  return {set,enqueue,observe,reset,render,renderActivity,hasPending:()=>(queue.items||[]).some(i=>['queued','paused','sending'].includes(i.state))};
+  return {set,enqueue,observe,reset,render,renderActivity,hasPending:()=>(queue.items||[]).some(i=>['queued','paused','sending','error'].includes(i.state))};
 }
