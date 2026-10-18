@@ -11,6 +11,7 @@ mod permission_modes;
 mod runtime;
 mod service_restart;
 mod store;
+mod timeouts;
 mod workspace;
 mod worktrees;
 use catalog::{Catalog, Settings};
@@ -114,6 +115,9 @@ struct SessionData {
     storage_error: Option<String>,
     #[serde(default)]
     continuation: limit_resume::State,
+    /// L-07 per-session override; None uses the saved default at turn launch.
+    #[serde(default)]
+    timeouts: Option<timeouts::Policy>,
 }
 
 struct Approval {
@@ -150,14 +154,23 @@ impl Session {
         if let Some(origin) = state.automation.as_mut().filter(|a| a.outcome.is_none()) {
             origin.outcome = match kind {
                 "turn_end" => Some(
-                    if data["stopReason"] == "cancelled" {
+                    if data["timedOut"].is_string() {
+                        "timed_out"
+                    } else if data["stopReason"] == "cancelled" {
                         "cancelled"
                     } else {
                         "completed"
                     }
                     .into(),
                 ),
-                "error" => Some("failed".into()),
+                "error" => Some(
+                    if data["timedOut"].is_string() {
+                        "timed_out"
+                    } else {
+                        "failed"
+                    }
+                    .into(),
+                ),
                 "interrupted" => Some("interrupted".into()),
                 _ => None,
             };
@@ -223,7 +236,7 @@ impl Session {
         let approvals = self.approvals.lock().unwrap();
         let data = self.data.lock().unwrap();
         json!({"kind":"snapshot","seq":data.seq,"session":{"id":self.id,"provider":self.provider,
-            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation},"events":data.events,
+            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone())},"events":data.events,
             "truncated":data.events.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
             "permissionModes":data.permission_modes,"models":data.models,"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|json!({"id":id,"request":a.request})).collect::<Vec<_>>()})
@@ -471,6 +484,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mcp_endpoint,
         restart: Arc::new(service_restart::Manager::new()),
     };
+    if let Some(policy) = app
+        .catalog
+        .lock()
+        .unwrap()
+        .data
+        .settings
+        .timeouts
+        .clone()
+        .filter(|p| p.validate().is_ok())
+    {
+        timeouts::set_default(policy);
+    }
     for (metadata, mut data) in restored {
         data.continuation.reconcile();
         let pending = data.queued_prompt.take().is_some();
@@ -571,6 +596,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route(
+            "/timeout-controls.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../web/timeout-controls.js"),
+                )
+            }),
+        )
+        .route(
             "/diff.js",
             get(|| async {
                 (
@@ -649,6 +683,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/status", get(status))
         .route("/api/activity", get(activity))
         .route("/api/settings", get(get_settings).put(save_settings))
+        .route("/api/timeouts", get(get_timeouts).put(save_timeouts))
+        .route(
+            "/api/sessions/{id}/timeouts",
+            axum::routing::put(save_session_timeouts),
+        )
         .route("/api/models", post(discover_models))
         .route("/api/external-sessions", post(list_external_sessions))
         .route("/api/sessions/import", post(import_session))
@@ -876,12 +915,83 @@ async fn save_settings(State(app): State<App>, Json(mut settings): Json<Settings
         }
     }
     settings.roots = Some(normalized);
-    app.catalog
-        .lock()
-        .unwrap()
-        .settings(settings)
-        .map_err(|_| fail(StatusCode::INTERNAL_SERVER_ERROR, "Could not save settings"))?;
+    persist_settings(&app, |current| {
+        // The roots/models form may omit timeouts; keep the saved default.
+        settings.timeouts = settings.timeouts.take().or(current.timeouts.clone());
+        settings
+    })?;
     Ok(get_settings(State(app.clone())).await)
+}
+async fn get_timeouts() -> Json<Value> {
+    Json(json!({"default":timeouts::default_policy()}))
+}
+async fn save_timeouts(State(app): State<App>, Json(policy): Json<timeouts::Policy>) -> ApiResult {
+    let _workspace = app.workspace_lock.lock().await;
+    persist_settings(&app, |current| catalog::Settings {
+        timeouts: Some(policy),
+        ..current.clone()
+    })?;
+    Ok(get_timeouts().await)
+}
+#[derive(Deserialize)]
+struct SessionTimeouts {
+    policy: Option<timeouts::Policy>,
+}
+/// Applies to the next turn launch; a running turn keeps its fixed policy.
+async fn save_session_timeouts(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(req): Json<SessionTimeouts>,
+) -> ApiResult {
+    if let Some(policy) = &req.policy {
+        policy
+            .validate()
+            .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    }
+    let _run = app.run_lock.lock().await;
+    let s = session(&app, &id)?;
+    let effective = {
+        let mut data = s.data.lock().unwrap();
+        let mut next = data.clone();
+        next.timeouts = req.policy;
+        // Commit before publishing: a failed save is never acknowledged or applied.
+        s.store
+            .lock()
+            .unwrap()
+            .save_state(&s.id, &next)
+            .map_err(|_| {
+                fail(
+                    StatusCode::INSUFFICIENT_STORAGE,
+                    "Could not save session timeouts",
+                )
+            })?;
+        *data = next;
+        timeouts::effective(data.timeouts.clone())
+    };
+    let result = json!({"timeouts":s.data.lock().unwrap().timeouts,"effective":effective,"appliesTo":"nextTurn"});
+    // Emitting persists session state and shows the change in the transcript.
+    s.emit("timeout_settings", result.clone());
+    Ok(Json(result))
+}
+/// Single validated write path: merge, persist, then publish the effective
+/// default under the catalog lock so saved and effective policy never diverge.
+fn persist_settings(
+    app: &App,
+    build: impl FnOnce(&Settings) -> Settings,
+) -> Result<(), (StatusCode, String)> {
+    let mut catalog = app.catalog.lock().unwrap();
+    let next = build(&catalog.data.settings);
+    if let Some(policy) = &next.timeouts {
+        policy
+            .validate()
+            .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    }
+    let policy = next.timeouts.clone().unwrap_or_default();
+    catalog
+        .settings(next)
+        .map_err(|_| fail(StatusCode::INTERNAL_SERVER_ERROR, "Could not save settings"))?;
+    timeouts::set_default(policy);
+    Ok(())
 }
 #[derive(Deserialize)]
 struct ModelDiscovery {
@@ -1411,6 +1521,7 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             continuation: req
                 .inherited_resume
                 .unwrap_or(limit_resume::new_policy(req.resume_policy)?),
+            timeouts: None,
         }),
         tx,
         commands: Mutex::new(None),

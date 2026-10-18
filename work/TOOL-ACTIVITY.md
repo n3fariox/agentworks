@@ -1,6 +1,6 @@
 # Tool activity, progress and compact work logs
 
-Proposed follow-up work from the user's requests. This document records a design; no implementation batch is running.
+Batch 006 implements U-06 compact work logs and L-07 configurable timeouts; see the [batch record](batches/006-session-usability.md) and [timeout behavior](TIMEOUTS.md). U-05 progress normalization and parsing below remains a design. Work-log durations currently use live browser observations and are omitted after replay because stored events do not carry timestamps; unknown background process state is labelled unresolved rather than running.
 
 ## Current behavior and transport work
 

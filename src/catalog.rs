@@ -28,6 +28,9 @@ pub struct Settings {
     pub roots: Option<Vec<PathBuf>>,
     #[serde(default)]
     pub default_models: HashMap<String, String>,
+    /// L-07 saved default; absent keeps the built-in default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeouts: Option<crate::timeouts::Policy>,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct CatalogData {
@@ -183,6 +186,7 @@ mod tests {
             .settings(Settings {
                 roots: Some(vec![PathBuf::from("/projects")]),
                 default_models: HashMap::from([("codex".into(), "example-model".into())]),
+                timeouts: None,
             })
             .unwrap();
         let mut reopened = Catalog::open(path.clone()).unwrap();

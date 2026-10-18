@@ -7,6 +7,7 @@ import {setupPalettes} from '/palettes.js';
 import {setupDisplayPreferences} from '/display-preferences.js';
 import {setupWorkLogs,observeTool} from '/work-logs.js';
 import {setupUsageStatus} from '/usage-status.js';
+import {setupTimeoutControls} from '/timeout-controls.js';
 const $ = id => document.getElementById(id);
 // randomUUID is unavailable on plain HTTP remote origins; getRandomValues is supported.
 const uuid = () => globalThis.crypto.randomUUID?.() ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -24,6 +25,7 @@ let config, sessions=[], active=null, socket=null, generation=0, connected=false
 // U-07: per-session composer usage statusline; only this session's own events feed it.
 const usageStatus=setupUsageStatus({root:$('usage-status'),getProvider:()=>active?.provider});
 setInterval(()=>usageStatus.render(),60000);
+let timeoutControls=null;
 let transcript=[], tools=new Map(), approvals=new Map(), assistant=null, status='starting';
 let permissionModes=null;
 let replaying=false,workLogs=null,turnEnds=new Map();
@@ -323,6 +325,7 @@ function consume(e,live=false){
   const d=e.data;
   usageStatus.consume(e,{live});
   if(d?.continuationState&&active)active.continuation=d.continuationState;
+  {const t=timeoutControls?.notice(e.kind,d);if(t){transcript.push({id:uuid(),type:'notice',text:t});assistant=null;}}
   if(e.kind==='session_updated'){
     Object.assign(active,d);$('header-title').textContent=active.title;const row=sessions.find(s=>s.id===active.id);if(row)Object.assign(row,d);sidebar();
   }
@@ -338,7 +341,7 @@ function consume(e,live=false){
   else if(e.kind==='interrupted'){transcript.push({id:uuid(),type:'notice',text:d.message,interrupted:true});assistant=null;}
   else if(e.kind==='storage_error'){status='error';$('session-notice').textContent=d.message;$('session-notice').hidden=false;}
   else if(e.kind==='error'){transcript.push({id:uuid(),type:'error',text:d.message});assistant=null;}
-  else if(e.kind==='turn_end'){assistant=null;turnEnds.set(transcript.at(-1)?.id,{seq:e.seq,stopReason:d?.stopReason});}
+  else if(e.kind==='turn_end'){assistant=null;turnEnds.set(transcript.at(-1)?.id,{seq:e.seq,stopReason:d?.timedOut?`timeout_${d.timedOut}`:d?.stopReason});}
   else if(e.kind==='acp'){
     switch(d.sessionUpdate){
       case 'user_message_chunk':{
@@ -606,6 +609,7 @@ function addRoot(value=''){
 }
 $('add-root').onclick=()=>addRoot().focus();
 $('open-settings').onclick=async()=>{
+  timeoutControls.load();
   try{
     const settings=await api('/api/settings');$('settings-roots').replaceChildren();for(const root of settings.roots)addRoot(root);$('settings-error').textContent='';$('settings-saved').textContent='';
     const fields=$('default-model-fields');fields.replaceChildren();
@@ -639,6 +643,7 @@ $('settings-form').onsubmit=async event=>{
 };
 document.addEventListener('keydown',event=>{if(event.key==='n'&&!event.ctrlKey&&!event.metaKey&&!event.altKey&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)&&!document.querySelector('dialog[open]')){event.preventDefault();openCreate();}});
 setupDiff({api,getActive:()=>active});
+timeoutControls=setupTimeoutControls({$,api,getActive:()=>active});
 workspace=createWorkspace({api,toast,labels,uuid,getConfig:()=>config,getActive:()=>active,selectSession,openCreate,refreshSessions,enhanceBlocks:display.enhance,openSettings:()=>$('open-settings').click(),
   overview(){ $('conversation').hidden=true;$('welcome').hidden=false;localStorage.removeItem('agentworks-session'); },
   appendDraft(text){if(!active)return;const current=$('prompt').value;$('prompt').value=current?current+'\n\n'+text:text;drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));},
