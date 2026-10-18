@@ -1,3 +1,4 @@
+import {setupDiff} from '/diff.js';
 import {setupWorktreeControls,setupPolicyEditor} from '/worktree-controls.js';
 import {setupGitContext} from '/git-context.js';
 import {createWorkspace} from '/workspace.js';
@@ -592,6 +593,7 @@ $('settings-form').onsubmit=async event=>{
   }catch(e){$('settings-error').textContent=e.message;}finally{$('save-settings').disabled=false;}
 };
 document.addEventListener('keydown',event=>{if(event.key==='n'&&!event.ctrlKey&&!event.metaKey&&!event.altKey&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)&&!document.querySelector('dialog[open]')){event.preventDefault();openCreate();}});
+setupDiff({api,getActive:()=>active});
 workspace=createWorkspace({api,toast,labels,uuid,getConfig:()=>config,getActive:()=>active,selectSession,openCreate,refreshSessions,openSettings:()=>$('open-settings').click(),
   overview(){ $('conversation').hidden=true;$('welcome').hidden=false;localStorage.removeItem('agentworks-session'); },
   appendDraft(text){if(!active)return;const current=$('prompt').value;$('prompt').value=current?current+'\n\n'+text:text;drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));},

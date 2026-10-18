@@ -2,6 +2,7 @@ mod automations;
 mod catalog;
 mod communication;
 mod completion;
+mod diff;
 mod git_context;
 mod limit_resume;
 mod mcp;
@@ -522,6 +523,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route(
+            "/diff.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../web/diff.js"),
+                )
+            }),
+        )
+        .route(
             "/git-context.js",
             get(|| async {
                 (
@@ -617,6 +627,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/{id}/events", get(events))
         .route("/api/sessions/{id}/file", get(file))
         .route("/api/sessions/{id}/workspace", get(git_context::workspace))
+        .route("/api/sessions/{id}/diff", get(diff::view))
         .route("/api/markdown", post(markdown))
         .layer(DefaultBodyLimit::max(128 * 1024))
         .layer(middleware::from_fn_with_state(app.clone(), guard))

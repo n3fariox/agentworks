@@ -124,6 +124,22 @@ pub(crate) async fn git_bounded(
     args: &[&str],
     output_limit: u64,
 ) -> Result<(bool, String, String, Option<i32>), &'static str> {
+    let (success, output, error, code) = git_bounded_raw(cwd, root, args, output_limit).await?;
+    Ok((
+        success,
+        output.trim_end_matches(['\n', '\r']).to_owned(),
+        error,
+        code,
+    ))
+}
+
+// Patches and NUL-delimited paths require byte-for-byte whitespace preservation.
+pub(crate) async fn git_bounded_raw(
+    cwd: &FsPath,
+    root: &FsPath,
+    args: &[&str],
+    output_limit: u64,
+) -> Result<(bool, String, String, Option<i32>), &'static str> {
     let mut command = Command::new("git");
     // Remove all inherited repository/config/index/object overrides, including future GIT_* keys.
     for (key, _) in std::env::vars_os() {
@@ -167,9 +183,7 @@ pub(crate) async fn git_bounded(
         if bytes.len() as u64 > output_limit {
             return Err("Git output exceeded the inspection limit");
         }
-        String::from_utf8(bytes)
-            .map(|s| s.trim_end_matches(['\n', '\r']).to_owned())
-            .map_err(|_| "Git output is not valid UTF-8")
+        String::from_utf8(bytes).map_err(|_| "Git output is not valid UTF-8")
     };
     let read_error = async {
         let mut bytes = Vec::new();
