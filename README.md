@@ -89,6 +89,14 @@ Use **Sessions**, **Files**, and **Automations** in the navigation rail (tabs ac
 
 Navigation preserves running sessions and drafts. The chosen project, directory, last file, and workspace view are remembered per browser. Settings are available from the navigation rail.
 
+## Command and session palettes
+
+**Ctrl/Cmd+K** opens the command palette and **Ctrl/Cmd+P** opens the session palette; the header ⌕ button and the sidebar **⌕ Commands & sessions** entry open them by touch or mouse. Neither shortcut is taken while another modal is open, and **Esc** always closes the palette. The **Actions & commands** / **Sessions** buttons, or **Tab**, switch lists.
+
+Entries are ranked by fuzzy matching, where every typed word must match something: the title first, then project, host, directory and status. Session rows show the status plus the current marker, agent, project, host and directory, and show more of the path when titles repeat so two sessions stay distinguishable. Running and waiting sessions are listed first until you type. **↑ ↓**, **Home/End**, and **Page Up/Down** move the highlighted option; **Enter** runs it.
+
+Actions call existing controls only (new/resumed session, new project, files, automations, settings, agents and inbox, workspace info, resume, stop, usage, delete). Entries that cannot run right now stay readable, explain why, and refuse to run. Advertised harness commands are typed into the composer for review; choosing one never submits a turn. Switching sessions uses the same path as the sidebar, so each draft and every running turn is preserved.
+
 ## Manual automations
 
 In **Automations**, create a named definition with a harness, optional model, project, working directory, and instructions. The initial trigger is **Manual**; GitHub polling, webhooks, and schedules are future work. A blank model uses the host’s configured default. Paused definitions cannot start new runs.
