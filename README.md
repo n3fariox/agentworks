@@ -269,3 +269,5 @@ To check native history import without new inference, reuse the populated test f
 AGENTWORKS_IMPORT_FIXTURE_DB=.cache/persistence-<run>/sessions.sqlite3 \
 AGENTWORKS_URL=http://127.0.0.1:4318 npm run test:import-capabilities
 ```
+
+Usage-limit continuation is opt-in per session (off for existing and new sessions). Use the new-session checkbox or the composer’s **Usage-limit continuation** controls to authorize bounded continuation, inspect reset freshness/countdown, disable a timer, or resume deliberately. Verified Claude reset events and native Codex quota errors/read-only account quota queries support durable scheduling; unavailable resets remain manual and OpenCode automatic detection is unsupported. Stop, explicit completion reports and newer accepted instructions cancel pending work. See [L-09 behavior, provider evidence, durability and APIs](work/LIMIT-RESUME.md).

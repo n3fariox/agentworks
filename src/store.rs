@@ -51,7 +51,7 @@ impl Store {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
         )?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 5 {
+        if version > 6 {
             return Err("Session database was created by a newer Agentworks version".into());
         }
         connection.execute_batch("BEGIN; CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, metadata TEXT NOT NULL, state TEXT NOT NULL);
@@ -68,7 +68,7 @@ impl Store {
           CREATE TABLE IF NOT EXISTS agent_completions(id INTEGER PRIMARY KEY AUTOINCREMENT,author TEXT NOT NULL,author_title TEXT NOT NULL,project_id TEXT,request_id TEXT NOT NULL,payload TEXT NOT NULL,report TEXT NOT NULL,created INTEGER NOT NULL,UNIQUE(author,request_id));
           CREATE INDEX IF NOT EXISTS agent_completions_latest ON agent_completions(author,id DESC);
           CREATE TABLE IF NOT EXISTS session_creations(request_key TEXT PRIMARY KEY,payload TEXT NOT NULL,session_id TEXT,error TEXT,mutation_started INTEGER NOT NULL DEFAULT 0);
-          PRAGMA user_version=5; COMMIT;")?;
+          PRAGMA user_version=6; COMMIT;")?;
         Ok(Self {
             connection,
             _lock: lock,
@@ -354,6 +354,7 @@ impl Store {
                 queued_prompt: None,
                 control_origin: None,
                 storage_error: None,
+                continuation: Default::default(),
             };
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO sessions(id,metadata,state) VALUES (?1,?2,?3)",
@@ -387,6 +388,72 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
+    fn v5_migration_preserves_every_existing_table_and_defaults_policy_off() {
+        let path =
+            std::env::temp_dir().join(format!("agentworks-v5-{}.sqlite3", uuid::Uuid::new_v4()));
+        let snapshot = |db: &Connection| -> Vec<(String, Vec<String>)> {
+            let mut stmt=db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").unwrap();
+            let names: Vec<String> = stmt
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            names
+                .into_iter()
+                .map(|name| {
+                    let mut q = db
+                        .prepare(&format!("SELECT * FROM {name} ORDER BY rowid"))
+                        .unwrap();
+                    let columns = q.column_count();
+                    let rows = q
+                        .query_map([], |r| {
+                            Ok((0..columns)
+                                .map(|i| format!("{:?}", r.get_ref(i).unwrap()))
+                                .collect::<Vec<_>>()
+                                .join("|"))
+                        })
+                        .unwrap()
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .unwrap();
+                    (name, rows)
+                })
+                .collect()
+        };
+        let before;
+        {
+            let store = Store::open(&path).unwrap();
+            store.connection.execute_batch(r#"
+              INSERT INTO sessions VALUES ('old','{}','{}');
+              INSERT INTO events VALUES ('old',1,'{"kind":"user","seq":1}');
+              INSERT INTO agent_access VALUES ('old','{"startSessions":true}');
+              INSERT INTO agent_starts VALUES ('old','start','old');
+              INSERT INTO agent_completions(author,author_title,request_id,payload,report,created) VALUES ('old','Old','done','{}','{"status":"completed"}',1);
+              INSERT INTO agent_audit(actor,action,target,outcome,created) VALUES ('old','access','old','accepted',1);
+              INSERT INTO agent_messages(sender,sender_title,recipient,recipient_title,text,created,request_id) VALUES ('old','Old','old','Old','history',1,'mail');
+              INSERT INTO automations VALUES ('auto','{}');
+              INSERT INTO automation_runs VALUES ('run','auto','req','old','Test','demo',1,'completed');
+              INSERT INTO session_creations VALUES ('create','{}','old',NULL,1);
+              PRAGMA user_version=5;
+            "#).unwrap();
+            before = snapshot(&store.connection);
+        }
+        {
+            let store = Store::open(&path).unwrap();
+            assert_eq!(before, snapshot(&store.connection));
+            assert_eq!(
+                store
+                    .connection
+                    .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                6
+            );
+        }
+        let state:SessionData=serde_json::from_value(json!({"status":"idle","seq":0,"requests":[],"models":null,"available_commands":[],"turn_active":false,"project_id":null,"provider_session_id":null})).unwrap();
+        assert!(!state.continuation.enabled);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(path.with_extension("sqlite3.lock")).unwrap();
+    }
+    #[test]
     fn migrates_v3_without_changing_existing_data() {
         let path = std::env::temp_dir().join(format!(
             "agentworks-migration-{}.sqlite3",
@@ -408,7 +475,7 @@ mod tests {
             assert_eq!(
                 db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                     .unwrap(),
-                5
+                6
             );
             for (sql, expected) in [
                 (
@@ -588,6 +655,7 @@ mod tests {
             queued_prompt: None,
             control_origin: None,
             storage_error: None,
+            continuation: Default::default(),
         };
         {
             let mut store = Store::open(&path).unwrap();

@@ -393,6 +393,7 @@ pub async fn run(
                 if staged.1>32*1024*1024 || staged.0.len()>=50000 {staged.2=true;}else{staged.0.push(update.clone());}
             }
             if !notify_replaying.load(Ordering::SeqCst) || matches!(update["sessionUpdate"].as_str(),Some("available_commands_update"|"config_option_update")) {
+                crate::limit_resume::observe(&notify_s, &update);
                 notify_s.emit("acp",update);
             }
             Ok(())
@@ -451,6 +452,7 @@ pub async fn run(
                 }
                 s.set_models(model_config.clone());
             }
+            crate::limit_resume::ready(&s);
             s.emit("ready",json!({"providerSessionId":provider_id,"configuration":serde_json::to_value(&created).unwrap_or(Value::Null)}));
             if !s.start_queued_prompt().map_err(|e|agent_client_protocol::Error::internal_error().data(e))? {s.status("idle");}
             while let Some(command)=commands.recv().await {
@@ -480,8 +482,8 @@ pub async fn run(
                                 result=&mut request=>{
                                     s.clear_approvals();
                                     match result {
-                                        Ok(result)=>s.emit("turn_end",json!({"stopReason":result.stop_reason})),
-                                        Err(error)=>s.emit("error",json!({"message":safe_error(&error.to_string())})),
+                                        Ok(result)=>{crate::limit_resume::finish(&s, Some(&serde_json::to_value(&result.stop_reason).unwrap_or(Value::Null)), None);s.emit("turn_end",json!({"stopReason":result.stop_reason}));},
+                                        Err(error)=>{let raw=serde_json::to_value(&error).unwrap_or(Value::Null);crate::limit_resume::enrich_codex(&s,&raw).await;crate::limit_resume::finish(&s,None,Some(&raw));s.emit("error",json!({"message":safe_error(&error.to_string())}));},
                                     }
                                     s.status("idle");
                                     break;
