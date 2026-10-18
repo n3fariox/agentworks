@@ -1,7 +1,9 @@
 [
- {"kind":"acp","at":1760000000000,"data":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}},
- {"kind":"acp","at":1760000001000,"data":{"sessionUpdate":"usage_update","used":53000,"size":200000,"cost":{"amount":0.0421,"currency":"USD"}}},
- {"kind":"acp","at":1760000002000,"data":{"sessionUpdate":"usage_update","used":12000,"size":200000}},
- {"kind":"acp","at":1760000003000,"data":{"sessionUpdate":"usage_update","used":9000,"size":1000000,"_meta":{"rateLimits":{"primary":{"usedPercent":42,"windowDurationMins":300,"resetsAt":1760010000},"secondary":{"usedPercent":7}}}}},
- {"kind":"acp","at":1760000004000,"data":{"sessionUpdate":"usage_update"}}
+ {"seq":1,"kind":"acp","data":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}},
+ {"seq":2,"kind":"acp","data":{"sessionUpdate":"usage_update","used":53000,"size":200000,"cost":{"amount":0.0421,"currency":"USD"},"_meta":{"_claude/model":"claude-opus-5-5"}}},
+ {"seq":3,"kind":"acp","data":{"sessionUpdate":"usage_update","used":12000,"size":200000}},
+ {"seq":4,"kind":"acp","data":{"sessionUpdate":"usage_update","used":9000,"size":1000000,"_meta":{"_claude/rateLimit":{"status":"allowed_warning","rateLimitType":"five_hour","utilization":42,"resetsAt":1760010000}}}},
+ {"seq":5,"kind":"acp","data":{"sessionUpdate":"usage_update","used":999999,"size":200000,"_meta":{"parentToolUseId":"toolu_1"}}},
+ {"seq":6,"kind":"acp","data":{"sessionUpdate":"usage_update","used":-5,"size":-1,"cost":{"amount":-1},"_meta":{"_claude/rateLimit":{"rateLimitType":"seven_day","utilization":250}}}},
+ {"seq":7,"kind":"acp","data":{"sessionUpdate":"usage_update","cost":{"amount":0.5}}}
 ]

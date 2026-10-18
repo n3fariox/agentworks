@@ -11,9 +11,6 @@ const $ = id => document.getElementById(id);
 const uuid = () => globalThis.crypto.randomUUID?.() ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
 const labels = {demo:'Demo agent',claude:'Claude',codex:'Codex',opencode:'OpenCode'};
 const icons = {demo:'◈',claude:'✳',codex:'⌘',opencode:'▣'};
-// U-07: per-session composer usage statusline; only this session's own events feed it.
-const usageStatus=setupUsageStatus({root:$('usage-status'),getProvider:()=>active?.provider});
-setInterval(()=>usageStatus.render(),60000);
 function readStorage(storage,key,fallback){try{return JSON.parse(storage.getItem(key))??fallback;}catch{return fallback;}}
 let workspace;
 let projects=[],hosts=[{id:'local',name:'Local',status:'connected'}];
@@ -23,6 +20,9 @@ let editingProject=null,savingProject=false;
 const drafts=readStorage(sessionStorage,'agentworks-drafts',{});
 const scrollPositions=new Map();let restoreScroll=null;
 let config, sessions=[], active=null, socket=null, generation=0, connected=false;
+// U-07: per-session composer usage statusline; only this session's own events feed it.
+const usageStatus=setupUsageStatus({root:$('usage-status'),getProvider:()=>active?.provider});
+setInterval(()=>usageStatus.render(),60000);
 let transcript=[], tools=new Map(), approvals=new Map(), assistant=null, status='starting';
 let modelConfig=null, availableCommands=[], commandsOpen=false;
 let discoveryGeneration=0;
@@ -295,7 +295,7 @@ function connect(gen){
       approvals=new Map(e.approvals.map(a=>[a.id,a.request]));status=e.session.status;modelConfig=e.models;if(status==='suspended'&&!e.session.explicitlySuspended)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();
       if(e.storageError){$('session-notice').textContent=e.storageError;$('session-notice').hidden=false;}
       if(e.truncated){$('session-notice').textContent='Showing recent output. The full transcript is saved on this host.';$('session-notice').hidden=false;}
-    }else consume(e);
+    }else consume(e,true);
     scheduleDraw();updateControls();renderContinuation();usageStatus.render();
   };
   ws.onclose=()=>{
@@ -315,9 +315,9 @@ function connect(gen){
   };
 }
 function addMessage(role,text){const message={id:uuid(),type:'message',role,text};transcript.push(message);return message;}
-function consume(e){
+function consume(e,live=false){
   const d=e.data;
-  usageStatus.consume(e);
+  usageStatus.consume(e,{live});
   if(d?.continuationState&&active)active.continuation=d.continuationState;
   if(e.kind==='session_updated'){
     Object.assign(active,d);$('header-title').textContent=active.title;const row=sessions.find(s=>s.id===active.id);if(row)Object.assign(row,d);sidebar();
