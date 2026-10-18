@@ -63,6 +63,7 @@ Batch 004 implements U-01 and U-04; the other additions below remain planned. Ba
 
 | ID | Bug | Acceptance |
 | --- | --- | --- |
+| B-02 | **High priority:** status-only commands cancel pending usage-limit recovery | A `/status` or equivalent read-only usage check must preserve the unfinished assignment's authorized quota wake, original deadline and attempt bound; it must not silently clear `dueAt` or treat the check's successful turn as task completion. Keep explicit Stop/disable, revocation, completion and deliberate replacement-work cancellation semantics. Cover a scheduled quota pause → status check → exactly one original-context continuation across reset/restart, including a check still reporting exhausted quota; never replay a mutating tool. Observed in coordinator session `50cba24d-a4ae-45a0-8330-2e7137d67722`: event 2146 scheduled 2026-10-18 18:15:04 UTC; `/status` events 2149–2154 cleared the timer with zero attempts. |
 | B-01 | Settings success toast appears red — implemented batch 004 | Successful saves use success/neutral styling; failures retain error styling. Feedback remains accessible and distinguishes saved settings from partial/failed saves |
 
 ## Automations
