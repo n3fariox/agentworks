@@ -51,7 +51,7 @@ impl Store {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
         )?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 4 {
+        if version > 5 {
             return Err("Session database was created by a newer Agentworks version".into());
         }
         connection.execute_batch("BEGIN; CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, metadata TEXT NOT NULL, state TEXT NOT NULL);
@@ -67,7 +67,8 @@ impl Store {
           CREATE TABLE IF NOT EXISTS agent_starts(actor TEXT NOT NULL,request_id TEXT NOT NULL,session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,PRIMARY KEY(actor,request_id));
           CREATE TABLE IF NOT EXISTS agent_completions(id INTEGER PRIMARY KEY AUTOINCREMENT,author TEXT NOT NULL,author_title TEXT NOT NULL,project_id TEXT,request_id TEXT NOT NULL,payload TEXT NOT NULL,report TEXT NOT NULL,created INTEGER NOT NULL,UNIQUE(author,request_id));
           CREATE INDEX IF NOT EXISTS agent_completions_latest ON agent_completions(author,id DESC);
-          PRAGMA user_version=4; COMMIT;")?;
+          CREATE TABLE IF NOT EXISTS session_creations(request_key TEXT PRIMARY KEY,payload TEXT NOT NULL,session_id TEXT,error TEXT,mutation_started INTEGER NOT NULL DEFAULT 0);
+          PRAGMA user_version=5; COMMIT;")?;
         Ok(Self {
             connection,
             _lock: lock,
@@ -78,6 +79,7 @@ impl Store {
         metadata: &Metadata,
         state: &SessionData,
         access: Option<&crate::communication::Access>,
+        creation_key: Option<&str>,
     ) -> Result<()> {
         let tx = self.connection.transaction()?;
         tx.execute(
@@ -104,7 +106,59 @@ impl Store {
         if let Some(origin) = &state.automation {
             tx.execute("INSERT INTO automation_runs(id,automation_id,request_id,session_id,name,provider,created,status) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![origin.run_id,origin.automation_id,origin.request_id,metadata.id,origin.name,metadata.provider,i64::try_from(metadata.created)?,crate::automations::run_status(state)])?;
         }
+        if let Some(key) = creation_key {
+            tx.execute(
+                "UPDATE session_creations SET session_id=?2,error=NULL WHERE request_key=?1",
+                params![key, metadata.id],
+            )?;
+        }
         tx.commit()?;
+        Ok(())
+    }
+    pub fn reserve_creation(&mut self, key: &str, payload: &str) -> Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        let prior: Option<(String, Option<String>, Option<String>, bool)> = self
+            .connection
+            .query_row(
+                "SELECT payload,session_id,error,mutation_started FROM session_creations WHERE request_key=?1",
+                [key],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        if let Some((saved, session, error, mutation_started)) = prior {
+            if saved != payload {
+                return Err("Request ID already used for a different session payload".into());
+            }
+            if let Some(id) = session {
+                return Ok(Some(id));
+            }
+            if !mutation_started {
+                // Payload binding persists, but no Git mutation/session insertion was armed.
+                self.connection.execute(
+                    "UPDATE session_creations SET error=NULL WHERE request_key=?1",
+                    [key],
+                )?;
+                return Ok(None);
+            }
+            return Err(format!("Previous creation did not complete: {}. Inspect retained files before using a new request ID", error.as_deref().unwrap_or("interrupted preparation")).into());
+        }
+        self.connection.execute(
+            "INSERT INTO session_creations(request_key,payload) VALUES (?1,?2)",
+            params![key, payload],
+        )?;
+        Ok(None)
+    }
+    pub fn arm_creation(&mut self, key: &str) -> Result<()> {
+        if self.connection.execute("UPDATE session_creations SET mutation_started=1 WHERE request_key=?1 AND session_id IS NULL", [key])? != 1 {
+            return Err("Creation request could not be durably armed".into());
+        }
+        Ok(())
+    }
+    pub fn creation_error(&mut self, key: &str, message: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE session_creations SET error=?2 WHERE request_key=?1 AND session_id IS NULL",
+            params![key, message],
+        )?;
         Ok(())
     }
     pub fn event(&mut self, id: &str, state: &SessionData, event: &Value) -> Result<()> {
@@ -354,7 +408,7 @@ mod tests {
             assert_eq!(
                 db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                     .unwrap(),
-                4
+                5
             );
             for (sql, expected) in [
                 (
@@ -404,6 +458,74 @@ mod tests {
         std::fs::remove_file(path.with_extension("sqlite3.lock")).unwrap();
     }
 
+    #[test]
+    fn v4_migration_and_interrupted_creation_reservations_survive_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "agentworks-creation-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ));
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .connection
+                .execute_batch("DROP TABLE session_creations; PRAGMA user_version=4;")
+                .unwrap();
+        }
+        {
+            let mut store = Store::open(&path).unwrap();
+            assert_eq!(store.reserve_creation("key", "payload").unwrap(), None);
+            store
+                .creation_error("key", "mutation-free validation failure")
+                .unwrap();
+            assert_eq!(store.reserve_creation("key", "payload").unwrap(), None);
+            store.arm_creation("key").unwrap();
+            assert_eq!(
+                store.reserve_creation("preflight", "payload").unwrap(),
+                None
+            );
+            assert!(
+                store
+                    .reserve_creation("key", "changed")
+                    .unwrap_err()
+                    .to_string()
+                    .contains("different")
+            );
+        }
+        {
+            let mut store = Store::open(&path).unwrap();
+            assert_eq!(
+                store.reserve_creation("preflight", "payload").unwrap(),
+                None
+            );
+            assert!(
+                store
+                    .reserve_creation("key", "payload")
+                    .unwrap_err()
+                    .to_string()
+                    .contains("interrupted")
+            );
+            store.creation_error("key", "retained destination").unwrap();
+            assert!(
+                store
+                    .reserve_creation("key", "payload")
+                    .unwrap_err()
+                    .to_string()
+                    .contains("retained destination")
+            );
+            store
+                .connection
+                .execute(
+                    "UPDATE session_creations SET session_id='old' WHERE request_key='key'",
+                    [],
+                )
+                .unwrap();
+            assert_eq!(
+                store.reserve_creation("key", "payload").unwrap(),
+                Some("old".into())
+            );
+        }
+        std::fs::remove_file(&path).unwrap();
+    }
     #[test]
     fn legacy_snapshot_import_preserves_identity_and_transcript() {
         let dir = std::env::temp_dir().join(format!("agentworks-import-{}", uuid::Uuid::new_v4()));
@@ -469,7 +591,7 @@ mod tests {
         };
         {
             let mut store = Store::open(&path).unwrap();
-            store.insert(&metadata, &state, None).unwrap();
+            store.insert(&metadata, &state, None, None).unwrap();
             assert!(
                 Store::open(&path).is_err(),
                 "a second server must not open the same database"

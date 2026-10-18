@@ -20,6 +20,18 @@ Project: **Agentworks · parallel batch 002** (`caa7dc76-19b1-45f0-8005-4475469f
 
 ## Integration and status
 
-Both workers acknowledged their tasks through MCP and are implementing their assigned halves. They will commit only owned files and submit completion claims with checks and limitations. The coordinator will review implementation and reports, merge sequentially, run combined checks, and deploy only when the live activity endpoint permits shutdown and data has been backed up.
+Both workers finished and published completion claims through MCP. UI commit: `2103fb29f388f1faeee2013cc044080a4745281b`; backend commit: `534308a9354805b009d81f2147e3102bc893ddea`. Worktrees remain clean and retained. The coordinator merged the UI as `6f50c12` with its embedded asset route and staged the backend sequentially without conflicts. Combined validation is in progress.
 
-Next coordination work remains named external controller credentials and a review/merge queue. Session lifecycle controls can proceed independently after this batch; worktree cleanup requires its own safety and ownership design.
+Review caught two implementation issues before integration: asynchronous worktree preparation needed to prevent `safeToClose:true`, and changing the shared Git output cap would weaken the existing inspection bound. The backend now reports preparation activity and keeps separate inspection/worktree output limits. A subsequent read-only review by the UI worker found that mutation-free preflight failures consumed request IDs permanently. The backend split durable payload binding from the mutation marker and added recovery tests; unchanged retries recover after capacity or destination preflight failures, while changed payloads conflict and uncertain mutations cannot repeat automatically.
+
+The reviewer also reported a test-port mismatch, but that finding was rejected: the backend's assigned range was 4351–4355, distinct from the UI's 4361–4365. The original assignments remain valid. No worker changed the live service, grants, shared dependencies or another checkout.
+
+The coordinator updated the existing missing-import check to expect rejection before registration, added policy/UI test commands and verification wiring, and supplied a real browser/API integration check using demo agents and isolated Git fixtures.
+
+Combined main passed 10 Rust unit tests, formatting/whitespace checks, 26 Playwright tests, native MCP legacy/modern discovery, existing API/project/settings/import/workspace/automation/completion checks, real Git worktree policy/retry/activity/timeout/output-bound checks, communication/coordinator regressions, restart/crash persistence, and graceful shutdown with an open browser WebSocket. A separate browser check against the actual backend created a requiring project and new worktree, inspected Git context, and selected the same existing linked worktree on mobile without inference. Its first run needed a test-script correction to open the mobile drawer; the corrected run passed with no page errors.
+
+Strict Clippy retains seven pre-existing style findings in unchanged code. Failed or interrupted mutation may retain a branch/directory and needs inspection before a new request ID; safe preflight failures can retry unchanged. Missing/prunable paths are omitted, Git administrative paths must be inside allowed roots, and protection against another process racing filesystem changes remains bounded by the same-user trust model. Cleanup/merge controls remain deferred.
+
+Deployment requires an idle activity endpoint and a catalog/database backup. Validation artifacts remain ignored under `.cache/batch-002/`.
+
+The user has requested stopping after this round is integrated. No further feature batch will be dispatched. Named external controller credentials, session lifecycle controls and a review/merge queue remain backlog items; worktree cleanup requires its own safety and ownership design.

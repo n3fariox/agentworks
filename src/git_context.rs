@@ -110,10 +110,19 @@ async fn required(cwd: &FsPath, root: &FsPath, args: &[&str]) -> Result<String, 
     }
 }
 
-async fn git(
+pub(crate) async fn git(
     cwd: &FsPath,
     root: &FsPath,
     args: &[&str],
+) -> Result<(bool, String, String, Option<i32>), &'static str> {
+    git_bounded(cwd, root, args, OUTPUT_LIMIT).await
+}
+
+pub(crate) async fn git_bounded(
+    cwd: &FsPath,
+    root: &FsPath,
+    args: &[&str],
+    output_limit: u64,
 ) -> Result<(bool, String, String, Option<i32>), &'static str> {
     let mut command = Command::new("git");
     // Remove all inherited repository/config/index/object overrides, including future GIT_* keys.
@@ -130,6 +139,8 @@ async fn git(
             "core.fsmonitor=false",
             "-c",
             "core.hooksPath=/dev/null",
+            "-c",
+            "submodule.recurse=false",
         ])
         .args(args)
         .env("LC_ALL", "C")
@@ -149,11 +160,11 @@ async fn git(
     let read = async |stream: tokio::process::ChildStdout| {
         let mut bytes = Vec::new();
         stream
-            .take(OUTPUT_LIMIT + 1)
+            .take(output_limit + 1)
             .read_to_end(&mut bytes)
             .await
             .map_err(|_| "Git output could not be read")?;
-        if bytes.len() as u64 > OUTPUT_LIMIT {
+        if bytes.len() as u64 > output_limit {
             return Err("Git output exceeded the inspection limit");
         }
         String::from_utf8(bytes)
@@ -163,11 +174,11 @@ async fn git(
     let read_error = async {
         let mut bytes = Vec::new();
         stderr
-            .take(OUTPUT_LIMIT + 1)
+            .take(output_limit + 1)
             .read_to_end(&mut bytes)
             .await
             .map_err(|_| "Git output could not be read")?;
-        if bytes.len() as u64 > OUTPUT_LIMIT {
+        if bytes.len() as u64 > output_limit {
             return Err("Git output exceeded the inspection limit");
         }
         Ok(String::from_utf8_lossy(&bytes).into_owned())

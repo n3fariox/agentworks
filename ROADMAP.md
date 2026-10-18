@@ -49,7 +49,7 @@ Pending: further Claude/Codex tool-use and resume validation, question/elicitati
 
 - This is a personal local application. Team accounts and public hosting are outside the first release.
 - The application launches and manages its own sessions. Attaching to arbitrary already-running terminal processes is a later investigation.
-- Each project can have several sessions. Parallel implementation work now uses separate Git branches/worktrees, with one coordinator reviewing and integrating changes sequentially. Managed worktree creation/cleanup in the app remains follow-up work.
+- Each project can have several sessions. Parallel implementation work uses separate Git branches/worktrees, with one coordinator reviewing and integrating changes sequentially. Batch 002 adds managed worktree launches and project isolation requirements; cleanup and merge controls remain follow-up work.
 - Local execution means files and processes live on the host; Claude/Codex model requests still use their configured remote providers.
 - Read-only file previews are in scope; a full browser IDE is deferred.
 - Linux is the first hosting target. Keep PTY creation, process control, paths, and service installation behind platform interfaces so Windows can be added later using ConPTY. macOS is not a launch requirement.

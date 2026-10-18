@@ -99,7 +99,9 @@ Definitions and run records are saved in SQLite alongside sessions. Completed, f
 
 ## Session workspace context
 
-Open **Workspace info** in a session to see its current Git branch, commit, repository/worktree paths, and whether it is a linked worktree. Detached HEAD, new branches without commits, non-Git directories and unavailable paths have explicit states. The dialog refreshes on open and preserves the chat stream and draft. This is read-only inspection; managed worktree creation/cleanup and merge controls are later work. See [workspace details and checks](WORKTREES.md).
+Open **Workspace info** in a session to see its current Git branch, commit, repository/worktree paths, and whether it is a linked worktree. Detached HEAD, new branches without commits, non-Git directories and unavailable paths have explicit states. The dialog refreshes on open and preserves the chat stream and draft. See [workspace details and checks](WORKTREES.md).
+
+**New session** can use a directory, create a new Git worktree, or discover an existing linked worktree. Project settings choose the default and can require isolated worktrees for new sessions, including MCP starts and automation runs. New worktrees use a committed revision; uncommitted source changes stay in the source directory. Existing sessions resume in their original directory. Deleting a session keeps worktree files and branches; cleanup and merge controls remain later work. Launch request IDs survive retries and tab reloads; interrupted preparation retains files and requires inspection before a deliberate fresh attempt. See [policy/API details](WORKTREE-POLICY.md) and [browser controls](WORKTREE-UI.md).
 
 ## Agent communication and MCP control
 
@@ -128,6 +130,8 @@ Deterministic MCP checks use isolated data and no model calls:
 npm run test:mcp-wire
 npm run test:communication
 npm run test:completion
+npm run test:worktree-policy
+npm run test:worktree-ui
 npm run test:git-context
 ```
 
@@ -144,7 +148,7 @@ AGENTWORKS_URL=http://127.0.0.1:4323 npm run test:mcp-harnesses
 
 Participating agents can call **report_completion** to persist a completed/blocked claim with a summary, branch/commit, checks and a retry request ID. **get_completion** reads a permitted session's latest report. Reports appear in **Agents & inbox**, survive updates/restarts and retain authenticated author identity. They do not end turns, start work, approve changes or merge commits. Review and integration remain separate from an agent's claim. See [report schemas, permissions and checks](COMPLETION-REPORTS.md).
 
-The first parallel development batch ran two real Codex sessions in separate branches/worktrees, with MCP handoffs and sequential reviewed merges. See [the batch record](work/batches/001-parallel-coordination.md) and [remaining work](work/BACKLOG.md).
+Parallel development uses real Codex sessions in separate branches/worktrees, with MCP handoffs and sequential reviewed merges. See [batch 001](work/batches/001-parallel-coordination.md), [batch 002](work/batches/002-worktree-policy.md), and [remaining work](work/BACKLOG.md).
 
 ## Hosts and projects
 
@@ -241,7 +245,7 @@ npx playwright test
 
 Browser checks cover desktop/mobile layout, session switching, permission requests across reload, cancellation, images, and Markdown file preview.
 
-After `cargo build --locked`, `npm run verify` starts an isolated server on port 4318, runs the API, project, settings/model, import, workspace/automation, completion-report, Git-context and browser suites, checks shutdown with an open browser connection, and stops its server. Use `AGENTWORKS_VERIFY_PORT` to change the test port.
+After `cargo build --locked`, `npm run verify` starts an isolated server on port 4318, runs the API, project, settings/model, import, workspace/automation, completion-report, worktree-policy, Git-context and browser suites, checks shutdown with an open browser connection, and stops its server. Use `AGENTWORKS_VERIFY_PORT` to change the main test port; worktree policy owns a separate server on port 4351.
 
 Architecture and follow-up work: [ROADMAP.md](ROADMAP.md), [Rust/ACP assessment](RUST-INTEGRATION.md), and [morsh reuse notes](MORSH-REUSE.md).
 

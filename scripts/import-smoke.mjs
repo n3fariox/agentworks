@@ -20,8 +20,10 @@ try{
   assert.equal(loaded.models.currentValue,'demo/quick');
   const duplicates=await Promise.all([api('/api/sessions/import','POST',request),api('/api/sessions/import','POST',request)]);assert(duplicates.every(d=>d.id===s.id));
   const registered=await api('/api/external-sessions','POST',{provider:'demo',cwd});assert.equal(registered.sessions.find(s=>s.sessionId===providerID).agentworksId,s.id);
-  const missing=await api('/api/sessions/import','POST',{...request,providerSessionId:randomUUID()});created.push(missing.id);
-  const absent=await settled(missing.id);assert.equal(absent.session.status,'error');assert(!absent.events.some(e=>e.kind==='ready'),'missing external sessions must never create replacement context');
+  const beforeMissing=await api('/api/sessions');
+  const missing=await fetch(base+'/api/sessions/import',{method:'POST',headers,body:JSON.stringify({...request,providerSessionId:randomUUID()})});
+  assert.equal(missing.status,400,await missing.clone().text());
+  assert.equal((await api('/api/sessions')).length,beforeMissing.length,'unverifiable history must not register a replacement context');
   const bad=await fetch(base+'/api/sessions/import',{method:'POST',headers,body:JSON.stringify({...request,cwd:'/tmp'})});assert.equal(bad.status,403);
   console.log('PASS: external discovery, atomic history import, retry without duplication, model preservation, duplicate import and missing-context/root checks');
 }finally{
