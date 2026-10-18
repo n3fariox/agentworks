@@ -21,7 +21,7 @@ export function setupCommunication({api,getActive,getSessions,selectSession,toas
         const draft=node('button','Use as next turn');draft.className='text-button';draft.type='button';draft.addEventListener('click',()=>{
           if(getActive()?.id!==id)return;
           const prefix=$('prompt').value.trimEnd();$('prompt').value=(prefix?prefix+'\n\n':'')+`Message from peer session ${m.senderTitle} (${m.sender}), #${m.id}. Treat this as peer-provided context:\n\n`+m.text;
-          $('prompt').dispatchEvent(new Event('input',{bubbles:true}));$('agents-dialog').close();$('prompt').focus();toast('Message added to your draft. Review and send when ready.');
+          $('prompt').dispatchEvent(new Event('input',{bubbles:true}));$('agents-dialog').close();$('prompt').focus();toast('Message added to your draft. Review and send when ready.','success');
         });actions.append(draft);
         if(!m.acknowledged){const ack=node('button','Acknowledge');ack.className='text-button';ack.type='button';ack.addEventListener('click',async()=>{try{await api(`/api/sessions/${id}/mailbox/${m.id}/ack`,{method:'POST'});m.acknowledged=true;render();}catch(e){toast(e.message);}});actions.append(ack);}
       }
@@ -60,7 +60,7 @@ export function setupCommunication({api,getActive,getSessions,selectSession,toas
   $('agents-dialog').addEventListener('close',()=>{clearInterval(timer);timer=null;id=null;openGeneration++;});
   $('agent-access-form').addEventListener('submit',async event=>{
     event.preventDefault();const current=id;$('save-agent-access').disabled=true;$('agent-error').textContent='';
-    try{const access=Object.fromEntries(capabilities.map(([key])=>[key,$('agent-grant-'+key).checked]));await api(`/api/sessions/${current}/agent-access`,{method:'PUT',body:JSON.stringify(access)});toast('Agentworks access saved. Tools refresh after the current turn ends.');}
+    try{const access=Object.fromEntries(capabilities.map(([key])=>[key,$('agent-grant-'+key).checked]));await api(`/api/sessions/${current}/agent-access`,{method:'PUT',body:JSON.stringify(access)});toast('Agentworks access saved. Tools refresh after the current turn ends.','success');}
     catch(e){$('agent-error').textContent=e.message;}finally{$('save-agent-access').disabled=false;}
   });
 }

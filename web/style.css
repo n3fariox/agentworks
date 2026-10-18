@@ -13,3 +13,37 @@
 
 #continuation-controls{font-size:12px;padding:8px 0;overflow-wrap:anywhere}#continuation-controls summary{cursor:pointer;min-height:28px}#continuation-controls label{display:block;margin:8px 0}#continuation-controls input[type=checkbox]{width:auto}#continuation-controls button{min-height:40px;margin-right:10px}#continuation-status{line-height:1.6}#continuation-time{max-width:100%;color:inherit;background:var(--surface);border:1px solid var(--border);padding:8px}
 #continuation-controls[open]{max-height:42dvh;overflow-y:auto;padding-right:6px;scrollbar-gutter:stable}#continuation-controls>summary{position:sticky;top:0;background:var(--bg);z-index:1}@media(max-width:800px){#continuation-controls[open]{max-height:32dvh}}
+
+/* Display preferences: code/literal blocks (web/display-preferences.js) and toast tone */
+.code-block{margin:0 0 13px;min-width:0;max-width:100%;background:#171a1e;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.code-block figcaption{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:4px 6px 4px 12px;border-bottom:1px solid var(--border);font-size:11px;color:var(--muted);white-space:normal}
+.code-language{font-family:ui-monospace,SFMono-Regular,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.code-actions{display:flex;gap:4px;flex-shrink:0}
+.code-actions button{background:transparent;border:1px solid transparent;border-radius:6px;color:#b6a1d5;font-size:11px;padding:4px 8px;min-height:28px;cursor:pointer}
+.code-actions button:hover,.code-actions button:focus-visible{border-color:var(--border);background:#1f2227}
+.code-actions button:focus-visible,.code-block pre:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.code-copy-status:empty{display:none}
+.code-copy-fallback{display:block;box-sizing:border-box;width:100%;margin:0;border:0;border-top:1px solid var(--border);border-radius:0;background:#101214;color:var(--text);font:11px/1.7 ui-monospace,SFMono-Regular,monospace;padding:8px 12px;white-space:pre;resize:vertical}
+.code-copy-status{display:block;padding:4px 12px;font-size:11px;color:var(--muted);border-top:1px solid var(--border)}
+.markdown .code-block pre,#file-content .code-block pre{margin:0;border:0;border-radius:0;padding:12px 15px;overflow:auto;max-height:none;white-space:pre}
+.code-block pre code{display:block;font:11px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;background:transparent;border:0;padding:0;color:#d1c7ed;white-space:inherit}
+body[data-code-wrap=wrap] .code-block pre,body[data-code-wrap=wrap] .tool-card pre,body[data-code-wrap=wrap] .approval pre,body[data-code-wrap=wrap] #file-content pre{white-space:pre-wrap;overflow-wrap:anywhere}
+body[data-code-wrap=scroll] .tool-card pre,body[data-code-wrap=scroll] .approval pre{white-space:pre;overflow-wrap:normal;overflow:auto}
+@media(max-width:650px){
+  body[data-code-wrap=auto] .code-block pre,body[data-code-wrap=auto] .tool-card pre,body[data-code-wrap=auto] .approval pre,body[data-code-wrap=auto] #file-content pre{white-space:pre-wrap;overflow-wrap:anywhere}
+  .code-actions button{min-height:40px;min-width:44px;font-size:12px}
+}
+.code-block.plain pre{white-space:pre-wrap;overflow-wrap:anywhere;font-family:inherit}
+.code-block.plain pre code{font-family:inherit;font-size:13px;line-height:1.8;color:#cbd0d8}
+.code-block.plain .code-language::after{content:' · plain text'}
+.tok-keyword{color:#c4a7ff}
+.tok-string{color:#9fd3b1}
+.tok-number{color:#f0c38e}
+.tok-comment{color:#7d8591;font-style:italic}
+.display-preferences{border:1px solid var(--border);border-radius:8px;padding:10px 14px 4px;margin:16px 0 0;min-width:0}
+.display-preferences legend{padding:0 6px;font-size:12px;color:var(--muted)}
+.display-field{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,auto);align-items:center;gap:6px 12px;margin:6px 0}
+.display-field select{min-width:0;max-width:100%}
+@media(max-width:650px){.display-field{grid-template-columns:minmax(0,1fr)}.display-field select{width:100%;min-height:40px}}
+#toast[data-tone=success]{background:#1f2e27;border-color:#4d7a62;color:#cfe9d9}
+#toast[data-tone=success]::before{content:'✓ ';color:var(--green)}
