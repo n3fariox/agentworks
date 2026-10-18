@@ -39,6 +39,14 @@ pub struct State {
     pub phase: Option<String>,
     // Evidence collected during a turn is never executable until its response terminates.
     pending: Option<Evidence>,
+    // Keep the assignment in place: never restore a snapshot over a later Stop/policy edit.
+    #[serde(default)]
+    status_probe: Option<StatusProbe>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct StatusProbe {
+    generation: u64,
+    authorization: u64,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Evidence {
@@ -68,6 +76,8 @@ impl State {
         self.authorization += 1;
     }
     pub fn reconcile(&mut self) {
+        // Known local reads are safe to abandon; resume only the saved assignment.
+        self.status_probe = None;
         // A durable claim might have reached the provider before the crash. Never replay it.
         if self.phase.as_deref() == Some("claimed") || self.phase.as_deref() == Some("dispatched") {
             self.due_at = None;
@@ -80,12 +90,40 @@ impl State {
         }
         self.pending = None;
     }
+    /// Prompt-acceptance hook, called under the existing run/session serialization.
+    /// This purpose is distinct from initial queued prompts and automatic continuation.
+    pub fn begin_turn(&mut self, provider: &str, commands: &Value, text: &str) {
+        self.status_probe = None;
+        if is_status_probe(provider, commands, text) {
+            self.pending = None;
+            self.status_probe = Some(StatusProbe {
+                generation: self.generation,
+                authorization: self.authorization,
+            });
+        } else {
+            self.cancel("New human or controller turn");
+        }
+    }
     fn eligible(&self, time: u64) -> bool {
         self.enabled
             && self.limited
             && self.attempts < self.max_attempts
             && self.deadline.is_some_and(|d| time < d)
     }
+}
+// Installed adapter semantics are required in addition to advertisement. A skill or
+// arbitrary slash command named similarly is never enough. Arguments are excluded.
+fn is_status_probe(provider: &str, commands: &Value, text: &str) -> bool {
+    let command = match (provider, text.trim()) {
+        ("codex", "/status") | ("demo", "/status") => "status",
+        ("claude", "/usage") | ("demo", "/usage") => "usage",
+        _ => return false,
+    };
+    commands.as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item["name"] == command && item["input"].is_null())
+    })
 }
 pub fn new_policy(input: Option<PolicyInput>) -> Result<State, (StatusCode, String)> {
     let mut state = State::default();
@@ -182,6 +220,7 @@ pub async fn configure(
             }
             .into(),
         );
+        policy.status_probe = data.continuation.status_probe.take();
         data.continuation = policy;
     }
     s.emit(
@@ -268,28 +307,72 @@ pub fn observe(s: &Session, update: &Value) {
 pub fn finish(s: &Session, stop: Option<&Value>, error: Option<&Value>) {
     let mut data = s.data.lock().unwrap();
     let p = &mut data.continuation;
+    finish_turn(p, &s.provider, stop, error, now());
+    drop(data);
+    s.emit("continuation", json!({"decision":"turn terminated"}));
+}
+fn finish_turn(
+    p: &mut State,
+    provider: &str,
+    stop: Option<&Value>,
+    error: Option<&Value>,
+    time: u64,
+) {
     let evidence = p
         .pending
         .take()
-        .or_else(|| error.and_then(|e| error_evidence(&s.provider, e)));
+        .or_else(|| error.and_then(|e| error_evidence(provider, e)));
+    if let Some(probe) = p.status_probe.take() {
+        if probe.generation != p.generation || probe.authorization != p.authorization {
+            return;
+        }
+        if stop.is_some_and(|v| v == "cancelled") {
+            p.cancel("Status check cancelled");
+        } else {
+            // A local check is not completion of the unfinished assignment. Only
+            // fresh structured blocking evidence may extend its existing reset.
+            if p.limited
+                && let Some(evidence) = evidence
+            {
+                if let Some(reset) = evidence.reset.filter(|r| *r > time) {
+                    p.observed_at = Some(time);
+                    p.source = Some(evidence.source);
+                    if p.eligible(time) {
+                        let backoff = 1_000u64.saturating_mul(1u64 << p.attempts.min(8));
+                        let due = reset.max(time + backoff).max(p.due_at.unwrap_or(0));
+                        p.due_at = p.deadline.filter(|d| due < *d).map(|_| due);
+                        p.phase = Some(
+                            if p.due_at.is_some() {
+                                "scheduled"
+                            } else {
+                                "paused"
+                            }
+                            .into(),
+                        );
+                    }
+                }
+            }
+        }
+        return;
+    }
     if stop.is_some_and(|v| v == "cancelled") {
         p.cancel("Turn cancelled");
     } else if let Some(evidence) =
         evidence.filter(|_| error.is_some() || stop.is_some_and(|v| v == "refusal"))
     {
         p.limited = true;
-        p.observed_at = Some(now());
+        p.observed_at = Some(time);
         p.limit_event = Some(uuid::Uuid::new_v4().to_string());
         p.source = Some(evidence.source);
         p.phase = Some("paused".into());
         p.reason = Some("Paused by verified provider usage limit".into());
-        if p.eligible(now()) {
+        if p.eligible(time) {
             let backoff = 1_000u64.saturating_mul(1u64 << p.attempts.min(8));
             // Expired timestamps at observation are stale; never fabricate a precise reset.
             p.due_at = evidence
                 .reset
-                .filter(|r| *r > now())
-                .map(|r| r.max(now() + backoff));
+                .filter(|r| *r > time)
+                .map(|r| r.max(time + backoff));
             if p.due_at
                 .is_some_and(|due| !p.deadline.is_some_and(|d| due < d))
             {
@@ -309,8 +392,6 @@ pub fn finish(s: &Session, stop: Option<&Value>, error: Option<&Value>) {
             "Turn ended normally; no continuation"
         });
     }
-    drop(data);
-    s.emit("continuation", json!({"decision":"turn terminated"}));
 }
 fn lineage(app: &App, s: &Session) -> bool {
     let mut policy = s.data.lock().unwrap().continuation.clone();
@@ -437,6 +518,10 @@ pub async fn scheduler(app: App) {
             let generation = data.continuation.generation;
             let attempt = data.continuation.attempts + 1;
             let request = format!("limit:{}:{}:{}", s.id, generation, attempt);
+            // A previous local read may have lost its transport without a turn response.
+            // This claim is purposefully the original assignment, never that abandoned read.
+            data.continuation.status_probe = None;
+            data.continuation.pending = None;
             data.continuation.attempts = attempt;
             data.continuation.request_id = Some(request.clone());
             data.continuation.phase = Some("claimed".into());
@@ -497,6 +582,145 @@ pub fn ready(s: &Session) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn scheduled() -> State {
+        State {
+            enabled: true,
+            generation: 7,
+            authorization: 3,
+            deadline: Some(100_000),
+            max_attempts: 4,
+            attempts: 2,
+            limited: true,
+            due_at: Some(5_000),
+            observed_at: Some(900),
+            source: Some("original verified reset".into()),
+            phase: Some("scheduled".into()),
+            ..Default::default()
+        }
+    }
+    fn commands() -> Value {
+        json!([{"name":"status"},{"name":"usage"}])
+    }
+    #[test]
+    fn only_exact_advertised_known_local_commands() {
+        assert!(is_status_probe("codex", &commands(), " /status\n"));
+        assert!(is_status_probe("claude", &commands(), "/usage"));
+        for (provider, text) in [
+            ("codex", "/usage"),
+            ("claude", "/status"),
+            ("opencode", "/status"),
+            ("codex", "/status help"),
+            ("codex", "/statusx"),
+            ("codex", "/STATUS"),
+            ("codex", "/status\ncontinue"),
+            ("codex", "status"),
+        ] {
+            assert!(!is_status_probe(provider, &commands(), text));
+        }
+        assert!(!is_status_probe("codex", &json!([]), "/status"));
+        assert!(!is_status_probe(
+            "codex",
+            &json!([{"name":"status","input":{"hint":"task"}}]),
+            "/status"
+        ));
+    }
+    #[test]
+    fn probe_keeps_assignment_bounds_and_overdue_timer_after_restart() {
+        let mut p = scheduled();
+        let before = serde_json::to_value(&p).unwrap();
+        p.begin_turn("codex", &commands(), "/status");
+        finish_turn(&mut p, "codex", Some(&json!("end_turn")), None, 6_000);
+        assert_eq!(serde_json::to_value(&p).unwrap(), before);
+        p.begin_turn("codex", &commands(), "/status");
+        let mut restored: State =
+            serde_json::from_value(serde_json::to_value(&p).unwrap()).unwrap();
+        restored.reconcile();
+        assert_eq!(serde_json::to_value(&restored).unwrap(), before);
+        assert!(restored.eligible(6_000));
+        assert_eq!(restored.due_at, Some(5_000));
+    }
+    #[test]
+    fn probe_evidence_never_renews_authorization_or_invents_reset() {
+        for reset in [None, Some(1), Some(20_000), Some(110_000)] {
+            let mut p = scheduled();
+            p.begin_turn("claude", &commands(), "/usage");
+            p.pending = Some(Evidence {
+                reset,
+                source: "fresh verified reset".into(),
+            });
+            // Local status can report exhaustion and still return a successful RPC.
+            finish_turn(&mut p, "claude", Some(&json!("end_turn")), None, 6_000);
+            assert_eq!(
+                (
+                    p.generation,
+                    p.authorization,
+                    p.attempts,
+                    p.max_attempts,
+                    p.deadline
+                ),
+                (7, 3, 2, 4, Some(100_000))
+            );
+            assert_eq!(
+                p.due_at,
+                match reset {
+                    Some(20_000) => Some(20_000),
+                    Some(110_000) => None,
+                    _ => Some(5_000),
+                }
+            );
+        }
+        let mut p = State::default();
+        p.begin_turn("codex", &commands(), "/status");
+        finish_turn(
+            &mut p,
+            "codex",
+            None,
+            Some(&json!({"data":{"codexErrorInfo":"usageLimitExceeded"}})),
+            6_000,
+        );
+        assert!(!p.enabled);
+        assert!(!p.limited);
+        assert!(p.due_at.is_none());
+    }
+    #[test]
+    fn terminal_changes_win_over_late_probe_results() {
+        for reason in ["Explicit Stop", "Completion reported", "Revoked"] {
+            let mut p = scheduled();
+            p.begin_turn("codex", &commands(), "/status");
+            p.stop(reason);
+            p.pending = Some(Evidence {
+                reset: Some(20_000),
+                source: "late".into(),
+            });
+            finish_turn(
+                &mut p,
+                "codex",
+                None,
+                Some(&json!({"data":{"codexErrorInfo":"usageLimitExceeded"}})),
+                6_000,
+            );
+            assert!(!p.enabled);
+            assert!(p.due_at.is_none());
+            assert_eq!(p.reason.as_deref(), Some(reason));
+        }
+        let mut p = scheduled();
+        p.begin_turn("codex", &commands(), "/status");
+        // Mirrors configure replacing the authorization, preserving only purpose.
+        let marker = p.status_probe.take();
+        p = State {
+            authorization: 4,
+            generation: 8,
+            status_probe: marker,
+            ..Default::default()
+        };
+        finish_turn(&mut p, "codex", Some(&json!("end_turn")), None, 6_000);
+        assert!(p.due_at.is_none());
+        assert!(!p.enabled);
+        let mut p = scheduled();
+        p.begin_turn("codex", &commands(), "replacement work");
+        assert!(p.due_at.is_none());
+        assert!(!p.limited);
+    }
     #[test]
     fn exact_provider_evidence_only() {
         assert!(

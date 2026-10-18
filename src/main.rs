@@ -1702,7 +1702,9 @@ async fn prompt(
                 "Wait for this session to become idle",
             ));
         }
-        data.continuation.cancel("New human or controller turn");
+        let commands = data.available_commands.clone();
+        data.continuation
+            .begin_turn(&s.provider, &commands, &req.text);
         data.status = "running".into();
         data.turn_active = true;
         data.requests.insert(req.request_id.clone());
