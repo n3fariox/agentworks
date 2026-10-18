@@ -2,7 +2,7 @@
 
 Design and implementation checkpoint, October 17, 2026.
 
-Implemented: native Rust stdio MCP and private loopback service bridge; durable per-session capabilities, project-scoped text inboxes/replies/acknowledgements, audit activity, default-off browser presets and individual grants, explicit draft delivery, coordinator session creation/prompt/cancellation/manual automation runs, retry deduplication, and initiator visibility. Actual messaging has been verified with Claude, Codex, and OpenCode. Automatic wake-up, cross-project grants, cross-host forwarding, external-client credentials, and file attachments remain deferred. See [usage and checks](README.md#agent-communication-and-mcp-control).
+Implemented: native Rust stdio MCP and private loopback service bridge; durable per-session capabilities, project-scoped text inboxes/replies/acknowledgements, audit activity, default-off browser presets and individual grants, explicit draft delivery, coordinator session creation/prompt/cancellation/manual automation runs, retry deduplication, and initiator visibility. Actual messaging has been verified with Claude, Codex, and OpenCode. Batch 007 adds default-off bounded inbox delivery ([policy, ledger and integration notes](work/INBOX-DELIVERY.md)); combined human-input queue integration remains a coordinator acceptance check. Cross-project grants, cross-host forwarding, external-client credentials, and file attachments remain deferred. See [usage and checks](README.md#agent-communication-and-mcp-control).
 
 Batch 001 additionally delivered durable self-authored completion reports and live Git/worktree context, using two concurrent Codex sessions inside Agentworks. See [the integration record](work/batches/001-parallel-coordination.md).
 

@@ -51,7 +51,7 @@ impl Store {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
         )?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 6 {
+        if version > 7 {
             return Err("Session database was created by a newer Agentworks version".into());
         }
         connection.execute_batch("BEGIN; CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, metadata TEXT NOT NULL, state TEXT NOT NULL);
@@ -68,7 +68,11 @@ impl Store {
           CREATE TABLE IF NOT EXISTS agent_completions(id INTEGER PRIMARY KEY AUTOINCREMENT,author TEXT NOT NULL,author_title TEXT NOT NULL,project_id TEXT,request_id TEXT NOT NULL,payload TEXT NOT NULL,report TEXT NOT NULL,created INTEGER NOT NULL,UNIQUE(author,request_id));
           CREATE INDEX IF NOT EXISTS agent_completions_latest ON agent_completions(author,id DESC);
           CREATE TABLE IF NOT EXISTS session_creations(request_key TEXT PRIMARY KEY,payload TEXT NOT NULL,session_id TEXT,error TEXT,mutation_started INTEGER NOT NULL DEFAULT 0);
-          PRAGMA user_version=6; COMMIT;")?;
+          COMMIT;")?;
+        connection.execute_batch(&format!(
+            "BEGIN; {} PRAGMA user_version=7; COMMIT;",
+            crate::inbox_delivery::SCHEMA
+        ))?;
         Ok(Self {
             connection,
             _lock: lock,
@@ -344,6 +348,7 @@ impl Store {
                 .map(str::to_owned);
             let state = SessionData {
                 lifecycle: Default::default(),
+                inbox_turn: None,
                 status: "suspended".into(),
                 seq: snapshot["seq"].as_u64().unwrap_or(0),
                 events: VecDeque::new(),
@@ -458,7 +463,7 @@ mod tests {
                     .connection
                     .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                     .unwrap(),
-                6
+                7
             );
         }
         let state:SessionData=serde_json::from_value(json!({"status":"idle","seq":0,"requests":[],"models":null,"available_commands":[],"turn_active":false,"project_id":null,"provider_session_id":null})).unwrap();
@@ -488,7 +493,7 @@ mod tests {
             assert_eq!(
                 db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                     .unwrap(),
-                6
+                7
             );
             for (sql, expected) in [
                 (
@@ -652,6 +657,7 @@ mod tests {
         };
         let mut state = SessionData {
             lifecycle: Default::default(),
+            inbox_turn: None,
             status: "starting".into(),
             seq: 0,
             events: VecDeque::new(),

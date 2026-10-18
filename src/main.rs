@@ -4,6 +4,7 @@ mod communication;
 mod completion;
 mod diff;
 mod git_context;
+mod inbox_delivery;
 mod lifecycle;
 mod limit_resume;
 mod mcp;
@@ -84,6 +85,8 @@ struct Session {
 #[derive(Clone, Serialize, Deserialize)]
 struct SessionData {
     status: String,
+    #[serde(default)]
+    inbox_turn: Option<inbox_delivery::Turn>,
     #[serde(default)]
     lifecycle: lifecycle::Metadata,
     seq: u64,
@@ -222,6 +225,7 @@ impl Session {
             };
             if matches!(status, "idle" | "error" | "closed" | "suspended") {
                 data.turn_active = false;
+                data.inbox_turn = None;
             }
         }
         self.emit("status", json!({"status":status}));
@@ -263,8 +267,10 @@ impl Session {
         }
     }
     fn send_command(&self, command: runtime::Command) -> Result<(), (StatusCode, String)> {
-        if !matches!(command, runtime::Command::Cancel)
-            && self.data.lock().unwrap().storage_error.is_some()
+        if !matches!(
+            command,
+            runtime::Command::Cancel | runtime::Command::CancelInbox(_)
+        ) && self.data.lock().unwrap().storage_error.is_some()
         {
             return Err(fail(
                 StatusCode::INSUFFICIENT_STORAGE,
@@ -310,6 +316,7 @@ impl Session {
             if let Some(origin) = data.automation.as_mut() {
                 origin.outcome = None;
             }
+            data.inbox_turn = None;
             data.requests.insert(id.clone());
             data.status = "running".into();
             data.turn_active = true;
@@ -467,6 +474,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     store
         .import_legacy(&db_path.with_file_name("legacy-sessions.json"))
         .map_err(|e| e.to_string())?;
+    inbox_delivery::reconcile(&mut store).map_err(|(_, e)| e)?;
     let restored = store.load().map_err(|e| e.to_string())?;
     let mcp_listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let mcp_endpoint = mcp_listener.local_addr()?;
@@ -497,6 +505,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         timeouts::set_default(policy);
     }
     for (metadata, mut data) in restored {
+        inbox_delivery::restore(&mut data);
         data.continuation.reconcile();
         let pending = data.queued_prompt.take().is_some();
         let interrupted = data.turn_active
@@ -510,6 +519,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         data.status = "suspended".into();
         data.turn_active = false;
+        data.inbox_turn = None;
         let (tx, _) = broadcast::channel(128);
         let s = Arc::new(Session {
             id: metadata.id,
@@ -539,6 +549,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     service_restart::initialize(&app)?;
     tokio::spawn(service_restart::scheduler(app.clone()));
     let scheduler = tokio::spawn(limit_resume::scheduler(app.clone()));
+    let inbox_scheduler = tokio::spawn(inbox_delivery::scheduler(app.clone()));
     tokio::spawn(mcp::serve_bridge(app.clone(), mcp_listener));
     let router = Router::new()
         .route(
@@ -632,6 +643,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route(
+            "/inbox-delivery.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../web/inbox-delivery.js"),
+                )
+            }),
+        )
+        .route(
             "/communication.js",
             get(|| async {
                 (
@@ -718,6 +738,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/sessions/{id}/completion",
             get(completion::get_completion),
         )
+        .route(
+            "/api/sessions/{id}/inbox-delivery",
+            get(inbox_delivery::get).put(inbox_delivery::configure),
+        )
         .route("/api/sessions/{id}/peers", get(communication::get_peers))
         .route(
             "/api/sessions/{id}/mailbox",
@@ -765,6 +789,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = tokio::signal::ctrl_c().await;
             scheduler.abort();
             let _ = scheduler.await;
+            inbox_scheduler.abort();
+            let _=inbox_scheduler.await;
             for s in app.sessions.lock().unwrap().values() {
                 if let Some(worker) = s.worker.lock().unwrap().take() { worker.abort(); }
                 *s.commands.lock().unwrap()=None;
@@ -1172,8 +1198,8 @@ async fn rename_project(
 }
 async fn delete_project(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     let _gate = app.communication_lock.lock().await;
+    let _run = app.run_lock.lock().await;
     let _workspace = app.workspace_lock.lock().await;
-    let mut catalog = app.catalog.lock().unwrap();
     app.store
         .lock()
         .unwrap()
@@ -1184,10 +1210,13 @@ async fn delete_project(State(app): State<App>, Path(id): Path<String>) -> ApiRe
                 "Could not update automation projects",
             )
         })?;
-    catalog
+    app.catalog
+        .lock()
+        .unwrap()
         .remove(&id)
         .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
-    for s in app.sessions.lock().unwrap().values() {
+    let affected: Vec<_> = app.sessions.lock().unwrap().values().cloned().collect();
+    for s in &affected {
         let moved = {
             let mut data = s.data.lock().unwrap();
             if data.project_id.as_deref() == Some(&id) {
@@ -1198,6 +1227,7 @@ async fn delete_project(State(app): State<App>, Path(id): Path<String>) -> ApiRe
             }
         };
         if moved {
+            inbox_delivery::revoke_related(&app, s, "Project deleted")?;
             s.emit("session_updated", json!({"projectId":null}));
         }
     }
@@ -1214,6 +1244,7 @@ async fn assign_project(
     Json(req): Json<ProjectChoice>,
 ) -> ApiResult {
     let _gate = app.communication_lock.lock().await;
+    let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
     let mut catalog = app.catalog.lock().unwrap();
     if req
@@ -1233,6 +1264,8 @@ async fn assign_project(
                 )
             })?;
     }
+    drop(catalog);
+    inbox_delivery::revoke_related(&app, &s, "Project assignment changed")?;
     s.data.lock().unwrap().project_id = req.project_id.clone();
     s.emit("session_updated", json!({"projectId":req.project_id}));
     Ok(Json(s.meta()))
@@ -1500,6 +1533,7 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             .as_millis() as u64,
         data: Mutex::new(SessionData {
             lifecycle: Default::default(),
+            inbox_turn: None,
             status: "starting".into(),
             seq: 0,
             events: VecDeque::new(),
@@ -1702,6 +1736,7 @@ async fn prompt(
                 "Wait for this session to become idle",
             ));
         }
+        data.inbox_turn = None;
         let commands = data.available_commands.clone();
         data.continuation
             .begin_turn(&s.provider, &commands, &req.text);
@@ -1724,6 +1759,7 @@ async fn cancel(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     let _run = app.run_lock.lock().await;
     let restart_error = service_restart::stop_requester(&app, &id).err();
     let s = session(&app, &id)?;
+    let inbox_error = inbox_delivery::cancel(&s, "Explicit Stop").err();
     let status = {
         let mut data = s.data.lock().unwrap();
         data.continuation.stop("Explicit Stop");
@@ -1749,6 +1785,9 @@ async fn cancel(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
             StatusCode::INSUFFICIENT_STORAGE,
             "Stop requested, but saving failed; inspect server storage",
         ));
+    }
+    if let Some(error) = inbox_error {
+        return Err(error);
     }
     if let Some(error) = restart_error {
         return Err(error);
@@ -1797,6 +1836,7 @@ async fn delete_session(State(app): State<App>, Path(id): Path<String>) -> ApiRe
     let _gate = app.communication_lock.lock().await;
     let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
+    inbox_delivery::revoke_related(&app, &s, "Session deleted")?;
     let _ = lifecycle::suspend_locked(&s).await?;
     app.store.lock().unwrap().delete(&id).map_err(|_| {
         fail(

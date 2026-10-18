@@ -20,6 +20,10 @@ impl Manager {
             releases: std::env::var_os("AGENTWORKS_RELEASE_DIR").map(PathBuf::from),
         }
     }
+    #[cfg(test)]
+    pub(crate) fn block_admission_for_test(&self) {
+        self.blocked.store(true, Ordering::SeqCst);
+    }
     fn supported(&self) -> bool {
         let Some(dir) = &self.control else {
             return false;

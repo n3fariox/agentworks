@@ -126,8 +126,10 @@ pub fn report(app: &App, s: &Session, req: Report) -> mail::Result<Value> {
     )
     .map_err(error)?;
     tx.execute("INSERT INTO agent_audit(actor,action,target,outcome,created) VALUES (?1,'completion_reported',?1,?2,?3)",params![s.id,format!("report:{id}"),created]).map_err(error)?;
+    crate::inbox_delivery::cancel_db(&tx, &s.id, "Explicit completion or blocked report")?;
     tx.commit().map_err(error)?;
     drop(store);
+    crate::inbox_delivery::interrupt_inflight(s, "Explicit completion or blocked report")?;
     s.data
         .lock()
         .unwrap()
