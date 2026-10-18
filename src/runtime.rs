@@ -488,7 +488,7 @@ pub async fn run(
                         tokio::pin!(request);
                         // Policy is fixed at launch; later edits apply to later turns.
                         let mut clock=crate::timeouts::Clock::new(crate::timeouts::effective(s.data.lock().unwrap().timeouts.clone()),crate::timeouts::now_ms());
-                        crate::timeouts::begin(&s.id);
+                        let _activity=crate::timeouts::begin(&s.id);
                         s.emit("timeout_policy",json!({"policy":clock.policy}));
                         let grace=clock.policy.cancel_grace_seconds;
                         // Far-future sleep until a cancel/timeout arms the grace deadline.
@@ -501,7 +501,6 @@ pub async fn run(
                             tokio::select! {
                                 result=&mut request=>{
                                     s.clear_approvals();
-                                    crate::timeouts::end(&s.id);
                                     match (result,timed_out) {
                                         // A timed-out turn is a deliberate cancellation: never schedule quota continuation.
                                         (Ok(result),Some(kind))=>{crate::limit_resume::finish(&s,Some(&json!("cancelled")),None);s.emit("turn_end",json!({"stopReason":result.stop_reason,"timedOut":kind}));},
@@ -524,7 +523,7 @@ pub async fn run(
                                     }
                                     Some(Command::Prompt(_))=>{},
                                     Some(Command::Model(_))=>{},
-                                    None=>{crate::timeouts::end(&s.id);return Ok(())},
+                                    None=>return Ok(()),
                                 },
                                 _=tick.tick(),if !cancelled=>{
                                     // Lock order: approvals guard released before any emit/status.
@@ -545,7 +544,7 @@ pub async fn run(
                                         }
                                     }
                                 }
-                                _=&mut deadline=>{crate::timeouts::end(&s.id);if timed_out.is_some(){crate::limit_resume::finish(&s,Some(&json!("cancelled")),None);}return Err(agent_client_protocol::Error::internal_error().data(format!("Agent did not stop within {grace} seconds after {}; session closed",match timed_out {Some("total")=>"the total turn limit",Some(_)=>"the inactivity timeout",None=>"cancellation"})))},
+                                _=&mut deadline=>{if timed_out.is_some(){crate::limit_resume::finish(&s,Some(&json!("cancelled")),None);}return Err(agent_client_protocol::Error::internal_error().data(format!("Agent did not stop within {grace} seconds after {}; session closed",match timed_out {Some("total")=>"the total turn limit",Some(_)=>"the inactivity timeout",None=>"cancellation"})))},
                             }
                         }
                     }

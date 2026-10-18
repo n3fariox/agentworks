@@ -20,12 +20,16 @@ export function setupTimeoutControls({$,api,getActive}){
   function read(s){const p={totalIncludesHumanWait:f(s,'totalIncludesHumanWait').checked};for(const[k]of fields)p[k]=num(f(s,k).value);return p;}
   const note=(s,t)=>part(s).querySelector('[data-note]').textContent=t;
   async function load(){
-    try{const r=await api('/api/timeouts');fill('default',r.default);note('default','Applies to later turns: '+describe(r.default));}catch(e){note('default','Cannot load timeouts: '+e.message);}
+    let saved=null;
+    try{const r=await api('/api/timeouts');saved=r.default;fill('default',saved);note('default','Applies to later turns: '+describe(saved));}catch(e){note('default','Cannot load timeouts: '+e.message);}
     const a=getActive();part('session').hidden=!a;
+    // Next-turn policy is the override, else the freshly loaded default (never a stale snapshot).
+    if(a&&!a.timeouts&&saved)a.effectiveTimeouts=saved;
     if(a){f('session','override').checked=!!a.timeouts;fill('session',a.timeouts||a.effectiveTimeouts);note('session','Next turn uses: '+describe(a.effectiveTimeouts));}
   }
   part('default').querySelector('[data-save]').onclick=async()=>{
-    try{const r=await api('/api/timeouts',{method:'PUT',body:JSON.stringify(read('default'))});note('default','Saved. Later turns use: '+describe(r.default));}catch(e){note('default',e.message);}
+    try{const r=await api('/api/timeouts',{method:'PUT',body:JSON.stringify(read('default'))});note('default','Saved. Later turns use: '+describe(r.default));
+      const a=getActive();if(a&&!a.timeouts){a.effectiveTimeouts=r.default;fill('session',r.default);note('session','Next turn uses: '+describe(r.default));}}catch(e){note('default',e.message);}
   };
   part('session').querySelector('[data-save]').onclick=async()=>{
     const a=getActive();if(!a)return;
@@ -34,7 +38,8 @@ export function setupTimeoutControls({$,api,getActive}){
   };
   // Transcript notice for timeout events; returns null for unrelated kinds.
   function notice(kind,d){
-    if(kind==='timeout_policy'){const a=getActive();if(a)a.effectiveTimeouts=d.policy;return 'Turn limits: '+describe(d.policy);}
+    // The running turn's fixed policy stays separate from the next-turn effective policy.
+    if(kind==='timeout_policy'){const a=getActive();if(a)a.currentTimeouts=d.policy;return 'Turn limits: '+describe(d.policy);}
     if(kind==='timeout_warning')return d.kind==='total'?`Turn limit approaching: ${d.remainingSeconds}s left`:`No output for ${d.quietSeconds}s; the agent may be waiting on a quiet tool`;
     if(kind==='timeout')return `Turn stopped by ${d.kind==='total'?'total limit':'inactivity timeout'}; cancelling (${d.graceSeconds}s grace). It will not be retried.`;
     if(kind==='timeout_settings')return 'Session timeout settings changed for the next turn: '+describe(d.effective);

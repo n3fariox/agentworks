@@ -902,7 +902,15 @@ async fn save_session_timeouts(
     let s = session(&app, &id)?;
     let effective = {
         let mut data = s.data.lock().unwrap();
-        data.timeouts = req.policy;
+        let mut next = data.clone();
+        next.timeouts = req.policy;
+        // Commit before publishing: a failed save is never acknowledged or applied.
+        s.store
+            .lock()
+            .unwrap()
+            .save_state(&s.id, &next)
+            .map_err(|_| fail(StatusCode::INSUFFICIENT_STORAGE, "Could not save session timeouts"))?;
+        *data = next;
         timeouts::effective(data.timeouts.clone())
     };
     let result = json!({"timeouts":s.data.lock().unwrap().timeouts,"effective":effective,"appliesTo":"nextTurn"});

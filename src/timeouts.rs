@@ -102,6 +102,7 @@ fn empty(value: Option<&Value>) -> bool {
 #[derive(Default)]
 pub struct Activity {
     pub last: Option<u64>,
+    generation: u64,
     snapshots: HashMap<String, u64>,
 }
 impl Activity {
@@ -115,7 +116,11 @@ impl Activity {
                 let c = &update["content"];
                 !(c["type"] == "text" && empty(c.get("text"))) && !empty(Some(c))
             }
-            Some("tool_call") => true,
+            // Only a new call (or a changed one) counts; repeated announcements are heartbeats.
+            Some("tool_call") => {
+                let id = update["toolCallId"].as_str().unwrap_or_default();
+                self.changed(&format!("{id}\0call"), update)
+            }
             Some("plan") => self.changed("\0plan", &update["entries"]),
             Some("tool_call_update") => {
                 let id = update["toolCallId"].as_str().unwrap_or_default();
@@ -135,14 +140,37 @@ fn turns() -> &'static Mutex<HashMap<String, Activity>> {
     CELL.get_or_init(Default::default)
 }
 /// Start a fresh activity record; stale values from earlier turns are discarded.
-pub fn begin(session: &str) {
-    turns()
-        .lock()
-        .unwrap()
-        .insert(session.into(), Activity::default());
+/// The guard removes it on every exit path (errors, `?`, task abort/Suspend).
+pub fn begin(session: &str) -> TurnGuard {
+    static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    turns().lock().unwrap().insert(
+        session.into(),
+        Activity {
+            generation,
+            ..Default::default()
+        },
+    );
+    TurnGuard {
+        session: session.into(),
+        generation,
+    }
 }
-pub fn end(session: &str) {
-    turns().lock().unwrap().remove(session);
+pub struct TurnGuard {
+    session: String,
+    generation: u64,
+}
+impl Drop for TurnGuard {
+    fn drop(&mut self) {
+        let mut turns = turns().lock().unwrap();
+        // A newer turn's record is never removed by an older guard.
+        if turns
+            .get(&self.session)
+            .is_some_and(|t| t.generation == self.generation)
+        {
+            turns.remove(&self.session);
+        }
+    }
 }
 /// Updates outside an active turn are ignored, so the map holds only running turns.
 pub fn observe(session: &str, update: &Value, now_ms: u64) {
@@ -310,21 +338,26 @@ mod tests {
         assert!(a.meaningful(&done) && !a.meaningful(&done));
     }
     #[test]
-    fn activity_is_per_turn_and_released() {
-        observe("t1", &json!({"sessionUpdate":"tool_call"}), 3);
+    fn activity_is_per_turn_and_released_by_guard() {
+        observe("t1", &json!({"sessionUpdate":"tool_call","toolCallId":"a"}), 3);
         assert_eq!(last_activity("t1"), None, "ignored outside a turn");
-        begin("t1");
+        let first = begin("t1");
         observe("t1", &json!({"sessionUpdate":"usage_update"}), 5);
         assert_eq!(last_activity("t1"), None);
-        observe("t1", &json!({"sessionUpdate":"tool_call"}), 7);
-        assert_eq!(last_activity("t1"), Some(7));
-        begin("t1");
-        assert_eq!(
-            last_activity("t1"),
-            None,
-            "new turn discards stale activity"
-        );
-        end("t1");
+        let call = json!({"sessionUpdate":"tool_call","toolCallId":"a","title":"run"});
+        observe("t1", &call, 7);
+        observe("t1", &call, 9);
+        assert_eq!(last_activity("t1"), Some(7), "repeated tool_call is a heartbeat");
+        let second = begin("t1");
+        assert_eq!(last_activity("t1"), None, "new turn discards stale activity");
+        drop(first);
+        assert!(turns().lock().unwrap().contains_key("t1"), "old guard keeps newer turn");
+        // Simulated abort/early return: dropping the guard always releases the entry.
+        let task = std::thread::spawn(move || {
+            let _g = second;
+            panic!("aborted turn");
+        });
+        assert!(task.join().is_err());
         assert!(!turns().lock().unwrap().contains_key("t1"));
     }
     #[test]

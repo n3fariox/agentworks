@@ -55,6 +55,18 @@ test('timeout defaults validate, session override applies to the next turn and i
   await page.locator('#prompt').fill('hello timeouts');await page.locator('#send').click();
   await expect(page.locator('#session-state')).toHaveText('Ready');
   await expect(page.getByText('Turn limits: 3600s total (excludes approval waits) · warn after 120s quiet')).toBeVisible();
+  // Clearing the override falls back to a newly saved default for the next turn.
+  await page.locator('#open-settings').click();
+  await def.getByLabel('Total turn limit (seconds)').fill('1200');
+  await def.locator('[data-save]').click();
+  await expect(def.locator('[data-note]')).toContainText('Saved. Later turns use: 1200s total');
+  await ses.getByLabel('Override the default for this session').uncheck();
+  await ses.locator('[data-save]').click();
+  await expect(ses.locator('[data-note]')).toContainText('Saved. Next turn uses: 1200s total');
+  await page.locator('#dismiss-settings').click();
+  await page.locator('#open-settings').click();
+  await expect(ses.locator('[data-note]')).toContainText('Next turn uses: 1200s total');
+  await page.locator('#dismiss-settings').click();
   await page.reload();await expect(page.locator('#session-state')).toHaveText('Ready');
   await expect(page.getByText('Turn limits: 3600s total')).toBeVisible();
 });
