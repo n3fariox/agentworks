@@ -23,3 +23,11 @@ After review of the first group, choose the next useful independent slices from 
 ## Progress and handoff
 
 First group dispatched. Implementation, review, integration and deployment evidence will be recorded as work completes. Detailed local task/state artifacts remain ignored under `.cache/batch-004/`.
+
+### Coordinator quota interruption and transfer
+
+The external coordinator hit its own Codex limit shortly after dispatch and did not automatically restart. Agentworks continuation applies to sessions it owns, not this external conversation. The eight-hour window has elapsed; do not restart backlog driving under the expired authorization. The user requested a service restart and transfer of this conversation into Agentworks. R-06 records supervised service-restart controls as new backlog work.
+
+State checked 2026-10-18 13:15 UTC: L-01 completed on `2d615504c1d5693e358c77ee1d8da84eb4e32e50`, D-01 completed on `808fdf4f4c2025710bf5b8f1f4e78687d59a0edb`. Both have completion claims and handoffs in the coordination inbox, but remain unreviewed/unmerged/undeployed. OpenCode palettes reached `49ce600` with claimed passing checks but ended in an error before its final handoff. Claude display ended in an error with incomplete work; inspect its worktree and saved transcript before resuming. Main remains the deployed L-09 code plus coordination documentation; no new feature integration occurred.
+
+Coordinator native Codex session: `01a14a2c-ee30-71a2-bf54-e551e9ec6d76`, cwd `/home/captain/projects/agentworks`. Import using the existing external-session picker after this turn ends, then read this record, `.cache/batch-004/state.json`, worker snapshots and inbox messages after cursor 53. Do not replay prompts or overwrite worker branches. Review existing completed work before assigning more, with renewed user scope for further backlog driving.
