@@ -4,7 +4,7 @@ This board distinguishes delivered behavior from the older architecture proposal
 
 ## Current batch
 
-[Batch 006](batches/006-session-usability.md) is closed: U-06 compact work logs, U-07 composer usage status and L-07 configurable timeouts are reviewed, corrected, merged and deployed as `agentworks-6d1740d`, with successful supervised readiness and preserved native sessions. Workers are suspended with their branches and histories retained. B-02 remains high priority and unimplemented; no new backlog batch is active. [Batch 005](batches/005-service-restart.md) delivered supervised restart, and [batch 004](batches/004-overnight.md) delivered L-01, U-01/B-01, D-01 and U-04. The [self-improvement workflow](SELF-IMPROVEMENT.md) grants service-restart control only to the selected coordinator.
+[Batch 007](batches/007-reliable-continuation.md) starts two Codex workers and one Claude Auto worker for high-priority B-02, C-06 optional inbox wake-up and L-05 activity/queued inputs. Its worker checkpoint deadline is 2026-10-18 21:15 UTC; no new implementation is integrated or deployed yet. [Batch 006](batches/006-session-usability.md) is closed with U-06, U-07 and L-07 deployed as `agentworks-6d1740d`; completed workers are archived/suspended with histories retained. [Batch 005](batches/005-service-restart.md) delivered supervised restart, and [batch 004](batches/004-overnight.md) delivered L-01, U-01/B-01, D-01 and U-04. The [self-improvement workflow](SELF-IMPROVEMENT.md) grants service-restart control only to the selected coordinator.
 
 | ID | Task | Status | Acceptance |
 | --- | --- | --- | --- |
