@@ -4,6 +4,7 @@ mod communication;
 mod completion;
 mod git_context;
 mod limit_resume;
+mod lifecycle;
 mod mcp;
 mod runtime;
 mod store;
@@ -69,7 +70,7 @@ struct Session {
     commands: Mutex<Option<mpsc::Sender<runtime::Command>>>,
     store: Arc<Mutex<store::Store>>,
     approvals: Mutex<HashMap<String, Approval>>,
-    worker: Mutex<Option<tokio::task::AbortHandle>>,
+    worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
     mcp_endpoint: std::net::SocketAddr,
     mcp_token: Mutex<String>,
     mcp_refresh_pending: std::sync::atomic::AtomicBool,
@@ -78,6 +79,8 @@ struct Session {
 #[derive(Clone, Serialize, Deserialize)]
 struct SessionData {
     status: String,
+    #[serde(default)]
+    lifecycle: lifecycle::Metadata,
     seq: u64,
     #[serde(skip)]
     events: VecDeque<Value>,
@@ -132,6 +135,12 @@ impl Session {
         }
         redact(&mut data, &self.mcp_token.lock().unwrap());
         let mut state = self.data.lock().unwrap();
+        if kind == "status" {
+            // A concurrent worker may have advanced state before this event acquired
+            // the lock. Publish the actual state rather than an obsolete transition.
+            data["status"] = json!(state.status);
+            data["explicitlySuspended"] = json!(state.lifecycle.suspended);
+        }
         if let Some(origin) = state.automation.as_mut().filter(|a| a.outcome.is_none()) {
             origin.outcome = match kind {
                 "turn_end" => Some(
@@ -200,18 +209,27 @@ impl Session {
     }
     fn meta(&self) -> Value {
         let data = self.data.lock().unwrap();
-        json!({"id":self.id,"provider":self.provider,"cwd":self.cwd,"title":self.title,
-            "created":self.created,"status":data.status,"turnRunning":data.turn_active,
+        json!({"id":self.id,"provider":self.provider,"cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),
+            "archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"created":self.created,"status":data.status,"turnRunning":data.turn_active,
             "projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation})
     }
     fn snapshot(&self) -> Value {
         let approvals = self.approvals.lock().unwrap();
         let data = self.data.lock().unwrap();
         json!({"kind":"snapshot","seq":data.seq,"session":{"id":self.id,"provider":self.provider,
-            "cwd":self.cwd,"title":self.title,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation},"events":data.events,
+            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation},"events":data.events,
             "truncated":data.events.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
             "models":data.models,"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|json!({"id":id,"request":a.request})).collect::<Vec<_>>()})
+    }
+    fn display_title(&self) -> String {
+        self.data
+            .lock()
+            .unwrap()
+            .lifecycle
+            .title
+            .clone()
+            .unwrap_or_else(|| self.title.clone())
     }
     fn metadata(&self) -> store::Metadata {
         store::Metadata {
@@ -582,7 +600,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route(
             "/api/sessions/{id}",
-            get(get_session).delete(delete_session),
+            get(get_session).patch(lifecycle::update).delete(delete_session),
         )
         .route(
             "/api/sessions/{id}/agent-access",
@@ -611,6 +629,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/api/sessions/{id}/prompt", post(prompt))
         .route("/api/sessions/{id}/cancel", post(cancel))
+        .route("/api/sessions/{id}/stop", post(cancel))
+        .route("/api/sessions/{id}/suspend", post(lifecycle::suspend))
         .route("/api/sessions/{id}/resume", post(resume))
         .route("/api/sessions/{id}/model", post(set_model))
         .route("/api/sessions/{id}/approvals/{approval}", post(approve))
@@ -882,6 +902,8 @@ async fn list_external_sessions(
                 && data.provider_session_id.as_deref() == item["sessionId"].as_str()
         }) {
             item["agentworksId"] = json!(existing.id);
+            item["archived"] = existing.meta()["archived"].clone();
+            item["title"] = json!(existing.display_title());
         }
         visible.push(item);
     }
@@ -1029,13 +1051,14 @@ async fn assign_project(
     s.emit("session_updated", json!({"projectId":req.project_id}));
     Ok(Json(s.meta()))
 }
-async fn list_sessions(State(app): State<App>) -> Json<Value> {
+async fn list_sessions(State(app): State<App>, Query(query): Query<lifecycle::Filter>) -> Json<Value> {
     let mut list: Vec<_> = app
         .sessions
         .lock()
         .unwrap()
         .values()
         .map(|s| s.meta())
+        .filter(|s| query.includes(s["archived"].as_bool().unwrap_or(false)))
         .collect();
     list.sort_by_key(|s| std::cmp::Reverse(s["created"].as_u64().unwrap_or(0)));
     Json(json!(list))
@@ -1059,7 +1082,7 @@ async fn activity(State(app): State<App>) -> Json<Value> {
                     data.status.as_str(),
                     "starting" | "resuming" | "configuring" | "cancelling"
                 );
-            json!({"id":s.id,"title":s.title,"provider":s.provider,"status":data.status,
+            json!({"id":s.id,"title":data.lifecycle.title.as_deref().unwrap_or(&s.title),"provider":s.provider,"status":data.status,
             "turnRunning":data.turn_active,"pendingApprovals":approvals.len(),"canClose":!busy,"continuation":data.continuation})
         })
         .collect();
@@ -1286,6 +1309,7 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             .unwrap()
             .as_millis() as u64,
         data: Mutex::new(SessionData {
+            lifecycle: Default::default(),
             status: "starting".into(),
             seq: 0,
             events: VecDeque::new(),
@@ -1402,9 +1426,10 @@ fn start_worker(s: &Arc<Session>) {
             worker_s.status("error");
         }
     });
-    *handle = Some(worker.abort_handle());
+    *handle = Some(worker);
 }
 async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
+    let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
     if !installed(&s.provider) || !s.cwd.is_dir() {
         return Err(fail(
@@ -1439,9 +1464,11 @@ async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
         {
             return Err(fail(StatusCode::CONFLICT, "Limit: 12 active harnesses"));
         }
+        data.lifecycle.suspended = false;
         data.status = "resuming".into();
     }
-    s.emit("status", json!({"status":"resuming"}));
+    lifecycle::stop_worker(&s).await;
+    s.status("resuming");
     start_worker(&s);
     Ok(Json(json!({"accepted":true})))
 }
@@ -1500,13 +1527,28 @@ async fn prompt(
 async fn cancel(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
-    {
-        s.data.lock().unwrap().continuation.stop("Explicit Stop");
-    }
+    let status = {
+        let mut data = s.data.lock().unwrap();
+        data.continuation.stop("Explicit Stop");
+        let status = data.status.clone();
+        if matches!(status.as_str(), "running" | "waiting") {
+            data.status = "cancelling".into();
+        }
+        status
+    };
     s.emit("continuation", json!({"decision":"Explicit Stop"}));
-    let status = s.data.lock().unwrap().status.clone();
-    if status == "running" || status == "waiting" {
-        s.send_command(runtime::Command::Cancel)?;
+    if matches!(status.as_str(), "starting" | "resuming" | "configuring") {
+        let _ = lifecycle::suspend_locked(&s).await?;
+    } else if status == "running" || status == "waiting" {
+        s.emit("status", json!({"status":"cancelling"}));
+        if let Err(error) = s.send_command(runtime::Command::Cancel) {
+            let _ = lifecycle::suspend_locked(&s).await?;
+            return Err(error);
+        }
+        s.clear_approvals();
+    }
+    if s.data.lock().unwrap().storage_error.is_some() {
+        return Err(fail(StatusCode::INSUFFICIENT_STORAGE, "Stop requested, but saving failed; inspect server storage"));
     }
     Ok(Json(json!({"ok":true})))
 }
@@ -1519,6 +1561,7 @@ async fn set_model(
     Path(id): Path<String>,
     Json(req): Json<ModelChoice>,
 ) -> ApiResult {
+    let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
     {
         let mut data = s.data.lock().unwrap();
@@ -1550,6 +1593,7 @@ async fn delete_session(State(app): State<App>, Path(id): Path<String>) -> ApiRe
     let _gate = app.communication_lock.lock().await;
     let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
+    let _ = lifecycle::suspend_locked(&s).await?;
     app.store.lock().unwrap().delete(&id).map_err(|_| {
         fail(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1557,10 +1601,6 @@ async fn delete_session(State(app): State<App>, Path(id): Path<String>) -> ApiRe
         )
     })?;
     app.sessions.lock().unwrap().remove(&id);
-    s.clear_approvals();
-    if let Some(worker) = s.worker.lock().unwrap().take() {
-        worker.abort();
-    }
     s.status("closed");
     Ok(Json(json!({"ok":true})))
 }
@@ -1574,6 +1614,7 @@ async fn approve(
     Path((id, approval_id)): Path<(String, String)>,
     Json(req): Json<Decision>,
 ) -> ApiResult {
+    let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
     let approval = {
         let mut pending = s.approvals.lock().unwrap();
@@ -1588,6 +1629,14 @@ async fn approve(
         }
         pending.remove(&approval_id).unwrap()
     };
+    let approvals = s.approvals.lock().unwrap();
+    let running = {
+        let mut data = s.data.lock().unwrap();
+        let running = approvals.is_empty() && data.turn_active && data.status == "waiting";
+        if running { data.status = "running".into(); }
+        running
+    };
+    drop(approvals);
     approval
         .answer
         .send(Some(req.option_id.clone()))
@@ -1596,8 +1645,9 @@ async fn approve(
         "approval_resolved",
         json!({"id":approval_id,"optionId":req.option_id}),
     );
-    if s.approvals.lock().unwrap().is_empty() {
-        s.status("running");
+    if running {
+        // The prompt may have completed immediately after receiving the answer.
+        s.emit("status", json!({"status":"running"}));
     }
     Ok(Json(json!({"ok":true})))
 }

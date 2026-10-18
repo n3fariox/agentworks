@@ -85,6 +85,7 @@ pub fn report(app: &App, s: &Session, req: Report) -> mail::Result<Value> {
     req.validate()?;
     let payload = serde_json::to_string(&req).map_err(error)?;
     let project = mail::project(s);
+    let title = s.display_title();
     let mut store = app.store.lock().unwrap();
     let tx = store.connection.transaction().map_err(error)?;
     let previous: Option<(String, String)> = tx
@@ -110,13 +111,13 @@ pub fn report(app: &App, s: &Session, req: Report) -> mail::Result<Value> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
-    tx.execute("INSERT INTO agent_completions(author,author_title,project_id,request_id,payload,report,created) VALUES (?1,?2,?3,?4,?5,'{}',?6)", params![s.id,s.title,project,req.request_id,payload,created]).map_err(error)?;
+    tx.execute("INSERT INTO agent_completions(author,author_title,project_id,request_id,payload,report,created) VALUES (?1,?2,?3,?4,?5,'{}',?6)", params![s.id,title,project,req.request_id,payload,created]).map_err(error)?;
     let id = tx.last_insert_rowid();
     let mut report = serde_json::to_value(req).map_err(error)?;
     let obj = report.as_object_mut().unwrap();
     obj.insert("id".into(), json!(id));
     obj.insert("author".into(), json!(s.id));
-    obj.insert("authorTitle".into(), json!(s.title));
+    obj.insert("authorTitle".into(), json!(title));
     obj.insert("projectId".into(), json!(project));
     obj.insert("created".into(), json!(created));
     tx.execute(
