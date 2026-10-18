@@ -252,6 +252,7 @@ pub fn send(app: &App, s: &Session, req: SendMessage) -> Result<Value> {
     tx.execute("INSERT INTO agent_messages(sender,sender_title,recipient,recipient_title,text,reply_to,created,request_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![s.id,sender_title,target.id,target_title,req.text,req.reply_to,now(),req.request_id]).map_err(db_error)?;
     let id = tx.last_insert_rowid();
     tx.execute("INSERT INTO agent_audit(actor,action,target,outcome,created) VALUES (?1,'send_message',?2,'accepted',?3)",params![s.id,target.id,now()]).map_err(db_error)?;
+    crate::inbox_delivery::enqueue(&tx, &target.id, id)?;
     tx.commit().map_err(db_error)?;
     drop(store);
     s.emit("mailbox_updated", json!({"messageId":id}));
@@ -288,6 +289,9 @@ pub async fn set_access(
 ) -> ApiResult {
     let _gate = app.communication_lock.lock().await;
     let s = session(&app, &id)?;
+    if !req.communicate {
+        crate::inbox_delivery::revoke_related(&app, &s, "Communication grant revoked")?;
+    }
     app.store.lock().unwrap().save_access(&id, &req)?;
     s.emit("agent_access", serde_json::to_value(&req).unwrap());
     // Grants apply immediately. Refresh cached tool catalogs after the active turn ends.

@@ -1,3 +1,4 @@
+import {setupInboxDelivery} from '/inbox-delivery.js';
 import {setupDiff} from '/diff.js';
 import {setupWorktreeControls,setupPolicyEditor} from '/worktree-controls.js';
 import {setupGitContext} from '/git-context.js';
@@ -333,7 +334,7 @@ function consume(e,live=false){
   else if(e.kind==='models'){modelConfig=d;}
   else if(e.kind==='permission_modes'){permissionModes=d;}
   else if(e.kind==='commands'){availableCommands=Array.isArray(d)?d:[];renderCommands();}
-  else if(e.kind==='user'){assistant=null;if(d.initiatedBy)transcript.push({id:uuid(),type:'notice',text:'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});addMessage('user',d.text).seq=e.seq;}
+  else if(e.kind==='user'){assistant=null;if(d.inboxDelivery)transcript.push({id:uuid(),type:'notice',text:'Automatic inbox turn authorized by you; peer messages are untrusted context.'});else if(d.initiatedBy)transcript.push({id:uuid(),type:'notice',text:'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});addMessage('user',d.text).seq=e.seq;}
   else if(e.kind==='status'){
     status=d.status;if(active){active.status=status;if(d.explicitlySuspended!==undefined)active.explicitlySuspended=d.explicitlySuspended;const s=sessions.find(s=>s.id===active.id);if(s)s.status=status;}sidebar();
   }else if(e.kind==='approval'){approvals.set(d.id,d.request);}
@@ -660,6 +661,7 @@ async function init(){
 init().catch(error=>toast('Cannot reach the local server: '+error.message));
 
 setupCommunication({api,getActive:()=>active,getSessions:()=>sessions,selectSession,toast,uuid});
+setupInboxDelivery({api,getActive:()=>active,toast,uuid});
 
 setupGitContext({api,getActive:()=>active});
 

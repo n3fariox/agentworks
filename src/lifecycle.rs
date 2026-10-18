@@ -45,6 +45,9 @@ pub async fn update(
             "Use a title of 1–80 characters without control characters",
         ));
     }
+    if req.archived == Some(true) {
+        crate::inbox_delivery::cancel(&s, "Recipient archived")?;
+    }
     {
         let mut data = s.data.lock().unwrap();
         let mut next = data.clone();
@@ -81,6 +84,7 @@ pub async fn stop_worker(s: &Session) {
     }
 }
 pub async fn suspend_locked(s: &Session) -> ApiResult {
+    let inbox_error = crate::inbox_delivery::cancel(s, "Explicit suspend").err();
     {
         let mut data = s.data.lock().unwrap();
         data.lifecycle.suspended = true;
@@ -99,6 +103,9 @@ pub async fn suspend_locked(s: &Session) -> ApiResult {
             StatusCode::INSUFFICIENT_STORAGE,
             "Harness suspended, but saving failed; inspect server storage",
         ));
+    }
+    if let Some(error) = inbox_error {
+        return Err(error);
     }
     Ok(Json(s.meta()))
 }
