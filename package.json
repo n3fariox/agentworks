@@ -19,7 +19,11 @@
     "test:git-context": "playwright test tests/git-context.spec.mjs",
     "test:worktree-policy": "node scripts/worktree-policy-smoke.mjs",
     "test:worktree-ui": "playwright test tests/worktree-launch.spec.mjs",
-    "test:limit-resume": "node scripts/limit-resume-smoke.mjs"
+    "test:limit-resume": "node scripts/limit-resume-smoke.mjs",
+    "test:lifecycle": "node scripts/lifecycle-smoke.mjs",
+    "test:diff": "playwright test tests/diff.spec.mjs",
+    "test:palettes": "playwright test tests/palettes.spec.mjs",
+    "prepare:coordinator": "node scripts/prepare-self-improvement.mjs"
   },
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "0.93.0",
