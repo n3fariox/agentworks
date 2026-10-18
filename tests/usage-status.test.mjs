@@ -21,16 +21,24 @@ assert.equal(s.context.dropped,true);
 assert.ok(usageView(s).details.includes('Occupancy decreased since the previous report (cause not reported)'));
 s=replay(events.slice(0,4));
 assert.equal(s.context.sizeChanged,true);
-assert.deepEqual(Object.keys(s.quota),['5h']);
-assert.ok(usageView(s).details.some(d=>d.startsWith('5h quota (reported): status allowed_warning · utilization 42')));
-assert.ok(usageView(s).details.includes('7d quota: not reported'));
+assert.deepEqual(Object.keys(s.quota),['5h','7d']);
+assert.equal(s.quota['5h'].resetsAt,1792366200000,'seconds converted to ms');
+v=usageView(s);
+assert.match(v.label,/· 5h 23% used\/77% left ⚠ · 7d 10% used\/90% left ⚠$/,'replayed quota marked stale, never bare 5h0');
+assert.ok(v.details.some(d=>d.startsWith('5h quota (reported): 23% used / 77% remaining · status allowed · resets')&&d.includes('freshness unknown (replayed event #4')));
+assert.ok(v.details.some(d=>d.startsWith('7d quota (reported): 10% used / 90% remaining · resets')));
+// Live quota is fresh and independent of context freshness.
+const live=applyUsageEvent(replay(events.slice(0,3)),events[3],1792360000000);
+assert.match(usageView(live,{now:1792360000000}).label,/5h 23% used\/77% left · 7d 10% used\/90% left$/);
+// Scalar utilization of unverified scale alone is not shown.
+assert.deepEqual(applyUsageEvent(emptyUsage(),{kind:'acp',data:{sessionUpdate:'usage_update',used:1,size:2,_meta:{'_claude/rateLimit':{rateLimitType:'five_hour',utilization:0.4}}}}).quota,{});
 // Parent/subagent-attributed usage is ignored.
 s=replay(events.slice(0,5));
 assert.equal(s.context.used,9000);assert.equal(s.ignored,1);
 // Invalid negative/out-of-range values are rejected.
 s=replay(events.slice(0,6));
 assert.equal(s.context.used,9000);assert.equal(s.cost.amount,0.0421);
-assert.equal(s.quota['7d'].utilization,undefined);
+assert.equal(s.quota['5h'].usedPercent,23,'out-of-range fraction rejected');assert.equal(s.quota['7d'].usedPercent,10,'negative fraction rejected');
 // Live partial cost-only update does not freshen old context.
 const now=1760000000000;
 s=applyUsageEvent(replay(events.slice(0,6)),events[6],now);
@@ -43,6 +51,10 @@ assert.ok(v.details.some(d=>d.includes('0.5000 (currency unknown)')));
 s=applyUsageEvent(emptyUsage(),events[1],now);
 assert.ok(!usageView(s,{now}).stale);
 assert.ok(usageView(s,{now:now+STALE_MS+1}).stale);
+// size 0 means unknown, never a percentage.
+s=replay(events);
+assert.equal(s.context.size,undefined);assert.equal(usageView(s).label.split(' · ')[0],'⚠ 100 ctx');
+assert.equal(s.quota['5h'].usedPercent,30);
 // Replay is deterministic; non-usage events never change state.
 assert.deepEqual(replay(events),replay(events));
 const base=emptyUsage();

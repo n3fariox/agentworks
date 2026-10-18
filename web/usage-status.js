@@ -34,7 +34,7 @@ export function applyUsageEvent(state,e,observedAt=null){
   if(attributedElsewhere(d))return {...state,ignored:state.ignored+1};
   const fresh={at:observedAt,seq:num(e.seq)??null};
   const next={...state,events:state.events+1,quota:{...state.quota}};
-  const used=nonneg(d.used),size=nonneg(d.size);
+  const used=nonneg(d.used),size=nonneg(d.size)||undefined; // size 0 means unknown
   if(used!==undefined||size!==undefined){
     const prev=state.context;
     next.context={used,size,percent:used!==undefined&&size?used/size*100:undefined,...fresh,
@@ -47,12 +47,16 @@ export function applyUsageEvent(state,e,observedAt=null){
   const model=d._meta?.['_claude/model'];
   if(typeof model==='string'&&model)next.model={name:model,...fresh};
   const rl=d._meta?.['_claude/rateLimit'];
-  const label=QUOTA_LABELS[rl?.rateLimitType];
-  if(label){
-    const u=num(rl.utilization);
-    next.quota[label]={status:typeof rl.status==='string'?rl.status:null,
-      utilization:u!==undefined&&u>=0&&u<=100?u:undefined,
-      resetsAt:nonneg(rl.resetsAt)!==undefined?(rl.resetsAt<1e12?rl.resetsAt*1000:rl.resetsAt):null,...fresh};
+  // Only `unifiedWindows` fractions (0..1, verified from live persisted events) give
+  // a used share. Scalar `utilization` has an unverified scale and is not shown.
+  const windows=rl?.unifiedWindows&&typeof rl.unifiedWindows==='object'?rl.unifiedWindows:{};
+  for(const [key,label] of Object.entries(QUOTA_LABELS)){
+    const w=windows[key];
+    const u=num(w?.utilization);
+    if(u===undefined||u<0||u>1)continue;
+    const reset=nonneg(w.resetsAt);
+    next.quota[label]={usedPercent:u*100,status:rl.rateLimitType===key&&typeof rl.status==='string'?rl.status:null,
+      resetsAt:reset===undefined?null:(reset<1e12?reset*1000:reset),...fresh};
   }
   return next;
 }
@@ -69,9 +73,10 @@ export function usageView(state,{now=Date.now(),provider}={}){
   let label='Context unknown';
   if(c?.used!==undefined&&c.size)label=`${fmt(c.used)}/${fmt(c.size)} · ${Math.round(Math.min(100,c.percent))}%`;
   else if(c?.used!==undefined)label=`${fmt(c.used)} ctx · size unknown`;
-  const compactQuota=Object.entries(state.quota).filter(([,w])=>w.utilization!==undefined&&!freshness(w,now).stale).map(([k,w])=>`${k} ${Math.round(w.utilization)}`);
+  const pct=n=>Math.round(n);
+  const compactQuota=['5h','7d'].filter(k=>state.quota[k]).map(k=>{const w=state.quota[k];return `${k} ${pct(w.usedPercent)}% used/${pct(100-w.usedPercent)}% left${freshness(w,now).stale?' ⚠':''}`;});
   const quota=['5h','7d'].map(k=>{const w=state.quota[k];if(!w)return `${k} quota: not reported`;
-    return `${k} quota (reported): status ${w.status||'unknown'} · utilization ${w.utilization!==undefined?w.utilization+' (provider scale, used not remaining)':'unknown'} · ${w.resetsAt?'resets '+new Date(w.resetsAt).toLocaleString():'reset unknown'} · ${freshness(w,now).text}`;});
+    return `${k} quota (reported): ${pct(w.usedPercent)}% used / ${pct(100-w.usedPercent)}% remaining${w.status?' · status '+w.status:''} · ${w.resetsAt?'resets '+new Date(w.resetsAt).toLocaleString():'reset unknown'} · ${freshness(w,now).text}`;});
   const details=[
     c?`Context occupancy (current window): ${c.used!==undefined?c.used.toLocaleString():'unknown'} of ${c.size!==undefined?c.size.toLocaleString():'unknown'} tokens${c.percent!==undefined?` (${c.percent.toFixed(1)}%)`:''} · ${cf.text}`:'Context occupancy: not reported yet',
     c?.dropped?'Occupancy decreased since the previous report (cause not reported)':'',

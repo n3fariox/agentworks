@@ -80,4 +80,22 @@ test('composer usage statusline: live, replay, partial, attributed, session swit
   await expect(details(page)).toBeHidden();
   await open(page,a.id);
   await expect(toggle(page)).toHaveText('⚠ 60k/200k · 30%');
+  // Reported unified 5h/7d windows (verified live shape; fractions 0..1, resets in seconds).
+  await open(page,b.id);
+  const rateLimit={status:'allowed',rateLimitType:'five_hour',resetsAt:1792366200,unifiedWindows:{five_hour:{utilization:0.23,resetsAt:1792366200},seven_day:{utilization:0.1,resetsAt:1792803600}}};
+  await inject(page,{used:68468,size:1000000,_meta:{'_claude/model':'demo-model','_claude/rateLimit':rateLimit}});
+  await expect(toggle(page)).toHaveText('68k/1.0M · 7% · 5h 23% used/77% left · 7d 10% used/90% left');
+  await toggle(page).click();
+  await expect(details(page)).toContainText('5h quota (reported): 23% used / 77% remaining · status allowed');
+  await expect(details(page)).toContainText('7d quota (reported): 10% used / 90% remaining');
+  // Invalid fractions are rejected and do not overwrite reported windows.
+  await inject(page,{used:70000,size:1000000,_meta:{'_claude/rateLimit':{unifiedWindows:{five_hour:{utilization:1.5},seven_day:{utilization:-0.2}}}}});
+  await expect(toggle(page)).toHaveText('70k/1.0M · 7% · 5h 23% used/77% left · 7d 10% used/90% left');
+  // Replay: quota and context freshness unknown; a live context update leaves quota stale.
+  await page.reload();await expect(page.locator('#session-state')).toHaveText('Ready');
+  await expect(toggle(page)).toHaveText('⚠ 70k/1.0M · 7% · 5h 23% used/77% left ⚠ · 7d 10% used/90% left ⚠');
+  await inject(page,{used:80000,size:0});
+  await expect(toggle(page)).toHaveText('80k ctx · size unknown · 5h 23% used/77% left ⚠ · 7d 10% used/90% left ⚠');
+  await toggle(page).click();
+  await expect(details(page).locator('div',{hasText:'5h quota'})).toContainText('freshness unknown (replayed');
 });
