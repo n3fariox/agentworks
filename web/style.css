@@ -34,3 +34,26 @@
 #diff-dialog details{margin-top:12px}
 #diff-dialog summary{cursor:pointer}
 @media(max-width:650px){.diff-layout{grid-template-columns:minmax(0,1fr)}#diff-files{min-height:100px;height:120px}#diff-dialog{padding:16px}#diff-dialog .dialog-heading h2{overflow-wrap:anywhere;min-width:0}#diff-patch{max-height:45dvh}}
+.palette-entry{margin-bottom:0}
+#palette-search{font-size:20px}
+#palette-dialog{width:560px;padding:26px 0 20px;overflow:hidden}
+#palette-dialog>.dialog-heading,#palette-dialog>.palette-modes,#palette-dialog>.field-note{margin-left:29px;margin-right:29px}
+#palette-dialog>.dialog-heading h2{font-size:19px;margin:0}
+.palette-modes{display:flex;gap:6px;margin-top:16px}
+.palette-modes button{flex:1;background:#171a1f;color:var(--muted);border:1px solid var(--border);border-radius:7px;padding:8px;font-size:11px}
+.palette-modes button[aria-pressed=true]{background:#2b2636;color:#d6c9f6;border-color:#463c5c}
+#palette-dialog>label{margin:14px 29px 6px}
+#palette-input{border-width:1px 0;border-radius:0;padding:12px 29px;font-size:15px;background:#121417}
+#palette-list{max-height:min(50dvh,420px);overflow:auto;overscroll-behavior:contain;padding:8px 14px}
+.palette-option{display:grid;grid-template-columns:1fr auto;gap:2px 10px;padding:9px 11px;border:1px solid transparent;border-radius:8px;cursor:pointer}
+.palette-option[aria-selected=true]{background:#2a2536;border-color:#453a5e}
+.palette-option.disabled{opacity:.5}
+.palette-option.disabled[aria-selected=true]{opacity:.75}
+.palette-option-label{font-size:13px;overflow-wrap:anywhere}
+.palette-option mark{background:transparent;color:var(--accent);font-weight:600}
+.palette-option-group{font-size:10px;color:var(--muted);white-space:nowrap;align-self:center}
+.palette-option-detail,.palette-option-reason{grid-column:1/-1;font-size:11px;color:var(--muted);overflow-wrap:anywhere}
+.palette-option-reason{color:#d8b17a}
+.palette-empty,.palette-keys{color:var(--muted)}
+#palette-status{margin-top:12px}
+@media(pointer:coarse){.palette-option{padding:12px 11px;min-height:44px}.palette-keys{display:none}}

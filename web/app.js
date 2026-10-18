@@ -3,6 +3,7 @@ import {setupWorktreeControls,setupPolicyEditor} from '/worktree-controls.js';
 import {setupGitContext} from '/git-context.js';
 import {createWorkspace} from '/workspace.js';
 import {setupCommunication} from '/communication.js';
+import {setupPalettes} from '/palettes.js';
 const $ = id => document.getElementById(id);
 // randomUUID is unavailable on plain HTTP remote origins; getRandomValues is supported.
 const uuid = () => globalThis.crypto.randomUUID?.() ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -616,6 +617,36 @@ init().catch(error=>toast('Cannot reach the local server: '+error.message));
 setupCommunication({api,getActive:()=>active,getSessions:()=>sessions,selectSession,toast,uuid});
 
 setupGitContext({api,getActive:()=>active});
+
+// A chosen harness command only reaches the composer; nothing here submits a turn.
+function insertCommand(text) {
+  if(!active)return;
+  const current=$('prompt').value;
+  $('prompt').value=/^\s*[/\$]\S*$/.test(current)||!current.trim()?text+' ':current.replace(/\s+$/,'')+' '+text+' ';
+  $('prompt').dispatchEvent(new Event('input'));
+  $('prompt').focus();
+}
+function usageCommand(){return availableCommands.find(c=>c.name===(active?.provider==='claude'?'usage':'status'));}
+setupPalettes({
+  $,labels,selectSession,
+  fallbackFocus:()=>active?$('prompt'):null,
+  state:()=>({active,status,connected,sessions,projects,hosts,commands:availableCommands,
+    usageAvailable:!!active&&['claude','codex'].includes(active.provider)&&!!usageCommand(),
+    views:{files:()=>$('nav-files').click(),automations:()=>$('nav-automations').click()}}),
+  handlers:{
+    newSession:()=>openCreate(),
+    importSession:()=>openImport(),
+    newProject:()=>openProjectDialog(),
+    settings:()=>$('open-settings').click(),
+    agents:()=>{if(active)$('session-agents').click();},
+    workspaceInfo:()=>{if(active)$('session-workspace').click();},
+    resume:()=>{if(active&&connected&&['suspended','error'].includes(status))resumeSession(active.id);},
+    stop:()=>{if(active&&connected&&['running','waiting'].includes(status))$('stop').click();},
+    usage:()=>{if(active&&connected&&status==='idle')$('show-usage').click();},
+    deleteSession:()=>{if(active)$('close-session').click();},
+    insertCommand,
+  },
+});
 
 async function refreshContinuation(){
   const id=active?.id;if(!id)return;
