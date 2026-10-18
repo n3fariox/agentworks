@@ -17,7 +17,7 @@ export function formatElapsed(ms){
 
 export function setupInputQueue({$,api,uuid,getActive,getStatus,toolActive}){
   const indicator=$('activity-indicator'),list=$('input-queue');
-  let queue={items:[],paused:null},pendingEnqueue=null,editing=null;
+  let queue={items:[],paused:null},editing=null;
   // Elapsed timing: `exact` only when this page saw the turn start live. After replay or
   // reconnect the start is unknown, so we show time observed since reconnect, labelled so.
   let since=null,exact=false,lastStatus=null,timer=null;
@@ -30,7 +30,7 @@ export function setupInputQueue({$,api,uuid,getActive,getStatus,toolActive}){
     if(!busy){since=null;exact=false;}
     lastStatus=status;renderActivity();
   }
-  function reset(){since=null;exact=false;lastStatus=null;queue={items:[],paused:null};editing=null;pendingEnqueue=null;renderActivity();render();}
+  function reset(){since=null;exact=false;lastStatus=null;queue={items:[],paused:null};editing=null;renderActivity();render();}
   function renderActivity(){
     const status=getStatus(),label=activityLabel(status,toolActive());
     indicator.hidden=!label;
@@ -48,14 +48,10 @@ export function setupInputQueue({$,api,uuid,getActive,getStatus,toolActive}){
   async function call(suffix,options){
     const r=await api(path(suffix),options);set(r.queue);return r;
   }
-  // Retries with the same text reuse one request ID; a changed draft gets a new one.
-  async function enqueue(text){
-    const id=sid();if(!id)return false;
-    if(!pendingEnqueue||pendingEnqueue.text!==text||pendingEnqueue.sid!==id)pendingEnqueue={text,sid:id,requestId:uuid()};
-    const submission=pendingEnqueue;
-    await call('',{method:'POST',body:JSON.stringify({text:submission.text,requestId:submission.requestId})});
-    if(pendingEnqueue===submission)pendingEnqueue=null;
-    return true;
+  // The caller owns the stable per-session request identity; retries reuse it.
+  async function enqueue(id,{text,requestId}){
+    const r=await api(`/api/sessions/${encodeURIComponent(id)}/queue`,{method:'POST',body:JSON.stringify({text,requestId})});
+    if(id===sid())set(r.queue);return r;
   }
   let lastSig=null;
   function render(){

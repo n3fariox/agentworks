@@ -190,3 +190,103 @@ test('restart during queued dispatch pauses as ambiguous and never replays',asyn
     expect(users.some(e=>e.data.text==='later')).toBe(false);
   }finally{proc.child.kill();}
 });
+
+test('late idempotency: removed/sent IDs stay bound and direct prompts never duplicate queued IDs',async()=>{
+  const path=`/api/sessions/${session.id}/queue`;
+  const a=await api(path,{text:'bound text',requestId:'late-1'});
+  await api(`${path}/${a.result.id}`,{text:'edited text',revision:0},'PATCH');
+  expect((await call(path,{text:'some other text',requestId:'late-1'})).status).toBe(409);
+  await api(`${path}/${a.result.id}`,undefined,'DELETE');
+  const retry=await api(path,{text:'bound text',requestId:'late-1'});
+  expect(retry.result.duplicate).toBe(true);
+  expect(retry.queue.items.length).toBe(0);
+  expect((await call(path,{text:'changed after remove',requestId:'late-1'})).status).toBe(409);
+  // A late direct prompt with a queued request ID is a duplicate, not a new turn.
+  const direct=await api(`/api/sessions/${session.id}/prompt`,{text:'bound text',requestId:'late-1'});
+  expect(direct.duplicate).toBe(true);
+  // A request ID already sent directly cannot also be queued.
+  await api(`/api/sessions/${session.id}/prompt`,{text:'hello direct',requestId:'direct-1'});
+  const dup=await api(path,{text:'hello direct',requestId:'direct-1'});
+  expect(dup.result.sentDirectly).toBe(true);
+  await until(async()=>await state()==='idle');
+  expect((await api(`/api/sessions/${session.id}`)).events.filter(e=>e.kind==='user').length).toBe(1);
+});
+
+test('quota failure of a queued item pauses the queue and never sends later items',async()=>{
+  const path=`/api/sessions/${session.id}/queue`;
+  await api(`/api/sessions/${session.id}/prompt`,{text:'slow before quota',requestId:'pre'});
+  await api(path,{text:'quota known',requestId:'qq'});
+  await api(path,{text:'after quota',requestId:'aq'});
+  await until(async()=>(await api(path)).queue.paused!=null,25000);
+  const q=(await api(path)).queue;
+  expect(q.items[0].state).toBe('error');
+  expect(q.items[1].state).toBe('paused');
+  await new Promise(r=>setTimeout(r,800));
+  const users=(await api(`/api/sessions/${session.id}`)).events.filter(e=>e.kind==='user').map(e=>e.data.text);
+  expect(users).toEqual(['slow before quota','quota known']);
+});
+
+test('status-only probe turn does not trigger queued substantive work; a real turn does',async()=>{
+  const path=`/api/sessions/${session.id}/queue`;
+  await api(path,{text:'substantive queued',requestId:'sq'});
+  await api(`/api/sessions/${session.id}/prompt`,{text:'/status',requestId:'probe'});
+  await until(async()=>await state()==='idle');
+  await new Promise(r=>setTimeout(r,800));
+  expect((await api(path)).queue.items[0].state).toBe('queued');
+  await api(`/api/sessions/${session.id}/prompt`,{text:'hello',requestId:'real'});
+  await until(async()=>(await api(path)).queue.items[0].state==='sent',15000);
+});
+
+test('Stop and Suspend win over turn-end dispatch',async()=>{
+  const path=`/api/sessions/${session.id}/queue`;
+  // Stop while idle blocks pending items even though nothing is running.
+  await api(path,{text:'idle pending',requestId:'ip'});
+  await api(`/api/sessions/${session.id}/stop`,{});
+  expect((await api(path)).queue.paused).toContain('Stop');
+  await api(`${path}/q1`,undefined,'DELETE');
+  // Suspend mid-turn: the turn ends but nothing is dispatched; resume of the queue is refused while suspended.
+  await api(`/api/sessions/${session.id}/prompt`,{text:'slow suspend me',requestId:'sm'});
+  await api(path,{text:'must not run',requestId:'mn'});
+  await api(`/api/sessions/${session.id}/suspend`,{});
+  await until(async()=>await state()==='suspended');
+  await new Promise(r=>setTimeout(r,800));
+  expect((await api(path)).queue.items[0].state).toBe('paused');
+  expect((await call(`${path}/resume`,{})).status).toBe(409);
+  expect((await api(`/api/sessions/${session.id}`)).events.filter(e=>e.kind==='user').map(e=>e.data.text)).toEqual(['slow suspend me']);
+});
+
+test('Send then Enter race queues the second input exactly once without losing it',async({page})=>{
+  await openSession(page);
+  await page.locator('#prompt').fill('slow race first');
+  await page.locator('#send').click();
+  await page.locator('#prompt').fill('race second');
+  await page.locator('#prompt').press('Enter');
+  await expect(page.locator('#input-queue .queue-text')).toHaveText(['race second']);
+  await expect(page.locator('#prompt')).toHaveValue('');
+  await until(async()=>(await api(`/api/sessions/${session.id}/queue`)).queue.items[0]?.state==='sent',25000);
+  const users=(await api(`/api/sessions/${session.id}`)).events.filter(e=>e.kind==='user').map(e=>e.data.text);
+  expect(users).toEqual(['slow race first','race second']);
+});
+
+test('storage fault: queue changes are not acknowledged or applied when persistence fails',async()=>{
+  const {DatabaseSync}=await import('node:sqlite');
+  const dir=await mkdtemp(resolve('.cache/input-queue-fault-'));const url='http://127.0.0.1:4513';
+  const proc=launch(4513,dir);await ready(proc,url);
+  try{
+    const s=await api('/api/sessions',{provider:'demo',cwd:dir,title:'Fault'},undefined,url);
+    await until(async()=>await state(url,s.id)==='idle');
+    const path=`/api/sessions/${s.id}/queue`;
+    const ok=await api(path,{text:'kept',requestId:'k'},undefined,url);
+    // Inject a write fault into this isolated database only.
+    const db=new DatabaseSync(join(dir,'sessions.sqlite3'));
+    db.exec(`CREATE TRIGGER inject_fault BEFORE UPDATE ON sessions WHEN NEW.state LIKE '%fault-me%' BEGIN SELECT RAISE(ABORT,'injected'); END;`);
+    expect((await call(path,{text:'fault-me',requestId:'f'},undefined,url)).status).toBe(500);
+    expect((await call(`${path}/${ok.result.id}`,{text:'fault-me edit',revision:0},'PATCH',url)).status).toBe(500);
+    const q=(await api(path,undefined,undefined,url)).queue;
+    expect(q.items.map(i=>[i.text,i.revision])).toEqual([['kept',0]]);
+    expect(q.bindings.map(b=>b.requestId)).toEqual(['k']);
+    db.exec('DROP TRIGGER inject_fault');db.close();
+    // After the fault clears, the same request ID is accepted normally (it was never bound).
+    expect((await api(path,{text:'fault-me',requestId:'f'},undefined,url)).result.duplicate).toBe(false);
+  }finally{proc.child.kill();}
+});

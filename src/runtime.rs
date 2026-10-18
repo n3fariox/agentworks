@@ -541,8 +541,8 @@ pub async fn run(
                                         (Ok(result),None)=>{crate::limit_resume::finish(&s, Some(&serde_json::to_value(&result.stop_reason).unwrap_or(Value::Null)), None);s.emit("turn_end",json!({"stopReason":result.stop_reason}));},
                                         (Err(error),None)=>{let raw=serde_json::to_value(&error).unwrap_or(Value::Null);crate::limit_resume::enrich_codex(&s,&raw).await;crate::limit_resume::finish(&s,None,Some(&raw));s.emit("error",json!({"message":safe_error(&error.to_string())}));},
                                     }
-                                    // L-05 hook: dispatch the next explicit queued input only after a clean end_turn.
-                                    if !crate::input_queue::after_turn(&s,outcome) {s.status("idle");}
+                                    // L-05 hook: record outcome only; the locked queue scheduler dispatches later.
+                                    crate::input_queue::record_outcome(&s,outcome);s.status("idle");
                                     break;
                                 }
                                 command=commands.recv()=>match command {

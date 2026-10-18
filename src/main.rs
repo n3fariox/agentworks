@@ -314,6 +314,7 @@ impl Session {
             if let Some(origin) = data.automation.as_mut() {
                 origin.outcome = None;
             }
+            data.input_queue.begin_turn(&text);
             data.requests.insert(id.clone());
             data.status = "running".into();
             data.turn_active = true;
@@ -544,6 +545,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     service_restart::initialize(&app)?;
     tokio::spawn(service_restart::scheduler(app.clone()));
     let scheduler = tokio::spawn(limit_resume::scheduler(app.clone()));
+    tokio::spawn(input_queue::scheduler(app.clone()));
     tokio::spawn(mcp::serve_bridge(app.clone(), mcp_listener));
     let router = Router::new()
         .route(
@@ -1715,9 +1717,25 @@ async fn prompt(
             "Enter a message of up to 32 KB and a request ID",
         ));
     }
+    if s.data.lock().unwrap().input_queue.bound(&req.request_id) {
+        // L-05: a request ID already accepted into the explicit queue is never also sent directly.
+        return Ok(Json(
+            json!({"accepted":true,"duplicate":true,"queued":true}),
+        ));
+    }
+    accept_prompt(&s, req.text, req.request_id, req.initiated_by)
+}
+/// Shared turn acceptance for direct prompts and L-05 queued dispatch. Callers hold
+/// `run_lock` and have passed `service_restart::allow_start`.
+fn accept_prompt(
+    s: &Session,
+    text: String,
+    request_id: String,
+    initiated_by: Option<String>,
+) -> ApiResult {
     {
         let mut data = s.data.lock().unwrap();
-        if data.requests.contains(&req.request_id) {
+        if data.requests.contains(&request_id) {
             return Ok(Json(json!({"accepted":true,"duplicate":true})));
         }
         if data.status != "idle" {
@@ -1727,16 +1745,17 @@ async fn prompt(
             ));
         }
         data.continuation.cancel("New human or controller turn");
+        data.input_queue.begin_turn(&text);
         data.status = "running".into();
         data.turn_active = true;
-        data.requests.insert(req.request_id.clone());
+        data.requests.insert(request_id.clone());
     }
     s.emit(
         "user",
-        json!({"text":req.text,"requestId":req.request_id,"initiatedBy":req.initiated_by}),
+        json!({"text":text,"requestId":request_id,"initiatedBy":initiated_by}),
     );
     s.emit("status", json!({"status":"running"}));
-    if let Err(error) = s.send_command(runtime::Command::Prompt(req.text)) {
+    if let Err(error) = s.send_command(runtime::Command::Prompt(text)) {
         s.status("error");
         return Err(error);
     }
@@ -1749,6 +1768,8 @@ async fn cancel(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     let status = {
         let mut data = s.data.lock().unwrap();
         data.continuation.stop("Explicit Stop");
+        data.input_queue
+            .block("Explicit Stop; inspect, then resume.");
         let status = data.status.clone();
         if matches!(status.as_str(), "running" | "waiting") {
             data.status = "cancelling".into();
