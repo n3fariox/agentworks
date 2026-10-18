@@ -33,7 +33,6 @@
 .palette-option-group{font-size:10px;color:var(--muted);white-space:nowrap;align-self:center}
 .palette-option-detail,.palette-option-reason{grid-column:1/-1;font-size:11px;color:var(--muted);overflow-wrap:anywhere}
 .palette-option-reason{color:#d8b17a}
-.palette-option-hint{display:none}
 .palette-empty,.palette-keys{color:var(--muted)}
 #palette-status{margin-top:12px}
-@media(pointer:coarse){.palette-option{padding:12px 11px;min-height:44px}}
+@media(pointer:coarse){.palette-option{padding:12px 11px;min-height:44px}.palette-keys{display:none}}

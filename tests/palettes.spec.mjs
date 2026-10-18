@@ -77,11 +77,12 @@ test('session entries carry title, project, host, directory and status context',
   const items=sessionItems(sessions,context);
   // Running work is offered first, and the active session is marked rather than hidden.
   expect(items.map(i=>i.id)).toEqual(['two','one','three']);
-  expect(items[0]).toMatchObject({current:true,group:'Current session'});
-  expect(items[0].detail).toBe('Codex · Second project · Local · srv/work/zeta · Running turn');
+  expect(items[0]).toMatchObject({current:true,group:'Running turn'});
+  expect(items[0].detail).toBe('Current · Codex · Second project · Local · srv/work/zeta');
   // Equal titles keep more of the path so the two Beta rows stay distinguishable.
-  expect(items[1].detail).toBe('Demo agent · Palette project · Local · alpha · Ready');
-  expect(items[2].detail).toBe('Demo agent · Second project · Local · srv/work/omega · Ready');
+  expect(items[1].detail).toBe('Demo agent · Palette project · Local · alpha');
+  expect(items[2].detail).toBe('Demo agent · Second project · Local · srv/work/omega');
+  expect(items[1].group).toBe('Ready');
   expect(items[2].hint).toBe('/srv/work/omega');
   expect(sessionRanking('omega',items).map(i=>i.id)).toEqual(['three']);
   expect(sessionRanking('second',items).map(i=>i.id)).toEqual(['two','three']);

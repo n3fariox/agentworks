@@ -105,8 +105,10 @@ export function sessionItems(sessions,{labels={},hosts=[],projects=[],activeId=n
     const project=projectName(session.projectId),host=hostName(session.hostId);
     // Equal titles need more of the path to stay distinguishable in the list.
     const directory=pathTail(session.cwd,(titles.get(session.title)||0)>1?3:1);
-    const detail=[session.automation?'Automation':null,labels[session.provider]||session.provider,project,host,directory].filter(Boolean).join(' · ')+' · '+statusLabel(session.status);
-    return {id:session.id,label:session.title,group:session.id===activeId?'Current session':project||'Ungrouped',detail,hint:session.cwd,
+    // Status is the right-hand caption; the line under the title carries the context needed to tell two
+    // similarly named sessions apart: current marker, automation, agent, project, host and directory.
+    const detail=[session.id===activeId?'Current':null,session.automation?'Automation':null,labels[session.provider]||session.provider,project,host,directory].filter(Boolean).join(' · ');
+    return {id:session.id,label:session.title,group:statusLabel(session.status),detail,hint:session.cwd,
       // Search the tail of the path: the shared prefix of every session would otherwise match anything.
       search:[session.title,project,host,pathTail(session.cwd,3),labels[session.provider]||session.provider,statusLabel(session.status)].filter(Boolean).join(' '),
       status:session.status,current:session.id===activeId,session};
@@ -220,7 +222,8 @@ export function setupPalettes({$,state=()=>({}),handlers={},selectSession,labels
       }
       if(item.hint){
         option.title=item.hint;
-        const hint=document.createElement('span');hint.className='palette-option-hint';hint.textContent=item.hint;
+        // Kept for assistive technology and the hover title; the visible line already carries the context.
+        const hint=document.createElement('span');hint.className='sr-only';hint.textContent=item.hint;
         option.append(hint);
       }
       option.addEventListener('click',()=>{active=index;activate();});
