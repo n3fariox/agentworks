@@ -4,7 +4,7 @@ This board distinguishes delivered behavior from the older architecture proposal
 
 ## Current batch
 
-See [batch 002](batches/002-worktree-policy.md), deployed after two Codex sessions implemented enforced worktree launches and their browser controls. [Batch 001](batches/001-parallel-coordination.md) is also deployed. The coordinator reviewed, integrated, validated and deployed both batches. Work stops after batch 002 at the user's request; no next feature batch is running.
+See [batch 003](batches/003-limit-resume.md): the user has now authorized a new Codex session to implement L-09 first. It runs in an isolated worktree; the coordinator owns review, validation, integration and deployment. [Batch 002](batches/002-worktree-policy.md) and [batch 001](batches/001-parallel-coordination.md) remain deployed. No other feature work has resumed.
 
 | ID | Task | Status | Acceptance |
 | --- | --- | --- | --- |
@@ -14,7 +14,7 @@ See [batch 002](batches/002-worktree-policy.md), deployed after two Codex sessio
 
 ## Immediate feature priority
 
-**L-09: Resume when usage limits reset** is the user's highest-priority next feature. It enables explicitly authorized long-running backlog work to continue across provider limit windows. This is a planning update; no implementation batch is running.
+**L-09: Resume when usage limits reset** is the user's highest-priority feature, now in progress in batch 003. It enables explicitly authorized long-running backlog work to continue across provider limit windows.
 
 ## Next coordination work
 
@@ -41,7 +41,7 @@ See [batch 002](batches/002-worktree-policy.md), deployed after two Codex sessio
 
 ## Chat interface and navigation
 
-These additions are recorded for a later round; implementation remains stopped after batch 002.
+These additions remain planned; batch 003 is limited to L-09 and the controls it requires.
 
 | ID | Task | Acceptance |
 | --- | --- | --- |
