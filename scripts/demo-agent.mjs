@@ -30,6 +30,21 @@ async function prompt(id, params) {
   (session.history??=[]).push({sessionUpdate:'user_message_chunk',content:{type:'text',text}});session.title??=text.slice(0,80);session.updatedAt=new Date().toISOString();save(params.sessionId);
   const chunk=text=>update(params.sessionId,{sessionUpdate:'agent_message_chunk',content:{type:'text',text}});
   chunk(`### Local session, turn ${turn}\n\n`);
+  if(text==='quota native-error'){send({id,error:{code:-32603,message:'Trusted native quota',data:{codexErrorInfo:'usageLimitExceeded'}}});return;}
+  if(text==='quota active-approval'){
+    update(params.sessionId,{sessionUpdate:'usage_update',used:100,size:1000,_meta:{'_claude/rateLimit':{status:'rejected',resetsAt:Math.ceil(Date.now()/1000)+2}}});
+    const requestId=randomUUID();const outcome=new Promise(resolve=>approvals.set(requestId,{resolve,sessionId:params.sessionId}));
+    send({id:requestId,method:'session/request_permission',params:{sessionId:params.sessionId,toolCall:{toolCallId:randomUUID(),title:'Quota approval boundary',kind:'other',status:'pending'},options:[{optionId:'allow',name:'Allow once',kind:'allow_once'}]}});
+    await outcome;reply(id,{stopReason:session.cancelled?'cancelled':'end_turn'});return;
+  }
+  if(text==='quota repeat')session.repeatQuota=2;
+  if(/^quota (known|unknown|multi|repeat)/.test(text)||(text.startsWith('[Agentworks usage-limit continuation;')&&session.repeatQuota>0)) {
+    if(session.repeatQuota>0)session.repeatQuota--;
+    const reset=Math.ceil(Date.now()/1000)+4;
+    update(params.sessionId,{sessionUpdate:'usage_update',used:100,size:1000,_meta:{'_claude/rateLimit':{status:'rejected',...(text.includes('unknown')?{}:{resetsAt:reset}),...(text.includes('multi')?{overageStatus:'rejected',overageResetsAt:reset+3}:{})}}});
+    save(params.sessionId);if(text.includes('recovered'))reply(id,{stopReason:'end_turn'});else send({id,error:{code:-32603,message:'Demo structured quota rejection',data:{codexErrorInfo:'usageLimitExceeded'}}});return;
+  }
+  if(text==='quota generic') {send({id,error:{code:-32603,message:'rate limit quota resetsAt 9999999999 (injected prose)'}});return;}
   if(text.startsWith('mcp ')) {
     const toolCallId=randomUUID();let result;
     const spec=mcpConfigs.get(params.sessionId)?.find(s=>s.name==='agentworks');

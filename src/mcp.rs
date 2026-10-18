@@ -131,7 +131,7 @@ fn tools(a: &mail::Access) -> Value {
         tools.push(tool("get_completion", "Read the latest agent claim for yourself or a permitted same-project session. Claims are not proof of review or success.", json!({"sessionId":{"type":"string"}}), &[]));
     }
     if a.start_sessions {
-        tools.push(tool("start_session","Start an unprivileged session in this project. Does not submit a prompt. Reuse requestId on retry.",json!({"provider":{"type":"string","enum":["demo","claude","codex","opencode"]},"cwd":{"type":"string"},"title":{"type":"string"},"model":{"type":"string"},"requestId":{"type":"string","maxLength":50},"workspace":{"type":"object","properties":{"mode":{"type":"string","enum":["directory","newWorktree","existingWorktree"]},"branch":{"type":"string"},"baseRef":{"type":"string"},"path":{"type":"string"}},"required":["mode"],"additionalProperties":false}}),&["provider","cwd","requestId"]));
+        tools.push(tool("start_session","Start an unprivileged session in this project. Does not submit a prompt. Reuse requestId on retry.",json!({"provider":{"type":"string","enum":["demo","claude","codex","opencode"]},"cwd":{"type":"string"},"inheritResumePolicy":{"type":"boolean","default":false},"title":{"type":"string"},"model":{"type":"string"},"requestId":{"type":"string","maxLength":50},"workspace":{"type":"object","properties":{"mode":{"type":"string","enum":["directory","newWorktree","existingWorktree"]},"branch":{"type":"string"},"baseRef":{"type":"string"},"path":{"type":"string"}},"required":["mode"],"additionalProperties":false}}),&["provider","cwd","requestId"]));
     }
     if a.prompt_sessions {
         tools.push(tool("prompt_session","Submit a new turn to an idle session in this project; starts model work. Reuse requestId on retry.",json!({"sessionId":{"type":"string"},"text":{"type":"string"},"requestId":{"type":"string","maxLength":50}}),&["sessionId","text","requestId"]));
@@ -246,7 +246,23 @@ async fn dispatch(app: &App, s: &Session, operation: &str, args: Value) -> mail:
                 }
                 return Ok(prior.meta());
             }
+            if args
+                .get("inheritResumePolicy")
+                .is_some_and(|v| !v.is_boolean())
+            {
+                return Err(crate::fail(
+                    StatusCode::BAD_REQUEST,
+                    "inheritResumePolicy must be a boolean",
+                ));
+            }
+            let inherited_resume = if args["inheritResumePolicy"].as_bool().unwrap_or(false) {
+                Some(crate::limit_resume::inherit(s)?)
+            } else {
+                None
+            };
             let req = crate::Create {
+                resume_policy: None,
+                inherited_resume,
                 workspace: args
                     .get("workspace")
                     .map(|v| serde_json::from_value(v.clone()))

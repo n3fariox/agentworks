@@ -3,6 +3,7 @@ mod catalog;
 mod communication;
 mod completion;
 mod git_context;
+mod limit_resume;
 mod mcp;
 mod runtime;
 mod store;
@@ -102,6 +103,8 @@ struct SessionData {
     control_origin: Option<communication::ControlOrigin>,
     #[serde(skip)]
     storage_error: Option<String>,
+    #[serde(default)]
+    continuation: limit_resume::State,
 }
 
 struct Approval {
@@ -143,6 +146,13 @@ impl Session {
                 "interrupted" => Some("interrupted".into()),
                 _ => None,
             };
+        }
+        if matches!(
+            kind,
+            "continuation" | "user" | "status" | "completion_reported"
+        ) {
+            data["continuationState"] =
+                serde_json::to_value(&state.continuation).unwrap_or(Value::Null);
         }
         state.seq += 1;
         let event = json!({"seq":state.seq,"kind":kind,"data":data});
@@ -192,13 +202,13 @@ impl Session {
         let data = self.data.lock().unwrap();
         json!({"id":self.id,"provider":self.provider,"cwd":self.cwd,"title":self.title,
             "created":self.created,"status":data.status,"turnRunning":data.turn_active,
-            "projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin})
+            "projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation})
     }
     fn snapshot(&self) -> Value {
         let approvals = self.approvals.lock().unwrap();
         let data = self.data.lock().unwrap();
         json!({"kind":"snapshot","seq":data.seq,"session":{"id":self.id,"provider":self.provider,
-            "cwd":self.cwd,"title":self.title,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin},"events":data.events,
+            "cwd":self.cwd,"title":self.title,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation},"events":data.events,
             "truncated":data.events.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
             "models":data.models,"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|json!({"id":id,"request":a.request})).collect::<Vec<_>>()})
@@ -429,6 +439,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mcp_endpoint,
     };
     for (metadata, mut data) in restored {
+        data.continuation.reconcile();
         let pending = data.queued_prompt.take().is_some();
         let interrupted = data.turn_active
             || pending
@@ -467,6 +478,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         s.status("suspended");
         app.sessions.lock().unwrap().insert(s.id.clone(), s);
     }
+    let scheduler = tokio::spawn(limit_resume::scheduler(app.clone()));
     tokio::spawn(mcp::serve_bridge(app.clone(), mcp_listener));
     let router = Router::new()
         .route(
@@ -593,6 +605,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/sessions/{id}/agent-audit",
             get(communication::audit_log),
         )
+        .route(
+            "/api/sessions/{id}/continuation",
+            axum::routing::put(limit_resume::configure),
+        )
         .route("/api/sessions/{id}/prompt", post(prompt))
         .route("/api/sessions/{id}/cancel", post(cancel))
         .route("/api/sessions/{id}/resume", post(resume))
@@ -614,6 +630,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, router)
         .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
+            scheduler.abort();
+            let _ = scheduler.await;
             for s in app.sessions.lock().unwrap().values() {
                 if let Some(worker) = s.worker.lock().unwrap().take() { worker.abort(); }
                 *s.commands.lock().unwrap()=None;
@@ -891,6 +909,8 @@ async fn import_session(State(app): State<App>, Json(req): Json<ImportSession>) 
     create_session(
         State(app),
         Json(Create {
+            resume_policy: None,
+            inherited_resume: None,
             workspace: None,
             request_id: None,
             agent_access: None,
@@ -1040,12 +1060,22 @@ async fn activity(State(app): State<App>) -> Json<Value> {
                     "starting" | "resuming" | "configuring" | "cancelling"
                 );
             json!({"id":s.id,"title":s.title,"provider":s.provider,"status":data.status,
-            "turnRunning":data.turn_active,"pendingApprovals":approvals.len(),"canClose":!busy})
+            "turnRunning":data.turn_active,"pendingApprovals":approvals.len(),"canClose":!busy,"continuation":data.continuation})
         })
         .collect();
     let busy: Vec<_> = sessions
         .iter()
         .filter(|s| s["canClose"] == false)
+        .cloned()
+        .collect();
+    let scheduled: Vec<_> = sessions
+        .iter()
+        .filter(|s| s["continuation"]["dueAt"].is_number())
+        .cloned()
+        .collect();
+    let unfinished: Vec<_> = sessions
+        .iter()
+        .filter(|s| s["continuation"]["limited"] == true)
         .cloned()
         .collect();
     let active = sessions.iter().filter(|s| s["turnRunning"] == true).count();
@@ -1055,7 +1085,7 @@ async fn activity(State(app): State<App>) -> Json<Value> {
         .sum();
     Json(
         json!({"safeToClose":busy.is_empty() && !workspace_preparing,"workspacePreparing":workspace_preparing,"activeTurns":active,"pendingApprovals":approvals,
-        "busySessions":busy,"sessions":sessions}),
+        "busySessions":busy,"scheduledContinuations":scheduled,"unfinishedLimitedSessions":unfinished,"sessions":sessions}),
     )
 }
 async fn get_session(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
@@ -1064,6 +1094,10 @@ async fn get_session(State(app): State<App>, Path(id): Path<String>) -> ApiResul
 
 #[derive(Serialize, Deserialize)]
 struct Create {
+    #[serde(rename = "resumePolicy")]
+    resume_policy: Option<limit_resume::PolicyInput>,
+    #[serde(skip)]
+    inherited_resume: Option<limit_resume::State>,
     workspace: Option<worktrees::Workspace>,
     #[serde(rename = "requestId")]
     request_id: Option<String>,
@@ -1089,6 +1123,7 @@ struct Create {
     control_origin: Option<communication::ControlOrigin>,
 }
 async fn create_session(State(app): State<App>, Json(req): Json<Create>) -> ApiResult {
+    limit_resume::new_policy(req.resume_policy.clone())?;
     let _workspace = app.workspace_lock.lock().await;
     let key = worktrees::creation_key(&req)?;
     if let Some(key) = &key {
@@ -1268,6 +1303,9 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             queued_prompt: req.queued_prompt,
             control_origin: req.control_origin,
             storage_error: None,
+            continuation: req
+                .inherited_resume
+                .unwrap_or(limit_resume::new_policy(req.resume_policy)?),
         }),
         tx,
         commands: Mutex::new(None),
@@ -1349,6 +1387,14 @@ fn start_worker(s: &Arc<Session>) {
     let worker = tokio::spawn(async move {
         if let Err(error) = runtime::run(worker_s.clone(), rx).await {
             worker_s.clear_approvals();
+            {
+                let mut data = worker_s.data.lock().unwrap();
+                if data.continuation.phase.as_deref() == Some("opening") {
+                    data.continuation.due_at = None;
+                    data.continuation.phase = Some("paused".into());
+                    data.continuation.reason=Some("Native resume failed; no fresh context substituted. Resume deliberately after inspection".into());
+                }
+            }
             worker_s.emit(
                 "error",
                 json!({"message":runtime::safe_error(&error.to_string())}),
@@ -1412,6 +1458,7 @@ async fn prompt(
     Path(id): Path<String>,
     Json(req): Json<Prompt>,
 ) -> ApiResult {
+    let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
     if req.text.trim().is_empty()
         || req.text.len() > 32768
@@ -1434,6 +1481,7 @@ async fn prompt(
                 "Wait for this session to become idle",
             ));
         }
+        data.continuation.cancel("New human or controller turn");
         data.status = "running".into();
         data.turn_active = true;
         data.requests.insert(req.request_id.clone());
@@ -1450,7 +1498,12 @@ async fn prompt(
     Ok(Json(json!({"accepted":true})))
 }
 async fn cancel(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
+    let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
+    {
+        s.data.lock().unwrap().continuation.stop("Explicit Stop");
+    }
+    s.emit("continuation", json!({"decision":"Explicit Stop"}));
     let status = s.data.lock().unwrap().status.clone();
     if status == "running" || status == "waiting" {
         s.send_command(runtime::Command::Cancel)?;
@@ -1495,6 +1548,7 @@ async fn set_model(
 }
 async fn delete_session(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     let _gate = app.communication_lock.lock().await;
+    let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
     app.store.lock().unwrap().delete(&id).map_err(|_| {
         fail(

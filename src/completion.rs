@@ -127,6 +127,11 @@ pub fn report(app: &App, s: &Session, req: Report) -> mail::Result<Value> {
     tx.execute("INSERT INTO agent_audit(actor,action,target,outcome,created) VALUES (?1,'completion_reported',?1,?2,?3)",params![s.id,format!("report:{id}"),created]).map_err(error)?;
     tx.commit().map_err(error)?;
     drop(store);
+    s.data
+        .lock()
+        .unwrap()
+        .continuation
+        .stop("Explicit completion or blocked report");
     s.emit("completion_reported", json!({"reportId":id}));
     Ok(json!({"report":report,"duplicate":false}))
 }

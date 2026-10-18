@@ -27,6 +27,7 @@ try{
   await run('node',['scripts/workspace-smoke.mjs']);
   await run('node',['scripts/completion-smoke.mjs']);
   await run('node',['scripts/worktree-policy-smoke.mjs']);
+  await run('node',['scripts/limit-resume-smoke.mjs']);
   await run('node',['node_modules/@playwright/test/cli.js','test']);
   const config=await (await fetch(base+'/api/status')).json();
   const s=await (await fetch(base+'/api/sessions',{method:'POST',headers:{'Content-Type':'application/json',Origin:base},body:JSON.stringify({provider:'demo',cwd:config.roots[0],title:'Shutdown test'})})).json();

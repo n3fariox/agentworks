@@ -18,7 +18,8 @@
     "test:completion": "node scripts/completion-smoke.mjs",
     "test:git-context": "playwright test tests/git-context.spec.mjs",
     "test:worktree-policy": "node scripts/worktree-policy-smoke.mjs",
-    "test:worktree-ui": "playwright test tests/worktree-launch.spec.mjs"
+    "test:worktree-ui": "playwright test tests/worktree-launch.spec.mjs",
+    "test:limit-resume": "node scripts/limit-resume-smoke.mjs"
   },
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "0.93.0",

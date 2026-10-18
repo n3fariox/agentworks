@@ -49,6 +49,7 @@ function openCreate(context={}) {
   const projectId=Object.hasOwn(context,'projectId')?context.projectId:workspaceContext?.projectId??active?.projectId??null;
   $('create-project').value=projectId||'';
   const locations=readStorage(localStorage,'agentworks-project-locations',{});
+  $('create-resume-policy').checked=false;
   $('create-agent-access').value='off';$('create-error').textContent='';$('directory').value=context.cwd||workspaceContext?.cwd||locations[projectId||'ungrouped']||active?.cwd||config.roots[0];$('session-title').value='';
   resetCreateModels();worktrees.projectChanged();providerNote();$('create-dialog').showModal();
 }
@@ -266,11 +267,12 @@ function connect(gen){
     if(e.kind==='snapshot'){
       resetTranscript();status=e.session.status;Object.assign(active,e.session);
       for(const item of e.events)consume(item);
+      active.continuation=e.session.continuation;
       approvals=new Map(e.approvals.map(a=>[a.id,a.request]));status=e.session.status;modelConfig=e.models;if(status==='suspended')resumeSession(active.id);availableCommands=e.commands||[];renderCommands();
       if(e.storageError){$('session-notice').textContent=e.storageError;$('session-notice').hidden=false;}
       if(e.truncated){$('session-notice').textContent='Showing recent output. The full transcript is saved on this host.';$('session-notice').hidden=false;}
     }else consume(e);
-    scheduleDraw();updateControls();
+    scheduleDraw();updateControls();renderContinuation();
   };
   ws.onclose=()=>{
     if(gen!==generation)return;
@@ -291,9 +293,11 @@ function connect(gen){
 function addMessage(role,text){const message={id:uuid(),type:'message',role,text};transcript.push(message);return message;}
 function consume(e){
   const d=e.data;
+  if(d?.continuationState&&active)active.continuation=d.continuationState;
   if(e.kind==='session_updated'){
     Object.assign(active,d);const row=sessions.find(s=>s.id===active.id);if(row)Object.assign(row,d);sidebar();
   }
+  else if(e.kind==='continuation'){renderContinuation();}
   else if(e.kind==='models'){modelConfig=d;}
   else if(e.kind==='commands'){availableCommands=Array.isArray(d)?d:[];renderCommands();}
   else if(e.kind==='user'){assistant=null;if(d.initiatedBy)transcript.push({id:uuid(),type:'notice',text:'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});addMessage('user',d.text);}
@@ -361,7 +365,7 @@ function updateControls(){
   const busy=['running','waiting','cancelling'].includes(status);
   $('session-state').textContent=status==='waiting'?'Needs your approval':status==='idle'?'Ready':status[0]?.toUpperCase()+status.slice(1);
   $('prompt').disabled=!connected||status!=='idle';$('send').disabled=!connected||status!=='idle';
-  $('send').hidden=busy;$('stop').hidden=!busy;$('stop').disabled=!connected||status==='cancelling';
+  $('send').hidden=busy;$('stop').hidden=!busy&&!active?.continuation?.dueAt;$('stop').disabled=!connected||status==='cancelling';
   $('prompt').placeholder=status==='starting'?'Starting your agent…':status==='waiting'?'Respond to the permission request above…':busy?'Your agent is working…':status==='error'?'Session unavailable. Use Resume session to try again.':'What would you like to work on?';
 }
 function scheduleDraw(){if(!drawTimer)drawTimer=setTimeout(()=>{drawTimer=null;draw();},70);}
@@ -515,7 +519,7 @@ $('model-picker').onchange=async event=>{
 $('create-form').onsubmit=async event=>{
   event.preventDefault();if(creating||worktrees.blocked())return;creating=true;providerNote();$('create-error').textContent='';
   try{
-    const payload={provider:$('provider').value,...worktrees.submission(),title:$('session-title').value,projectId:$('create-project').value||null,hostId:$('create-host').value,model:$('create-model').value,agentAccess:{communicate:$('create-agent-access').value!=='off',...Object.fromEntries(['startSessions','promptSessions','cancelSessions','runAutomations'].map(key=>[key,$('create-agent-access').value==='coordinator']))}};
+    const payload={resumePolicy:{enabled:$('create-resume-policy').checked},provider:$('provider').value,...worktrees.submission(),title:$('session-title').value,projectId:$('create-project').value||null,hostId:$('create-host').value,model:$('create-model').value,agentAccess:{communicate:$('create-agent-access').value!=='off',...Object.fromEntries(['startSessions','promptSessions','cancelSessions','runAutomations'].map(key=>[key,$('create-agent-access').value==='coordinator']))}};
     const signature=JSON.stringify(payload);
     if(!pendingCreate||pendingCreate.signature!==signature)pendingCreate={signature,requestId:uuid()};
     sessionStorage.setItem('agentworks-pending-create',JSON.stringify(pendingCreate));
@@ -606,3 +610,50 @@ init().catch(error=>toast('Cannot reach the local server: '+error.message));
 setupCommunication({api,getActive:()=>active,getSessions:()=>sessions,selectSession,toast,uuid});
 
 setupGitContext({api,getActive:()=>active});
+
+async function refreshContinuation(){
+  const id=active?.id;if(!id)return;
+  try{const snapshot=await api(`/api/sessions/${id}`);if(active?.id===id){active.continuation=snapshot.session.continuation;renderContinuation();updateControls();}}catch(e){toast(e.message);}
+}
+function renderContinuation(){
+  const p=active?.continuation||{};
+  const boundKey=active?.id+':'+(p.authorization||0);
+  if($('continuation-attempts').dataset.policy!==boundKey){
+    $('continuation-attempts').dataset.policy=boundKey;$('continuation-attempts').value=p.maxAttempts||3;
+    const d=new Date(p.deadline||Date.now()+86400000);$('continuation-deadline').value=new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,16);
+  }
+  $('continuation-enabled').checked=!!p.enabled;
+  $('continuation-label').textContent=p.enabled?'On':'Off';
+  const due=p.dueAt?new Date(p.dueAt):null;
+  $('continuation-status').textContent=[p.limited?'Paused by usage limit':'',p.reason,due?`Resumes ${due.toLocaleString()} · ${Math.max(0,Math.ceil((p.dueAt-Date.now())/1000))}s remaining`:p.limited?'Reset unknown or timer cancelled — choose a time or resume deliberately':'',`Policy: ${p.origin||'default off'}${p.parent?' · parent '+p.parent:''}`,p.enabled?`${p.attempts}/${p.maxAttempts} attempts · deadline ${new Date(p.deadline).toLocaleString()}`:'',p.source,active?.provider==='opencode'?'OpenCode automatic reset detection unavailable; use manual session controls':'',p.observedAt?'Data observed '+new Date(p.observedAt).toLocaleString():'No provider reset data'].filter(Boolean).join(' · ');
+  $('continuation-schedule').disabled=!p.enabled||!p.limited;
+  $('continuation-now').disabled=(!p.limited&&readStorage(sessionStorage,'agentworks-manual-continuation',null)?.sid!==active?.id)||!!$('continuation-now').dataset.busy;
+}
+async function setContinuation(payload){if(!active)return;try{await api(`/api/sessions/${active.id}/continuation`,{method:'PUT',body:JSON.stringify(payload)});await refreshContinuation();}catch(e){toast(e.message);}}
+$('continuation-save-bounds').onclick=()=>{const deadline=new Date($('continuation-deadline').value).getTime(),maxAttempts=Number($('continuation-attempts').value);if(!Number.isFinite(deadline)||!Number.isInteger(maxAttempts)){toast('Choose a valid deadline and attempt count');return;}setContinuation({enabled:true,deadline,maxAttempts});};
+$('continuation-enabled').onchange=()=>setContinuation({enabled:$('continuation-enabled').checked});
+$('continuation-cancel').onclick=()=>setContinuation({enabled:false});
+$('continuation-schedule').onclick=()=>{const due=new Date($('continuation-time').value).getTime();if(!Number.isFinite(due)){toast('Choose a valid local time');return;}setContinuation({enabled:true,manualDueAt:due});};
+$('continuation-now').onclick=async()=>{
+  if(!active||$('continuation-now').dataset.busy)return;
+  const id=active.id,button=$('continuation-now');button.dataset.busy='yes';button.disabled=true;
+  let pending=readStorage(sessionStorage,'agentworks-manual-continuation',null);
+  if(pending?.sid!==id)pending={sid:id,requestId:uuid(),started:false};
+  sessionStorage.setItem('agentworks-manual-continuation',JSON.stringify(pending));
+  try{
+    if(!pending.started){
+      await api(`/api/sessions/${id}/cancel`,{method:'POST',body:'{}'});
+      await api(`/api/sessions/${id}/resume`,{method:'POST',body:'{}'});
+      for(let i=0;i<300;i++){
+        const current=await api(`/api/sessions/${id}`);
+        if(current.session.status==='idle')break;
+        if(current.session.status==='error')throw new Error('Native resume failed; inspect session error');
+        await new Promise(r=>setTimeout(r,250));if(i===299)throw new Error('Native session is not ready');
+      }
+      pending.started=true;sessionStorage.setItem('agentworks-manual-continuation',JSON.stringify(pending));
+    }
+    await api(`/api/sessions/${id}/prompt`,{method:'POST',body:JSON.stringify({text:'Inspect current task and tool results, then continue the unfinished assigned task within its saved scope and stop instructions. Do not replay prior commands. If complete, report completion.',requestId:pending.requestId})});
+    sessionStorage.removeItem('agentworks-manual-continuation');
+  }catch(e){toast(e.message);}finally{delete button.dataset.busy;renderContinuation();}
+};
+setInterval(()=>{if(active?.continuation?.dueAt)renderContinuation();},1000);
