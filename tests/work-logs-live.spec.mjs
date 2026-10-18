@@ -1,0 +1,41 @@
+import {test,expect} from '@playwright/test';
+import {spawn} from 'node:child_process';
+import {mkdir,rm} from 'node:fs/promises';
+import {resolve,join} from 'node:path';
+
+// Isolated server, store, catalog and demo state on assigned port 4451; demo agent only, no model inference.
+const base='http://127.0.0.1:4451';
+let fixture,server,log='',exited=false;
+async function api(path,body){
+  const r=await fetch(base+path,{method:body?'POST':'GET',headers:{Origin:base,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
+  expect(r.ok,await r.clone().text()).toBe(true);return r.status===204?null:r.json();
+}
+test.beforeAll(async()=>{
+  fixture=resolve('.cache','work-logs-fixture');await rm(fixture,{recursive:true,force:true});await mkdir(join(fixture,'project'),{recursive:true});
+  server=spawn(resolve('target/debug/agentworks'),[],{env:{...process.env,AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:'4451',AGENTWORKS_ROOTS:fixture,
+    AGENTWORKS_CATALOG_PATH:join(fixture,'catalog.json'),AGENTWORKS_DB_PATH:join(fixture,'sessions.sqlite3'),AGENTWORKS_DEMO_STATE_DIR:join(fixture,'demo')},stdio:['ignore','pipe','pipe']});
+  server.on('exit',()=>exited=true);for(const s of [server.stdout,server.stderr])s.on('data',c=>{log+=c;});
+  for(let i=0;i<100;i++){if(exited)throw new Error(log);try{if((await fetch(base+'/api/status')).ok)return;}catch{}await new Promise(r=>setTimeout(r,100));}
+  throw new Error('readiness timed out: '+log);
+});
+test.afterAll(async()=>{if(server&&!exited){const s=new Promise(r=>server.once('exit',r));server.kill('SIGTERM');await s;}});
+
+test('demo approval turn: approval stays actionable, log folds after completion and survives reload',async({page})=>{
+  const session=await api('/api/sessions',{provider:'demo',cwd:join(fixture,'project'),title:'Work log test'});
+  await page.goto(base+'/');await page.evaluate(id=>localStorage.setItem('agentworks-session',id),session.id);
+  await page.goto(base+'/');
+  await expect(page.locator('#prompt')).toBeEnabled({timeout:15000});
+  await page.fill('#prompt','approval');await page.click('#send');
+  const approval=page.locator('#approval-area .approval');
+  await expect(approval).toBeVisible();
+  await expect(page.locator('.work-log')).toHaveAttribute('open','');
+  await expect(page.locator('.work-log-counts')).toHaveText('1 tool call · 1 running');
+  await approval.getByRole('button',{name:'Allow once'}).click();
+  await expect(page.locator('#prompt')).toBeEnabled();
+  await expect(page.locator('.work-log')).not.toHaveAttribute('open','');
+  await expect(page.locator('.work-log-counts')).toHaveText(/^1 tool call( · \d+s)?$/);
+  await page.reload();
+  await expect(page.locator('.work-log-counts')).toHaveText('1 tool call');
+  await expect(page.locator('.work-log')).not.toHaveAttribute('open','');
+  await expect(page.locator('.message.assistant').last()).toContainText('demo agent');
+});

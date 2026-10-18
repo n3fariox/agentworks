@@ -5,6 +5,7 @@ import {createWorkspace} from '/workspace.js';
 import {setupCommunication} from '/communication.js';
 import {setupPalettes} from '/palettes.js';
 import {setupDisplayPreferences} from '/display-preferences.js';
+import {setupWorkLogs,observeTool} from '/work-logs.js';
 const $ = id => document.getElementById(id);
 // randomUUID is unavailable on plain HTTP remote origins; getRandomValues is supported.
 const uuid = () => globalThis.crypto.randomUUID?.() ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -20,6 +21,7 @@ const drafts=readStorage(sessionStorage,'agentworks-drafts',{});
 const scrollPositions=new Map();let restoreScroll=null;
 let config, sessions=[], active=null, socket=null, generation=0, connected=false;
 let transcript=[], tools=new Map(), approvals=new Map(), assistant=null, status='starting';
+let replaying=false,workLogs=null;
 let modelConfig=null, availableCommands=[], commandsOpen=false;
 let discoveryGeneration=0;
 let externalSessions=[], externalSelection=null, externalCursor=null, externalGeneration=0, externalLoading=false, externalImporting=false;
@@ -30,6 +32,7 @@ let pendingCreate=readStorage(sessionStorage,'agentworks-pending-create',null);
 const worktrees=setupWorktreeControls({$,api,onChange:()=>{if(config)providerNote();}});
 const policyEditor=setupPolicyEditor({$,api});
 const display=setupDisplayPreferences();display.mount($('display-preferences'));
+workLogs=setupWorkLogs({el});workLogs.mount($('display-preferences'),()=>scheduleDraw());
 
 async function api(path, options={}) {
   const response=await fetch(path,{...options,headers:{'Content-Type':'application/json',...options.headers}});
@@ -261,7 +264,7 @@ function openProjectDialog(project=null){
   $('project-name').value=project?.name||'';$('project-error').textContent='';$('delete-project').hidden=!project;
   policyEditor.open(editingProject);$('project-dialog').showModal();$('project-name').focus();
 }
-function resetTranscript(){transcript=[];tools=new Map();approvals=new Map();assistant=null;nodes.clear();$('messages').replaceChildren();$('approval-area').replaceChildren();}
+function resetTranscript(){transcript=[];tools=new Map();approvals=new Map();assistant=null;nodes.clear();workLogs?.reset();$('messages').replaceChildren();$('approval-area').replaceChildren();}
 function selectSession(s) {
   document.body.classList.remove('menu-open');
   if(active?.id===s.id){$('welcome').hidden=true;$('conversation').hidden=false;workspace?.sessionSelected(s);return;}
@@ -285,7 +288,7 @@ function connect(gen){
     const e=JSON.parse(event.data);
     if(e.kind==='snapshot'){
       resetTranscript();status=e.session.status;Object.assign(active,e.session);
-      for(const item of e.events)if(item.kind!=='session_updated')consume(item);
+      replaying=true;try{for(const item of e.events)if(item.kind!=='session_updated')consume(item);}finally{replaying=false;}
       Object.assign(active,e.session);$('header-title').textContent=active.title;
       active.continuation=e.session.continuation;
       approvals=new Map(e.approvals.map(a=>[a.id,a.request]));status=e.session.status;modelConfig=e.models;if(status==='suspended'&&!e.session.explicitlySuspended)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();
@@ -325,7 +328,7 @@ function consume(e){
     status=d.status;if(active){active.status=status;if(d.explicitlySuspended!==undefined)active.explicitlySuspended=d.explicitlySuspended;const s=sessions.find(s=>s.id===active.id);if(s)s.status=status;}sidebar();
   }else if(e.kind==='approval'){approvals.set(d.id,d.request);}
   else if(e.kind==='approval_resolved'){approvals.delete(d.id);}
-  else if(e.kind==='interrupted'){transcript.push({id:uuid(),type:'notice',text:d.message});assistant=null;}
+  else if(e.kind==='interrupted'){transcript.push({id:uuid(),type:'notice',text:d.message,interrupted:true});assistant=null;}
   else if(e.kind==='storage_error'){status='error';$('session-notice').textContent=d.message;$('session-notice').hidden=false;}
   else if(e.kind==='error'){transcript.push({id:uuid(),type:'error',text:d.message});assistant=null;}
   else if(e.kind==='turn_end'){assistant=null;}
@@ -348,11 +351,11 @@ function consume(e){
         }break;
       }
       case 'tool_call':{
-        assistant=null;const tool={...d,id:d.toolCallId,type:'tool'};tools.set(d.toolCallId,tool);transcript.push(tool);break;
+        assistant=null;const tool={...d,id:d.toolCallId,type:'tool'};tools.set(d.toolCallId,tool);transcript.push(tool);observeTool(tool,{live:!replaying});break;
       }
       case 'tool_call_update':{
         let tool=tools.get(d.toolCallId);
-        if(!tool){tool={id:d.toolCallId,type:'tool',title:'Tool activity'};tools.set(d.toolCallId,tool);transcript.push(tool);}Object.assign(tool,d,{type:'tool'});break;
+        if(!tool){tool={id:d.toolCallId,type:'tool',title:'Tool activity'};tools.set(d.toolCallId,tool);transcript.push(tool);}Object.assign(tool,d,{type:'tool'});observeTool(tool,{live:!replaying});break;
       }
       case 'plan':{
         const text=(d.entries||[]).map(p=>`- ${p.status==='completed'?'✓':'○'} ${p.content}`).join('\n');
@@ -460,6 +463,7 @@ function draw(){
     }
   }
   const pending=$('approval-area');pending.replaceChildren();
+  workLogs.apply(area,transcript,nodes,{sessionIdle:['idle','closed','suspended','error'].includes(status)});
   for(const [id,request]of approvals){
     const card=el('div','approval');card.append(el('h4','','Permission requested'),el('p','',request.toolCall?.title||'An agent needs your decision'));
     if(request.toolCall?.rawInput)card.append(el('pre','',JSON.stringify(request.toolCall.rawInput,null,2)));
