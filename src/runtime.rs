@@ -26,6 +26,7 @@ pub enum Command {
     Prompt(String),
     Cancel,
     Model(String),
+    PermissionMode(String),
 }
 
 fn agent_config(provider: &str, api_key_mode: bool, host_profile: bool) -> AcpAgentConfig {
@@ -376,6 +377,7 @@ pub async fn run(
     let permission_s = s.clone();
     let replaying = Arc::new(AtomicBool::new(true));
     let notify_replaying = replaying.clone();
+    let saved_permission_modes = s.data.lock().unwrap().permission_modes.clone();
     let import_pending = s.data.lock().unwrap().import_pending;
     let host_profile = s.data.lock().unwrap().opencode_host;
     let history = Arc::new(std::sync::Mutex::new((Vec::<Value>::new(), 0usize, false)));
@@ -387,6 +389,7 @@ pub async fn run(
                 notify_s.set_commands(update["availableCommands"].clone());
             } else if update["sessionUpdate"]=="config_option_update" {
                 if let Some(config)=parse_model_config(&update,notify_s.provider=="opencode") {notify_s.set_models(config);}
+                if let Some(config)=crate::permission_modes::parse(&update) {notify_s.set_permission_modes(config);}
             }
             if import_pending && notify_replaying.load(Ordering::SeqCst) && !matches!(update["sessionUpdate"].as_str(),Some("available_commands_update"|"config_option_update")) {
                 let mut staged=notify_history.lock().unwrap();staged.1+=update.to_string().len();
@@ -463,6 +466,17 @@ pub async fn run(
                 }
                 s.set_models(model_config.clone());
             }
+            let mut mode_config=crate::permission_modes::parse(&created).unwrap_or(Value::Null);
+            if let Some(mode)=saved_permission_modes["currentValue"].as_str() {
+                if mode_config["options"].as_array().is_some_and(|items|items.iter().any(|o|o["value"]==mode)) {
+                    let request=SetSessionConfigOptionRequest::new(provider_id.clone(),mode_config["configId"].as_str().unwrap().to_owned(),SessionConfigOptionValue::value_id(mode.to_owned()));
+                    let selected=tokio::time::timeout(Duration::from_secs(30),connection.send_request(request).block_task()).await.map_err(|_|agent_client_protocol::Error::internal_error().data("Permission mode selection timed out"))??;
+                    mode_config=crate::permission_modes::parse(&serde_json::to_value(selected).unwrap_or(Value::Null)).ok_or_else(||agent_client_protocol::Error::internal_error().data("Harness did not confirm permission mode"))?;
+                } else {
+                    return Err(agent_client_protocol::Error::internal_error().data("Saved permission mode is no longer advertised; inspect session configuration"));
+                }
+            }
+            s.set_permission_modes(mode_config.clone());
             crate::limit_resume::ready(&s);
             s.emit("ready",json!({"providerSessionId":provider_id,"configuration":serde_json::to_value(&created).unwrap_or(Value::Null)}));
             if !s.start_queued_prompt().map_err(|e|agent_client_protocol::Error::internal_error().data(e))? {s.status("idle");}
@@ -479,6 +493,18 @@ pub async fn run(
                             }
                             Ok(Err(error))=>s.emit("error",json!({"message":safe_error(&error.to_string())})),
                             Err(_)=>return Err(agent_client_protocol::Error::internal_error().data("Model selection timed out; session closed")),
+                        }
+                        s.status("idle");
+                    }
+                    Command::PermissionMode(mode)=>{
+                        let request=SetSessionConfigOptionRequest::new(provider_id.clone(),mode_config["configId"].as_str().unwrap_or("mode").to_owned(),SessionConfigOptionValue::value_id(mode));
+                        match tokio::time::timeout(Duration::from_secs(30),connection.send_request(request).block_task()).await {
+                            Ok(Ok(selected))=>{
+                                if let Some(config)=crate::permission_modes::parse(&serde_json::to_value(selected).unwrap_or(Value::Null)) {mode_config=config;s.set_permission_modes(mode_config.clone());}
+                                else {s.emit("error",json!({"message":"Harness did not confirm permission mode"}));}
+                            }
+                            Ok(Err(error))=>s.emit("error",json!({"message":safe_error(&error.to_string())})),
+                            Err(_)=>return Err(agent_client_protocol::Error::internal_error().data("Permission mode selection timed out; session closed")),
                         }
                         s.status("idle");
                     }
@@ -510,7 +536,7 @@ pub async fn run(
                                         }
                                     }
                                     Some(Command::Prompt(_))=>{},
-                                    Some(Command::Model(_))=>{},
+                                    Some(Command::Model(_)|Command::PermissionMode(_))=>{},
                                     None=>return Ok(()),
                                 },
                                 _=&mut deadline=>return Err(agent_client_protocol::Error::internal_error().data(if cancelled {"Agent did not stop within 15 seconds; session closed"} else {"Prototype turn timed out after 15 minutes; session closed"})),

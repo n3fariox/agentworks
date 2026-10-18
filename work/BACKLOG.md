@@ -4,7 +4,7 @@ This board distinguishes delivered behavior from the older architecture proposal
 
 ## Current batch
 
-See [batch 005](batches/005-service-restart.md): R-06 is implemented, reviewed, tested and installed as a supervised Linux user service, with a live MCP/native-handoff proof. [Batch 004](batches/004-overnight.md) delivered L-01, U-01/B-01, D-01 and U-04. No further feature batch is active. The [self-improvement workflow](SELF-IMPROVEMENT.md) is ready for transfer into Agentworks; use the explicit service-restart grant only for the selected coordinator.
+[Batch 006](batches/006-session-usability.md) starts three Claude workers for U-06 compact work logs, U-07 composer usage status and L-07 configurable timeouts, with isolated worktrees and a 2026-10-18 17:15 UTC worker deadline. No integration or deployment yet. [Batch 005](batches/005-service-restart.md) delivered supervised restart, and [batch 004](batches/004-overnight.md) delivered L-01, U-01/B-01, D-01 and U-04. The [self-improvement workflow](SELF-IMPROVEMENT.md) grants service-restart control only to the selected coordinator.
 
 | ID | Task | Status | Acceptance |
 | --- | --- | --- | --- |

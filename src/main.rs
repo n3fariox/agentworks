@@ -7,6 +7,7 @@ mod git_context;
 mod lifecycle;
 mod limit_resume;
 mod mcp;
+mod permission_modes;
 mod runtime;
 mod service_restart;
 mod store;
@@ -91,6 +92,8 @@ struct SessionData {
     bytes: usize,
     requests: HashSet<String>,
     models: Value,
+    #[serde(default)]
+    permission_modes: Value,
     available_commands: Value,
     turn_active: bool,
     project_id: Option<String>,
@@ -222,7 +225,7 @@ impl Session {
         json!({"kind":"snapshot","seq":data.seq,"session":{"id":self.id,"provider":self.provider,
             "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation},"events":data.events,
             "truncated":data.events.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
-            "models":data.models,"commands":data.available_commands,"storageError":data.storage_error,
+            "permissionModes":data.permission_modes,"models":data.models,"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|json!({"id":id,"request":a.request})).collect::<Vec<_>>()})
     }
     fn display_title(&self) -> String {
@@ -275,6 +278,10 @@ impl Session {
     fn set_models(&self, models: Value) {
         self.data.lock().unwrap().models = models.clone();
         self.emit("models", models);
+    }
+    fn set_permission_modes(&self, modes: Value) {
+        self.data.lock().unwrap().permission_modes = modes.clone();
+        self.emit("permission_modes", modes);
     }
     fn start_queued_prompt(&self) -> Result<bool, String> {
         let text = {
@@ -677,6 +684,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/{id}/suspend", post(lifecycle::suspend))
         .route("/api/sessions/{id}/resume", post(resume))
         .route("/api/sessions/{id}/model", post(set_model))
+        .route(
+            "/api/sessions/{id}/permission-mode",
+            get(permission_modes::get).post(permission_modes::set),
+        )
         .route("/api/sessions/{id}/approvals/{approval}", post(approve))
         .route("/api/sessions/{id}/events", get(events))
         .route("/api/sessions/{id}/file", get(file))
@@ -1367,6 +1378,7 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             bytes: 0,
             requests: HashSet::new(),
             models: Value::Null,
+            permission_modes: Value::Null,
             available_commands: json!([]),
             turn_active: false,
             project_id: req.project_id,

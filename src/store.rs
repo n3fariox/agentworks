@@ -354,6 +354,7 @@ impl Store {
                     .filter_map(|e| e["data"]["requestId"].as_str().map(str::to_owned))
                     .collect(),
                 models: snapshot["models"].clone(),
+                permission_modes: snapshot["permissionModes"].clone(),
                 available_commands: snapshot["commands"].clone(),
                 turn_active: false,
                 project_id: s["projectId"].as_str().map(str::to_owned),
@@ -656,6 +657,7 @@ mod tests {
             bytes: 0,
             requests: Default::default(),
             models: Value::Null,
+            permission_modes: Value::Null,
             available_commands: json!([]),
             turn_active: false,
             project_id: None,

@@ -12,7 +12,7 @@ function save(id){const file=join(stateDir,id+'.json');writeFileSync(file+'.tmp'
 function commands(id){update(id,{sessionUpdate:'available_commands_update',availableCommands:[{name:'help',description:'Show demo help'},{name:'$demo-skill',description:'Example skill entry; no model is called'}]});}
 const sessions = new Map(), approvals = new Map(), mcpConfigs = new Map();
 const modelOptions=[{value:'demo/steady',name:'Steady (local demo)'},{value:'demo/quick',name:'Quick (local demo)'}];
-const modelConfig=model=>[{id:'model',name:'Model',category:'model',type:'select',currentValue:model,options:modelOptions}];
+const modelConfig=(model,mode='default')=>[{id:'model',name:'Model',category:'model',type:'select',currentValue:model,options:modelOptions},...(process.env.AGENTWORKS_DEMO_MODES==='1'?[{id:'mode',name:'Mode',category:'mode',type:'select',currentValue:mode,options:[{value:'default',name:'Manual'},{value:'auto',name:'Auto'}]}]:[])];
 const send = value => process.stdout.write(JSON.stringify({jsonrpc:'2.0',...value})+'\n');
 const reply = (id,result) => send({id,result});
 const update = (sessionId,update) => {
@@ -125,15 +125,16 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         if(method==='session/load')for(const update of session.history||[])send({method:'session/update',params:{sessionId:params.sessionId,update}});
         if(method==='session/load'&&session.failLoad){send({id,error:{code:-32603,message:'Demo history load failed'}});break;}
         // Deterministic native-opening race fixture; never delays ordinary demo sessions.
-        const ready=()=>{reply(id,{configOptions:modelConfig(session.model)});commands(params.sessionId);};
+        const ready=()=>{reply(id,{configOptions:modelConfig(session.model,session.mode)});commands(params.sessionId);};
         if(Number.isInteger(session.resumeDelayMs)&&session.resumeDelayMs>0&&session.resumeDelayMs<=2000)setTimeout(ready,session.resumeDelayMs);else ready();
       }catch{send({id,error:{code:-32002,message:'Saved demo session is unavailable'}});}
       break;
     }
     case 'session/set_config_option':{
       const session=sessions.get(params.sessionId);
+      if(session&&params.configId==='mode'&&process.env.AGENTWORKS_DEMO_MODES==='1'&&['default','auto'].includes(params.value)){session.mode=params.value;save(params.sessionId);reply(id,{configOptions:modelConfig(session.model,session.mode)});break;}
       if(!session||params.configId!=='model'||!modelOptions.some(o=>o.value===params.value)) {send({id,error:{code:-32602,message:'Unknown model'}});break;}
-      session.model=params.value;save(params.sessionId);reply(id,{configOptions:modelConfig(session.model)});break;
+      session.model=params.value;save(params.sessionId);reply(id,{configOptions:modelConfig(session.model,session.mode)});break;
     }
     case 'session/prompt':prompt(id,params).catch(error=>send({id,error:{code:-32603,message:error.message}}));break;
     case 'session/cancel':{

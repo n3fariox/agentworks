@@ -20,6 +20,7 @@ const drafts=readStorage(sessionStorage,'agentworks-drafts',{});
 const scrollPositions=new Map();let restoreScroll=null;
 let config, sessions=[], active=null, socket=null, generation=0, connected=false;
 let transcript=[], tools=new Map(), approvals=new Map(), assistant=null, status='starting';
+let permissionModes=null;
 let modelConfig=null, availableCommands=[], commandsOpen=false;
 let discoveryGeneration=0;
 let externalSessions=[], externalSelection=null, externalCursor=null, externalGeneration=0, externalLoading=false, externalImporting=false;
@@ -268,7 +269,7 @@ function selectSession(s) {
   if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));scrollPositions.set(active.id,$('messages').scrollTop);}
   $('prompt').value=drafts[s.id]||'';restoreScroll=scrollPositions.get(s.id)??null;
   clearTimeout(retryTimer);generation++;socket?.close();socket=null;connected=false;
-  active=s;status=s.status;pendingSend=null;modelConfig=null;availableCommands=[];commandsOpen=false;renderCommands();resetTranscript();
+  active=s;status=s.status;pendingSend=null;modelConfig=null;permissionModes=null;availableCommands=[];commandsOpen=false;renderCommands();resetTranscript();
   localStorage.setItem('agentworks-session',s.id);$('welcome').hidden=true;$('conversation').hidden=false;
   $('header-title').textContent=s.title;$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;
   $('session-notice').hidden=true;document.body.classList.remove('menu-open');sidebar();updateControls();connect(generation);
@@ -288,7 +289,7 @@ function connect(gen){
       for(const item of e.events)if(item.kind!=='session_updated')consume(item);
       Object.assign(active,e.session);$('header-title').textContent=active.title;
       active.continuation=e.session.continuation;
-      approvals=new Map(e.approvals.map(a=>[a.id,a.request]));status=e.session.status;modelConfig=e.models;if(status==='suspended'&&!e.session.explicitlySuspended)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();
+      approvals=new Map(e.approvals.map(a=>[a.id,a.request]));status=e.session.status;modelConfig=e.models;permissionModes=e.permissionModes;if(status==='suspended'&&!e.session.explicitlySuspended)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();
       if(e.storageError){$('session-notice').textContent=e.storageError;$('session-notice').hidden=false;}
       if(e.truncated){$('session-notice').textContent='Showing recent output. The full transcript is saved on this host.';$('session-notice').hidden=false;}
     }else consume(e);
@@ -319,6 +320,7 @@ function consume(e){
   }
   else if(e.kind==='continuation'){renderContinuation();}
   else if(e.kind==='models'){modelConfig=d;}
+  else if(e.kind==='permission_modes'){permissionModes=d;}
   else if(e.kind==='commands'){availableCommands=Array.isArray(d)?d:[];renderCommands();}
   else if(e.kind==='user'){assistant=null;if(d.initiatedBy)transcript.push({id:uuid(),type:'notice',text:'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});addMessage('user',d.text);}
   else if(e.kind==='status'){
@@ -374,6 +376,13 @@ function updateControls(){
   const usage=availableCommands.find(c=>c.name===(active?.provider==='claude'?'usage':'status'));
   $('show-usage').hidden=!['claude','codex'].includes(active?.provider)||!usage;
   $('show-usage').disabled=!connected||status!=='idle';
+  const modePicker=$('permission-mode-picker');modePicker.hidden=!permissionModes?.options?.length;
+  const modeSignature=JSON.stringify(permissionModes);
+  if(modePicker.dataset.config!==modeSignature){
+    modePicker.replaceChildren(...(permissionModes?.options||[]).map(o=>{const option=document.createElement('option');option.value=o.value;option.textContent=o.name||o.value;return option;}));
+    modePicker.value=permissionModes?.currentValue||'';modePicker.dataset.config=modeSignature;
+  }
+  modePicker.disabled=!connected||status!=='idle';
   const picker=$('model-picker');picker.hidden=!modelConfig?.options?.length;
   if(!picker.hidden){
     const signature=JSON.stringify(modelConfig);
@@ -533,6 +542,12 @@ $('show-usage').onclick=async()=>{
   $('show-usage').disabled=true;
   try{await api(`/api/sessions/${active.id}/prompt`,{method:'POST',body:JSON.stringify({text:active.provider==='claude'?'/usage':'/status',requestId:uuid()})});}
   catch(e){toast(e.message);}finally{updateControls();}
+};
+$('permission-mode-picker').onchange=async event=>{
+  if(!active)return;
+  const mode=event.target.value;event.target.disabled=true;
+  try{await api(`/api/sessions/${active.id}/permission-mode`,{method:'POST',body:JSON.stringify({mode})});}
+  catch(error){toast(error.message);updateControls();}
 };
 $('model-picker').onchange=async event=>{
   try{await api(`/api/sessions/${active.id}/model`,{method:'POST',body:JSON.stringify({model:event.target.value})});}
