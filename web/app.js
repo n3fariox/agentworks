@@ -5,6 +5,7 @@ import {createWorkspace} from '/workspace.js';
 import {setupCommunication} from '/communication.js';
 import {setupPalettes} from '/palettes.js';
 import {setupDisplayPreferences} from '/display-preferences.js';
+import {setupTimeoutControls} from '/timeout-controls.js';
 const $ = id => document.getElementById(id);
 // randomUUID is unavailable on plain HTTP remote origins; getRandomValues is supported.
 const uuid = () => globalThis.crypto.randomUUID?.() ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -19,6 +20,7 @@ let editingProject=null,savingProject=false;
 const drafts=readStorage(sessionStorage,'agentworks-drafts',{});
 const scrollPositions=new Map();let restoreScroll=null;
 let config, sessions=[], active=null, socket=null, generation=0, connected=false;
+let timeoutControls=null;
 let transcript=[], tools=new Map(), approvals=new Map(), assistant=null, status='starting';
 let modelConfig=null, availableCommands=[], commandsOpen=false;
 let discoveryGeneration=0;
@@ -314,6 +316,7 @@ function addMessage(role,text){const message={id:uuid(),type:'message',role,text
 function consume(e){
   const d=e.data;
   if(d?.continuationState&&active)active.continuation=d.continuationState;
+  {const t=timeoutControls?.notice(e.kind,d);if(t)transcript.push({id:uuid(),type:'notice',text:t});}
   if(e.kind==='session_updated'){
     Object.assign(active,d);$('header-title').textContent=active.title;const row=sessions.find(s=>s.id===active.id);if(row)Object.assign(row,d);sidebar();
   }
@@ -582,6 +585,7 @@ function addRoot(value=''){
 }
 $('add-root').onclick=()=>addRoot().focus();
 $('open-settings').onclick=async()=>{
+  timeoutControls.load();
   try{
     const settings=await api('/api/settings');$('settings-roots').replaceChildren();for(const root of settings.roots)addRoot(root);$('settings-error').textContent='';$('settings-saved').textContent='';
     const fields=$('default-model-fields');fields.replaceChildren();
@@ -615,6 +619,7 @@ $('settings-form').onsubmit=async event=>{
 };
 document.addEventListener('keydown',event=>{if(event.key==='n'&&!event.ctrlKey&&!event.metaKey&&!event.altKey&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)&&!document.querySelector('dialog[open]')){event.preventDefault();openCreate();}});
 setupDiff({api,getActive:()=>active});
+timeoutControls=setupTimeoutControls({$,api,getActive:()=>active});
 workspace=createWorkspace({api,toast,labels,uuid,getConfig:()=>config,getActive:()=>active,selectSession,openCreate,refreshSessions,enhanceBlocks:display.enhance,openSettings:()=>$('open-settings').click(),
   overview(){ $('conversation').hidden=true;$('welcome').hidden=false;localStorage.removeItem('agentworks-session'); },
   appendDraft(text){if(!active)return;const current=$('prompt').value;$('prompt').value=current?current+'\n\n'+text:text;drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));},
