@@ -148,7 +148,9 @@ impl Session {
         if let Some(origin) = state.automation.as_mut().filter(|a| a.outcome.is_none()) {
             origin.outcome = match kind {
                 "turn_end" => Some(
-                    if data["stopReason"] == "cancelled" {
+                    if data["timedOut"].is_string() {
+                        "timed_out"
+                    } else if data["stopReason"] == "cancelled" {
                         "cancelled"
                     } else {
                         "completed"
@@ -852,30 +854,41 @@ async fn save_settings(State(app): State<App>, Json(mut settings): Json<Settings
         }
     }
     settings.roots = Some(normalized);
-    // The roots/models form does not carry timeouts; keep the saved default.
-    let saved = app.catalog.lock().unwrap().data.settings.timeouts.clone();
-    settings.timeouts = settings.timeouts.take().or(saved);
-    app.catalog
-        .lock()
-        .unwrap()
-        .settings(settings)
-        .map_err(|_| fail(StatusCode::INTERNAL_SERVER_ERROR, "Could not save settings"))?;
+    persist_settings(&app, |current| {
+        // The roots/models form may omit timeouts; keep the saved default.
+        settings.timeouts = settings.timeouts.take().or(current.timeouts.clone());
+        settings
+    })?;
     Ok(get_settings(State(app.clone())).await)
 }
 async fn get_timeouts() -> Json<Value> {
     Json(json!({"default":timeouts::default_policy()}))
 }
 async fn save_timeouts(State(app): State<App>, Json(policy): Json<timeouts::Policy>) -> ApiResult {
-    policy.validate().map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
     let _workspace = app.workspace_lock.lock().await;
+    persist_settings(&app, |current| catalog::Settings {
+        timeouts: Some(policy),
+        ..current.clone()
+    })?;
+    Ok(get_timeouts().await)
+}
+/// Single validated write path: merge, persist, then publish the effective
+/// default under the catalog lock so saved and effective policy never diverge.
+fn persist_settings(
+    app: &App,
+    build: impl FnOnce(&Settings) -> Settings,
+) -> Result<(), (StatusCode, String)> {
     let mut catalog = app.catalog.lock().unwrap();
-    let mut settings = catalog.data.settings.clone();
-    settings.timeouts = Some(policy.clone());
+    let next = build(&catalog.data.settings);
+    if let Some(policy) = &next.timeouts {
+        policy.validate().map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    }
+    let policy = next.timeouts.clone().unwrap_or_default();
     catalog
-        .settings(settings)
+        .settings(next)
         .map_err(|_| fail(StatusCode::INTERNAL_SERVER_ERROR, "Could not save settings"))?;
     timeouts::set_default(policy);
-    Ok(Json(json!({"default":timeouts::default_policy()})))
+    Ok(())
 }
 #[derive(Deserialize)]
 struct ModelDiscovery {

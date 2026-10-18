@@ -1,9 +1,12 @@
 // L-07 execution timeout policy and a pure, deterministic turn clock.
 // The runtime samples the clock; nothing here retries tools or turns.
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,12 +25,12 @@ fn yes() -> bool {
     true
 }
 impl Default for Policy {
-    // Preserves the previous fixed behavior: 15-minute wall-clock turn, 15 s grace.
+    // Preserves the previous fixed behavior: 15-minute turn, 15 s grace, no inactivity rules.
     fn default() -> Self {
         Policy {
             total_seconds: Some(900),
             total_includes_human_wait: true,
-            inactivity_warning_seconds: Some(300),
+            inactivity_warning_seconds: None,
             inactivity_timeout_seconds: None,
             cancel_grace_seconds: 15,
         }
@@ -59,10 +62,10 @@ impl Policy {
     }
 }
 
+/// Monotonic milliseconds since process start; immune to wall-clock jumps.
 pub fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
+    static BASE: OnceLock<Instant> = OnceLock::new();
+    BASE.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 fn default_cell() -> &'static Mutex<Policy> {
     static CELL: OnceLock<Mutex<Policy>> = OnceLock::new();
@@ -79,30 +82,78 @@ pub fn effective(session_override: Option<Policy>) -> Policy {
     session_override.unwrap_or_else(default_policy)
 }
 
-/// Meaningful output resets inactivity; transport/status heartbeats do not.
-pub fn is_meaningful(update: &Value) -> bool {
-    match update["sessionUpdate"].as_str() {
-        Some("agent_message_chunk" | "agent_thought_chunk" | "tool_call" | "plan") => true,
-        Some("tool_call_update") => {
-            update.get("content").is_some_and(|c| !c.is_null())
-                || update.get("rawOutput").is_some_and(|c| !c.is_null())
-                || matches!(update["status"].as_str(), Some("completed" | "failed"))
-        }
+fn digest(value: &Value) -> u64 {
+    let mut h = DefaultHasher::new();
+    value.to_string().hash(&mut h);
+    h.finish()
+}
+fn empty(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => true,
+        Some(Value::Array(a)) => a.is_empty(),
+        Some(Value::String(s)) => s.is_empty(),
+        Some(Value::Object(o)) => o.is_empty(),
         _ => false,
     }
 }
 
-fn activity() -> &'static Mutex<HashMap<String, u64>> {
-    static CELL: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+/// Per-turn activity. Meaningful output resets inactivity; heartbeats,
+/// status-only updates and repeated identical snapshots do not.
+#[derive(Default)]
+pub struct Activity {
+    pub last: Option<u64>,
+    snapshots: HashMap<String, u64>,
+}
+impl Activity {
+    fn changed(&mut self, key: &str, value: &Value) -> bool {
+        let d = digest(value);
+        self.snapshots.insert(key.to_owned(), d) != Some(d)
+    }
+    pub fn meaningful(&mut self, update: &Value) -> bool {
+        match update["sessionUpdate"].as_str() {
+            Some("agent_message_chunk" | "agent_thought_chunk") => {
+                let c = &update["content"];
+                !(c["type"] == "text" && empty(c.get("text"))) && !empty(Some(c))
+            }
+            Some("tool_call") => true,
+            Some("plan") => self.changed("\0plan", &update["entries"]),
+            Some("tool_call_update") => {
+                let id = update["toolCallId"].as_str().unwrap_or_default();
+                let terminal = matches!(update["status"].as_str(), Some("completed" | "failed"))
+                    && self.changed(&format!("{id}\0status"), &update["status"]);
+                let output = (!empty(update.get("content")) || !empty(update.get("rawOutput")))
+                    && self.changed(id, &json!([update["content"], update["rawOutput"]]));
+                terminal || output
+            }
+            _ => false,
+        }
+    }
+}
+
+fn turns() -> &'static Mutex<HashMap<String, Activity>> {
+    static CELL: OnceLock<Mutex<HashMap<String, Activity>>> = OnceLock::new();
     CELL.get_or_init(Default::default)
 }
+/// Start a fresh activity record; stale values from earlier turns are discarded.
+pub fn begin(session: &str) {
+    turns()
+        .lock()
+        .unwrap()
+        .insert(session.into(), Activity::default());
+}
+pub fn end(session: &str) {
+    turns().lock().unwrap().remove(session);
+}
+/// Updates outside an active turn are ignored, so the map holds only running turns.
 pub fn observe(session: &str, update: &Value, now_ms: u64) {
-    if is_meaningful(update) {
-        activity().lock().unwrap().insert(session.into(), now_ms);
+    if let Some(turn) = turns().lock().unwrap().get_mut(session) {
+        if turn.meaningful(update) {
+            turn.last = Some(now_ms);
+        }
     }
 }
 pub fn last_activity(session: &str) -> Option<u64> {
-    activity().lock().unwrap().get(session).copied()
+    turns().lock().unwrap().get(session).and_then(|t| t.last)
 }
 
 #[derive(Debug, PartialEq)]
@@ -210,6 +261,11 @@ mod tests {
     fn default_preserves_fixed_deadline_and_bounds_validate() {
         let d = Policy::default();
         assert_eq!((d.total_seconds, d.cancel_grace_seconds), (Some(900), 15));
+        assert_eq!(
+            (d.inactivity_warning_seconds, d.inactivity_timeout_seconds),
+            (None, None)
+        );
+        assert!(d.total_includes_human_wait);
         assert!(d.validate().is_ok());
         assert!(p(None, None, None).validate().is_ok());
         assert!(p(Some(59), None, None).validate().is_err());
@@ -224,21 +280,57 @@ mod tests {
         assert_eq!(back, d);
     }
     #[test]
-    fn heartbeat_is_not_meaningful_output() {
-        assert!(is_meaningful(
-            &json!({"sessionUpdate":"agent_message_chunk"})
+    fn heartbeats_and_repeated_snapshots_are_not_meaningful() {
+        let mut a = Activity::default();
+        let text =
+            json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}});
+        assert!(a.meaningful(&text));
+        assert!(!a.meaningful(
+            &json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":""}})
         ));
-        assert!(!is_meaningful(&json!({"sessionUpdate":"usage_update"})));
-        assert!(!is_meaningful(
-            &json!({"sessionUpdate":"tool_call_update","status":"in_progress"})
+        assert!(!a.meaningful(&json!({"sessionUpdate":"usage_update"})));
+        let quiet =
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"x","status":"in_progress"});
+        assert!(!a.meaningful(&quiet));
+        assert!(!a.meaningful(
+            &json!({"sessionUpdate":"tool_call_update","toolCallId":"x","content":[]})
         ));
-        assert!(is_meaningful(
-            &json!({"sessionUpdate":"tool_call_update","content":[{}]})
+        let snap =
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"x","content":[{"t":"1"}]});
+        assert!(a.meaningful(&snap));
+        assert!(
+            !a.meaningful(&snap),
+            "identical snapshot must not reset inactivity"
+        );
+        assert!(a.meaningful(
+            &json!({"sessionUpdate":"tool_call_update","toolCallId":"x","content":[{"t":"2"}]})
         ));
+        let done =
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"x","status":"completed"});
+        assert!(a.meaningful(&done) && !a.meaningful(&done));
+    }
+    #[test]
+    fn activity_is_per_turn_and_released() {
+        observe("t1", &json!({"sessionUpdate":"tool_call"}), 3);
+        assert_eq!(last_activity("t1"), None, "ignored outside a turn");
+        begin("t1");
         observe("t1", &json!({"sessionUpdate":"usage_update"}), 5);
         assert_eq!(last_activity("t1"), None);
-        observe("t1", &json!({"sessionUpdate":"plan"}), 7);
+        observe("t1", &json!({"sessionUpdate":"tool_call"}), 7);
         assert_eq!(last_activity("t1"), Some(7));
+        begin("t1");
+        assert_eq!(
+            last_activity("t1"),
+            None,
+            "new turn discards stale activity"
+        );
+        end("t1");
+        assert!(!turns().lock().unwrap().contains_key("t1"));
+    }
+    #[test]
+    fn monotonic_clock_advances() {
+        let a = now_ms();
+        assert!(now_ms() >= a);
     }
     #[test]
     fn warns_before_stopping_quiet_tools_and_activity_resets() {

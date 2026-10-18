@@ -488,6 +488,7 @@ pub async fn run(
                         tokio::pin!(request);
                         // Policy is fixed at launch; later edits apply to later turns.
                         let mut clock=crate::timeouts::Clock::new(crate::timeouts::effective(None),crate::timeouts::now_ms());
+                        crate::timeouts::begin(&s.id);
                         s.emit("timeout_policy",json!({"policy":clock.policy}));
                         let grace=clock.policy.cancel_grace_seconds;
                         // Far-future sleep until a cancel/timeout arms the grace deadline.
@@ -500,9 +501,13 @@ pub async fn run(
                             tokio::select! {
                                 result=&mut request=>{
                                     s.clear_approvals();
-                                    match result {
-                                        Ok(result)=>{crate::limit_resume::finish(&s, Some(&serde_json::to_value(&result.stop_reason).unwrap_or(Value::Null)), None);s.emit("turn_end",json!({"stopReason":result.stop_reason}));},
-                                        Err(error)=>{let raw=serde_json::to_value(&error).unwrap_or(Value::Null);crate::limit_resume::enrich_codex(&s,&raw).await;crate::limit_resume::finish(&s,None,Some(&raw));s.emit("error",json!({"message":safe_error(&error.to_string())}));},
+                                    crate::timeouts::end(&s.id);
+                                    match (result,timed_out) {
+                                        // A timed-out turn is a deliberate cancellation: never schedule quota continuation.
+                                        (Ok(result),Some(kind))=>{crate::limit_resume::finish(&s,Some(&json!("cancelled")),None);s.emit("turn_end",json!({"stopReason":result.stop_reason,"timedOut":kind}));},
+                                        (Err(error),Some(kind))=>{crate::limit_resume::finish(&s,Some(&json!("cancelled")),None);s.emit("error",json!({"message":safe_error(&error.to_string()),"timedOut":kind}));},
+                                        (Ok(result),None)=>{crate::limit_resume::finish(&s, Some(&serde_json::to_value(&result.stop_reason).unwrap_or(Value::Null)), None);s.emit("turn_end",json!({"stopReason":result.stop_reason}));},
+                                        (Err(error),None)=>{let raw=serde_json::to_value(&error).unwrap_or(Value::Null);crate::limit_resume::enrich_codex(&s,&raw).await;crate::limit_resume::finish(&s,None,Some(&raw));s.emit("error",json!({"message":safe_error(&error.to_string())}));},
                                     }
                                     s.status("idle");
                                     break;
@@ -519,7 +524,7 @@ pub async fn run(
                                     }
                                     Some(Command::Prompt(_))=>{},
                                     Some(Command::Model(_))=>{},
-                                    None=>return Ok(()),
+                                    None=>{crate::timeouts::end(&s.id);return Ok(())},
                                 },
                                 _=tick.tick(),if !cancelled=>{
                                     // Lock order: approvals guard released before any emit/status.
@@ -540,7 +545,7 @@ pub async fn run(
                                         }
                                     }
                                 }
-                                _=&mut deadline=>return Err(agent_client_protocol::Error::internal_error().data(format!("Agent did not stop within {grace} seconds after {}; session closed",match timed_out {Some("total")=>"the total turn limit",Some(_)=>"the inactivity timeout",None=>"cancellation"}))),
+                                _=&mut deadline=>{crate::timeouts::end(&s.id);if timed_out.is_some(){crate::limit_resume::finish(&s,Some(&json!("cancelled")),None);}return Err(agent_client_protocol::Error::internal_error().data(format!("Agent did not stop within {grace} seconds after {}; session closed",match timed_out {Some("total")=>"the total turn limit",Some(_)=>"the inactivity timeout",None=>"cancellation"})))},
                             }
                         }
                     }
