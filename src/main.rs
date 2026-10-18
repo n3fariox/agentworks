@@ -4,8 +4,8 @@ mod communication;
 mod completion;
 mod diff;
 mod git_context;
-mod limit_resume;
 mod lifecycle;
+mod limit_resume;
 mod mcp;
 mod runtime;
 mod store;
@@ -610,7 +610,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route(
             "/api/sessions/{id}",
-            get(get_session).patch(lifecycle::update).delete(delete_session),
+            get(get_session)
+                .patch(lifecycle::update)
+                .delete(delete_session),
         )
         .route(
             "/api/sessions/{id}/agent-access",
@@ -1062,7 +1064,10 @@ async fn assign_project(
     s.emit("session_updated", json!({"projectId":req.project_id}));
     Ok(Json(s.meta()))
 }
-async fn list_sessions(State(app): State<App>, Query(query): Query<lifecycle::Filter>) -> Json<Value> {
+async fn list_sessions(
+    State(app): State<App>,
+    Query(query): Query<lifecycle::Filter>,
+) -> Json<Value> {
     let mut list: Vec<_> = app
         .sessions
         .lock()
@@ -1559,7 +1564,10 @@ async fn cancel(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
         s.clear_approvals();
     }
     if s.data.lock().unwrap().storage_error.is_some() {
-        return Err(fail(StatusCode::INSUFFICIENT_STORAGE, "Stop requested, but saving failed; inspect server storage"));
+        return Err(fail(
+            StatusCode::INSUFFICIENT_STORAGE,
+            "Stop requested, but saving failed; inspect server storage",
+        ));
     }
     Ok(Json(json!({"ok":true})))
 }
@@ -1644,7 +1652,9 @@ async fn approve(
     let running = {
         let mut data = s.data.lock().unwrap();
         let running = approvals.is_empty() && data.turn_active && data.status == "waiting";
-        if running { data.status = "running".into(); }
+        if running {
+            data.status = "running".into();
+        }
         running
     };
     drop(approvals);

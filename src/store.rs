@@ -165,7 +165,8 @@ impl Store {
         if self.connection.execute(
             "UPDATE sessions SET state=?2 WHERE id=?1",
             params![id, serde_json::to_string(state)?],
-        )? != 1 {
+        )? != 1
+        {
             return Err("Session no longer exists".into());
         }
         Ok(())

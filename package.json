@@ -23,6 +23,7 @@
     "test:lifecycle": "node scripts/lifecycle-smoke.mjs",
     "test:diff": "playwright test tests/diff.spec.mjs",
     "test:palettes": "playwright test tests/palettes.spec.mjs",
+    "test:display": "playwright test tests/display-preferences.spec.mjs",
     "prepare:coordinator": "node scripts/prepare-self-improvement.mjs"
   },
   "dependencies": {
