@@ -1,8 +1,8 @@
 # Batch 003 — Continue after usage limits reset
 
-Status: implemented and validated; deployment preparation in progress. The user explicitly requested a new session for L-09 and wants this feature completed first. Other backlog work remains deferred.
+Status: completed and deployed. The user explicitly requested a new session for L-09 and this feature was completed first. Other backlog work remains deferred.
 
-One real Codex session is running inside Agentworks in a dedicated worktree created through the deployed worktree-launch API:
+One real Codex session implemented the feature inside Agentworks in a dedicated worktree created through the deployed worktree-launch API:
 
 - Session: `f0ef54d0-adcd-4b9d-bdfe-8fd68f323977`, **Limit reset · Codex · implementation**.
 - Project: `0bba737d-c653-45db-938e-e1e96e7d03c8`, **Agentworks · limit-reset continuation**.
@@ -20,7 +20,7 @@ Investigate provider reset evidence early, including whether native Codex expose
 
 The worker owns needed runtime/store/MCP/UI/demo/tests/docs changes in its worktree. The coordinator owns the backlog/batch record and integration. No edits to main/other worktrees/live data, shared dependency changes, merges, deployment or live policy/grant changes by the worker. Shared node_modules is linked read-only by convention; Cargo targets and all test data are separate. Worker ports are 4371–4375, localhost only; coordinator checks use other isolated ports.
 
-The worker acknowledged the assignment through MCP. It will commit its changes, publish a completion claim and send a handoff with checks/limitations. The coordinator reviews actual code and evidence, requests corrections as needed, runs combined regressions and a real UI check, then deploys an immutable tested executable only after an idle activity check and backup. Existing sessions, transcripts, completion claims and settings must survive the migration/update.
+The worker acknowledged the assignment through MCP, committed its changes, published completion claim #5 and sent a handoff with checks/limitations. The coordinator reviewed actual code and evidence, requested corrections, completed combined regressions and real UI checks, then deployed an immutable tested executable after idle activity checks and backups. The implementation session and clean source worktree remain saved; no next feature session was dispatched.
 
 ## Implementation and review
 
@@ -43,3 +43,13 @@ Review corrections included scheduler communication/run/workspace lock ordering;
 Off by default. Human controls expose three-attempt/24-hour defaults with configurable 1–100 attempts and a deadline within 30 days. MCP `inheritResumePolicy:true` propagates an enabled parent's remaining per-session attempt bound/deadline without granting coordinator access. Stop, explicit completion/blocked reports and policy revocation prevent later wakes; normal successful turns do not schedule new work. Scope remains in the native conversation; natural-language completion is not inferred.
 
 Claude requires structured rejected metadata for an automatic timestamp; its exact first-turn rate-limit error can produce an unknown-reset manual pause. Codex exact quota errors trigger a bounded read-only quota request. Unavailable/stale resets and API-key mode remain manual; OpenCode automatic reset detection is unsupported. Unknown claim/dispatch outcomes after a crash pause for inspection rather than automatically replaying work. Provider wake-ups are conservatively staggered across accounts. Full behavior is documented in [L-09](../LIMIT-RESUME.md).
+
+## Deployment and preservation
+
+Feature integration: `770b281`; final mobile correction: `c15ba87773fc`. The tested immutable executable `.agentworks/bin/agentworks-c15ba87773fc` listens on `0.0.0.0:4318` through the existing VPN. No automatic policy was enabled as part of deployment.
+
+Before migration, idle checks confirmed zero turns/approvals and an integrity-checked schema-v5 SQLite/catalog backup was saved under `.agentworks/backups/batch003-20261017-225726/`. Post-migration comparison preserved all 12 session IDs/metadata, 12,776 pre-update transcript events byte-for-byte, all 5 completion reports and the project/location/settings catalog; schema v6 and integrity passed.
+
+For the final layout update the coordinator waited for the user's active **Model Prompts** Claude turn to finish. A fresh schema-v6/catalog backup was taken under `.agentworks/backups/batch003-layout-20261017-230224/`. The final update preserved all 12 sessions, 13,095 then-existing transcript events and 5 completion reports. Backup directories use 0700 and catalog/database copies use 0600.
+
+Final VPN-facing desktop/mobile checks confirmed default-off new/existing-session controls, visible editable bounds, reachable timer controls and composer, no page errors, no turns started by verification and no scheduled continuations. The web service remains running; other feature work remains deferred.

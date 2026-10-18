@@ -4,7 +4,7 @@ This board distinguishes delivered behavior from the older architecture proposal
 
 ## Current batch
 
-See [batch 003](batches/003-limit-resume.md): the user has now authorized a new Codex session to implement L-09 first. It runs in an isolated worktree; the coordinator owns review, validation, integration and deployment. [Batch 002](batches/002-worktree-policy.md) and [batch 001](batches/001-parallel-coordination.md) remain deployed. No other feature work has resumed.
+See [batch 003](batches/003-limit-resume.md): L-09 was implemented first in the requested dedicated Codex session, reviewed, tested, merged and deployed. [Batch 002](batches/002-worktree-policy.md) and [batch 001](batches/001-parallel-coordination.md) remain deployed. The implementation session is finished; no other feature batch has started.
 
 | ID | Task | Status | Acceptance |
 | --- | --- | --- | --- |
@@ -12,9 +12,9 @@ See [batch 003](batches/003-limit-resume.md): the user has now authorized a new 
 | C-03 | Durable completion claims | Delivered in batch 001 | Self-authored scoped MCP reports; idempotency; restart persistence; visible claims with commits, checks and blockers; no automatic work |
 | C-04a | Enforced worktree launches | Delivered in batch 002 | Project defaults and mandatory isolation; new/existing worktree selection; common browser/MCP/automation checks; durable retry behavior; preserved history |
 
-## Immediate feature priority
+## Completed priority feature
 
-**L-09: Resume when usage limits reset** is the user's highest-priority feature, now in progress in batch 003. It enables explicitly authorized long-running backlog work to continue across provider limit windows.
+**L-09: Resume when usage limits reset** was the user's highest-priority feature and is now delivered in batch 003. It enables explicitly authorized long-running backlog work to continue across recognized provider limit windows. Policies remain off by default; other backlog items remain deferred.
 
 ## Next coordination work
 
@@ -37,11 +37,11 @@ See [batch 003](batches/003-limit-resume.md): the user has now authorized a new 
 | L-06 | Switch harness with fresh context | Let the user choose another harness and what context to carry over into a fresh provider session. Preserve the original session/history and link the successor; make the context reset explicit, apply normal model/workspace policy, and leave the original usable if startup fails |
 | L-07 | Configurable execution timeouts | Replace the fixed 15-minute turn deadline with saved defaults and per-session overrides for optional total duration, inactivity warning/timeout and cancellation grace. Distinguish meaningful output from transport heartbeats; pause inactivity timing during human approval waits, show approaching limits, and preserve accurate interrupted/recovery state. See [tool activity design](TOOL-ACTIVITY.md) |
 | L-08 | Fork into a new session | Create an independent session from the latest completed turn or a selected earlier turn, preserving the original session and recording parent/branch-point lineage. Prefer a native harness fork when supported; otherwise explicitly offer a fresh session seeded with selected transcript/context or a summary, without claiming identical hidden provider state. Choose harness/model and reuse the workspace or create a new worktree under normal project policy; conversation forking and Git worktree creation are separate choices. Snapshot the chosen boundary without interrupting a running parent, preserve file-reference meaning when directories change, do not copy pending approvals/queued inputs or automatically grant coordinator privileges, and make fork creation retry-safe. Keep lineage/history across restarts; coordinate context handoff with L-06 |
-| L-09 | Resume when usage limits reset — highest priority | Off by default; human-enabled session policy schedules a durable continuation at a recognized provider quota reset, with visible countdown, cancellation and reset-source/freshness details. Resume the saved native context and unfinished assignment without blindly replaying the last tool/turn. Let authorized MCP child-session creation explicitly inherit an enabled parent's policy and stop/budget constraints; inheritance grants no additional controls and cannot enable a disabled policy. Persist/deduplicate timers across restarts, recheck live state/grants and shared account limits before dispatch, and honor explicit Stop/Pause/completion. See [design and checks](LIMIT-RESUME.md) |
+| L-09 | Resume when usage limits reset — delivered batch 003 | Off by default; human-enabled session policy schedules a durable continuation at a recognized provider quota reset, with visible countdown, cancellation and reset-source/freshness details. Resume the saved native context and unfinished assignment without blindly replaying the last tool/turn. Authorized MCP child-session creation can explicitly inherit an enabled parent's bounds; inheritance grants no additional controls and cannot enable a disabled policy. Timers persist across restarts; ambiguous dispatch pauses for inspection. Live state/grants and configured bounds are checked before dispatch. See [behavior, provider support and checks](LIMIT-RESUME.md) |
 
 ## Chat interface and navigation
 
-These additions remain planned; batch 003 is limited to L-09 and the controls it requires.
+These additions remain planned; batch 003 delivered L-09 and the controls it requires only.
 
 | ID | Task | Acceptance |
 | --- | --- | --- |
