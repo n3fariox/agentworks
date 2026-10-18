@@ -24,6 +24,8 @@ Start with a built-in Bazel parser and user-configurable match/capture rules. Ba
 
 Provide a documented registry so other build/test/download parsers can be added independently of the renderer. Simple rules should be configuration-only. If complex custom parsers are needed, an explicitly user-installed local helper can consume/emit versioned JSON events over stdio; bound its processing time, state and output, and let parser failures fall back to raw output without affecting execution. Tool output or repository content must not implicitly install or execute a parser.
 
+[Experiment E-01](experiments/001-starlark.md) evaluates embedded Rust Starlark as a shared extension language for these parsers and future workflow logic. It is a candidate implementation of this interface, not an adoption decision. Retain the normalized event/progress contract regardless of the experiment's outcome; evaluate it before committing to an external-helper protocol or a custom parser language.
+
 Record deterministic sample streams for tests, including dynamic totals, failures, duplicate events, snapshots/deltas, ANSI/carriage returns, replay and harnesses without streaming. The user's existing Bazel mod can provide parsing rules and representative fixtures when available. Do not require harness-specific CLI modifications just to render progress in Agentworks; investigate an adapter extension or an opt-in build progress source if a harness does not expose live output.
 
 ## Compact work logs — U-06
@@ -37,7 +39,7 @@ Approvals/questions remain actionable outside the folded log. Failures and inter
 ## Suggested implementation order
 
 1. Normalize and test tool/terminal events against deterministic fixtures and verify each installed harness's live output capabilities.
-2. Add the progress interface and Bazel renderer with raw-output fallback.
+2. Run E-01 to evaluate the extension language, then add the progress interface and Bazel renderer with raw-output fallback using the selected approach.
 3. Add turn work-log grouping, accessible expansion and mobile behavior.
 4. Expose timeout settings and integrate their outcomes with queued-input dispatch. This backend policy can also proceed independently once its shared session/event contract is agreed.
 

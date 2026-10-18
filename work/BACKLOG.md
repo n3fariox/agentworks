@@ -65,6 +65,12 @@ These additions are recorded for a later round; implementation remains stopped a
 | A-01 | Scheduled runs | Durable schedules/time zones, pause state, deduplicated dispatch and explicit restart/missed-run policy |
 | A-02 | GitHub triggers | Start with a small supported event set and polling or authenticated webhooks; persist event IDs, deduplicate, and apply existing run/approval limits |
 
+## Experiments
+
+| ID | Experiment | Acceptance |
+| --- | --- | --- |
+| E-01 | Embedded Rust Starlark for progress parsers and workflow logic | Prototype a Bazel progress parser and a durable conditional two-step workflow using the same interpreter library with separate capabilities. Rust owns I/O, scheduling, permissions and persistence. Verify replay/restart behavior, bounded evaluation, parser isolation and dependency/runtime cost; record a go/no-go decision before adopting it for U-05 or a production workflow engine. See [experiment plan](experiments/001-starlark.md). Planned only; no implementation started |
+
 ## Terminal mode
 
 | ID | Task | Acceptance |
