@@ -20,7 +20,7 @@ Project: **Agentworks · parallel batch 002** (`caa7dc76-19b1-45f0-8005-4475469f
 
 ## Integration and status
 
-Both workers finished and published completion claims through MCP. UI commit: `2103fb29f388f1faeee2013cc044080a4745281b`; backend commit: `534308a9354805b009d81f2147e3102bc893ddea`. Worktrees remain clean and retained. The coordinator merged the UI as `6f50c12` with its embedded asset route and staged the backend sequentially without conflicts. Combined validation is in progress.
+Completed and deployed. Both workers finished and published completion claims through MCP (#3 UI, #4 backend). UI commit: `2103fb29f388f1faeee2013cc044080a4745281b`; backend commit: `534308a9354805b009d81f2147e3102bc893ddea`. Worktrees remain clean and retained. The coordinator merged the UI as `6f50c12` with its embedded asset route, then merged the backend as `7562b86` sequentially without conflicts after combined validation.
 
 Review caught two implementation issues before integration: asynchronous worktree preparation needed to prevent `safeToClose:true`, and changing the shared Git output cap would weaken the existing inspection bound. The backend now reports preparation activity and keeps separate inspection/worktree output limits. A subsequent read-only review by the UI worker found that mutation-free preflight failures consumed request IDs permanently. The backend split durable payload binding from the mutation marker and added recovery tests; unchanged retries recover after capacity or destination preflight failures, while changed payloads conflict and uncertain mutations cannot repeat automatically.
 
@@ -32,6 +32,8 @@ Combined main passed 10 Rust unit tests, formatting/whitespace checks, 26 Playwr
 
 Strict Clippy retains seven pre-existing style findings in unchanged code. Failed or interrupted mutation may retain a branch/directory and needs inspection before a new request ID; safe preflight failures can retry unchanged. Missing/prunable paths are omitted, Git administrative paths must be inside allowed roots, and protection against another process racing filesystem changes remains bounded by the same-user trust model. Cleanup/merge controls remain deferred.
 
-Deployment requires an idle activity endpoint and a catalog/database backup. Validation artifacts remain ignored under `.cache/batch-002/`.
+Deployment confirmed `safeToClose:true`, zero active turns and zero pending approvals before stopping the prior service. Catalog and integrity-checked schema-v4 SQLite backup: `.agentworks/backups/batch002-20261017-211604/` (directory mode 0700, files 0600). The tested immutable executable `.agentworks/bin/agentworks-7562b8652de6` now listens on `0.0.0.0:4318` through the existing VPN.
+
+Post-deployment verification preserved all 8 session IDs and metadata, all 8,416 earlier transcript events byte-for-byte, and all 4 completion reports. SQLite migration to schema v5 and integrity checks passed. The deployed JavaScript route and desktop/mobile controls worked through the VPN URL without page errors or starting new turns. The service is idle; implementation sessions remain saved and suspended after restart. Validation artifacts remain ignored under `.cache/batch-002/`.
 
 The user has requested stopping after this round is integrated. No further feature batch will be dispatched. Named external controller credentials, session lifecycle controls and a review/merge queue remain backlog items; worktree cleanup requires its own safety and ownership design.

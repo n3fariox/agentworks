@@ -4,20 +4,20 @@ This board distinguishes delivered behavior from the older architecture proposal
 
 ## Current batch
 
-See [batch 002](batches/002-worktree-policy.md), now running two Codex sessions for enforced worktree launches and their browser controls. [Batch 001](batches/001-parallel-coordination.md) is deployed. The coordinator owns continued dispatch, review, sequential integration, validation and safe deployment.
+See [batch 002](batches/002-worktree-policy.md), deployed after two Codex sessions implemented enforced worktree launches and their browser controls. [Batch 001](batches/001-parallel-coordination.md) is also deployed. The coordinator reviewed, integrated, validated and deployed both batches. Work stops after batch 002 at the user's request; no next feature batch is running.
 
 | ID | Task | Status | Acceptance |
 | --- | --- | --- | --- |
 | C-02 | Read-only session Git/worktree context | Delivered in batch 001 | Main/linked/detached/non-Git states; branch/path/commit visible on desktop and phone; no repository mutation |
 | C-03 | Durable completion claims | Delivered in batch 001 | Self-authored scoped MCP reports; idempotency; restart persistence; visible claims with commits, checks and blockers; no automatic work |
-| C-04a | Enforced worktree launches | In progress in batch 002 | Project defaults and mandatory isolation; new/existing worktree selection; common browser/MCP/automation checks; durable retry behavior; preserved history |
+| C-04a | Enforced worktree launches | Delivered in batch 002 | Project defaults and mandatory isolation; new/existing worktree selection; common browser/MCP/automation checks; durable retry behavior; preserved history |
 
 ## Next coordination work
 
 | ID | Task | Acceptance |
 | --- | --- | --- |
 | C-01 | Named external controller identity | Explicit, revocable project-scoped credentials for this conversation/external MCP clients, with attributed operations; no borrowing an existing session's identity |
-| C-04 | Managed worktree lifecycle | Create/register isolated branch/worktree sessions, show ownership and dirty state, refuse unsafe cleanup, and keep integration/merge privileges explicit |
+| C-04b | Worktree ownership and cleanup | Build on delivered creation/selection; show ownership and dirty state, refuse unsafe cleanup, and keep integration/merge privileges explicit |
 | C-05 | Review and merge queue | Record proposed commits, review/test results and integration state separately from agent completion claims; apply one integration at a time |
 | C-06 | Optional inbox delivery/wake-up | Opt-in queued delivery with stable request IDs, loop/cost bounds, cancellation and crash recovery; messages alone continue not to start work |
 
