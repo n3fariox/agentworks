@@ -4,7 +4,7 @@ This board distinguishes delivered behavior from the older architecture proposal
 
 ## Current batch
 
-See [batch 003](batches/003-limit-resume.md): L-09 was implemented first in the requested dedicated Codex session, reviewed, tested, merged and deployed. [Batch 002](batches/002-worktree-policy.md) and [batch 001](batches/001-parallel-coordination.md) remain deployed. The implementation session is finished; no other feature batch has started.
+See [batch 004](batches/004-overnight.md): an eight-hour autonomous backlog run is active, starting with L-01, U-01/B-01 and D-01 in isolated Agentworks sessions. Major product decisions are deferred for tomorrow. [Batch 003](batches/003-limit-resume.md) delivered L-09; batches 001 and 002 remain deployed.
 
 | ID | Task | Status | Acceptance |
 | --- | --- | --- | --- |
