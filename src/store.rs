@@ -366,6 +366,7 @@ impl Store {
                 control_origin: None,
                 storage_error: None,
                 continuation: Default::default(),
+                timeouts: None,
             };
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO sessions(id,metadata,state) VALUES (?1,?2,?3)",
@@ -668,6 +669,7 @@ mod tests {
             control_origin: None,
             storage_error: None,
             continuation: Default::default(),
+                timeouts: None,
         };
         {
             let mut store = Store::open(&path).unwrap();

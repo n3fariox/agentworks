@@ -487,7 +487,7 @@ pub async fn run(
                         let request=connection.send_request(PromptRequest::new(provider_id.clone(),vec![ContentBlock::Text(TextContent::new(text))])).block_task();
                         tokio::pin!(request);
                         // Policy is fixed at launch; later edits apply to later turns.
-                        let mut clock=crate::timeouts::Clock::new(crate::timeouts::effective(None),crate::timeouts::now_ms());
+                        let mut clock=crate::timeouts::Clock::new(crate::timeouts::effective(s.data.lock().unwrap().timeouts.clone()),crate::timeouts::now_ms());
                         crate::timeouts::begin(&s.id);
                         s.emit("timeout_policy",json!({"policy":clock.policy}));
                         let grace=clock.policy.cancel_grace_seconds;

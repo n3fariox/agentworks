@@ -112,6 +112,9 @@ struct SessionData {
     storage_error: Option<String>,
     #[serde(default)]
     continuation: limit_resume::State,
+    /// L-07 per-session override; None uses the saved default at turn launch.
+    #[serde(default)]
+    timeouts: Option<timeouts::Policy>,
 }
 
 struct Approval {
@@ -223,7 +226,7 @@ impl Session {
         let approvals = self.approvals.lock().unwrap();
         let data = self.data.lock().unwrap();
         json!({"kind":"snapshot","seq":data.seq,"session":{"id":self.id,"provider":self.provider,
-            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation},"events":data.events,
+            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone())},"events":data.events,
             "truncated":data.events.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
             "models":data.models,"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|json!({"id":id,"request":a.request})).collect::<Vec<_>>()})
@@ -631,6 +634,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/activity", get(activity))
         .route("/api/settings", get(get_settings).put(save_settings))
         .route("/api/timeouts", get(get_timeouts).put(save_timeouts))
+        .route("/api/sessions/{id}/timeouts", axum::routing::put(save_session_timeouts))
         .route("/api/models", post(discover_models))
         .route("/api/external-sessions", post(list_external_sessions))
         .route("/api/sessions/import", post(import_session))
@@ -871,6 +875,31 @@ async fn save_timeouts(State(app): State<App>, Json(policy): Json<timeouts::Poli
         ..current.clone()
     })?;
     Ok(get_timeouts().await)
+}
+#[derive(Deserialize)]
+struct SessionTimeouts {
+    policy: Option<timeouts::Policy>,
+}
+/// Applies to the next turn launch; a running turn keeps its fixed policy.
+async fn save_session_timeouts(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(req): Json<SessionTimeouts>,
+) -> ApiResult {
+    if let Some(policy) = &req.policy {
+        policy.validate().map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    }
+    let _run = app.run_lock.lock().await;
+    let s = session(&app, &id)?;
+    let effective = {
+        let mut data = s.data.lock().unwrap();
+        data.timeouts = req.policy;
+        timeouts::effective(data.timeouts.clone())
+    };
+    let result = json!({"timeouts":s.data.lock().unwrap().timeouts,"effective":effective,"appliesTo":"nextTurn"});
+    // Emitting persists session state and shows the change in the transcript.
+    s.emit("timeout_settings", result.clone());
+    Ok(Json(result))
 }
 /// Single validated write path: merge, persist, then publish the effective
 /// default under the catalog lock so saved and effective policy never diverge.
@@ -1417,6 +1446,7 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             continuation: req
                 .inherited_resume
                 .unwrap_or(limit_resume::new_policy(req.resume_policy)?),
+            timeouts: None,
         }),
         tx,
         commands: Mutex::new(None),
