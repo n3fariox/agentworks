@@ -21,7 +21,7 @@ const drafts=readStorage(sessionStorage,'agentworks-drafts',{});
 const scrollPositions=new Map();let restoreScroll=null;
 let config, sessions=[], active=null, socket=null, generation=0, connected=false;
 let transcript=[], tools=new Map(), approvals=new Map(), assistant=null, status='starting';
-let replaying=false,workLogs=null;
+let replaying=false,workLogs=null,turnEnds=new Map();
 let modelConfig=null, availableCommands=[], commandsOpen=false;
 let discoveryGeneration=0;
 let externalSessions=[], externalSelection=null, externalCursor=null, externalGeneration=0, externalLoading=false, externalImporting=false;
@@ -264,7 +264,7 @@ function openProjectDialog(project=null){
   $('project-name').value=project?.name||'';$('project-error').textContent='';$('delete-project').hidden=!project;
   policyEditor.open(editingProject);$('project-dialog').showModal();$('project-name').focus();
 }
-function resetTranscript(){transcript=[];tools=new Map();approvals=new Map();assistant=null;nodes.clear();workLogs?.reset();$('messages').replaceChildren();$('approval-area').replaceChildren();}
+function resetTranscript(){transcript=[];tools=new Map();approvals=new Map();assistant=null;nodes.clear();turnEnds=new Map();workLogs?.reset();$('messages').replaceChildren();$('approval-area').replaceChildren();}
 function selectSession(s) {
   document.body.classList.remove('menu-open');
   if(active?.id===s.id){$('welcome').hidden=true;$('conversation').hidden=false;workspace?.sessionSelected(s);return;}
@@ -323,7 +323,7 @@ function consume(e){
   else if(e.kind==='continuation'){renderContinuation();}
   else if(e.kind==='models'){modelConfig=d;}
   else if(e.kind==='commands'){availableCommands=Array.isArray(d)?d:[];renderCommands();}
-  else if(e.kind==='user'){assistant=null;if(d.initiatedBy)transcript.push({id:uuid(),type:'notice',text:'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});addMessage('user',d.text);}
+  else if(e.kind==='user'){assistant=null;if(d.initiatedBy)transcript.push({id:uuid(),type:'notice',text:'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});addMessage('user',d.text).seq=e.seq;}
   else if(e.kind==='status'){
     status=d.status;if(active){active.status=status;if(d.explicitlySuspended!==undefined)active.explicitlySuspended=d.explicitlySuspended;const s=sessions.find(s=>s.id===active.id);if(s)s.status=status;}sidebar();
   }else if(e.kind==='approval'){approvals.set(d.id,d.request);}
@@ -331,14 +331,14 @@ function consume(e){
   else if(e.kind==='interrupted'){transcript.push({id:uuid(),type:'notice',text:d.message,interrupted:true});assistant=null;}
   else if(e.kind==='storage_error'){status='error';$('session-notice').textContent=d.message;$('session-notice').hidden=false;}
   else if(e.kind==='error'){transcript.push({id:uuid(),type:'error',text:d.message});assistant=null;}
-  else if(e.kind==='turn_end'){assistant=null;}
+  else if(e.kind==='turn_end'){assistant=null;turnEnds.set(transcript.at(-1)?.id,{seq:e.seq,stopReason:d?.stopReason});}
   else if(e.kind==='acp'){
     switch(d.sessionUpdate){
       case 'user_message_chunk':{
         assistant=null;if(d.content?.type==='text'){
           const last=transcript.at(-1);
           if(last?.replayed&&last.role==='user'&&last.providerMessageId===d.messageId)last.text+=d.content.text;
-          else{const message=addMessage('user',d.content.text);message.replayed=true;message.providerMessageId=d.messageId;}
+          else{const message=addMessage('user',d.content.text);message.replayed=true;message.providerMessageId=d.messageId;message.seq=e.seq;}
         }break;
       }
       case 'agent_message_chunk':{
@@ -351,7 +351,7 @@ function consume(e){
         }break;
       }
       case 'tool_call':{
-        assistant=null;const tool={...d,id:d.toolCallId,type:'tool'};tools.set(d.toolCallId,tool);transcript.push(tool);observeTool(tool,{live:!replaying});break;
+        assistant=null;let tool=tools.get(d.toolCallId);if(tool)Object.assign(tool,d,{type:'tool'});else{tool={...d,id:d.toolCallId,type:'tool'};tools.set(d.toolCallId,tool);transcript.push(tool);}observeTool(tool,{live:!replaying});break;
       }
       case 'tool_call_update':{
         let tool=tools.get(d.toolCallId);
@@ -463,7 +463,7 @@ function draw(){
     }
   }
   const pending=$('approval-area');pending.replaceChildren();
-  workLogs.apply(area,transcript,nodes,{sessionIdle:['idle','closed','suspended','error'].includes(status)});
+  workLogs.apply(area,transcript,nodes,{sessionIdle:['idle','closed','suspended','error'].includes(status),scope:active.id,turnEnds});
   for(const [id,request]of approvals){
     const card=el('div','approval');card.append(el('h4','','Permission requested'),el('p','',request.toolCall?.title||'An agent needs your decision'));
     if(request.toolCall?.rawInput)card.append(el('pre','',JSON.stringify(request.toolCall.rawInput,null,2)));

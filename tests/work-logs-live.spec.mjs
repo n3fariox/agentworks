@@ -12,7 +12,7 @@ async function api(path,body){
 }
 test.beforeAll(async()=>{
   fixture=resolve('.cache','work-logs-fixture');await rm(fixture,{recursive:true,force:true});await mkdir(join(fixture,'project'),{recursive:true});
-  server=spawn(resolve('target/debug/agentworks'),[],{env:{...process.env,AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:'4451',AGENTWORKS_ROOTS:fixture,
+  server=spawn(process.env.AGENTWORKS_TEST_BINARY||resolve('target/debug/agentworks'),[],{env:{...process.env,AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:'4451',AGENTWORKS_ROOTS:fixture,
     AGENTWORKS_CATALOG_PATH:join(fixture,'catalog.json'),AGENTWORKS_DB_PATH:join(fixture,'sessions.sqlite3'),AGENTWORKS_DEMO_STATE_DIR:join(fixture,'demo')},stdio:['ignore','pipe','pipe']});
   server.on('exit',()=>exited=true);for(const s of [server.stdout,server.stderr])s.on('data',c=>{log+=c;});
   for(let i=0;i<100;i++){if(exited)throw new Error(log);try{if((await fetch(base+'/api/status')).ok)return;}catch{}await new Promise(r=>setTimeout(r,100));}
@@ -29,7 +29,7 @@ test('demo approval turn: approval stays actionable, log folds after completion 
   const approval=page.locator('#approval-area .approval');
   await expect(approval).toBeVisible();
   await expect(page.locator('.work-log')).toHaveAttribute('open','');
-  await expect(page.locator('.work-log-counts')).toHaveText('1 tool call · 1 running');
+  await expect(page.locator('.work-log-counts')).toHaveText('1 tool call · 1 in progress');
   await approval.getByRole('button',{name:'Allow once'}).click();
   await expect(page.locator('#prompt')).toBeEnabled();
   await expect(page.locator('.work-log')).not.toHaveAttribute('open','');
@@ -38,4 +38,18 @@ test('demo approval turn: approval stays actionable, log folds after completion 
   await expect(page.locator('.work-log-counts')).toHaveText('1 tool call');
   await expect(page.locator('.work-log')).not.toHaveAttribute('open','');
   await expect(page.locator('.message.assistant').last()).toContainText('demo agent');
+  // Explicit expansion survives a full reload (fresh random item ids) and session switching.
+  const other=await api('/api/sessions',{provider:'demo',cwd:join(fixture,'project'),title:'Other work log session'});
+  await page.locator('.work-log-summary').click();
+  await expect(page.locator('.work-log')).toHaveAttribute('open','');
+  await page.reload();
+  await expect(page.locator('.work-log-counts')).toHaveText('1 tool call');
+  await expect(page.locator('.work-log')).toHaveAttribute('open','');
+  await page.getByText('Other work log session').first().click();
+  await expect(page.locator('#header-title')).toHaveText('Other work log session');
+  await expect(page.locator('.work-log')).toHaveCount(0);
+  await page.getByText('Work log test').first().click();
+  await expect(page.locator('#header-title')).toHaveText('Work log test');
+  await expect(page.locator('.work-log')).toHaveAttribute('open','');
+  expect(other.id).not.toBe(session.id);
 });

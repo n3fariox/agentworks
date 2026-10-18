@@ -1,39 +1,55 @@
 // U-06 compact turn work logs: a derived presentation over the existing transcript items.
 // Raw items/events are never altered; grouping only moves already-rendered nodes into a fold.
 // Background metadata: ACP tool calls expose no process lifetime or parent/subagent link here,
-// so a call is "still running" only while its own status is pending/in_progress. No relationships are inferred.
+// so a pending/in_progress call is shown as "in progress" during its turn and "without final status" afterwards;
+// neither claims a background process is alive. Durations are browser-observed for live events only and
+// omitted after replay (persisted events carry no timestamps). No parent/subagent relationships are inferred.
 const PREF='agentworks-work-log-mode', CHOICES='agentworks-work-log-choices';
 const RUNNING=new Set(['pending','in_progress']);
 const write=(key,value)=>{try{localStorage.setItem(key,JSON.stringify(value));}catch{}};
 const read=(key,fallback)=>{try{return JSON.parse(localStorage.getItem(key))??fallback;}catch{return fallback;}};
 
-// Turns start at each user message. A turn is complete only when a later user message exists
-// or the session is idle/closed: imported history without turn_end markers is never closed early.
-export function buildWorkLogs(items,{sessionIdle=false}={}){
+// Turns start at each user message or after a persisted turn_end (`turnEnds`: id of the last item
+// before it -> {seq, stopReason}). Keys come from persisted event sequence numbers scoped by session,
+// so choices survive replay; transcript item ids are random per replay and are never used as keys.
+// A turn without turn_end is complete only when a later turn exists or the session is idle/closed,
+// so imported history lacking turn_end markers is never closed early.
+// Errors, images and notices (interruption, agent-initiated turns) split a turn into separate
+// segments so they are never folded away.
+const SEPARATORS=new Set(['error','image','notice']);
+export function buildWorkLogs(items,{sessionIdle=false,scope='',turnEnds=new Map()}={}){
   const turns=[];let turn=null;
+  const open=key=>{turn={key,items:[],end:null};turns.push(turn);};
   for(const item of items){
-    if(item.type==='message'&&item.role==='user'){turn={key:item.id,items:[]};turns.push(turn);continue;}
-    if(!turn){turn={key:'before-first-user',items:[]};turns.push(turn);}
-    turn.items.push(item);
+    if(item.type==='message'&&item.role==='user'){open(`${scope}:${item.seq??item.id}`);}
+    else{if(!turn)open(`${scope}:start`);if(!turn.items.includes(item))turn.items.push(item);}
+    const end=turnEnds.get(item.id);
+    if(end){turn.end=end;open(`${scope}:end-${end.seq}`);}
   }
-  return turns.map((t,index)=>{
-    const complete=index<turns.length-1||sessionIdle;
-    const toolIdx=t.items.flatMap((item,i)=>item.type==='tool'?[i]:[]);
-    if(!toolIdx.length)return null;
-    // Fold from the first tool through the last tool, keeping intermediate text in chronological order.
-    // The answer after the final tool, and anything before the first tool, stays prominent.
-    const members=t.items.slice(toolIdx[0],toolIdx.at(-1)+1);
-    const calls=new Map();
-    for(const item of members)if(item.type==='tool')calls.set(item.id,item);
-    const list=[...calls.values()];
-    const failed=list.filter(c=>c.status==='failed').length;
-    const running=list.filter(c=>RUNNING.has(c.status||'pending')).length;
-    const interrupted=complete&&t.items.some(i=>i.type==='notice'&&i.interrupted);
-    const starts=list.map(c=>c.observedStart).filter(Number.isFinite);
-    const ends=list.map(c=>c.observedEnd).filter(Number.isFinite);
-    const duration=starts.length===list.length&&ends.length&&!running?Math.max(...ends)-Math.min(...starts):null;
-    return {key:'work-'+t.key,anchor:members[0].id,members:members.map(m=>m.id),calls:list.length,failed,running,interrupted,complete,duration};
-  }).filter(Boolean);
+  const logs=[];
+  turns.forEach((t,index)=>{
+    const complete=!!t.end||index<turns.length-1||sessionIdle;
+    const segments=[[]];
+    for(const item of t.items)if(SEPARATORS.has(item.type))segments.push([]);else segments.at(-1).push(item);
+    const interrupted=t.items.some(i=>i.type==='notice'&&i.interrupted)||t.end?.stopReason==='cancelled';
+    const stopReason=t.end&&!['end_turn','cancelled'].includes(t.end.stopReason)?t.end.stopReason:null;
+    segments.forEach((segment,part)=>{
+      const toolIdx=segment.flatMap((item,i)=>item.type==='tool'?[i]:[]);
+      if(!toolIdx.length)return;
+      // Fold from the first tool through the last tool, keeping intermediate text in chronological order.
+      // The answer after the final tool, and anything before the first tool, stays prominent.
+      const members=segment.slice(toolIdx[0],toolIdx.at(-1)+1);
+      const list=members.filter(m=>m.type==='tool');
+      const failed=list.filter(c=>c.status==='failed').length;
+      const unresolved=list.filter(c=>RUNNING.has(c.status||'pending')).length;
+      const starts=list.map(c=>c.observedStart).filter(Number.isFinite);
+      const ends=list.map(c=>c.observedEnd).filter(Number.isFinite);
+      const duration=starts.length===list.length&&ends.length===list.length&&!unresolved?Math.max(...ends)-Math.min(...starts):null;
+      logs.push({key:`work-${t.key}:${part}`,anchor:members[0].id,members:members.map(m=>m.id),calls:list.length,failed,running:unresolved,
+        interrupted:complete&&interrupted,stopReason:complete?stopReason:null,complete,duration});
+    });
+  });
+  return logs;
 }
 
 export function formatDuration(ms){
@@ -45,7 +61,9 @@ export function summaryText(log){
   if(log.duration!==null)parts.push(formatDuration(log.duration));
   if(log.failed)parts.push(`${log.failed} failed`);
   if(log.interrupted)parts.push('interrupted');
-  if(log.running)parts.push(log.complete?`${log.running} still running`:`${log.running} running`);
+  if(log.stopReason)parts.push('stopped: '+log.stopReason.replace(/_/g,' '));
+  // Without process metadata a pending status after the turn ended is only an unresolved report, not proof of a live process.
+  if(log.running)parts.push(log.complete?`${log.running} without final status`:`${log.running} in progress`);
   return parts.join(' · ');
 }
 
@@ -62,8 +80,8 @@ export function setupWorkLogs({el}){
   let mode=read(PREF,'compact')==='expanded'?'expanded':'compact';
   const choices=read(CHOICES,{});const groups=new Map();
   const save=()=>{const keys=Object.keys(choices);for(const k of keys.slice(0,Math.max(0,keys.length-200)))delete choices[k];write(CHOICES,choices);};
-  function apply(area,items,nodes,{sessionIdle}){
-    const logs=buildWorkLogs(items,{sessionIdle});const seen=new Set();
+  function apply(area,items,nodes,{sessionIdle,scope,turnEnds}){
+    const logs=buildWorkLogs(items,{sessionIdle,scope,turnEnds});const seen=new Set();
     for(const log of logs){
       seen.add(log.key);
       let group=groups.get(log.key);
@@ -77,7 +95,9 @@ export function setupWorkLogs({el}){
       const anchor=nodes.get(log.anchor);
       if(anchor&&group.parentNode!==area)area.insertBefore(group,anchor.parentNode===area?anchor:null);
       const body=group.querySelector('.work-log-body');
-      for(const id of log.members){const node=nodes.get(id);if(node&&node.parentNode!==body)body.append(node);}
+      const wantedNodes=log.members.map(id=>nodes.get(id)).filter(Boolean);
+      // Re-append in chronological order whenever membership or order changed (e.g. an answer absorbed by a later tool).
+      if(wantedNodes.length!==body.children.length||wantedNodes.some((n,i)=>body.children[i]!==n))body.append(...wantedNodes);
       group.querySelector('.work-log-counts').textContent=summaryText(log);
       group.classList.toggle('has-failure',!!(log.failed||log.interrupted));
       group.classList.toggle('is-running',!!log.running);
