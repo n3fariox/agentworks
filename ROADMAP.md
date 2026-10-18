@@ -4,6 +4,8 @@ Status: architecture reference and execution plan, October 17, 2026. Current tas
 
 Confirmed decisions: Linux hosting for MVP; keep the architecture portable to Windows. Select chat or terminal when creating a session, with no switching. Reuse existing Claude/Codex host CLI sign-ins by default, with API keys as an optional explicit mode and the user's existing VPN for remote browser access. Add multiple execution hosts after MVP using a persistent host service connected over SSH.
 
+Hosting follow-up: also support the user's public Traefik HTTPS proxy with a UUID mount path and StripPrefix. Web URLs and proxy-aware origin checks must support that deployment; PWA installation is optional at hosting time, with manifest/worker scope confined to the mount. See [the hosting plan](work/HOSTING.md) and backlog R-04/R-05.
+
 Build a local web application for managing Claude and Codex agents across multiple project directories, with a responsive dark interface, structured chat, full terminal sessions, and local file previews.
 
 ## Prototype checkpoint
