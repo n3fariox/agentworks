@@ -6,6 +6,7 @@ import {setupCommunication} from '/communication.js';
 import {setupPalettes} from '/palettes.js';
 import {setupDisplayPreferences} from '/display-preferences.js';
 import {setupWorkLogs,observeTool} from '/work-logs.js';
+import {setupUsageStatus} from '/usage-status.js';
 const $ = id => document.getElementById(id);
 // randomUUID is unavailable on plain HTTP remote origins; getRandomValues is supported.
 const uuid = () => globalThis.crypto.randomUUID?.() ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -20,6 +21,9 @@ let editingProject=null,savingProject=false;
 const drafts=readStorage(sessionStorage,'agentworks-drafts',{});
 const scrollPositions=new Map();let restoreScroll=null;
 let config, sessions=[], active=null, socket=null, generation=0, connected=false;
+// U-07: per-session composer usage statusline; only this session's own events feed it.
+const usageStatus=setupUsageStatus({root:$('usage-status'),getProvider:()=>active?.provider});
+setInterval(()=>usageStatus.render(),60000);
 let transcript=[], tools=new Map(), approvals=new Map(), assistant=null, status='starting';
 let permissionModes=null;
 let replaying=false,workLogs=null,turnEnds=new Map();
@@ -272,7 +276,7 @@ function selectSession(s) {
   if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));scrollPositions.set(active.id,$('messages').scrollTop);}
   $('prompt').value=drafts[s.id]||'';restoreScroll=scrollPositions.get(s.id)??null;
   clearTimeout(retryTimer);generation++;socket?.close();socket=null;connected=false;
-  active=s;status=s.status;pendingSend=null;modelConfig=null;permissionModes=null;availableCommands=[];commandsOpen=false;renderCommands();resetTranscript();
+  active=s;status=s.status;pendingSend=null;modelConfig=null;permissionModes=null;availableCommands=[];commandsOpen=false;renderCommands();resetTranscript();usageStatus.reset();
   localStorage.setItem('agentworks-session',s.id);$('welcome').hidden=true;$('conversation').hidden=false;
   $('header-title').textContent=s.title;$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;
   $('session-notice').hidden=true;document.body.classList.remove('menu-open');sidebar();updateControls();connect(generation);
@@ -288,15 +292,15 @@ function connect(gen){
     if(gen!==generation)return;
     const e=JSON.parse(event.data);
     if(e.kind==='snapshot'){
-      resetTranscript();status=e.session.status;Object.assign(active,e.session);
+      resetTranscript();usageStatus.reset();status=e.session.status;Object.assign(active,e.session);
       replaying=true;try{for(const item of e.events)if(item.kind!=='session_updated')consume(item);}finally{replaying=false;}
       Object.assign(active,e.session);$('header-title').textContent=active.title;
       active.continuation=e.session.continuation;
       approvals=new Map(e.approvals.map(a=>[a.id,a.request]));status=e.session.status;modelConfig=e.models;permissionModes=e.permissionModes;if(status==='suspended'&&!e.session.explicitlySuspended)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();
       if(e.storageError){$('session-notice').textContent=e.storageError;$('session-notice').hidden=false;}
       if(e.truncated){$('session-notice').textContent='Showing recent output. The full transcript is saved on this host.';$('session-notice').hidden=false;}
-    }else consume(e);
-    scheduleDraw();updateControls();renderContinuation();
+    }else consume(e,true);
+    scheduleDraw();updateControls();renderContinuation();usageStatus.render();
   };
   ws.onclose=()=>{
     if(gen!==generation)return;
@@ -315,8 +319,9 @@ function connect(gen){
   };
 }
 function addMessage(role,text){const message={id:uuid(),type:'message',role,text};transcript.push(message);return message;}
-function consume(e){
+function consume(e,live=false){
   const d=e.data;
+  usageStatus.consume(e,{live});
   if(d?.continuationState&&active)active.continuation=d.continuationState;
   if(e.kind==='session_updated'){
     Object.assign(active,d);$('header-title').textContent=active.title;const row=sessions.find(s=>s.id===active.id);if(row)Object.assign(row,d);sidebar();

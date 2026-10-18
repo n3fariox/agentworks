@@ -29,6 +29,8 @@ async function prompt(id, params) {
   const text=params.prompt.filter(p=>p.type==='text').map(p=>p.text).join('\n');
   (session.history??=[]).push({sessionUpdate:'user_message_chunk',content:{type:'text',text}});session.title??=text.slice(0,80);session.updatedAt=new Date().toISOString();save(params.sessionId);
   const chunk=text=>update(params.sessionId,{sessionUpdate:'agent_message_chunk',content:{type:'text',text}});
+  // U-07 fixture: `usage-status {json}` emits that usage_update deterministically; no model is called.
+  if(text.startsWith('usage-status ')){update(params.sessionId,{sessionUpdate:'usage_update',...JSON.parse(text.slice(13))});chunk('usage reported');save(params.sessionId);reply(id,{stopReason:'end_turn'});return;}
   chunk(`### Local session, turn ${turn}\n\n`);
   if(text==='quota native-error'){send({id,error:{code:-32603,message:'Trusted native quota',data:{codexErrorInfo:'usageLimitExceeded'}}});return;}
   if(text==='quota active-approval'){

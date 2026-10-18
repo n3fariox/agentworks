@@ -93,3 +93,9 @@ body[data-code-wrap=scroll] .tool-card pre,body[data-code-wrap=scroll] .approval
 
 #service-controls{display:flex;flex-direction:column;gap:10px;margin-top:20px;min-width:0;border:1px solid var(--border,#555);border-radius:8px;padding:14px}#service-controls p{overflow-wrap:anywhere;margin:0}#service-controls input,#service-controls select,#service-controls button{min-height:44px;max-width:100%;box-sizing:border-box}#service-controls legend{font-weight:600}#service-controls [hidden]{display:none}
 .work-log{margin:6px 0;border:1px solid #2c3442;border-radius:10px;background:#12161d}.work-log-summary{display:flex;gap:10px;flex-wrap:wrap;padding:10px 12px;min-height:44px;box-sizing:border-box;align-items:center;cursor:pointer;color:#aeb7c4}.work-log-summary:focus-visible{outline:2px solid #7aa2f7;outline-offset:2px}.work-log-title{font-weight:600;color:#d8dee9}.work-log.has-failure .work-log-counts{color:#f7768e}.work-log.is-running .work-log-counts::before{content:'● ';color:#e0af68}.work-log-body{padding:0 8px 8px;min-width:0}
+/* U-07 composer usage statusline */
+.usage-status{display:flex;flex-direction:column;align-items:flex-end;font-size:12px;margin:0 0 4px}
+.usage-status-toggle{background:none;border:0;color:inherit;opacity:.75;cursor:pointer;font:inherit;padding:4px 6px;min-height:28px}
+.usage-status-toggle.stale,.usage-status-toggle.unknown{opacity:.55;font-style:italic}
+.usage-status-details{width:100%;max-width:640px;padding:8px 10px;border:1px solid rgba(127,127,127,.35);border-radius:8px;display:grid;gap:4px;overflow-wrap:anywhere}
+@media (max-width:640px){.usage-status{align-items:stretch}.usage-status-toggle{text-align:left;min-height:36px}}
