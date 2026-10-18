@@ -36,6 +36,7 @@ Review corrections included scheduler communication/run/workspace lock ordering;
 - Full verification: existing API/MCP legacy/modern wire, project/settings/import/workspace/automation/completion/worktree checks, the new local ACP/MCP/mobile timer suite, 26 Playwright tests, and graceful shutdown with an open browser WebSocket passed.
 - Existing communication/coordinator/grant/revocation and restart/crash/context/transcript persistence regressions passed separately.
 - An independent actual browser/API check verified a future countdown and custom seven-attempt/two-day policy on desktop/mobile, preserved the timer through graceful restart, and confirmed Stop removes the timer and authorization. Mobile panel geometry fits the viewport; no page errors or model calls. Artifacts remain ignored under `.cache/batch-003/`.
+- A final live visual check exposed advanced controls pushing the composer below the mobile viewport. The coordinator bounded the expanded panel with internal scrolling and a sticky summary, and added assertions that its last control and the composer remain reachable. The timer acceptance suite and all 26 browser regressions passed again against that focused layout fix.
 
 ## Behavior and limitations
 
