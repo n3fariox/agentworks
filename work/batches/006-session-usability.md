@@ -1,6 +1,6 @@
 # Batch 006 — Session usability
 
-The user authorized starting three Claude sessions for the next priority backlog items. This is one bounded batch, not a recurring backlog run. Coordinator: `50cba24d-a4ae-45a0-8330-2e7137d67722`, project `bd61c375-1916-4e60-a2d9-8fc7614e68d0`. Start 2026-10-18 16:28 UTC; absolute worker stop/checkpoint deadline **2026-10-18 17:15 UTC (12:15 Chicago)**. No quota-continuation policy is enabled or inherited. Workers checkpoint within 12 minutes because the current runtime has a fixed turn timeout; timed-out work must be inspected before any deliberate continuation.
+The user authorized starting three Claude sessions for the next priority backlog items. This is one bounded batch, not a recurring backlog run. Coordinator: `50cba24d-a4ae-45a0-8330-2e7137d67722`, project `bd61c375-1916-4e60-a2d9-8fc7614e68d0`. Start 2026-10-18 16:28 UTC; initial absolute worker stop/checkpoint deadline **2026-10-18 17:15 UTC (12:15 Chicago)**. Worker quota continuation is off and was not inherited. The coordinator's separate human-enabled policy was retained. Workers checkpoint within 12 minutes because the current runtime has a fixed turn timeout; timed-out work must be inspected before any deliberate continuation.
 
 All workers start from committed main `df380e1c0461f2cebae31ee6481a0b9a7ec767a4`. Only the coordinator reviews and integrates; no worker merges, deploys, restarts services, edits live state/grants, installs dependencies or starts other agents. Existing saved workers remain suspended. Major product decisions are deferred.
 
@@ -33,3 +33,19 @@ Validation: 22 Rust tests, locked offline build, formatting/JS syntax/whitespace
 At 2026-10-18 16:58 UTC all three existing harnesses resumed idle and their actual native adapters confirmed `currentValue:auto`. Native IDs remained unchanged: U-06 `e1123f04-1160-4ffb-b390-a3d88e335491`, U-07 `0b5c4f2e-6d80-41b3-84f3-1ae54a3525bf`, L-07 `1e7d14cc-63ed-4d2a-a86d-f0f7d6c309e4`. No replacement sessions were created and no bypass-permissions mode was selected.
 
 Each worker then accepted one fresh inspection/continuation instruction using stable request ID `b006-auto-continue-<work-logs|usage-status|timeouts>`. They must inspect interrupted tool outcomes/files before proceeding, preserve original ownership, checkpoint within ten minutes and commit/hand off by 17:12 UTC ahead of the unchanged 17:15 UTC absolute deadline. No prior tool or prompt was replayed. Feature work remains unreviewed/unintegrated; only the permission-mode repair was deployed.
+
+### Final worker handoffs and renewed review
+
+The workers finished idle with clean commits: U-06 `70271f8`, U-07 `e6ac0be`, L-07 partial backend `8bb0ddc`. Saved handoffs #88–90 include checks, limitations and pending decisions. No feature commit was merged on the basis of these claims.
+
+The coordinator's response to the user's first question about these handoffs hit a verified Codex quota limit. Its recorded timer targeted 2026-10-18 18:15:04 UTC, but a subsequent `/status` turn cleared it with zero automatic attempts. The user requested this defect be recorded at high priority: B-02 now captures evidence and regression acceptance. This does not authorize implementing B-02 during this review.
+
+The user then explicitly authorized continuing review. At approximately 18:48 UTC the same three workers accepted targeted review/fix requests, retaining their branches, ownership and isolated test ports. New stop/checkpoint bound is 19:10 UTC; each turn must checkpoint within ten minutes and finish within twelve minutes. No fresh backlog assignments or quota policies were added.
+
+Initial review blockers:
+
+- U-06: real user-message IDs change on replay, invalidating stored expansion choices; explicit turn endings/cancellation and unresolved tool states need truthful summaries; folding must not hide failures; real application reload and ordering coverage needed.
+- U-07: missing embedded module route; timestamp-less history is incorrectly freshened on reload; unrelated updates freshen old cost/quota; attribution and input validation need checking; unsupported cost assumptions and inferred compaction labels need correction. Live inspected events already contain Claude unified five-hour/seven-day utilization, which must be handled without account queries.
+- L-07: original checkpoint omits per-session overrides, controls and acceptance tests. General settings saves bypass timeout validation/effective-policy synchronization; elapsed timing uses wall clock; repeated snapshots may defeat inactivity; timeout outcomes can be reported as normal success or schedule quota recovery. These block integration.
+
+Review fixes and integration results will be recorded after examining actual commits and checks.
