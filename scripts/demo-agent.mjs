@@ -9,7 +9,7 @@ import {resolve,join} from 'node:path';
 const stateDir=process.env.AGENTWORKS_DEMO_STATE_DIR||resolve('.agentworks/demo');
 mkdirSync(stateDir,{recursive:true});
 function save(id){const file=join(stateDir,id+'.json');writeFileSync(file+'.tmp',JSON.stringify(sessions.get(id)),{mode:0o600});renameSync(file+'.tmp',file);}
-function commands(id){update(id,{sessionUpdate:'available_commands_update',availableCommands:[{name:'help',description:'Show demo help'},{name:'$demo-skill',description:'Example skill entry; no model is called'}]});}
+function commands(id){update(id,{sessionUpdate:'available_commands_update',availableCommands:[{name:'status',description:'Read-only demo status'},{name:'usage',description:'Read-only demo usage'},{name:'help',description:'Show demo help'},{name:'$demo-skill',description:'Example skill entry; no model is called'}]});}
 const sessions = new Map(), approvals = new Map(), mcpConfigs = new Map();
 const modelOptions=[{value:'demo/steady',name:'Steady (local demo)'},{value:'demo/quick',name:'Quick (local demo)'}];
 const modelConfig=(model,mode='default')=>[{id:'model',name:'Model',category:'model',type:'select',currentValue:model,options:modelOptions},...(process.env.AGENTWORKS_DEMO_MODES==='1'?[{id:'mode',name:'Mode',category:'mode',type:'select',currentValue:mode,options:[{value:'default',name:'Manual'},{value:'auto',name:'Auto'}]}]:[])];
@@ -32,6 +32,13 @@ async function prompt(id, params) {
   // U-07 fixture: `usage-status {json}` emits that usage_update deterministically; no model is called.
   if(text.startsWith('usage-status ')){update(params.sessionId,{sessionUpdate:'usage_update',...JSON.parse(text.slice(13))});chunk('usage reported');save(params.sessionId);reply(id,{stopReason:'end_turn'});return;}
   chunk(`### Local session, turn ${turn}\n\n`);
+  // B-02: deterministic provider-local read; no model/tool action is dispatched.
+  if(text==='/status'||text==='/usage') {
+    await delay(Number(process.env.AGENTWORKS_DEMO_STATUS_DELAY_MS||0));
+    if(session.probeMode==='transport-exit')process.exit(1);
+    if(session.probeMode)update(params.sessionId,{sessionUpdate:'usage_update',used:100,size:1000,_meta:{'_claude/rateLimit':{status:'rejected',...(session.probeMode==='unknown'?{}:{resetsAt:session.probeMode==='stale'?1:Math.ceil(Date.now()/1000)+10})}}});
+    chunk('Local status read.');save(params.sessionId);reply(id,{stopReason:session.cancelled?'cancelled':'end_turn'});return;
+  }
   if(text==='quota native-error'){send({id,error:{code:-32603,message:'Trusted native quota',data:{codexErrorInfo:'usageLimitExceeded'}}});return;}
   if(text==='quota active-approval'){
     update(params.sessionId,{sessionUpdate:'usage_update',used:100,size:1000,_meta:{'_claude/rateLimit':{status:'rejected',resetsAt:Math.ceil(Date.now()/1000)+2}}});
@@ -42,6 +49,7 @@ async function prompt(id, params) {
   if(text==='quota repeat')session.repeatQuota=2;
   if(/^quota (known|unknown|multi|repeat)/.test(text)||(text.startsWith('[Agentworks usage-limit continuation;')&&session.repeatQuota>0)) {
     if(session.repeatQuota>0)session.repeatQuota--;
+    session.probeMode=text.includes('probe-transport')?'transport-exit':text.includes('probe-exhausted')?'exhausted':text.includes('probe-unknown')?'unknown':text.includes('probe-stale')?'stale':null;
     const reset=Math.ceil(Date.now()/1000)+4;
     update(params.sessionId,{sessionUpdate:'usage_update',used:100,size:1000,_meta:{'_claude/rateLimit':{status:'rejected',...(text.includes('unknown')?{}:{resetsAt:reset}),...(text.includes('multi')?{overageStatus:'rejected',overageResetsAt:reset+3}:{})}}});
     save(params.sessionId);if(text.includes('recovered'))reply(id,{stopReason:'end_turn'});else send({id,error:{code:-32603,message:'Demo structured quota rejection',data:{codexErrorInfo:'usageLimitExceeded'}}});return;
