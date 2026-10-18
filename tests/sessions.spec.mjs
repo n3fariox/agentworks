@@ -219,6 +219,45 @@ test('models at creation, command and skill discovery, host settings',async({pag
   }
 });
 
+test('resume picker loads on open and agent changes, clears old filters, and ignores stale responses',async({page})=>{
+  await page.route('**/api/status',async route=>{
+    const response=await route.fetch(),config=await response.json();
+    for(const provider of config.providers)provider.installed=true;
+    await route.fulfill({response,json:config});
+  });
+  let releaseSlow,startedSlow;
+  const slowStarted=new Promise(resolve=>{startedSlow=resolve;});
+  const slowRelease=new Promise(resolve=>{releaseSlow=resolve;});
+  let delayCodex=false;
+  await page.route('**/api/external-sessions',async route=>{
+    const {provider,hostProfile}=route.request().postDataJSON();
+    if(provider==='codex'&&delayCodex){startedSlow();await slowRelease;}
+    const title=provider==='opencode'?`opencode ${hostProfile?'host':'agentworks'}`:provider;
+    await route.fulfill({json:{sessions:[{sessionId:title,cwd:'/project',title}],nextCursor:null}});
+  });
+  try{
+    await page.goto('/');await page.locator('#import-session').click();
+    await expect(page.locator('.external-session')).toContainText('claude');
+    await page.locator('#import-search').fill('claude');
+    await page.locator('#import-provider').selectOption('codex');
+    await expect(page.locator('#import-search')).toHaveValue('');
+    await expect(page.locator('.external-session')).toContainText('codex');
+    await page.locator('#import-provider').selectOption('claude');
+    await expect(page.locator('.external-session')).toContainText('claude');
+    delayCodex=true;await page.locator('#import-provider').selectOption('codex');await slowStarted;
+    await page.locator('#import-provider').selectOption('claude');
+    await expect(page.locator('#external-sessions')).toContainText('Loading sessions');
+    const stale=page.waitForResponse(response=>response.url().endsWith('/api/external-sessions')&&response.request().postDataJSON().provider==='codex');
+    releaseSlow();await stale;
+    await expect(page.locator('.external-session')).toContainText('claude');
+    await page.locator('#import-provider').selectOption('opencode');
+    await page.locator('#import-source').selectOption('host');
+    await expect(page.locator('.external-session')).toContainText('opencode host');
+    await page.locator('#import-source').selectOption('agentworks');
+    await expect(page.locator('.external-session')).toContainText('opencode agentworks');
+  }finally{releaseSlow();}
+});
+
 test('resume picker imports external history, paginates, and opens existing entries',async({page})=>{
   const {mkdir,writeFile,unlink,rm}=await import('node:fs/promises');
   const {resolve,join}=await import('node:path');

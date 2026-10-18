@@ -23,6 +23,7 @@ let transcript=[], tools=new Map(), approvals=new Map(), assistant=null, status=
 let modelConfig=null, availableCommands=[], commandsOpen=false;
 let discoveryGeneration=0;
 let externalSessions=[], externalSelection=null, externalCursor=null, externalGeneration=0, externalLoading=false, externalImporting=false;
+let externalFetch=Promise.resolve();
 let drawTimer=null, retryTimer=null, reconnectDelay=500, pendingSend=null, creating=false;
 const nodes=new Map();
 let pendingCreate=readStorage(sessionStorage,'agentworks-pending-create',null);
@@ -98,7 +99,7 @@ function openImport(){
   $('import-provider').replaceChildren();
   for(const provider of config.providers){const option=el('option','',provider.name);option.value=provider.id;option.disabled=!provider.installed;$('import-provider').append(option);}
   $('import-provider').value=active?.provider||'claude';$('import-project').value=active?.projectId||'';
-  $('import-directory').value='';$('import-search').value='';resetExternal();$('import-dialog').showModal();
+  $('import-directory').value='';$('import-search').value='';resetExternal();$('import-dialog').showModal();browseExternal();
 }
 function resetExternal(){
   externalGeneration++;externalSessions=[];externalSelection=null;externalCursor=null;externalLoading=false;externalImporting=false;
@@ -132,7 +133,15 @@ async function browseExternal(more=false){
   if(!more){externalSessions=[];externalSelection=null;externalCursor=null;}
   externalLoading=true;$('import-error').textContent='';externalControls();renderExternal();
   try{
-    const result=await api('/api/external-sessions',{method:'POST',body:JSON.stringify({provider,cwd:cwd||null,cursor:more?externalCursor:null,hostProfile})});
+    // Let an in-flight harness finish before starting the latest selection.
+    // Rapid switches must not exhaust the server's discovery slots.
+    const previous=externalFetch;let release;
+    externalFetch=new Promise(resolve=>{release=resolve;});
+    let result;
+    try{
+      await previous;if(gen!==externalGeneration)return;
+      result=await api('/api/external-sessions',{method:'POST',body:JSON.stringify({provider,cwd:cwd||null,cursor:more?externalCursor:null,hostProfile})});
+    }finally{release();}
     if(gen!==externalGeneration)return;
     const seen=new Set(externalSessions.map(s=>s.sessionId));for(const session of result.sessions||[])if(!seen.has(session.sessionId)){externalSessions.push(session);seen.add(session.sessionId);}
     externalCursor=result.nextCursor||null;
@@ -141,7 +150,10 @@ async function browseExternal(more=false){
 }
 $('import-session').onclick=openImport;$('create-import').onclick=openImport;
 $('dismiss-import').onclick=()=>{$('import-dialog').close();externalGeneration++;};
-$('import-provider').onchange=resetExternal;$('import-source').onchange=resetExternal;$('import-directory').oninput=resetExternal;
+function changeExternalAgent(){
+  $('import-search').value='';resetExternal();browseExternal();
+}
+$('import-provider').onchange=changeExternalAgent;$('import-source').onchange=changeExternalAgent;$('import-directory').oninput=resetExternal;
 $('import-search').oninput=renderExternal;$('browse-sessions').onclick=()=>browseExternal();$('more-external').onclick=()=>browseExternal(true);
 $('import-form').onsubmit=async event=>{
   event.preventDefault();if(!externalSelection||externalImporting||externalLoading)return;
