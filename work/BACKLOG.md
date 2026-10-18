@@ -4,7 +4,7 @@ This board distinguishes delivered behavior from the older architecture proposal
 
 ## Current batch
 
-See [batch 004](batches/004-overnight.md): an eight-hour autonomous backlog run is active, starting with L-01, U-01/B-01 and D-01 in isolated Agentworks sessions. Major product decisions are deferred for tomorrow. [Batch 003](batches/003-limit-resume.md) delivered L-09; batches 001 and 002 remain deployed.
+See [batch 004](batches/004-overnight.md): L-01, U-01/B-01, D-01 and U-04 are reviewed, tested, merged and deployed. The external coordinator hit its quota during the overnight window; the user then authorized finishing these existing assignments and preparing transfer into Agentworks. No further feature batch is active. The [self-improvement workflow](SELF-IMPROVEMENT.md) is prepared, with R-06 supervised service restart next. Batch 003 delivered L-09; batches 001 and 002 remain deployed.
 
 | ID | Task | Status | Acceptance |
 | --- | --- | --- | --- |
