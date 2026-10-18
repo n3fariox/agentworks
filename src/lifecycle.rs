@@ -90,6 +90,8 @@ pub async fn suspend_locked(s: &Session) -> ApiResult {
         data.lifecycle.suspended = true;
         data.continuation.stop("Explicit suspend");
         data.queued_prompt = None;
+        data.input_queue
+            .block("Explicit suspend; inspect, then resume.");
     }
     s.emit("continuation", json!({"decision":"Explicit suspend"}));
     stop_worker(s).await;

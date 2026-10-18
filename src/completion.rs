@@ -130,11 +130,13 @@ pub fn report(app: &App, s: &Session, req: Report) -> mail::Result<Value> {
     tx.commit().map_err(error)?;
     drop(store);
     crate::inbox_delivery::interrupt_inflight(s, "Explicit completion or blocked report")?;
-    s.data
-        .lock()
-        .unwrap()
-        .continuation
-        .stop("Explicit completion or blocked report");
+    {
+        let mut data = s.data.lock().unwrap();
+        data.continuation
+            .stop("Explicit completion or blocked report");
+        data.input_queue
+            .block("Completion reported; inspect, then resume.");
+    }
     s.emit("completion_reported", json!({"reportId":id}));
     Ok(json!({"report":report,"duplicate":false}))
 }

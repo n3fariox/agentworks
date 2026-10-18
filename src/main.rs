@@ -5,6 +5,7 @@ mod completion;
 mod diff;
 mod git_context;
 mod inbox_delivery;
+mod input_queue;
 mod lifecycle;
 mod limit_resume;
 mod mcp;
@@ -121,6 +122,9 @@ struct SessionData {
     /// L-07 per-session override; None uses the saved default at turn launch.
     #[serde(default)]
     timeouts: Option<timeouts::Policy>,
+    /// L-05 explicit human queued inputs (distinct from `queued_prompt`).
+    #[serde(default)]
+    input_queue: input_queue::Queue,
 }
 
 struct Approval {
@@ -240,7 +244,7 @@ impl Session {
         let approvals = self.approvals.lock().unwrap();
         let data = self.data.lock().unwrap();
         json!({"kind":"snapshot","seq":data.seq,"session":{"id":self.id,"provider":self.provider,
-            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone())},"events":data.events,
+            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"inputQueue":data.input_queue},"events":data.events,
             "truncated":data.events.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
             "permissionModes":data.permission_modes,"models":data.models,"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|json!({"id":id,"request":a.request})).collect::<Vec<_>>()})
@@ -317,6 +321,7 @@ impl Session {
                 origin.outcome = None;
             }
             data.inbox_turn = None;
+            data.input_queue.begin_turn(&text);
             data.requests.insert(id.clone());
             data.status = "running".into();
             data.turn_active = true;
@@ -507,6 +512,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (metadata, mut data) in restored {
         inbox_delivery::restore(&mut data);
         data.continuation.reconcile();
+        data.input_queue.recover();
         let pending = data.queued_prompt.take().is_some();
         let interrupted = data.turn_active
             || pending
@@ -547,9 +553,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.sessions.lock().unwrap().insert(s.id.clone(), s);
     }
     service_restart::initialize(&app)?;
+    input_queue::initialize(&app)?;
     tokio::spawn(service_restart::scheduler(app.clone()));
     let scheduler = tokio::spawn(limit_resume::scheduler(app.clone()));
     let inbox_scheduler = tokio::spawn(inbox_delivery::scheduler(app.clone()));
+    let input_scheduler = tokio::spawn(input_queue::scheduler(app.clone()));
     tokio::spawn(mcp::serve_bridge(app.clone(), mcp_listener));
     let router = Router::new()
         .route(
@@ -603,6 +611,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (
                     [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
                     include_str!("../web/worktree-controls.js"),
+                )
+            }),
+        )
+        .route(
+            "/input-queue.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../web/input-queue.js"),
                 )
             }),
         )
@@ -760,6 +777,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             axum::routing::put(limit_resume::configure),
         )
         .route("/api/sessions/{id}/prompt", post(prompt))
+        .route(
+            "/api/sessions/{id}/queue",
+            get(input_queue::get).post(input_queue::enqueue),
+        )
+        .route("/api/sessions/{id}/queue/resume", post(input_queue::resume))
+        .route(
+            "/api/sessions/{id}/queue/{item}",
+            axum::routing::patch(input_queue::edit).delete(input_queue::remove),
+        )
         .route("/api/sessions/{id}/cancel", post(cancel))
         .route("/api/sessions/{id}/stop", post(cancel))
         .route("/api/sessions/{id}/suspend", post(lifecycle::suspend))
@@ -789,6 +815,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = tokio::signal::ctrl_c().await;
             scheduler.abort();
             let _ = scheduler.await;
+            input_scheduler.abort();
+            let _ = input_scheduler.await;
             inbox_scheduler.abort();
             let _=inbox_scheduler.await;
             for s in app.sessions.lock().unwrap().values() {
@@ -1550,6 +1578,7 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             opencode_host: req.external_host,
             automation: req.automation,
             queued_prompt: req.queued_prompt,
+            input_queue: Default::default(),
             control_origin: req.control_origin,
             storage_error: None,
             continuation: req
@@ -1725,9 +1754,29 @@ async fn prompt(
             "Enter a message of up to 32 KB and a request ID",
         ));
     }
+    // L-05: a request ID bound into the explicit queue is never also sent directly.
+    match input_queue::check_binding(&s, &req.request_id, &req.text)? {
+        input_queue::Bound::Duplicate(_) => {
+            return Ok(Json(
+                json!({"accepted":true,"duplicate":true,"queued":true}),
+            ));
+        }
+        input_queue::Bound::Conflict => return Err(input_queue::conflict()),
+        input_queue::Bound::New => {}
+    }
+    accept_prompt(&s, req.text, req.request_id, req.initiated_by)
+}
+/// Shared turn acceptance for direct prompts and L-05 queued dispatch. Callers hold
+/// `run_lock` and have passed `service_restart::allow_start`.
+fn accept_prompt(
+    s: &Session,
+    text: String,
+    request_id: String,
+    initiated_by: Option<String>,
+) -> ApiResult {
     {
         let mut data = s.data.lock().unwrap();
-        if data.requests.contains(&req.request_id) {
+        if data.requests.contains(&request_id) {
             return Ok(Json(json!({"accepted":true,"duplicate":true})));
         }
         if data.status != "idle" {
@@ -1738,18 +1787,18 @@ async fn prompt(
         }
         data.inbox_turn = None;
         let commands = data.available_commands.clone();
-        data.continuation
-            .begin_turn(&s.provider, &commands, &req.text);
+        data.continuation.begin_turn(&s.provider, &commands, &text);
+        data.input_queue.begin_turn(&text);
         data.status = "running".into();
         data.turn_active = true;
-        data.requests.insert(req.request_id.clone());
+        data.requests.insert(request_id.clone());
     }
     s.emit(
         "user",
-        json!({"text":req.text,"requestId":req.request_id,"initiatedBy":req.initiated_by}),
+        json!({"text":text,"requestId":request_id,"initiatedBy":initiated_by}),
     );
     s.emit("status", json!({"status":"running"}));
-    if let Err(error) = s.send_command(runtime::Command::Prompt(req.text)) {
+    if let Err(error) = s.send_command(runtime::Command::Prompt(text)) {
         s.status("error");
         return Err(error);
     }
@@ -1763,6 +1812,8 @@ async fn cancel(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     let status = {
         let mut data = s.data.lock().unwrap();
         data.continuation.stop("Explicit Stop");
+        data.input_queue
+            .block("Explicit Stop; inspect, then resume.");
         let status = data.status.clone();
         if matches!(status.as_str(), "running" | "waiting") {
             data.status = "cancelling".into();
@@ -1922,8 +1973,8 @@ async fn event_socket(socket: WebSocket, s: Arc<Session>) {
             next=rx.recv()=>{
                 let event=match next {Ok(event)=>event,Err(broadcast::error::RecvError::Lagged(_))=>s.snapshot(),Err(_)=>break};
                 let n=event["seq"].as_u64().unwrap_or(0);
-                if n<=seq {continue;}
-                seq=n;
+                // L-05 hook: queue state is broadcast unsequenced (not stored in event history).
+                if event["kind"]!="input_queue" {if n<=seq {continue;} seq=n;}
                 let closed=event["kind"]=="status" && (event["data"]["status"]=="closed" || event["data"]["status"]=="suspended");
                 if sink.send(Message::Text(event.to_string().into())).await.is_err(){break;}
                 if closed {let _=sink.send(Message::Close(None)).await;break;}

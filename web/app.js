@@ -9,6 +9,7 @@ import {setupDisplayPreferences} from '/display-preferences.js';
 import {setupWorkLogs,observeTool} from '/work-logs.js';
 import {setupUsageStatus} from '/usage-status.js';
 import {setupTimeoutControls} from '/timeout-controls.js';
+import {setupInputQueue,BUSY} from '/input-queue.js';
 const $ = id => document.getElementById(id);
 // randomUUID is unavailable on plain HTTP remote origins; getRandomValues is supported.
 const uuid = () => globalThis.crypto.randomUUID?.() ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -28,13 +29,15 @@ const usageStatus=setupUsageStatus({root:$('usage-status'),getProvider:()=>activ
 setInterval(()=>usageStatus.render(),60000);
 let timeoutControls=null;
 let transcript=[], tools=new Map(), approvals=new Map(), assistant=null, status='starting';
+// L-05 hook: activity indicator and explicit queued inputs (server-owned state).
+const inputQueue=setupInputQueue({$,api,uuid:()=>uuid(),getActive:()=>active,getStatus:()=>status,toolActive:()=>[...tools.values()].some(t=>['pending','in_progress'].includes(t.status))});
 let permissionModes=null;
 let replaying=false,workLogs=null,turnEnds=new Map();
 let modelConfig=null, availableCommands=[], commandsOpen=false;
 let discoveryGeneration=0;
 let externalSessions=[], externalSelection=null, externalCursor=null, externalGeneration=0, externalLoading=false, externalImporting=false;
 let externalFetch=Promise.resolve();
-let drawTimer=null, retryTimer=null, reconnectDelay=500, pendingSend=null, creating=false;
+let drawTimer=null, retryTimer=null, reconnectDelay=500, creating=false;
 const nodes=new Map();
 let pendingCreate=readStorage(sessionStorage,'agentworks-pending-create',null);
 const worktrees=setupWorktreeControls({$,api,onChange:()=>{if(config)providerNote();}});
@@ -279,7 +282,7 @@ function selectSession(s) {
   if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));scrollPositions.set(active.id,$('messages').scrollTop);}
   $('prompt').value=drafts[s.id]||'';restoreScroll=scrollPositions.get(s.id)??null;
   clearTimeout(retryTimer);generation++;socket?.close();socket=null;connected=false;
-  active=s;status=s.status;pendingSend=null;modelConfig=null;permissionModes=null;availableCommands=[];commandsOpen=false;renderCommands();resetTranscript();usageStatus.reset();
+  active=s;status=s.status;modelConfig=null;permissionModes=null;availableCommands=[];commandsOpen=false;renderCommands();resetTranscript();usageStatus.reset();inputQueue.reset();
   localStorage.setItem('agentworks-session',s.id);$('welcome').hidden=true;$('conversation').hidden=false;
   $('header-title').textContent=s.title;$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;
   $('session-notice').hidden=true;document.body.classList.remove('menu-open');sidebar();updateControls();connect(generation);
@@ -294,12 +297,13 @@ function connect(gen){
   ws.onmessage=event=>{
     if(gen!==generation)return;
     const e=JSON.parse(event.data);
+    if(e.kind==='input_queue'){inputQueue.set(e.data);updateControls();return;}
     if(e.kind==='snapshot'){
       resetTranscript();usageStatus.reset();status=e.session.status;Object.assign(active,e.session);
       replaying=true;try{for(const item of e.events)if(item.kind!=='session_updated')consume(item);}finally{replaying=false;}
       Object.assign(active,e.session);$('header-title').textContent=active.title;
       active.continuation=e.session.continuation;
-      approvals=new Map(e.approvals.map(a=>[a.id,a.request]));status=e.session.status;modelConfig=e.models;permissionModes=e.permissionModes;if(status==='suspended'&&!e.session.explicitlySuspended)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();
+      approvals=new Map(e.approvals.map(a=>[a.id,a.request]));status=e.session.status;modelConfig=e.models;permissionModes=e.permissionModes;if(status==='suspended'&&!e.session.explicitlySuspended)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();inputQueue.set(e.session.inputQueue);inputQueue.observe(status,{live:false});
       if(e.storageError){$('session-notice').textContent=e.storageError;$('session-notice').hidden=false;}
       if(e.truncated){$('session-notice').textContent='Showing recent output. The full transcript is saved on this host.';$('session-notice').hidden=false;}
     }else consume(e,true);
@@ -336,7 +340,7 @@ function consume(e,live=false){
   else if(e.kind==='commands'){availableCommands=Array.isArray(d)?d:[];renderCommands();}
   else if(e.kind==='user'){assistant=null;if(d.inboxDelivery)transcript.push({id:uuid(),type:'notice',text:'Automatic inbox turn authorized by you; peer messages are untrusted context.'});else if(d.initiatedBy)transcript.push({id:uuid(),type:'notice',text:'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});addMessage('user',d.text).seq=e.seq;}
   else if(e.kind==='status'){
-    status=d.status;if(active){active.status=status;if(d.explicitlySuspended!==undefined)active.explicitlySuspended=d.explicitlySuspended;const s=sessions.find(s=>s.id===active.id);if(s)s.status=status;}sidebar();
+    status=d.status;if(!replaying)inputQueue.observe(status,{live});if(active){active.status=status;if(d.explicitlySuspended!==undefined)active.explicitlySuspended=d.explicitlySuspended;const s=sessions.find(s=>s.id===active.id);if(s)s.status=status;}sidebar();
   }else if(e.kind==='approval'){approvals.set(d.id,d.request);}
   else if(e.kind==='approval_resolved'){approvals.delete(d.id);}
   else if(e.kind==='interrupted'){transcript.push({id:uuid(),type:'notice',text:d.message,interrupted:true});assistant=null;}
@@ -407,9 +411,11 @@ function updateControls(){
   }
   const busy=['running','waiting','cancelling'].includes(status);
   $('session-state').textContent=status==='waiting'?'Needs your approval':status==='idle'?'Ready':status[0]?.toUpperCase()+status.slice(1);
-  $('prompt').disabled=!connected||status!=='idle';$('send').disabled=!connected||status!=='idle';
-  $('send').hidden=busy;$('stop').hidden=!busy&&!['starting','resuming','configuring'].includes(status)&&!active?.continuation?.enabled;$('stop').disabled=!connected||status==='cancelling';
-  $('prompt').placeholder=status==='starting'?'Starting your agent…':status==='waiting'?'Respond to the permission request above…':busy?'Your agent is working…':status==='error'?'Session unavailable. Use Resume session to try again.':'What would you like to work on?';
+  // Busy sessions keep the composer usable so input can be queued without losing the draft.
+  $('prompt').disabled=!connected||!(status==='idle'||busy);$('send').disabled=!connected||!(status==='idle'||busy);
+  $('send').setAttribute('aria-label',busy?'Queue message':'Send message');$('send').textContent=busy?'＋':'↑';$('send').title=busy?'Queue to send after this turn ends':'';
+  inputQueue.render();inputQueue.renderActivity();$('stop').hidden=!busy&&!['starting','resuming','configuring'].includes(status)&&!active?.continuation?.enabled;$('stop').disabled=!connected||status==='cancelling';
+  $('prompt').placeholder=status==='starting'?'Starting your agent…':status==='waiting'?'Respond to the permission request above…':busy?'Your agent is working… type to queue a follow-up':status==='error'?'Session unavailable. Use Resume session to try again.':'What would you like to work on?';
 }
 function scheduleDraw(){if(!drawTimer)drawTimer=setTimeout(()=>{drawTimer=null;draw();},70);}
 function fileUrl(path,download=false){return `/api/sessions/${active.id}/file?path=${encodeURIComponent(path)}${download?'&download=true':''}`;}
@@ -579,13 +585,33 @@ $('create-form').onsubmit=async event=>{
     sessions.unshift(created);$('create-dialog').close();selectSession(created);
   }catch(e){$('create-error').textContent=e.message;}finally{creating=false;providerNote();}
 };
+// L-05: one stable pending identity per session (survives switches, reloads and lost
+// responses) shared by direct send and queueing, so a retry can never send twice.
+const pendingSends=readStorage(sessionStorage,'agentworks-pending-sends',{});
+function pendingFor(sid,text){
+  if(pendingSends[sid]?.text!==text)pendingSends[sid]={text,requestId:uuid()};
+  sessionStorage.setItem('agentworks-pending-sends',JSON.stringify(pendingSends));return pendingSends[sid];
+}
+function settle(sid,submission){
+  if(active?.id===sid&&$('prompt').value===submission.text)$('prompt').value='';
+  if(drafts[sid]===submission.text)delete drafts[sid];sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));
+  if(pendingSends[sid]?.requestId===submission.requestId){delete pendingSends[sid];sessionStorage.setItem('agentworks-pending-sends',JSON.stringify(pendingSends));}
+}
 $('composer').onsubmit=async event=>{
-  event.preventDefault();const text=$('prompt').value;if(!active||status!=='idle'||!text.trim())return;
-  if(!pendingSend||pendingSend.text!==text||pendingSend.sid!==active.id)pendingSend={text,sid:active.id,requestId:uuid()};
+  event.preventDefault();const text=$('prompt').value;if(!active||!text.trim())return;
+  if(!BUSY.includes(status)&&status!=='idle')return;
+  const sid=active.id,submission={...pendingFor(sid,text)};
   $('send').disabled=true;
-  const submission={...pendingSend};
-  try{await api(`/api/sessions/${submission.sid}/prompt`,{method:'POST',body:JSON.stringify(submission)});if(active?.id===submission.sid&&$('prompt').value===submission.text)$('prompt').value='';if(drafts[submission.sid]===submission.text)delete drafts[submission.sid];sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));if(pendingSend?.requestId===submission.requestId)pendingSend=null;}
-  catch(e){toast(e.message);}finally{updateControls();}
+  try{
+    if(BUSY.includes(status))await inputQueue.enqueue(sid,submission);
+    else try{await api(`/api/sessions/${sid}/prompt`,{method:'POST',body:JSON.stringify(submission)});}
+    catch(e){
+      // Send→Enter race: the session became busy first. Queue the same intended input.
+      if(e.status!==409||!/become idle/.test(e.message))throw e;
+      await inputQueue.enqueue(sid,submission);
+    }
+    settle(sid,submission);
+  }catch(e){toast(e.message);}finally{updateControls();}
 };
 $('prompt').oninput=()=>{commandsOpen=/^[/\$]\S*$/.test($('prompt').value);renderCommands();if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));}};
 $('prompt').onkeydown=event=>{if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault();$('composer').requestSubmit();}};

@@ -502,7 +502,8 @@ pub fn reconcile(store: &mut crate::store::Store) -> Result<()> {
 }
 /// L-05 integration: evaluate the human queue here while holding run_lock. It must win.
 pub fn explicit_input_pending(s: &Session) -> bool {
-    s.data.lock().unwrap().queued_prompt.is_some()
+    let d = s.data.lock().unwrap();
+    d.queued_prompt.is_some() || d.input_queue.has_pending()
 }
 fn instruction(request: &str, messages: &[Value]) -> String {
     format!(

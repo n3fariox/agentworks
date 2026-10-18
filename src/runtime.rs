@@ -547,6 +547,13 @@ pub async fn run(
                             tokio::select! {
                                 result=&mut request=>{
                                     s.clear_approvals();
+                                    let outcome=match (&result,timed_out) {
+                                        (_,Some(_))=>crate::input_queue::Outcome::TimedOut,
+                                        (Err(_),None)=>crate::input_queue::Outcome::Error,
+                                        (Ok(_),None) if cancelled=>crate::input_queue::Outcome::Cancelled,
+                                        (Ok(r),None) if serde_json::to_value(&r.stop_reason).ok()==Some(json!("end_turn"))=>crate::input_queue::Outcome::Success,
+                                        (Ok(_),None)=>crate::input_queue::Outcome::Cancelled,
+                                    };
                                     match (result,timed_out) {
                                         // A timed-out turn is a deliberate cancellation: never schedule quota continuation.
                                         (Ok(result),Some(kind))=>{crate::limit_resume::finish(&s,Some(&json!("cancelled")),None);s.emit("turn_end",json!({"stopReason":result.stop_reason,"timedOut":kind}));},
@@ -555,6 +562,7 @@ pub async fn run(
                                         (Err(error),None)=>{let raw=serde_json::to_value(&error).unwrap_or(Value::Null);crate::limit_resume::enrich_codex(&s,&raw).await;crate::limit_resume::finish(&s,None,Some(&raw));s.emit("error",json!({"message":safe_error(&error.to_string())}));},
                                     }
                                     crate::inbox_delivery::finished(&s,inbox_owner.as_ref());
+                                    crate::input_queue::record_outcome(&s,outcome);
                                     s.status("idle");
                                     break;
                                 }
