@@ -548,6 +548,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
             }),
         )
+        .route(
+            "/palettes.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../web/palettes.js"),
+                )
+            }),
+        )
         .route("/api/locations", post(workspace::register_location))
         .route("/api/locations/{id}/files", get(workspace::list_files))
         .route("/api/locations/{id}/file", get(workspace::read_file))
