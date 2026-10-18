@@ -4,7 +4,7 @@ This board distinguishes delivered behavior from the older architecture proposal
 
 ## Current batch
 
-[Batch 006](batches/006-session-usability.md) reviewed and corrected U-06 compact work logs, U-07 composer usage status and L-07 configurable timeouts. Work logs and usage status are deployed; timeout integration passed combined acceptance and awaits its supervised live update. The user renewed review after the original worker window. B-02 remains high priority and unimplemented. [Batch 005](batches/005-service-restart.md) delivered supervised restart, and [batch 004](batches/004-overnight.md) delivered L-01, U-01/B-01, D-01 and U-04. The [self-improvement workflow](SELF-IMPROVEMENT.md) grants service-restart control only to the selected coordinator.
+[Batch 006](batches/006-session-usability.md) is closed: U-06 compact work logs, U-07 composer usage status and L-07 configurable timeouts are reviewed, corrected, merged and deployed as `agentworks-6d1740d`, with successful supervised readiness and preserved native sessions. Workers are suspended with their branches and histories retained. B-02 remains high priority and unimplemented; no new backlog batch is active. [Batch 005](batches/005-service-restart.md) delivered supervised restart, and [batch 004](batches/004-overnight.md) delivered L-01, U-01/B-01, D-01 and U-04. The [self-improvement workflow](SELF-IMPROVEMENT.md) grants service-restart control only to the selected coordinator.
 
 | ID | Task | Status | Acceptance |
 | --- | --- | --- | --- |
