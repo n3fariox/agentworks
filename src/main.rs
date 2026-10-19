@@ -651,11 +651,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route(
-            "/sidebar-resize.js",
+            "/side-panel.js",
             get(|| async {
                 (
                     [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-                    include_str!("../web/sidebar-resize.js"),
+                    include_str!("../web/side-panel.js"),
+                )
+            }),
+        )
+        .route(
+            "/resize-handle.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../web/resize-handle.js"),
                 )
             }),
         )

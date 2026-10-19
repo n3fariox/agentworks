@@ -9,7 +9,8 @@ import {setupDisplayPreferences} from '/display-preferences.js';
 import {setupWorkLogs,observeTool} from '/work-logs.js';
 import {setupUsageStatus} from '/usage-status.js';
 import {setupFlyout} from '/flyout.js';
-import {setupSidebarResize} from '/sidebar-resize.js';
+import {setupResize} from '/resize-handle.js';
+import {setupSidePanel} from '/side-panel.js';
 import {setupTimeoutControls} from '/timeout-controls.js';
 import {setupInputQueue,BUSY} from '/input-queue.js';
 import {setupNotifications} from '/notifications.js';
@@ -31,7 +32,9 @@ let config, sessions=[], active=null, socket=null, generation=0, connected=false
 const usageStatus=setupUsageStatus({root:$('usage-status'),getProvider:()=>active?.provider,chip:$('composer-info')});
 const composerMenu=setupFlyout({menu:$('composer-menu'),triggers:[$('composer-more'),$('composer-info')]});
 const sessionMenu=setupFlyout({menu:$('session-menu'),triggers:[$('session-more')]});
-setupSidebarResize({handle:$('sidebar-resize'),layout:document.querySelector('.layout'),sidebar:$('sidebar')});
+setupResize({handle:$('sidebar-resize'),target:document.querySelector('.layout'),panel:$('sidebar'),variable:'--sidebar-width',key:'agentworks-sidebar-width',min:200,max:560,initial:228});
+setupResize({handle:$('side-panel-resize'),target:$('side-panel'),panel:$('side-panel'),variable:'--side-panel-width',key:'agentworks-side-panel-width',min:300,max:960,initial:420,edge:'left'});
+let sidePanel=null;
 setInterval(()=>usageStatus.render(),60000);
 let timeoutControls=null;
 let transcript=[], tools=new Map(), approvals=new Map(), assistant=null, status='starting';
@@ -354,11 +357,12 @@ function enterChat(){
 }
 addEventListener('popstate',event=>{
   if(!phone()||$('conversation').hidden)return;
-  if(event.state?.agentworks==='chat')document.body.classList.remove('menu-open');else showBrowser();
+  const entry=event.state?.agentworks;sidePanel?.popstate(entry);
+  if(entry==='chat'||entry==='panel')document.body.classList.remove('menu-open');else showBrowser();
 });
 function selectSession(s) {
   document.body.classList.remove('menu-open');enterChat();
-  if(active?.id===s.id){$('welcome').hidden=true;$('conversation').hidden=false;workspace?.sessionSelected(s);return;}
+  if(active?.id===s.id){$('welcome').hidden=true;$('conversation').hidden=false;workspace?.sessionSelected(s);sidePanel?.sessionChanged();return;}
   if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));scrollPositions.set(active.id,$('messages').scrollTop);}
   $('prompt').value=drafts[s.id]||'';restoreScroll=scrollPositions.get(s.id)??null;
   clearTimeout(retryTimer);generation++;socket?.close();socket=null;connected=false;
@@ -366,7 +370,7 @@ function selectSession(s) {
   localStorage.setItem('agentworks-session',s.id);$('welcome').hidden=true;$('conversation').hidden=false;
   setTitle(s.title);$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;
   $('session-notice').hidden=true;document.body.classList.remove('menu-open');sidebar();updateControls();connect(generation);
-  workspace?.sessionSelected(s);
+  workspace?.sessionSelected(s);sidePanel?.sessionChanged();
   if(s.status==='suspended'&&!s.explicitlySuspended)resumeSession(s.id);
 }
 function connect(gen){
@@ -519,13 +523,13 @@ function localReference(href,base=''){
 function decorateMarkdown(node,base=''){
   for(const a of node.querySelectorAll('a')){
     const path=localReference(a.getAttribute('href'),base);
-    if(path!==null){a.href='#';a.onclick=e=>{e.preventDefault();previewFile(path);};}
+    if(path!==null){a.href='#';a.onclick=e=>{e.preventDefault();if(active)workspace?.openSideFile(active,path);};}
     else if(/^file:/i.test(a.getAttribute('href')||''))a.removeAttribute('href');
     else {a.target='_blank';a.rel='noopener noreferrer';}
   }
   for(const img of node.querySelectorAll('img')){
     const path=localReference(img.getAttribute('src'),base);
-    if(path!==null)img.src=fileUrl(path);
+    if(path!==null){img.src=fileUrl(path);img.classList.add('opens-preview');img.title='Open in the side panel';img.onclick=()=>{if(active)workspace?.openSideFile(active,path);};}
     img.loading='lazy';img.alt||='Agent image';
   }
 }
@@ -593,27 +597,6 @@ function draw(){
   }
   if(restoreScroll!==null){area.scrollTop=restoreScroll;restoreScroll=null;}else if(atBottom)area.scrollTop=area.scrollHeight;
 }
-async function previewFile(path){
-  const sid=active?.id;if(!sid)return;
-  $('file-open-workspace').onclick=()=>{$('file-dialog').close();if(active?.id===sid)workspace?.openSessionFile(active,path);};
-  $('file-title').textContent=path;$('file-content').replaceChildren(el('p','','Loading…'));
-  const download=$('file-download');download.href=fileUrl(path,true);download.download=basename(path);
-  if(!$('file-dialog').open)$('file-dialog').showModal();
-  try{
-    const response=await fetch(fileUrl(path));if(!response.ok)throw new Error(await response.text());
-    if(active?.id!==sid)return;
-    const content=$('file-content');content.replaceChildren();const type=response.headers.get('content-type');
-    if(type?.startsWith('image/')){
-      const image=el('img','file-image');image.src=fileUrl(path);image.alt=basename(path);content.append(image);
-    }else if(type?.startsWith('text/')){
-      const text=await response.text();
-      if(/\.md$/i.test(path)){
-        const {html}=await api('/api/markdown',{method:'POST',body:JSON.stringify({text:text.slice(0,100000)})});content.innerHTML=html;
-        const base=path.includes('/')?path.slice(0,path.lastIndexOf('/')+1):'';decorateMarkdown(content,base);display.enhance(content,'file:'+path);
-      }else{content.append(el('pre','',text));display.enhance(content,'file:'+path,{language:/\.([\w+-]+)$/.exec(basename(path))?.[1]||''});}
-    }else content.append(el('p','','Preview is not available for this format. Use Download to save the file.'));
-  }catch(e){$('file-content').textContent=e.message;}
-}
 $('new-session').onclick=()=>openCreate();$('welcome-new').onclick=()=>openCreate();
 $('view-hosts').onclick=()=>setSidebarView('hosts');$('view-projects').onclick=()=>setSidebarView('projects');
 $('new-project').onclick=()=>openProjectDialog();$('create-project-new').onclick=()=>openProjectDialog();
@@ -641,7 +624,7 @@ $('session-project').onchange=async event=>{
   try{const updated=await api(`/api/sessions/${active.id}/project`,{method:'POST',body:JSON.stringify({projectId:event.target.value||null})});Object.assign(active,updated);workspace?.sessionSelected(active);await refreshSessions();}
   catch(error){toast(error.message);updateProjectControls();}
 };
-$('dismiss-create').onclick=()=>$('create-dialog').close();$('dismiss-file').onclick=()=>$('file-dialog').close();
+$('dismiss-create').onclick=()=>$('create-dialog').close();
 $('menu').onclick=()=>document.body.classList.toggle('menu-open');$('session-home').onclick=()=>{if(history.state?.agentworks==='chat')history.back();else showBrowser();};$('session-search').onclick=()=>$('palette-search').click();$('scrim').onclick=()=>document.body.classList.remove('menu-open');
 $('provider').onchange=()=>{providerNote();resetCreateModels();};
 $('directory').onchange=resetCreateModels;
@@ -776,12 +759,14 @@ $('settings-form').onsubmit=async event=>{
   }catch(e){$('settings-error').textContent='Host settings were not saved: '+e.message+' Display preferences are stored separately in this browser.';}finally{$('save-settings').disabled=false;}
 };
 document.addEventListener('keydown',event=>{if(event.key==='n'&&!event.ctrlKey&&!event.metaKey&&!event.altKey&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)&&!document.querySelector('dialog[open]')){event.preventDefault();openCreate();}});
-setupDiff({api,getActive:()=>active});
+const diffView=setupDiff({api,root:$('side-diff')});
 timeoutControls=setupTimeoutControls({$,api,getActive:()=>active});
 workspace=createWorkspace({api,toast,labels,uuid,getConfig:()=>config,getActive:()=>active,selectSession,openCreate,refreshSessions,enhanceBlocks:display.enhance,openSettings:()=>$('open-settings').click(),
   overview(){ $('conversation').hidden=true;$('welcome').hidden=false;localStorage.removeItem('agentworks-session'); },
+  openPanel:tab=>sidePanel?.open(tab),
   appendDraft(text){if(!active)return;const current=$('prompt').value;$('prompt').value=current?current+'\n\n'+text:text;drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));},
 });
+sidePanel=setupSidePanel({panel:$('side-panel'),tabs:{files:$('side-tab-files'),diff:$('side-tab-diff')},triggers:{files:$('session-files'),diff:$('session-diff')},close:$('side-close'),renderers:{files:workspace.sideFiles,diff:diffView},getActive:()=>active,phone});
 async function init(){
   config=await api('/api/status');
   $('host-address').textContent=location.host+' · Linux prototype';
@@ -821,7 +806,8 @@ setupPalettes({
     settings:()=>$('open-settings').click(),
     agents:()=>{if(active)$('session-agents').click();},
     workspaceInfo:()=>{if(active)$('session-workspace').click();},
-    diff:()=>{if(active)$('session-diff').click();},
+    diff:()=>sidePanel.open('diff'),
+    sessionFiles:()=>sidePanel.open('files'),
     lifecycle:()=>{if(active){$('lifecycle-menu').open=true;$('lifecycle-menu').querySelector('button').focus();}},
     forkSession:()=>{if(active)openFork();},
     resume:()=>{if(active&&connected&&['suspended','error'].includes(status))resumeSession(active.id);},

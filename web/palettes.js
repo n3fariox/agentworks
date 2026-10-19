@@ -161,6 +161,7 @@ export function actionItems(state={},handlers={}){
   add('settings','Settings','Go to','Allowed roots and default models',()=>handlers.settings?.());
   if(hasSession){
     if(handlers.diff)add('session-diff','Session diff','Current session','Inspect unstaged, branch or commit changes',handlers.diff);
+    if(handlers.sessionFiles)add('session-files','Session files','Current session','Browse this session’s directory beside the chat',handlers.sessionFiles);
     if(handlers.lifecycle)add('session-actions','Session actions','Current session','Rename, archive, suspend or delete history',handlers.lifecycle);
     if(handlers.forkSession)add('session-fork','Fork session','Current session','Carry this conversation into a new session, agent or worktree',handlers.forkSession);
     add('session-agents','Agents and inbox','Current session','Access, messages and control activity',()=>handlers.agents?.());

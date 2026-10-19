@@ -43,27 +43,54 @@ export function createWorkspace(hooks){
     for(const name of ['sessions','files','automations'])$('nav-'+name).setAttribute('aria-pressed',String(state.view===name));
     if(state.view==='files')loadFiles();if(state.view==='automations')loadAutomations();save();
   }
+  // Directory listing shared by the Files view and the side panel's Files tab.
+  function renderListing({crumbs,list,result,go,open,selected}){
+    crumbs.replaceChildren();
+    const root=el('button','text-button','Root');root.onclick=()=>go('');crumbs.append(root);
+    const segments=result.path.split('/').filter(Boolean);for(let i=0;i<segments.length;i++){const button=el('button','text-button',segments[i]);button.onclick=()=>go(segments.slice(0,i+1).join('/'));crumbs.append(el('span','','/'),button);}
+    list.replaceChildren();
+    if(result.path){const parent=el('button','file-entry','↰ Parent directory');parent.onclick=()=>go(result.path.split('/').slice(0,-1).join('/'));list.append(parent);}
+    for(const entry of result.entries){
+      const button=el('button','file-entry'+(selected===entry.path?' selected':''));button.append(el('span','file-kind',entry.kind==='directory'?'▸':entry.kind==='blocked'?'↗':'▤'),el('span','file-name',entry.name));
+      button.dataset.path=entry.path;button.title=entry.kind==='blocked'?'This entry cannot be opened inside this project directory':entry.name;button.disabled=entry.kind==='blocked';
+      button.onclick=()=>{if(entry.kind==='directory')go(entry.path);else open(entry.path);};list.append(button);
+    }
+    if(!result.entries.length)list.append(el('p','field-note','This directory is empty.'));
+    if(result.truncated)list.append(el('p','field-note','Showing entries from the first 5,000 directory items.'));
+  }
+  const listUrl=(location,path)=>`/api/locations/${location.id}/files?path=${encodeURIComponent(path)}&hidden=${state.hidden}`;
   async function loadFiles(){
     const gen=++filesGeneration;const rootButton=el('button','text-button','Root');rootButton.onclick=()=>{state.path='';loadFiles();};$('file-breadcrumbs').replaceChildren(rootButton);$('files-error').textContent='';$('file-entries').replaceChildren(el('p','field-note','Loading directory…'));
     try{
       const location=await ensureLocation();if(gen!==filesGeneration)return;
-      const result=await api(`/api/locations/${location.id}/files?path=${encodeURIComponent(state.path)}&hidden=${state.hidden}`);
+      const result=await api(listUrl(location,state.path));
       if(gen!==filesGeneration)return;state.path=result.path;save();
-      const crumbs=$('file-breadcrumbs');crumbs.replaceChildren();
-      const root=el('button','text-button','Root');root.onclick=()=>{state.path='';loadFiles();};crumbs.append(root);
-      const segments=state.path.split('/').filter(Boolean);for(let i=0;i<segments.length;i++){const button=el('button','text-button',segments[i]);button.onclick=()=>{state.path=segments.slice(0,i+1).join('/');loadFiles();};crumbs.append(el('span','','/'),button);}
-      const list=$('file-entries');list.replaceChildren();
-      if(state.path){const parent=el('button','file-entry','↰ Parent directory');parent.onclick=()=>{state.path=state.path.split('/').slice(0,-1).join('/');loadFiles();};list.append(parent);}
-      for(const entry of result.entries){
-        const button=el('button','file-entry'+(state.file?.path===entry.path?' selected':''));button.append(el('span','file-kind',entry.kind==='directory'?'▸':entry.kind==='blocked'?'↗':'▤'),el('span','file-name',entry.name));
-        button.dataset.path=entry.path;button.title=entry.kind==='blocked'?'This entry cannot be opened inside this project directory':entry.name;button.disabled=entry.kind==='blocked';
-        button.onclick=()=>{if(entry.kind==='directory'){state.path=entry.path;loadFiles();}else openFile(location,entry.path,false);};list.append(button);
-      }
-      if(!result.entries.length)list.append(el('p','field-note','This directory is empty.'));
-      if(result.truncated)list.append(el('p','field-note','Showing entries from the first 5,000 directory items.'));
+      renderListing({crumbs:$('file-breadcrumbs'),list:$('file-entries'),result,selected:state.file?.path,go:path=>{state.path=path;loadFiles();},open:path=>openFile(location,path,false)});
     }catch(error){if(gen===filesGeneration){$('file-entries').replaceChildren();$('files-error').textContent=error.message;}}
   }
-  function fileUrl(file,download=false){return `/api/locations/${file.location.id}/file?path=${encodeURIComponent(file.path)}${download?'&download=true':''}`;}
+  // Side panel Files tab: browses the active session's directory, and shows a
+  // file preview in place of the listing until "← Files".
+  const side={location:null,path:'',generation:0};
+  function sideListing(){$('side-file-browser').hidden=false;$('workspace-preview').hidden=true;}
+  async function loadSideFiles(){
+    const gen=++side.generation,location=side.location;sideListing();
+    $('side-files-error').textContent='';$('side-file-entries').replaceChildren(el('p','field-note','Loading directory…'));
+    try{
+      const result=await api(listUrl(location,side.path));if(gen!==side.generation)return;side.path=result.path;
+      renderListing({crumbs:$('side-file-crumbs'),list:$('side-file-entries'),result,selected:state.sideFile?.path,go:path=>{side.path=path;loadSideFiles();},open:path=>openFile(location,path,true)});
+    }catch(error){if(gen===side.generation){$('side-file-entries').replaceChildren();$('side-files-error').textContent=error.message;}}
+  }
+  const sideFiles={
+    show(session){
+      if(side.location?.id!==session.locationId){side.location={id:session.locationId,path:session.cwd};side.path='';}
+      if(state.sideFile&&state.sideFile.location.path!==session.cwd)state.sideFile=null;
+      if(state.sideFile){$('side-file-browser').hidden=true;$('workspace-preview').hidden=false;renderPreview(state.sideFile,true);}else loadSideFiles();
+    },
+    hide(){side.generation++;},
+  };
+  // Files opened from chat links keep the session file endpoint, so forked
+  // sessions still resolve references against their original directory.
+  function fileUrl(file,download=false){const query=`file?path=${encodeURIComponent(file.path)}${download?'&download=true':''}`;return file.location.sessionId?`/api/sessions/${file.location.sessionId}/${query}`:`/api/locations/${file.location.id}/${query}`;}
   function localPath(href,base){
     if(!href||href.startsWith('#'))return null;
     if(/^file:/i.test(href)){try{const url=new URL(href);return ['','localhost'].includes(url.hostname)?decodeURIComponent(url.pathname):null;}catch{return null;}}
@@ -82,7 +109,7 @@ export function createWorkspace(hooks){
     const area=side?$('workspace-preview'):$('workspace-file-detail');area.replaceChildren();
     const header=el('div','workspace-preview-header');header.append(el('strong','',file.path));
     const actions=el('div','workspace-preview-actions');const download=el('a','text-button','Download ↓');download.href=fileUrl(file,true);download.download=file.path.split('/').at(-1);actions.append(download);
-    if(side){const close=el('button','text-button','Back to chat ×');close.onclick=()=>{state.sideFile=null;area.hidden=true;};actions.append(close);}header.append(actions);area.append(header);
+    if(side){const back=el('button','text-button','← Files');back.onclick=()=>{state.sideFile=null;loadSideFiles();};actions.prepend(back);}header.append(actions);area.append(header);
     if(file.type?.startsWith('text/')){
       const tabs=el('div','workspace-preview-tabs');for(const [source,label]of [[false,'Preview'],[true,'Source']]){
         const button=el('button','text-button',label);button.setAttribute('aria-pressed',String(file.source===source));button.onclick=()=>{file.source=source;renderPreview(file,side);};tabs.append(button);
@@ -98,11 +125,11 @@ export function createWorkspace(hooks){
       const limit=!file.source&&file.html?24000:100000;if(file.text.length>limit)body.append(el('p','field-note','Preview shortened. Download the file to read it in full.'));
     }else body.append(el('p','field-note','Preview is unavailable for this format. Use Download to save it.'));
     const footer=el('div','workspace-preview-footer'),ask=el('button','text-button','Ask about this file ↗');ask.disabled=!!file.error||file.loading;ask.onclick=()=>askAbout(file);footer.append(ask);
-    if(!side){const beside=el('button','text-button','Open beside chat');beside.disabled=!!file.error||file.loading;beside.onclick=()=>{const active=hooks.getActive();if(!active){hooks.openCreate({projectId:state.projectId,cwd:file.location.path});return;}if(active.cwd!==file.location.path){hooks.toast('Choose a session in this directory, or start one with Ask about this file.');return;}state.sideFile=file;$('workspace-preview').hidden=false;renderPreview(file,true);showView('sessions');};footer.append(beside);}
+    if(!side){const beside=el('button','text-button','Open beside chat');beside.disabled=!!file.error||file.loading;beside.onclick=()=>{const active=hooks.getActive();if(!active){hooks.openCreate({projectId:state.projectId,cwd:file.location.path});return;}if(active.cwd!==file.location.path){hooks.toast('Choose a session in this directory, or start one with Ask about this file.');return;}state.sideFile=file;showView('sessions');hooks.openPanel('files');};footer.append(beside);}
     area.append(footer);
   }
   async function openFile(location,path,side=false){
-    const file={location,path,source:false,text:'',type:'',loading:true};if(side){state.sideFile=file;$('workspace-preview').hidden=false;}else{state.file=file;for(const node of $('file-entries').querySelectorAll('button'))node.classList.toggle('selected',node.dataset.path===path);save();}renderPreview(file,side);
+    const file={location,path,source:false,text:'',type:'',loading:true};if(side){state.sideFile=file;$('side-file-browser').hidden=true;$('workspace-preview').hidden=false;}else{state.file=file;for(const node of $('file-entries').querySelectorAll('button'))node.classList.toggle('selected',node.dataset.path===path);save();}renderPreview(file,side);
     try{
       const response=await fetch(fileUrl(file));if(!response.ok)throw new Error(await response.text());
       file.type=response.headers.get('content-type')||'';
@@ -114,7 +141,7 @@ export function createWorkspace(hooks){
   }
   function askAbout(file){
     const active=hooks.getActive(),text=`Please read the local file ${file.path} and help me understand it.`;
-    if(active?.cwd===file.location.path){hooks.selectSession(active);hooks.appendDraft(text);state.sideFile=file;$('workspace-preview').hidden=matchMedia('(max-width:800px)').matches;renderPreview(file,true);}
+    if(active?.cwd===file.location.path){hooks.selectSession(active);hooks.appendDraft(text);state.sideFile=file;if(!narrow())hooks.openPanel('files');}
     else{pendingFile={cwd:file.location.path,text,file};hooks.openCreate({projectId:state.projectId,cwd:file.location.path});}
   }
   function automationOptions(){
@@ -168,10 +195,12 @@ export function createWorkspace(hooks){
     const project=catalog.projects.find(p=>p.id===session.projectId);if(project&&!project.locationIds?.includes(session.locationId))(project.locationIds??=[]).push(session.locationId);
     if(state.locationKey!==session.locationId)resetFiles();
     state.projectId=session.projectId||null;state.locationKey=session.locationId;contextControls();showView('sessions');
-    if(state.sideFile&&state.sideFile.location.path!==session.cwd){state.sideFile=null;$('workspace-preview').hidden=true;}
+    if(state.sideFile&&state.sideFile.location.path!==session.cwd)state.sideFile=null;
     const source=$('automation-source');source.hidden=!session.automation;source.textContent=session.automation?'Automation · '+session.automation.name:'';
-    if(pendingFile?.cwd===session.cwd){const pending=pendingFile;pendingFile=null;hooks.appendDraft(pending.text);state.sideFile=pending.file;$('workspace-preview').hidden=matchMedia('(max-width:800px)').matches;renderPreview(pending.file,true);}
+    if(pendingFile?.cwd===session.cwd){const pending=pendingFile;pendingFile=null;hooks.appendDraft(pending.text);state.sideFile=pending.file;if(!narrow())hooks.openPanel('files');}
   }
+  // Below this width the side panel replaces the chat rather than sitting beside it.
+  const narrow=()=>matchMedia('(max-width:800px)').matches;
   function openAutomation(id){state.automationId=id;showView('automations');}
   // On phones the Sessions tab is the full-screen session browser.
   $('nav-sessions').onclick=()=>{showView('sessions');if(matchMedia('(max-width:650px)').matches)document.body.classList.add('menu-open');};$('nav-files').onclick=()=>showView('files');$('nav-automations').onclick=()=>showView('automations');$('nav-settings').onclick=()=>hooks.openSettings();
@@ -188,7 +217,6 @@ export function createWorkspace(hooks){
     catch(error){$('location-error').textContent=error.message;}finally{$('save-location').disabled=false;}
   };
   $('refresh-files').onclick=loadFiles;$('files-hidden').onchange=()=>{state.hidden=$('files-hidden').checked;loadFiles();};
-  $('session-files').onclick=()=>{const session=hooks.getActive();if(session){state.projectId=session.projectId||null;state.locationKey=session.locationId;contextControls();}showView('files');};
   $('automation-source').onclick=()=>{const origin=hooks.getActive()?.automation;if(origin)openAutomation(origin.automationId);};
   $('new-automation').onclick=()=>automationEditor();$('dismiss-automation').onclick=()=>$('automation-dialog').close();
   $('automation-provider').onchange=()=>{editorGeneration++;$('automation-model').value='';$('automation-models').replaceChildren();};$('automation-directory').oninput=()=>{editorGeneration++;};
@@ -203,10 +231,11 @@ export function createWorkspace(hooks){
   $('delete-automation').onclick=async()=>{if(!editing||!confirm('Delete this automation definition? Its run sessions and history will remain.'))return;try{await api('/api/automations/'+editing,{method:'DELETE'});$('automation-dialog').close();loadAutomations();}catch(error){$('automation-error').textContent=error.message;}};
   return {
     sync(next,list){catalog=next;sessions=list;contextControls();if(state.view==='automations')loadAutomations();},
-    sessionSelected,showView,
+    sessionSelected,showView,sideFiles,
+    // Chat links (images, Markdown, source) open in the side panel's Files tab.
+    openSideFile(session,path){openFile({id:session.locationId,path:session.cwd,sessionId:session.id},path,true);hooks.openPanel('files');},
     context(){return {projectId:state.projectId,cwd:directory()};},
     restoreView(){if(initial.view&&initial.view!=='sessions'){state.projectId=initial.projectId||null;state.locationKey=initial.locationKey||'';state.path=initial.path||'';contextControls();showView(initial.view);if(initial.view==='files'&&initial.filePath){const expected=directory();ensureLocation().then(location=>{if(state.view==='files'&&directory()===expected&&!state.file)openFile(location,initial.filePath);}).catch(()=>{});}}},
     rootsChanged(){contextControls();if(state.view==='files')loadFiles();},
-    openSessionFile(session,path){state.projectId=session.projectId||null;state.locationKey=session.locationId;contextControls();const location=currentLocation()||{id:session.locationId,path:session.cwd};showView('files');openFile(location,path);},
   };
 }

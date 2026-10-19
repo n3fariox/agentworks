@@ -124,16 +124,15 @@ test('desktop: highlighting, exact raw copy, prose toggle, persisted preferences
 
   // File previews: plain source by extension and Markdown fences use the same blocks.
   await page.locator('.message.assistant').getByRole('link',{name:'sample'}).click();
-  await expect(page.locator('#file-title')).toHaveText('sample.rs');
-  const fileBlock=page.locator('#file-content .code-block');
+  await expect(page.locator('#workspace-preview .workspace-preview-header strong')).toHaveText('sample.rs');
+  const fileBlock=page.locator('#workspace-preview .code-block');
   await expect(fileBlock.locator('.code-language')).toHaveText('rs');
   await expect(fileBlock.locator('.tok-keyword').first()).toHaveText('pub');
   expect(await fileBlock.locator('pre code').evaluate(n=>n.textContent)).toBe('pub fn sample() -> u8 {\n    42 // answer\n}\n');
-  await page.locator('#dismiss-file').click();
   await page.locator('.message.assistant').getByRole('link',{name:'notes'}).click();
-  await expect(page.locator('#file-content .code-block .code-language')).toHaveText('python');
-  await expect(page.locator('#file-content .code-block .tok-keyword').first()).toHaveText('def');
-  await page.locator('#dismiss-file').click();
+  await expect(page.locator('#workspace-preview .code-block .code-language')).toHaveText('python');
+  await expect(page.locator('#workspace-preview .code-block .tok-keyword').first()).toHaveText('def');
+  await page.locator('#side-close').click();
 
   // Tool literals follow the wrap preference and stay unhighlighted readable JSON/text.
   await page.locator('#prompt').fill('approval');await page.locator('#send').click();

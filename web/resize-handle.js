@@ -1,0 +1,31 @@
+// Drag or arrow-key a panel edge to resize it on desktop. The width is a CSS
+// variable on `target` and persists in localStorage under `key`; double-click
+// resets it. `edge` is the side of `panel` the handle sits on. Phone layouts
+// hide the handles.
+export const clamp=(w,min,max)=>Math.round(Math.min(max,Math.max(min,w)));
+
+export function setupResize({handle,target,panel,variable,key,min,max,initial,edge='right'}){
+  const apply=w=>{
+    if(w==null){target.style.removeProperty(variable);localStorage.removeItem(key);}
+    else{w=clamp(w,min,max);target.style.setProperty(variable,w+'px');localStorage.setItem(key,String(w));}
+    handle.setAttribute('aria-valuenow',String(w??initial));
+  };
+  handle.setAttribute('aria-valuemin',String(min));handle.setAttribute('aria-valuemax',String(max));
+  const saved=Number(localStorage.getItem(key));apply(saved?saved:null);
+  // Width from the pointer: the far edge of the panel stays put.
+  const widthAt=x=>{const r=panel.getBoundingClientRect();return edge==='right'?x-r.left:r.right-x;};
+  handle.addEventListener('pointerdown',event=>{
+    if(event.button!==0)return;
+    event.preventDefault();handle.setPointerCapture(event.pointerId);document.body.classList.add('resizing');
+    const move=e=>apply(widthAt(e.clientX));
+    const up=()=>{handle.removeEventListener('pointermove',move);handle.removeEventListener('pointerup',up);handle.removeEventListener('pointercancel',up);document.body.classList.remove('resizing');};
+    handle.addEventListener('pointermove',move);handle.addEventListener('pointerup',up);handle.addEventListener('pointercancel',up);
+  });
+  handle.addEventListener('dblclick',()=>apply(null));
+  handle.addEventListener('keydown',event=>{
+    const step=event.shiftKey?40:10,now=panel.getBoundingClientRect().width,grow=edge==='right'?'ArrowRight':'ArrowLeft';
+    if(event.key===grow)apply(now+step);else if(event.key==='ArrowLeft'||event.key==='ArrowRight')apply(now-step);
+    else if(event.key==='Home')apply(min);else if(event.key==='End')apply(max);else return;
+    event.preventDefault();
+  });
+}

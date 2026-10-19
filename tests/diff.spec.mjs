@@ -120,11 +120,11 @@ for(const mobile of [false,true])test(`diff browser ${mobile?'mobile':'desktop'}
   await expect(page.locator('#diff-comparison')).toContainText(initial);await page.locator('#diff-files').selectOption('branch.txt');await expect(page.locator('#diff-patch')).toContainText('+feature only');
   await page.locator('#diff-mode').selectOption('commit');await page.locator('#diff-commit').fill(initial);await page.getByRole('button',{name:'Refresh diff',exact:true}).click();
   await expect(page.locator('#diff-comparison')).toContainText('Empty tree');
-  expect(await page.locator('#diff-dialog').evaluate(n=>{const r=n.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.height<=innerHeight;})).toBe(true);
+  expect(await page.locator('#side-panel').evaluate(n=>{const r=n.getBoundingClientRect();return r.left>=0&&Math.round(r.right)<=innerWidth&&r.height<=innerHeight;})).toBe(true);
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-  await page.keyboard.press('Escape');await expect(page.locator('#diff-dialog')).not.toBeVisible();await expect(page.locator('#prompt')).toHaveValue('Keep diff draft');expect(sockets).toBe(before);
+  await page.keyboard.press('Escape');await expect(page.locator('#side-panel')).not.toBeVisible();await expect(page.locator('#prompt')).toHaveValue('Keep diff draft');expect(sockets).toBe(before);
   await page.route('**/api/sessions/*/diff?**',route=>route.fulfill({json:{context:{cwd:'<img src=x onerror=alert(1)>',status:'non_git'},unavailable:'No Git'}}));
   if(mobile)await page.locator('#session-more').click();
   await page.getByRole('button',{name:'Diff',exact:true}).click();await expect(page.locator('#diff-context')).toContainText('<img src=x onerror=alert(1)>');expect(await page.locator('#diff-context img').count()).toBe(0);
-  await page.locator('#dismiss-diff').click();expect(errors).toEqual([]);
+  await page.locator('#side-close').click();await expect(page.locator('#side-panel')).not.toBeVisible();expect(errors).toEqual([]);
 });
