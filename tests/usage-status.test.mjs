@@ -1,7 +1,7 @@
 // Deterministic U-07 checks: node tests/usage-status.test.mjs (no server, no model calls).
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {emptyUsage,applyUsageEvent,usageView,STALE_MS} from '../web/usage-status.js';
+import {emptyUsage,applyUsageEvent,usageView,countdown,STALE_MS} from '../web/usage-status.js';
 const events=JSON.parse(readFileSync(new URL('./fixtures/usage-events.json',import.meta.url)));
 const replay=(list,at=null)=>list.reduce((s,e)=>applyUsageEvent(s,e,at),emptyUsage());
 let s=emptyUsage();
@@ -23,13 +23,16 @@ s=replay(events.slice(0,4));
 assert.equal(s.context.sizeChanged,true);
 assert.deepEqual(Object.keys(s.quota),['5h','7d']);
 assert.equal(s.quota['5h'].resetsAt,1792366200000,'seconds converted to ms');
-v=usageView(s);
-assert.match(v.label,/· 5h 23% used\/77% left ⚠ · 7d 10% used\/90% left ⚠$/,'replayed quota marked stale, never bare 5h0');
-assert.ok(v.details.some(d=>d.startsWith('5h quota (reported): 23% used / 77% remaining · status allowed · resets')&&d.includes('freshness unknown (replayed event #4')));
-assert.ok(v.details.some(d=>d.startsWith('7d quota (reported): 10% used / 90% remaining · resets')));
+v=usageView(s,{now:1792360000000});
+assert.match(v.label,/· 5h 77% left ⚠ \(resets in 1h 44m\) · 7d 90% left ⚠ \(resets in 5d 3h\)$/,'replayed quota marked stale, shown as remaining with countdown');
+assert.ok(v.details.some(d=>d.startsWith('5h quota (reported): 77% remaining · status allowed · resets in 1h 44m (')&&d.includes('freshness unknown (replayed event #4')));
+assert.ok(v.details.some(d=>d.startsWith('7d quota (reported): 90% remaining · resets in 5d 3h (')));
+assert.equal(v.short,'⚠ ctx 1% · 5h 77% left');
+assert.match(usageView(s,{now:1792366200000}).label,/5h 77% left ⚠ \(reset time passed\)/,'no countdown once the reported reset has passed');
+assert.deepEqual([countdown(30e3),countdown(45*60e3),countdown(134*60e3),countdown(26*3600e3),countdown(0)],['1m','45m','2h 14m','1d 2h',null]);
 // Live quota is fresh and independent of context freshness.
 const live=applyUsageEvent(replay(events.slice(0,3)),events[3],1792360000000);
-assert.match(usageView(live,{now:1792360000000}).label,/5h 23% used\/77% left · 7d 10% used\/90% left$/);
+assert.match(usageView(live,{now:1792360000000}).label,/5h 77% left \(resets in 1h 44m\) · 7d 90% left \(resets in 5d 3h\)$/);
 // Scalar utilization of unverified scale alone is not shown.
 assert.deepEqual(applyUsageEvent(emptyUsage(),{kind:'acp',data:{sessionUpdate:'usage_update',used:1,size:2,_meta:{'_claude/rateLimit':{rateLimitType:'five_hour',utilization:0.4}}}}).quota,{});
 // Parent/subagent-attributed usage is ignored.

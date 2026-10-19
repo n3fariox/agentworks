@@ -17,6 +17,17 @@ const num=v=>typeof v==='number'&&Number.isFinite(v)?v:undefined;
 const nonneg=v=>{const n=num(v);return n!==undefined&&n>=0?n:undefined;};
 const fmt=n=>n>=1e6?(n/1e6).toFixed(n>=1e7?0:1)+'M':n>=1e3?(n/1e3).toFixed(n>=1e4?0:1)+'k':String(n);
 const QUOTA_LABELS={five_hour:'5h',seven_day:'7d'};
+// Time until a reported reset, coarse enough to read at a glance.
+export function countdown(ms){
+  if(ms<=0)return null;
+  const m=Math.ceil(ms/60000),d=Math.floor(m/1440),h=Math.floor(m%1440/60),r=m%60;
+  return d?`${d}d ${h}h`:h?`${h}h ${r}m`:`${r}m`;
+}
+function resetText(at,now){
+  if(!at)return null;
+  const left=countdown(at-now);
+  return left?`resets in ${left}`:'reset time passed';
+}
 
 export function emptyUsage(){return {context:null,cost:null,quota:{},model:null,events:0,ignored:0};}
 
@@ -74,9 +85,10 @@ export function usageView(state,{now=Date.now(),provider}={}){
   if(c?.used!==undefined&&c.size)label=`${fmt(c.used)}/${fmt(c.size)} · ${Math.round(Math.min(100,c.percent))}%`;
   else if(c?.used!==undefined)label=`${fmt(c.used)} ctx · size unknown`;
   const pct=n=>Math.round(n);
-  const compactQuota=['5h','7d'].filter(k=>state.quota[k]).map(k=>{const w=state.quota[k];return `${k} ${pct(w.usedPercent)}% used/${pct(100-w.usedPercent)}% left${freshness(w,now).stale?' ⚠':''}`;});
+  // Quota is shown as what is left; the used share is its complement.
+  const compactQuota=['5h','7d'].filter(k=>state.quota[k]).map(k=>{const w=state.quota[k],reset=resetText(w.resetsAt,now);return `${k} ${pct(100-w.usedPercent)}% left${freshness(w,now).stale?' ⚠':''}${reset?` (${reset})`:''}`;});
   const quota=['5h','7d'].map(k=>{const w=state.quota[k];if(!w)return `${k} quota: not reported`;
-    return `${k} quota (reported): ${pct(w.usedPercent)}% used / ${pct(100-w.usedPercent)}% remaining${w.status?' · status '+w.status:''} · ${w.resetsAt?'resets '+new Date(w.resetsAt).toLocaleString():'reset unknown'} · ${freshness(w,now).text}`;});
+    return `${k} quota (reported): ${pct(100-w.usedPercent)}% remaining${w.status?' · status '+w.status:''} · ${w.resetsAt?`${resetText(w.resetsAt,now)} (${new Date(w.resetsAt).toLocaleString()})`:'reset unknown'} · ${freshness(w,now).text}`;});
   const details=[
     c?`Context occupancy (current window): ${c.used!==undefined?c.used.toLocaleString():'unknown'} of ${c.size!==undefined?c.size.toLocaleString():'unknown'} tokens${c.percent!==undefined?` (${c.percent.toFixed(1)}%)`:''} · ${cf.text}`:'Context occupancy: not reported yet',
     c?.dropped?'Occupancy decreased since the previous report (cause not reported)':'',
@@ -88,12 +100,15 @@ export function usageView(state,{now=Date.now(),provider}={}){
     `Source: ACP usage_update${provider?' · '+provider:''} · ${state.events} event(s)${state.ignored?` · ${state.ignored} subagent/parent-attributed ignored`:''}`,
   ].filter(Boolean);
   const stale=!c||cf.stale;
-  return {label:(c&&stale?'⚠ ':'')+label+(compactQuota.length?' · '+compactQuota.join(' · '):''),stale,known:!!c,details};
+  // Glanceable form for the phone composer chip: context used and 5h quota left.
+  const short=[c?.percent!==undefined?`ctx ${Math.round(Math.min(100,c.percent))}%`:'',state.quota['5h']?`5h ${pct(100-state.quota['5h'].usedPercent)}% left`:''].filter(Boolean).join(' · ');
+  return {label:(c&&stale?'⚠ ':'')+label+(compactQuota.length?' · '+compactQuota.join(' · '):''),short:short&&(c&&stale?'⚠ ':'')+short,stale,known:!!c,details};
 }
 
 // Wires the statusline into the composer. Hooks: reset() on session switch or
 // snapshot replay, consume(event,{live}) per event, render() after updates.
-export function setupUsageStatus({root,getProvider}){
+// An optional `chip` mirrors the short label (hidden while nothing is reported).
+export function setupUsageStatus({root,getProvider,chip}){
   let state=emptyUsage();
   root.innerHTML='<button type="button" class="usage-status-toggle" aria-expanded="false" aria-controls="usage-status-details"></button><div id="usage-status-details" class="usage-status-details" role="region" aria-label="Usage details" hidden></div>';
   const button=root.firstChild,panel=root.lastChild;
@@ -102,6 +117,7 @@ export function setupUsageStatus({root,getProvider}){
     const v=usageView(state,{provider:getProvider()});
     button.textContent=v.label;button.classList.toggle('stale',v.stale);button.classList.toggle('unknown',!v.known);
     button.title='Context usage details';
+    if(chip){chip.textContent=v.short;chip.hidden=!v.short;chip.classList.toggle('stale',v.stale);chip.setAttribute('aria-label',`Usage: ${v.label}. More options`);}
     panel.replaceChildren(...v.details.map(t=>{const p=document.createElement('div');p.textContent=t;return p;}));
   };
   render();

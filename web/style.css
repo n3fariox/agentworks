@@ -121,3 +121,53 @@ body[data-code-wrap=scroll] .tool-card pre,body[data-code-wrap=scroll] .approval
 .queue-state{font-size:.75rem;padding:0 .4rem;border-radius:4px;border:1px solid currentColor}
 .queue-item[data-state="error"] .queue-state,.queue-note{color:var(--danger,#e07070)}
 .queue-item[data-state="sent"]{opacity:.6}
+/* Phone flyouts: the composer ⋯/usage chip and session bar ⋯ open temporary
+   popovers; wider layouts show the same controls inline. */
+.composer-menu,.session-menu{display:contents}
+.composer-more,.composer-info,.session-more{display:none}
+@media(max-width:650px){
+  .composer-wrap{position:relative}
+  .composer-menu,.session-menu{display:none;position:absolute;z-index:6;overflow-y:auto;background:var(--panel);border:1px solid #3b3d46;border-radius:12px;padding:6px 12px;box-shadow:0 8px 28px #0008}
+  .composer-menu.open,.session-menu.open{display:block}
+  /* Over the prompt, anchored just above the ⋯ button. */
+  .composer-menu{left:12px;bottom:calc(max(12px,env(safe-area-inset-bottom)) + 52px);width:min(340px,calc(100% - 24px));max-height:min(60dvh,520px)}
+  .composer-menu .usage-status{margin:0}
+  .composer-menu .usage-status-toggle{width:100%;min-height:44px;text-align:left;opacity:.9}
+  .composer-menu .usage-status-details{margin-bottom:6px}
+  .composer-menu .composer-actions{flex-direction:column;align-items:stretch;gap:0;margin:0;border-top:1px solid var(--border)}
+  .composer-menu .composer-actions button{text-align:left;min-height:44px;font-size:14px}
+  .composer-menu #continuation-controls{border-top:1px solid var(--border);padding:0}
+  .composer-menu #continuation-controls>summary{background:var(--panel);min-height:44px;display:flex;align-items:center;gap:6px;font-size:14px}
+  .composer-menu #continuation-controls>summary::before{content:'▸';color:var(--muted)}
+  .composer-menu #continuation-controls[open]>summary::before{content:'▾'}
+  .composer-menu #continuation-controls[open]{max-height:none;overflow:visible;padding-bottom:8px}
+  .composer-more,.session-more{display:inline-flex;align-items:center;justify-content:center;position:relative;flex:none;width:36px;height:36px;border-radius:8px;background:transparent;border:1px solid #3b3d46;color:var(--text);font-size:18px;padding:0}
+  .composer-more.flagged::after{content:'';position:absolute;top:4px;right:4px;width:7px;height:7px;border-radius:50%;background:var(--green)}
+  .composer-info{display:inline-flex;margin-left:auto;align-items:center;min-height:36px;padding:0 10px;border-radius:18px;border:1px solid var(--border);background:transparent;color:var(--muted);font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
+  .composer-info[hidden]{display:none}
+  .composer-info.stale{font-style:italic;opacity:.75}
+  #composer-hint,.composer-foot{display:none}
+  .send-button,.stop-button{min-height:36px}
+  .send-button{width:36px;height:36px;margin-left:auto}
+  .composer-info:not([hidden])+.send-button{margin-left:0}
+  .composer-bottom{gap:8px}
+  /* Session bar: one row of agent, state and model; the rest in the ⋯ popover. */
+  .session-bar{position:relative;flex-wrap:nowrap;padding:10px 12px;gap:8px}
+  .session-bar>div:first-child{flex:none;gap:8px}
+  .session-bar #model-picker{order:0;margin-left:auto;min-width:0;flex:0 1 auto;max-width:none;min-height:36px}
+  .session-bar #resume-session{flex:none}
+  .session-menu{top:calc(100% - 4px);right:12px;width:min(300px,calc(100% - 24px));max-height:70dvh}
+  .session-menu>*{display:block;width:100%;margin:0}
+  .session-menu>[hidden]{display:none}
+  .session-menu>select{order:0;max-width:none;margin:6px 0;min-height:40px;font-size:14px}
+  .session-menu>.text-button{text-align:left;min-height:44px;font-size:14px;border-top:1px solid var(--border);border-radius:0}
+  .session-bar .session-menu .text-button,.composer-menu .composer-actions .text-button{font-size:14px;color:var(--text)}
+  .session-bar .session-menu>select,.session-menu>#session-project{width:100%;max-width:none;font-size:14px;padding:8px}
+  .session-menu #lifecycle-menu{border-top:1px solid var(--border);font-size:14px}
+  .session-menu #lifecycle-menu>summary{border:0;padding:12px 0;min-height:44px}
+  .session-menu #project-path{order:0;white-space:normal;overflow-wrap:anywhere;border-top:1px solid var(--border);padding:10px 0 6px}
+  /* The palette or a test can open Session actions while the popover is shut:
+     show only its bottom sheet. */
+  .session-menu:not(.open):has(#lifecycle-menu[open]){display:block;visibility:hidden}
+  .session-menu:has(#lifecycle-menu[open]) .lifecycle-actions{visibility:visible}
+}

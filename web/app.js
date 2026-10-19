@@ -8,6 +8,7 @@ import {setupPalettes} from '/palettes.js';
 import {setupDisplayPreferences} from '/display-preferences.js';
 import {setupWorkLogs,observeTool} from '/work-logs.js';
 import {setupUsageStatus} from '/usage-status.js';
+import {setupFlyout} from '/flyout.js';
 import {setupTimeoutControls} from '/timeout-controls.js';
 import {setupInputQueue,BUSY} from '/input-queue.js';
 const $ = id => document.getElementById(id);
@@ -25,7 +26,9 @@ const drafts=readStorage(sessionStorage,'agentworks-drafts',{});
 const scrollPositions=new Map();let restoreScroll=null;
 let config, sessions=[], active=null, socket=null, generation=0, connected=false;
 // U-07: per-session composer usage statusline; only this session's own events feed it.
-const usageStatus=setupUsageStatus({root:$('usage-status'),getProvider:()=>active?.provider});
+const usageStatus=setupUsageStatus({root:$('usage-status'),getProvider:()=>active?.provider,chip:$('composer-info')});
+const composerMenu=setupFlyout({menu:$('composer-menu'),triggers:[$('composer-more'),$('composer-info')]});
+const sessionMenu=setupFlyout({menu:$('session-menu'),triggers:[$('session-more')]});
 setInterval(()=>usageStatus.render(),60000);
 let timeoutControls=null;
 let transcript=[], tools=new Map(), approvals=new Map(), assistant=null, status='starting';
@@ -282,7 +285,7 @@ function selectSession(s) {
   if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));scrollPositions.set(active.id,$('messages').scrollTop);}
   $('prompt').value=drafts[s.id]||'';restoreScroll=scrollPositions.get(s.id)??null;
   clearTimeout(retryTimer);generation++;socket?.close();socket=null;connected=false;
-  active=s;status=s.status;modelConfig=null;permissionModes=null;availableCommands=[];commandsOpen=false;renderCommands();resetTranscript();usageStatus.reset();inputQueue.reset();
+  active=s;status=s.status;modelConfig=null;permissionModes=null;availableCommands=[];commandsOpen=false;renderCommands();composerMenu.close();sessionMenu.close();resetTranscript();usageStatus.reset();inputQueue.reset();
   localStorage.setItem('agentworks-session',s.id);$('welcome').hidden=true;$('conversation').hidden=false;
   $('header-title').textContent=s.title;$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;
   $('session-notice').hidden=true;document.body.classList.remove('menu-open');sidebar();updateControls();connect(generation);
@@ -735,7 +738,7 @@ function renderContinuation(){
     const d=new Date(p.deadline||Date.now()+86400000);$('continuation-deadline').value=new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,16);
   }
   $('continuation-enabled').checked=!!p.enabled;
-  $('continuation-label').textContent=p.enabled?'On':'Off';
+  $('continuation-label').textContent=p.enabled?'On':'Off';composerMenu.setFlag(!!p.enabled);
   const due=p.dueAt?new Date(p.dueAt):null;
   $('continuation-status').textContent=[p.limited?'Paused by usage limit':'',p.reason,due?`Resumes ${due.toLocaleString()} · ${Math.max(0,Math.ceil((p.dueAt-Date.now())/1000))}s remaining`:p.limited?'Reset unknown or timer cancelled — choose a time or resume deliberately':'',`Policy: ${p.origin||'default off'}${p.parent?' · parent '+p.parent:''}`,p.enabled?`${p.attempts}/${p.maxAttempts} attempts · deadline ${new Date(p.deadline).toLocaleString()}`:'',p.source,active?.provider==='opencode'?'OpenCode automatic reset detection unavailable; use manual session controls':'',p.observedAt?'Data observed '+new Date(p.observedAt).toLocaleString():'No provider reset data'].filter(Boolean).join(' · ');
   $('continuation-schedule').disabled=!p.enabled||!p.limited;

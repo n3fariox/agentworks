@@ -112,6 +112,7 @@ for(const mobile of [false,true])test(`diff browser ${mobile?'mobile':'desktop'}
   const errors=[];page.on('pageerror',e=>errors.push(e.message));let sockets=0;page.on('websocket',()=>sockets++);
   await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),session.id);await page.goto(base);
   await expect(page.locator('#session-state')).toHaveText('Ready');await page.locator('#prompt').fill('Keep diff draft');const before=sockets;
+  if(mobile)await page.locator('#session-more').click();
   await page.getByRole('button',{name:'Diff',exact:true}).click();await expect(page.locator('#diff-status')).toContainText('changed file');
   await expect(page.locator('#diff-context')).toContainText(nested);await page.locator('#diff-files').selectOption('both.txt');
   await expect(page.locator('#diff-patch')).toContainText('-staged version');await expect(page.locator('#diff-patch')).toContainText('+working version');
@@ -123,6 +124,7 @@ for(const mobile of [false,true])test(`diff browser ${mobile?'mobile':'desktop'}
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
   await page.keyboard.press('Escape');await expect(page.locator('#diff-dialog')).not.toBeVisible();await expect(page.locator('#prompt')).toHaveValue('Keep diff draft');expect(sockets).toBe(before);
   await page.route('**/api/sessions/*/diff?**',route=>route.fulfill({json:{context:{cwd:'<img src=x onerror=alert(1)>',status:'non_git'},unavailable:'No Git'}}));
+  if(mobile)await page.locator('#session-more').click();
   await page.getByRole('button',{name:'Diff',exact:true}).click();await expect(page.locator('#diff-context')).toContainText('<img src=x onerror=alert(1)>');expect(await page.locator('#diff-context img').count()).toBe(0);
   await page.locator('#dismiss-diff').click();expect(errors).toEqual([]);
 });

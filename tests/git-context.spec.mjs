@@ -91,6 +91,7 @@ for(const mobile of [false,true])test(`Workspace dialog ${mobile?'mobile':'deskt
   await page.locator('#prompt').fill('hello workspace');await page.locator('#send').click();
   await expect(page.locator('#messages')).toContainText('Local session, turn 1');
   await page.locator('#prompt').fill('Keep this draft');const before=sockets;
+  if(mobile)await page.locator('#session-more').click();
   await page.getByRole('button',{name:'Workspace info',exact:true}).click();
   await expect(page.getByRole('dialog',{name:'Workspace info'})).toBeVisible();
   await expect(page.locator('#workspace-info-status')).toHaveText('Detached HEAD');
@@ -103,10 +104,12 @@ for(const mobile of [false,true])test(`Workspace dialog ${mobile?'mobile':'deskt
   await expect(page.locator('#messages')).toContainText('hello workspace');
   // Safe text and error states, using only a mocked response for hostile display strings.
   await page.route('**/api/sessions/*/workspace',route=>route.fulfill({json:{cwd:'<img src=x onerror=alert(1)>',status:'non_git',message:'Not a repository'}}));
+  if(mobile)await page.locator('#session-more').click();
   await page.locator('#session-workspace').click();await expect(page.locator('#workspace-info-status')).toHaveText('Not a Git worktree');
   await expect(page.locator('#workspace-info-fields')).toContainText('<img src=x onerror=alert(1)>');expect(await page.locator('#workspace-info-fields img').count()).toBe(0);
   await page.locator('#dismiss-workspace-info').click();
   await page.route('**/api/sessions/*/workspace',route=>route.fulfill({status:503,body:'Git unavailable'}));
+  if(mobile)await page.locator('#session-more').click();
   await page.locator('#session-workspace').click();await expect(page.locator('#workspace-info-status')).toHaveText('Workspace context unavailable');
   await page.locator('#dismiss-workspace-info').click();expect(errors).toEqual([]);
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await remove(s);

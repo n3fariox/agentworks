@@ -72,7 +72,7 @@ try{
  await authorize(id);await send(id);await prompt(id,'mcp report_completion {"requestId":"inbox-complete","status":"completed","summary":"Fixture done"}');await idle(id);assert.equal((await policy(id)).policy.enabled,false);
  // Mobile controls expose explicit authorization and visible bounded status.
  browser=await chromium.launch({headless:true});const page=await browser.newPage({viewport:{width:390,height:844}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
- await page.goto(base);await page.evaluate(id=>localStorage.setItem('agentworks-session',id),id);await page.reload();await page.locator('#session-agents').click();await expect(page.locator('#inbox-delivery-status')).toContainText('Off');
+ await page.goto(base);await page.evaluate(id=>localStorage.setItem('agentworks-session',id),id);await page.reload();await page.locator('#session-more').click();await page.locator('#session-agents').click();await expect(page.locator('#inbox-delivery-status')).toContainText('Off');
  await expect(page.locator('#inbox-maxTurns')).toBeVisible();await page.locator('#inbox-maxTurns').fill('2');await page.locator('#inbox-delivery-controls button[type=submit]').click();await expect(page.locator('#inbox-delivery-status')).toContainText('Enabled');
  assert(await page.locator('#inbox-maxTurns').evaluate(n=>{const r=n.getBoundingClientRect();return r.width>0&&r.left>=0&&r.right<=innerWidth&&r.height>=44;}));
  await page.locator('#inbox-delivery-controls button[type=button]').click();await expect(page.locator('#inbox-delivery-status')).toContainText('Off');assert.deepEqual(errors,[]);await browser.close();browser=null;
