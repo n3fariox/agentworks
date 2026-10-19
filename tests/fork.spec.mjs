@@ -85,8 +85,8 @@ for(const mobile of [false,true]){
     expect(state.forks[0]).toMatchObject({sessionId:parent.id});
     expect(state.forks[0].body).toMatchObject({provider:'demo',title:'Refactor parser (fork)',model:'demo/steady',projectId:'a',cwd:'/repo/app',workspace:{mode:'newWorktree',baseRef:'abc1234'}});
     expect(state.forks[0].body.requestId).toBeTruthy();
-    // Forking grants no coordinator powers of its own.
-    expect(state.forks[0].body.agentAccess).toEqual({communicate:false,startSessions:false,promptSessions:false,cancelSessions:false,runAutomations:false});
+    // A fork does not copy the parent grant; the server applies the selected defaults.
+    expect(state.forks[0].body.agentAccess).toBeUndefined();
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);expect(errors).toEqual([]);
   });
 }
