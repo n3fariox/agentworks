@@ -930,21 +930,45 @@ async fn guard(
         .unwrap_or("");
     let direct_host = allowed_host(host, app.bind, app.port);
     let forwarded_origin = browser_origin::forwarded_origin(&headers);
+    let ws = req.uri().path().ends_with("/events");
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if ws {
+        eprintln!(
+            "WebSocket request path={:?} host={:?} origin={:?} x_forwarded_proto={:?} x_forwarded_host={:?} direct_host={} forwarded_origin={:?}",
+            req.uri().path(),
+            log_header(&headers, header::HOST),
+            log_header(&headers, header::ORIGIN),
+            log_header(&headers, "x-forwarded-proto"),
+            log_header(&headers, "x-forwarded-host"),
+            direct_host,
+            forwarded_origin
+        );
+    }
     if !direct_host && forwarded_origin.is_none() {
+        if ws {
+            eprintln!("WebSocket rejected reason=unrecognized_host");
+        }
         return (StatusCode::FORBIDDEN, "Unrecognized host").into_response();
     }
     let write = !matches!(req.method().as_str(), "GET" | "HEAD");
-    let ws = req.uri().path().ends_with("/events");
     if write || ws {
-        let origin = headers
-            .get(header::ORIGIN)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
         if !(direct_host && origin == format!("http://{host}"))
             && !browser_origin::origin_matches_forwarded(&headers, origin)
         {
+            if ws {
+                eprintln!(
+                    "WebSocket rejected reason=origin_mismatch path={:?}",
+                    req.uri().path()
+                );
+            }
             return (StatusCode::FORBIDDEN, "Same-origin requests required").into_response();
         }
+    }
+    if ws {
+        eprintln!("WebSocket guard passed path={:?}", req.uri().path());
     }
     let mut response = next.run(req).await;
     let h = response.headers_mut();
@@ -954,6 +978,15 @@ async fn guard(
     h.insert(header::CONTENT_SECURITY_POLICY,"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'".parse().unwrap());
     response
 }
+
+fn log_header(headers: &HeaderMap, name: impl axum::http::header::AsHeaderName) -> String {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.chars().take(256).collect())
+        .unwrap_or_else(|| "<missing>".into())
+}
+
 fn allowed_host(host: &str, bind: IpAddr, port: u16) -> bool {
     let Ok(authority) = host.parse::<axum::http::uri::Authority>() else {
         return false;
@@ -2222,8 +2255,17 @@ async fn events(
     Path(id): Path<String>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, (StatusCode, String)> {
-    let s = session(&app, &id)?;
-    Ok(ws.on_upgrade(move |socket| event_socket(socket, s)))
+    let s = match session(&app, &id) {
+        Ok(session) => session,
+        Err(error) => {
+            eprintln!("Session WebSocket route rejected reason=session_not_found");
+            return Err(error);
+        }
+    };
+    Ok(ws.on_upgrade(move |socket| {
+        eprintln!("Session WebSocket upgraded");
+        event_socket(socket, s)
+    }))
 }
 
 /// U-02 cross-session stream. Carries only noteworthy, policy-allowed events and
