@@ -60,14 +60,15 @@ export function setupInputQueue({$,api,uuid,getActive,getStatus,toolActive}){
     const sig=JSON.stringify([queue,editing,getStatus()==='idle']);if(sig===lastSig)return;lastSig=sig;
     list.replaceChildren();
     const items=queue.items||[];
-    list.hidden=!items.length;
-    if(!items.length)return;
+    const pending=items.filter(item=>item.state!=='sent'),sent=items.filter(item=>item.state==='sent');
+    list.hidden=!items.length&&!queue.paused;
+    if(!items.length&&!queue.paused)return;
     const head=document.createElement('div');head.className='queue-head';
-    const title=document.createElement('span');title.textContent=`Queued inputs (${items.filter(i=>i.state!=='sent').length})`;head.append(title);
+    const title=document.createElement('span');title.textContent=`Queued inputs (${pending.length})`;head.append(title);
     if(queue.paused){
       const note=document.createElement('span');note.className='queue-paused';note.setAttribute('role','status');note.textContent=queue.paused;
       const resume=document.createElement('button');resume.type='button';resume.className='text-button';resume.dataset.queueResume='';
-      resume.textContent=getStatus()==='idle'?'Resume & send next':'Resume queue';
+      resume.textContent=getStatus()==='idle'&&pending.some(item=>['queued','paused'].includes(item.state))?'Resume & send next':'Resume queue';
       resume.onclick=()=>call('/resume',{method:'POST'}).catch(e=>note.textContent=e.message);
       head.append(note,resume);
     }else if(getStatus()==='idle'&&items.some(i=>i.state==='queued')){
@@ -75,7 +76,7 @@ export function setupInputQueue({$,api,uuid,getActive,getStatus,toolActive}){
       send.onclick=()=>call('/resume',{method:'POST'}).catch(()=>{});head.append(send);
     }
     const ol=document.createElement('ol');
-    for(const item of items){
+    for(const item of pending){
       const li=document.createElement('li');li.className='queue-item';li.dataset.state=item.state;li.dataset.id=item.id;
       const badge=document.createElement('span');badge.className='queue-state';badge.textContent=STATE_LABELS[item.state]||item.state;
       li.append(badge);
@@ -101,7 +102,20 @@ export function setupInputQueue({$,api,uuid,getActive,getStatus,toolActive}){
       }
       ol.append(li);
     }
-    list.append(head,ol);
+    list.append(head);
+    if(pending.length)list.append(ol);
+    if(sent.length){
+      const history=document.createElement('details');history.className='queue-history';
+      const summary=document.createElement('summary');summary.textContent=`Recently sent (${sent.length})`;history.append(summary);
+      const sentList=document.createElement('ol');
+      for(const item of sent){
+        const li=document.createElement('li');li.className='queue-item';li.dataset.state='sent';li.dataset.id=item.id;
+        const badge=document.createElement('span');badge.className='queue-state';badge.textContent=STATE_LABELS[item.state];
+        const text=document.createElement('span');text.className='queue-text';text.textContent=item.text;
+        li.append(badge,text);if(item.note){const note=document.createElement('span');note.className='queue-note';note.textContent=item.note;li.append(note);}sentList.append(li);
+      }
+      history.append(sentList);list.append(history);
+    }
   }
   return {set,enqueue,observe,reset,render,renderActivity,hasPending:()=>(queue.items||[]).some(i=>['queued','paused','sending','error'].includes(i.state))};
 }

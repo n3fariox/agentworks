@@ -121,6 +121,35 @@ test('Stop pauses the queue; nothing sends until a deliberate resume',async({pag
   await until(async()=>(await api(`/api/sessions/${session.id}/queue`)).queue.items[0].state==='sent');
 });
 
+test('sent entries are collapsed history and an empty paused queue offers Resume queue',async({page})=>{
+  await openSession(page);
+  await type(page,'slow first turn');
+  await type(page,'already sent');
+  await expect(page.locator('#messages')).toContainText('already sent',{timeout:15000});
+  await until(async()=>(await api(`/api/sessions/${session.id}/queue`)).queue.items[0].state==='sent');
+
+  await type(page,'slow turn to cancel');
+  await expect(page.locator('#activity-indicator')).toBeVisible();
+  await type(page,'remove this pending input');
+  await page.locator('#stop').click();
+  await expect(page.locator('#session-state')).toHaveText('Ready');
+  await expect(page.locator('.queue-paused')).toContainText('Cancelled');
+  const queue=(await api(`/api/sessions/${session.id}/queue`)).queue;
+  const pending=queue.items.find(item=>item.state==='paused');
+  expect(pending).toBeTruthy();
+  await api(`/api/sessions/${session.id}/queue/${pending.id}`,undefined,'DELETE');
+
+  await expect(page.locator('#input-queue')).toBeVisible();
+  await expect(page.locator('#input-queue .queue-head')).toContainText('Queued inputs (0)');
+  await expect(page.locator('#input-queue > ol .queue-item')).toHaveCount(0);
+  await expect(page.locator('.queue-history summary')).toHaveText('Recently sent (1)');
+  await expect(page.getByRole('button',{name:'Resume queue'})).toBeVisible();
+  await expect(page.getByRole('button',{name:'Resume & send next'})).toHaveCount(0);
+  await page.getByRole('button',{name:'Resume queue'}).click();
+  await expect(page.locator('.queue-paused')).toHaveCount(0);
+  await expect(page.locator('#session-state')).toHaveText('Ready');
+});
+
 test('approval wait label, queued input dispatches after approval completes the turn',async({page})=>{
   await openSession(page);
   await type(page,'approval');
