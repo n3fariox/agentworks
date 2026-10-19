@@ -173,7 +173,8 @@ export function createWorkspace(hooks){
     if(pendingFile?.cwd===session.cwd){const pending=pendingFile;pendingFile=null;hooks.appendDraft(pending.text);state.sideFile=pending.file;$('workspace-preview').hidden=matchMedia('(max-width:800px)').matches;renderPreview(pending.file,true);}
   }
   function openAutomation(id){state.automationId=id;showView('automations');}
-  $('nav-sessions').onclick=()=>showView('sessions');$('nav-files').onclick=()=>showView('files');$('nav-automations').onclick=()=>showView('automations');$('nav-settings').onclick=()=>hooks.openSettings();
+  // On phones the Sessions tab is the full-screen session browser.
+  $('nav-sessions').onclick=()=>{showView('sessions');if(matchMedia('(max-width:650px)').matches)document.body.classList.add('menu-open');};$('nav-files').onclick=()=>showView('files');$('nav-automations').onclick=()=>showView('automations');$('nav-settings').onclick=()=>hooks.openSettings();
   $('workspace-project').onchange=()=>{contextGeneration++;state.projectId=$('workspace-project').value||null;state.locationKey='';contextControls();resetFiles();save();
     if(state.view==='sessions'){const session=sessions.find(s=>(s.projectId||null)===state.projectId);if(session)hooks.selectSession(session);else hooks.overview();}
     else if(state.view==='files')loadFiles();else loadAutomations();
