@@ -279,15 +279,30 @@ function openProjectDialog(project=null){
   policyEditor.open(editingProject);$('project-dialog').showModal();$('project-name').focus();
 }
 function resetTranscript(){transcript=[];tools=new Map();approvals=new Map();assistant=null;nodes.clear();turnEnds=new Map();workLogs?.reset();$('messages').replaceChildren();$('approval-area').replaceChildren();}
+// The desktop header and the phone session bar both show the session title.
+function setTitle(title){$('header-title').textContent=title;$('session-heading-title').textContent=title;}
+// Phone navigation: the session browser and a chat are separate history
+// entries, so the system Back button returns from a chat to the browser.
+const phone=()=>matchMedia('(max-width:650px)').matches;
+function showBrowser(){sessionMenu.close();composerMenu.close();document.body.classList.add('menu-open');}
+function enterChat(){
+  if(!phone()||history.state?.agentworks==='chat')return;
+  if(!history.state?.agentworks)history.replaceState({agentworks:'browser'},'');
+  history.pushState({agentworks:'chat'},'');
+}
+addEventListener('popstate',event=>{
+  if(!phone()||$('conversation').hidden)return;
+  if(event.state?.agentworks==='chat')document.body.classList.remove('menu-open');else showBrowser();
+});
 function selectSession(s) {
-  document.body.classList.remove('menu-open');
+  document.body.classList.remove('menu-open');enterChat();
   if(active?.id===s.id){$('welcome').hidden=true;$('conversation').hidden=false;workspace?.sessionSelected(s);return;}
   if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));scrollPositions.set(active.id,$('messages').scrollTop);}
   $('prompt').value=drafts[s.id]||'';restoreScroll=scrollPositions.get(s.id)??null;
   clearTimeout(retryTimer);generation++;socket?.close();socket=null;connected=false;
   active=s;status=s.status;modelConfig=null;permissionModes=null;availableCommands=[];commandsOpen=false;renderCommands();composerMenu.close();sessionMenu.close();resetTranscript();usageStatus.reset();inputQueue.reset();
   localStorage.setItem('agentworks-session',s.id);$('welcome').hidden=true;$('conversation').hidden=false;
-  $('header-title').textContent=s.title;$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;
+  setTitle(s.title);$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;
   $('session-notice').hidden=true;document.body.classList.remove('menu-open');sidebar();updateControls();connect(generation);
   workspace?.sessionSelected(s);
   if(s.status==='suspended'&&!s.explicitlySuspended)resumeSession(s.id);
@@ -304,7 +319,7 @@ function connect(gen){
     if(e.kind==='snapshot'){
       resetTranscript();usageStatus.reset();status=e.session.status;Object.assign(active,e.session);
       replaying=true;try{for(const item of e.events)if(item.kind!=='session_updated')consume(item);}finally{replaying=false;}
-      Object.assign(active,e.session);$('header-title').textContent=active.title;
+      Object.assign(active,e.session);setTitle(active.title);
       active.continuation=e.session.continuation;
       approvals=new Map(e.approvals.map(a=>[a.id,a.request]));status=e.session.status;modelConfig=e.models;permissionModes=e.permissionModes;if(status==='suspended'&&!e.session.explicitlySuspended)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();inputQueue.set(e.session.inputQueue);inputQueue.observe(status,{live:false});
       if(e.storageError){$('session-notice').textContent=e.storageError;$('session-notice').hidden=false;}
@@ -335,7 +350,7 @@ function consume(e,live=false){
   if(d?.continuationState&&active)active.continuation=d.continuationState;
   {const t=timeoutControls?.notice(e.kind,d);if(t){transcript.push({id:uuid(),type:'notice',text:t});assistant=null;}}
   if(e.kind==='session_updated'){
-    Object.assign(active,d);$('header-title').textContent=active.title;const row=sessions.find(s=>s.id===active.id);if(row)Object.assign(row,d);sidebar();
+    Object.assign(active,d);setTitle(active.title);const row=sessions.find(s=>s.id===active.id);if(row)Object.assign(row,d);sidebar();
   }
   else if(e.kind==='continuation'){renderContinuation();}
   else if(e.kind==='models'){modelConfig=d;}
@@ -555,7 +570,7 @@ $('session-project').onchange=async event=>{
   catch(error){toast(error.message);updateProjectControls();}
 };
 $('dismiss-create').onclick=()=>$('create-dialog').close();$('dismiss-file').onclick=()=>$('file-dialog').close();
-$('menu').onclick=()=>document.body.classList.toggle('menu-open');$('scrim').onclick=()=>document.body.classList.remove('menu-open');
+$('menu').onclick=()=>document.body.classList.toggle('menu-open');$('session-home').onclick=()=>{if(history.state?.agentworks==='chat')history.back();else showBrowser();};$('session-search').onclick=()=>$('palette-search').click();$('scrim').onclick=()=>document.body.classList.remove('menu-open');
 $('provider').onchange=()=>{providerNote();resetCreateModels();};
 $('directory').onchange=resetCreateModels;
 $('load-models').onclick=loadCreateModels;
@@ -625,7 +640,7 @@ $('close-session').onclick=async()=>{
   if(!active)return;
   if(!confirm('Permanently delete this session and its saved transcript? Its harness will stop. Worktree files and branches remain. To keep history, choose Suspend harness instead. This cannot be undone.'))return;
   const id=active.id;
-  try{await api(`/api/sessions/${id}`,{method:'DELETE'});generation++;socket?.close();clearTimeout(retryTimer);active=null;localStorage.removeItem('agentworks-session');$('conversation').hidden=true;$('welcome').hidden=false;$('header-title').textContent='Overview';await refreshSessions();}catch(e){toast(e.message);}
+  try{await api(`/api/sessions/${id}`,{method:'DELETE'});generation++;socket?.close();clearTimeout(retryTimer);active=null;localStorage.removeItem('agentworks-session');$('conversation').hidden=true;$('welcome').hidden=false;setTitle('Overview');await refreshSessions();}catch(e){toast(e.message);}
 };
 function applyRoots(){
   $('project-roots').replaceChildren();
@@ -780,7 +795,7 @@ $('rename-session').onclick=()=>{$('rename-title').value=active.title;$('rename-
 $('rename-dismiss').onclick=()=>$('rename-dialog').close();
 $('rename-form').onsubmit=async event=>{
   event.preventDefault();const id=active?.id;if(!id)return;
-  try{const updated=await api(`/api/sessions/${id}`,{method:'PATCH',body:JSON.stringify({title:$('rename-title').value})});if(active?.id===id){Object.assign(active,updated);$('header-title').textContent=updated.title;}await refreshSessions();$('rename-dialog').close();}catch(e){$('rename-error').textContent=e.message;}
+  try{const updated=await api(`/api/sessions/${id}`,{method:'PATCH',body:JSON.stringify({title:$('rename-title').value})});if(active?.id===id){Object.assign(active,updated);setTitle(updated.title);}await refreshSessions();$('rename-dialog').close();}catch(e){$('rename-error').textContent=e.message;}
 };
 $('archive-session').onclick=async()=>{
   const id=active?.id;if(!id)return;

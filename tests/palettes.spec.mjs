@@ -415,8 +415,8 @@ test.describe('phone',()=>{
     await expect(page.locator('#palette-dialog')).toBeHidden();
     await expect(page.locator('#header-title')).toHaveText('Phone zeta');
     await expect(page.locator('#session-state')).toHaveText('Ready');
-    // The header entry is always visible, so no drawer is needed.
-    await page.locator('#palette-search').click();
+    // The chat bar's ⌕ is always visible on phones, so no browser screen is needed.
+    await page.locator('#session-search').click();
     await expect(page.locator('#palette-dialog')).toBeVisible();
     await expect(page.locator('#palette-mode-actions')).toHaveAttribute('aria-pressed','true');
     await page.locator('#palette-input').fill('new project');

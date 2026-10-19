@@ -71,9 +71,20 @@ test('mobile: drawer, composer, image output, approval denial',async({page})=>{
   await page.getByRole('button',{name:'Deny',exact:true}).click();
   await expect(page.locator('#session-state')).toHaveText('Ready');
   await expect(page.locator('#messages')).toContainText('denied');
-  await page.locator('#menu').click();
+  // On phones the chat bar's ☰ opens the full-screen session browser.
+  await page.locator('#session-home').click();
   await expect(page.locator('#new-session')).toBeInViewport();
   await page.getByRole('button',{name:/Browser test mobile/}).click();
+  await expect(page.locator('#prompt')).toBeInViewport();
+  // The system Back button returns from a chat to the session browser, and
+  // reopening a session makes Back work again.
+  await page.goBack();
+  await expect(page.locator('#new-session')).toBeInViewport();
+  await page.getByRole('button',{name:/Browser test mobile/}).click();
+  await expect(page.locator('#prompt')).toBeInViewport();
+  await page.goBack();
+  await expect(page.locator('#new-session')).toBeInViewport();
+  await page.goForward();
   await expect(page.locator('#prompt')).toBeInViewport();
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
   await expect(page.locator('body')).not.toHaveClass(/menu-open/);
@@ -210,7 +221,7 @@ test('models at creation, command and skill discovery, host settings',async({pag
     await page.locator('#command-list button').click();
     await expect(page.locator('#prompt')).toHaveValue('$demo-skill ');
     await page.setViewportSize({width:390,height:844});
-    await page.locator('#menu').click();await page.locator('#open-settings').click();
+    await page.locator('#menu:visible,#session-home:visible').click();await page.locator('#open-settings').click();
     await expect(page.locator('#settings-dialog')).toBeVisible();
     await page.screenshot({path:'.cache/prototype-settings.png'});
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
@@ -288,7 +299,7 @@ test('resume picker imports external history, paginates, and opens existing entr
     expect(await page.evaluate(()=>localStorage.getItem('agentworks-session'))).toBe(selected);
     const result=await page.evaluate(async()=>fetch('/api/external-sessions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:'demo'})}).then(r=>r.json()));
     expect(result.sessions.some(s=>s.sessionId===outside)).toBe(false);
-    await page.setViewportSize({width:390,height:844});await page.locator('#menu').click();await page.locator('#import-session').click();
+    await page.setViewportSize({width:390,height:844});await page.locator('#menu:visible,#session-home:visible').click();await page.locator('#import-session').click();
     await page.locator('#import-provider').selectOption('demo');await page.locator('#import-directory').fill(cwd);await page.locator('#browse-sessions').click();
     await expect(page.locator('.external-session')).toHaveCount(10);
     await page.screenshot({path:'.cache/prototype-import.png'});
@@ -344,7 +355,7 @@ test('workspace mobile: browse without an agent, ask in a new session, preserve 
     await page.getByRole('button',{name:'Ask about this file'}).click();await expect(page.locator('#directory')).toHaveValue(cwd);await page.locator('#provider').selectOption('demo');await page.locator('#session-title').fill('Browser test mobile files');await page.locator('#create-submit').click();
     await expect(page.locator('#session-state')).toHaveText('Ready');await expect(page.locator('#prompt')).toBeVisible();expect(await page.locator('#prompt').inputValue()).toContain('README.md');
     const id=await page.evaluate(()=>localStorage.getItem('agentworks-session'));const count=await page.evaluate(id=>fetch('/api/sessions/'+id).then(r=>r.json()).then(s=>s.events.filter(e=>e.kind==='user').length),id);expect(count).toBe(0);
-    await page.locator('#nav-files').click();await page.locator('.file-entry').filter({hasText:'README.md'}).click();await page.reload();await expect(page.locator('#workspace-files')).toBeVisible();await expect(page.locator('#workspace-file-detail h1')).toHaveText('Mobile files');await expect(page.locator('#workspace-location')).toHaveValue(await page.evaluate(()=>JSON.parse(localStorage.getItem('agentworks-workspace')).locationKey));
+    await page.locator('#session-home').click();await page.locator('#nav-files').click();await page.locator('.file-entry').filter({hasText:'README.md'}).click();await page.reload();await expect(page.locator('#workspace-files')).toBeVisible();await expect(page.locator('#workspace-file-detail h1')).toHaveText('Mobile files');await expect(page.locator('#workspace-location')).toHaveValue(await page.evaluate(()=>JSON.parse(localStorage.getItem('agentworks-workspace')).locationKey));
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
     await page.screenshot({path:'.cache/prototype-workspace-mobile.png'});
   }finally{await rm(cwd,{recursive:true,force:true});}
