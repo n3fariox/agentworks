@@ -426,6 +426,8 @@ function updateControls(){
     modePicker.value=permissionModes?.currentValue||'';modePicker.dataset.config=modeSignature;
   }
   modePicker.disabled=!connected||status!=='idle';
+  $('permission-mode-note').textContent=permissionModes?.defaultFallback||'';
+  $('permission-mode-note').hidden=!permissionModes?.defaultFallback;
   const picker=$('model-picker');picker.hidden=!modelConfig?.options?.length;
   if(!picker.hidden){
     const signature=JSON.stringify(modelConfig);
@@ -683,6 +685,16 @@ $('open-settings').onclick=async()=>{
         }catch(e){$('settings-error').textContent=e.message;}finally{load.disabled=false;load.textContent='Load models';}
       };
       const row=el('div','model-field');row.append(input,load);fields.append(label,row,list);
+      if(provider.id==='claude'){
+        const modeLabel=el('label','','Claude default permission mode');modeLabel.htmlFor='claude-default-permission-mode';
+        const mode=el('select');mode.id='claude-default-permission-mode';
+        for(const [value,name] of [['auto','Auto'],['default','Default'],['acceptEdits','Accept edits'],['plan','Plan']]){
+          const option=el('option','',name);option.value=value;mode.append(option);
+        }
+        mode.value=settings.claudeDefaultPermissionMode||'auto';
+        const note=el('div','field-note',"Applies only to new Claude sessions. Auto uses Claude’s normal Auto mode. If the adapter does not advertise your choice, its current permission mode is kept and a note appears in Session options. Reconnected sessions keep their saved mode.");
+        fields.append(modeLabel,mode,note);
+      }
     }
     $('settings-dialog').showModal();
   }catch(e){toast(e.message);}
@@ -692,7 +704,7 @@ $('settings-form').onsubmit=async event=>{
   event.preventDefault();$('save-settings').disabled=true;$('settings-error').textContent='';
   try{
     const defaultModels={};for(const input of $('default-model-fields').querySelectorAll('input')){if(input.value.trim())defaultModels[input.dataset.provider]=input.value.trim();}
-    const settings=await api('/api/settings',{method:'PUT',body:JSON.stringify({roots:rootValues().filter(Boolean),defaultModels})});
+    const settings=await api('/api/settings',{method:'PUT',body:JSON.stringify({roots:rootValues().filter(Boolean),defaultModels,claudeDefaultPermissionMode:$('claude-default-permission-mode')?.value})});
     config.roots=settings.roots;config.defaultModels=settings.defaultModels;applyRoots();$('settings-dialog').close();toast('Settings saved. They apply to new sessions.','success');
   }catch(e){$('settings-error').textContent='Host settings were not saved: '+e.message+' Display preferences are stored separately in this browser.';}finally{$('save-settings').disabled=false;}
 };

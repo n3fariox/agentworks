@@ -99,6 +99,10 @@ struct SessionData {
     models: Value,
     #[serde(default)]
     permission_modes: Value,
+    // Captured at creation, never inferred for restored/imported sessions.
+    // A native session ID prevents this default from overriding reconnect state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    initial_claude_permission_mode: Option<permission_modes::ClaudeDefault>,
     available_commands: Value,
     turn_active: bool,
     project_id: Option<String>,
@@ -947,8 +951,9 @@ fn checked_cwd(app: &App, path: &str) -> Result<PathBuf, (StatusCode, String)> {
 }
 async fn get_settings(State(app): State<App>) -> Json<Value> {
     let roots = effective_roots(&app);
+    let settings = app.catalog.lock().unwrap().data.settings.clone();
     Json(
-        json!({"roots":roots,"defaultModels":app.catalog.lock().unwrap().data.settings.default_models}),
+        json!({"roots":roots,"defaultModels":settings.default_models,"claudeDefaultPermissionMode":settings.claude_default_permission_mode.unwrap_or_default()}),
     )
 }
 async fn save_settings(State(app): State<App>, Json(mut settings): Json<Settings>) -> ApiResult {
@@ -1000,7 +1005,10 @@ async fn save_settings(State(app): State<App>, Json(mut settings): Json<Settings
     }
     settings.roots = Some(normalized);
     persist_settings(&app, |current| {
-        // The roots/models form may omit timeouts; keep the saved default.
+        // Older settings forms may omit these controls; keep their saved defaults.
+        settings.claude_default_permission_mode = settings
+            .claude_default_permission_mode
+            .or(current.claude_default_permission_mode);
         settings.timeouts = settings.timeouts.take().or(current.timeouts.clone());
         settings
     })?;
@@ -1599,6 +1607,11 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             requests: HashSet::new(),
             models: Value::Null,
             permission_modes: Value::Null,
+            initial_claude_permission_mode: permission_modes::initial_claude_default(
+                &req.provider,
+                req.external_id.is_some(),
+                catalog.data.settings.claude_default_permission_mode,
+            ),
             available_commands: json!([]),
             turn_active: false,
             project_id: req.project_id,

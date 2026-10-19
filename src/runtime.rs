@@ -392,6 +392,14 @@ pub async fn run(
     let permission_s = s.clone();
     let replaying = Arc::new(AtomicBool::new(true));
     let notify_replaying = replaying.clone();
+    let initial_claude_mode = {
+        let data = s.data.lock().unwrap();
+        if s.provider == "claude" && data.provider_session_id.is_none() {
+            data.initial_claude_permission_mode
+        } else {
+            None
+        }
+    };
     let saved_permission_modes = s.data.lock().unwrap().permission_modes.clone();
     let import_pending = s.data.lock().unwrap().import_pending;
     let host_profile = s.data.lock().unwrap().opencode_host;
@@ -491,6 +499,12 @@ pub async fn run(
                 } else {
                     return Err(agent_client_protocol::Error::internal_error().data("Saved permission mode is no longer advertised; inspect session configuration"));
                 }
+            } else if let Some(mode)=initial_claude_mode {
+                mode_config=crate::permission_modes::apply_initial(mode_config,mode,|config_id,mode| async {
+                    let request=SetSessionConfigOptionRequest::new(provider_id.clone(),config_id,SessionConfigOptionValue::value_id(mode));
+                    let selected=tokio::time::timeout(Duration::from_secs(30),connection.send_request(request).block_task()).await.map_err(|_|agent_client_protocol::Error::internal_error().data("Claude default permission mode selection timed out; no prompt was sent"))??;
+                    Ok(serde_json::to_value(selected).unwrap_or(Value::Null))
+                }).await?;
             }
             s.set_permission_modes(mode_config.clone());
             crate::limit_resume::ready(&s);

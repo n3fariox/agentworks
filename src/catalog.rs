@@ -28,6 +28,8 @@ pub struct Settings {
     pub roots: Option<Vec<PathBuf>>,
     #[serde(default)]
     pub default_models: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_default_permission_mode: Option<crate::permission_modes::ClaudeDefault>,
     /// L-07 saved default; absent keeps the built-in default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeouts: Option<crate::timeouts::Policy>,
@@ -168,6 +170,49 @@ impl Catalog {
 mod tests {
     use super::*;
     #[test]
+    fn claude_permission_default_is_compatible_and_persistent() {
+        use crate::permission_modes::ClaudeDefault;
+        let legacy: CatalogData = serde_json::from_value(serde_json::json!({
+            "projects":[], "locations":[], "settings":{"roots":null,"defaultModels":{"codex":"unchanged"}}
+        })).unwrap();
+        assert_eq!(
+            legacy
+                .settings
+                .claude_default_permission_mode
+                .unwrap_or_default(),
+            ClaudeDefault::Auto
+        );
+        assert_eq!(
+            Settings::default()
+                .claude_default_permission_mode
+                .unwrap_or_default(),
+            ClaudeDefault::Auto
+        );
+        let path =
+            std::env::temp_dir().join(format!("agentworks-claude-setting-{}.json", Uuid::new_v4()));
+        let mut catalog = Catalog::open(path.clone()).unwrap();
+        let mut settings = legacy.settings;
+        settings.claude_default_permission_mode = Some(ClaudeDefault::Plan);
+        catalog.settings(settings).unwrap();
+        let saved = Catalog::open(path.clone()).unwrap().data.settings;
+        assert_eq!(
+            saved.claude_default_permission_mode,
+            Some(ClaudeDefault::Plan)
+        );
+        assert_eq!(saved.default_models["codex"], "unchanged");
+        assert_eq!(
+            serde_json::to_value(&saved).unwrap()["claudeDefaultPermissionMode"],
+            "plan"
+        );
+        assert!(
+            serde_json::from_value::<Settings>(
+                serde_json::json!({"claudeDefaultPermissionMode":"bypassPermissions"})
+            )
+            .is_err()
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
     fn projects_are_independent_of_locations_and_survive_reload() {
         let path = std::env::temp_dir().join(format!("agentworks-catalog-{}.json", Uuid::new_v4()));
         let mut catalog = Catalog::open(path.clone()).unwrap();
@@ -187,6 +232,7 @@ mod tests {
                 roots: Some(vec![PathBuf::from("/projects")]),
                 default_models: HashMap::from([("codex".into(), "example-model".into())]),
                 timeouts: None,
+                claude_default_permission_mode: None,
             })
             .unwrap();
         let mut reopened = Catalog::open(path.clone()).unwrap();
