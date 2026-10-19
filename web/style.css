@@ -209,3 +209,83 @@ body[data-code-wrap=scroll] .tool-card pre,body[data-code-wrap=scroll] .approval
 .context-menu button:hover,.context-menu button:focus-visible{background:#292631;outline:2px solid var(--accent);outline-offset:-2px}
 .context-menu button.danger{color:#ed9b9b}
 .session-item,.tree-heading[data-project-id]{-webkit-touch-callout:none;user-select:none}
+
+/* Settings use the available width, with persistent actions and one scroll area. */
+#settings-dialog{width:1080px;max-width:calc(100vw - 32px);max-height:90dvh;padding:0;overflow:hidden}
+#settings-form{display:flex;flex-direction:column;height:min(760px,90dvh);max-height:90dvh;min-height:0}
+#settings-dialog .settings-header{padding:22px 26px 18px;border-bottom:1px solid var(--border);flex:none}
+#settings-title{margin:0;font-size:24px}
+#settings-description{margin:8px 0 0;font-size:13px;line-height:1.6}
+#settings-dialog .settings-body{display:grid;grid-template-columns:220px minmax(0,1fr);flex:1;min-height:0}
+#settings-dialog .settings-categories{display:flex;flex-direction:column;gap:6px;padding:20px 14px;background:#15171b;border-right:1px solid var(--border);overflow-y:auto}
+#settings-dialog .settings-categories button{flex:none;min-height:44px;padding:11px 14px;border:1px solid transparent;border-radius:7px;background:transparent;text-align:left;color:#aeb4bf;font-size:13px;line-height:1.5}
+#settings-dialog .settings-categories button:hover{background:#24262d;color:var(--text)}
+#settings-dialog .settings-categories button[aria-selected=true]{background:#302b42;border-color:#49405f;color:#ddd4ff}
+#settings-dialog .settings-content{padding:24px 26px;overflow-y:auto;overscroll-behavior:contain;min-width:0;min-height:0;scroll-padding:20px;scrollbar-gutter:stable}
+#settings-dialog [role=tabpanel]{min-width:0;outline-offset:4px}
+#settings-dialog .settings-section,#settings-dialog #service-controls{min-width:0;margin:0;padding:16px 18px 18px;border:1px solid #373b44;border-radius:10px;background:var(--panel)}
+#settings-dialog legend{padding:0 7px;color:var(--text);font-size:15px;font-weight:600;letter-spacing:0}
+#settings-dialog .field-note{font-size:12px;line-height:1.65}
+#settings-dialog .settings-section>p:first-of-type{margin:0 0 14px}
+#settings-dialog label{font-size:13px;line-height:1.5;margin:16px 0 7px}
+#settings-dialog input,#settings-dialog select{font-size:13px;min-height:42px}
+#settings-dialog .project-field-heading{gap:12px;flex-wrap:wrap}
+#settings-dialog .project-field-heading label{margin:0}
+#settings-dialog .display-field{grid-template-columns:minmax(0,1fr);gap:0;margin:0 0 12px}
+#settings-dialog .display-field label{margin:0 0 7px}
+#settings-dialog .workspace-check{display:flex;align-items:center;gap:10px;margin:14px 0;font-size:13px}
+#settings-dialog input[type=checkbox]{width:18px;height:18px;min-height:18px;flex:none;margin:0;accent-color:var(--accent)}
+#settings-dialog #timeout-controls{display:block}
+#settings-dialog [data-timeout-scope]{min-width:0}
+#settings-dialog [data-timeout-scope] h3{font-size:14px;font-weight:500;margin:0 0 12px}
+#settings-dialog [data-timeout-scope=session]{border-left:1px solid var(--border);padding-left:22px}
+#settings-dialog #service-controls{grid-column:1/-1}
+#settings-dialog #service-controls label{margin:6px 0 0}
+#settings-dialog #service-controls button{align-self:flex-start;padding:10px 14px;border-radius:7px;background:#252830}
+#settings-dialog .settings-footer{padding:16px 26px 20px;border-top:1px solid var(--border);background:#1a1c20;flex:none}
+#settings-dialog .dialog-footer{margin:0;gap:20px}
+#settings-dialog .dialog-footer>span{font-size:12px;line-height:1.5;max-width:62%}
+#settings-dialog .dialog-footer button{flex:none;min-height:44px}
+#settings-dialog .settings-footer .error-text{margin:0 0 12px;max-height:80px;overflow:auto}
+@media(max-width:900px){
+  #settings-dialog{max-width:calc(100vw - 20px);max-height:94dvh}
+  #settings-form{height:min(760px,94dvh);max-height:94dvh}
+  #settings-dialog .settings-body{display:flex;flex-direction:column}
+  #settings-dialog .settings-categories{flex-direction:row;flex:none;overflow-x:auto;border-right:0;border-bottom:1px solid var(--border);padding:10px 14px;gap:6px}
+  #settings-dialog .settings-categories button{white-space:nowrap}
+  #settings-dialog .settings-content{flex:1}
+  #settings-dialog .settings-header{padding:16px 18px 14px}
+  #settings-dialog .settings-content{padding:18px}
+  #settings-dialog .settings-section,#settings-dialog #service-controls{padding:14px}
+  #settings-dialog #timeout-controls{grid-template-columns:minmax(0,1fr)}
+  #settings-dialog [data-timeout-scope=session]{border-left:0;border-top:1px solid var(--border);padding:18px 0 0}
+  #settings-dialog input,#settings-dialog select{font-size:16px;min-height:44px}
+  #settings-dialog .icon-button{min-width:44px;min-height:44px}
+  #settings-dialog .settings-footer{padding:12px 18px}
+  #settings-dialog .dialog-footer{gap:12px}
+  #settings-dialog .dialog-footer>span{font-size:11px;max-width:none}
+}
+
+/* Session overrides stay with the session, outside global defaults. */
+#session-settings-dialog{width:720px;padding:0;overflow:hidden;max-height:90dvh}
+#session-settings-form{display:flex;flex-direction:column;max-height:90dvh}
+#session-settings-dialog .dialog-heading{padding:20px 24px;border-bottom:1px solid var(--border);flex:none}
+#session-settings-dialog h2{margin:0;font-size:22px}
+#session-settings-dialog .session-settings-content{padding:0 24px 20px;overflow-y:auto;min-height:0;overscroll-behavior:contain}
+#session-settings-dialog .field-note{font-size:12px;line-height:1.65}
+#session-settings-dialog .display-preferences{margin:0;padding:16px}
+#session-settings-dialog legend{font-size:15px;font-weight:600;color:var(--text)}
+#session-settings-dialog label{font-size:13px;line-height:1.5}
+#session-settings-dialog .workspace-check{display:flex;align-items:center;gap:10px}
+#session-settings-dialog input[type=checkbox]{width:18px;height:18px;flex:none;accent-color:var(--accent)}
+#session-settings-dialog input:disabled{opacity:.55}
+#session-settings-dialog .dialog-footer{margin:0;padding:16px 24px;border-top:1px solid var(--border);flex:none}
+#session-settings-dialog .dialog-footer button{margin-left:auto;flex:none;min-height:44px}
+#session-settings-dialog .error-text{margin:0;font-size:12px;max-height:80px;overflow:auto}
+@media(max-width:650px){
+  #session-settings-dialog input,#session-settings-dialog select{font-size:16px;min-height:44px}
+  #session-settings-dialog .icon-button{min-width:44px;min-height:44px}
+  #session-settings-dialog .dialog-heading,#session-settings-dialog .dialog-footer{padding:14px 18px}
+  #session-settings-dialog .session-settings-content{padding:0 18px 18px}
+  #session-settings-dialog input[type=checkbox]{min-height:18px}
+}

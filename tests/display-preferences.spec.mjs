@@ -28,7 +28,7 @@ async function sendDisplayMessage(page){
   await expect(page.locator('.message.assistant .code-block')).toHaveCount(3);
 }
 async function setPreference(page,key,value){
-  await page.locator('#open-settings').click();
+  await page.locator('#nav-settings').click();await page.locator('#settings-tab-display').click();
   await page.getByLabel({wrap:'Long lines in code blocks',highlight:'Syntax highlighting',prose:'Prose in unlabeled code blocks'}[key]).selectOption(value);
   await expect(page.locator('#display-preferences-note')).toContainText('saved in this browser');
   await page.locator('#dismiss-settings').click();
@@ -115,7 +115,7 @@ test('desktop: highlighting, exact raw copy, prose toggle, persisted preferences
   expect(await page.evaluate(()=>document.body.dataset.codeWrap)).toBe('wrap');
   await expect(blocks(page).nth(0).locator('[class^=tok-]')).toHaveCount(0);
   await expect(blocks(page).nth(1)).not.toHaveClass(/plain/);
-  await page.locator('#open-settings').click();
+  await page.locator('#nav-settings').click();await page.locator('#settings-tab-display').click();
   await expect(page.getByLabel('Syntax highlighting')).toHaveValue('off');
   await expect(page.getByLabel('Long lines in code blocks')).toHaveValue('wrap');
   await expect(page.getByLabel('Prose in unlabeled code blocks')).toHaveValue('code');
@@ -198,7 +198,7 @@ test('copy fallback selects the raw block when clipboard access is unavailable',
 
 test('settings toast: success tone for saved settings, error tone and inline detail for failures',async({page})=>{
   await openSession(page);
-  await page.locator('#open-settings').click();
+  await page.locator('#nav-settings').click();await page.locator('#settings-tab-display').click();
   await page.locator('#save-settings').click();
   const toast=page.locator('#toast');
   await expect(toast).toHaveText('Settings saved. They apply to new sessions.');
@@ -210,7 +210,7 @@ test('settings toast: success tone for saved settings, error tone and inline det
   // Failed host save keeps the dialog open with an explicit inline error; no success toast.
   await page.evaluate(()=>{document.getElementById('toast').hidden=true;});
   await page.route('**/api/settings',route=>route.request().method()==='PUT'?route.fulfill({status:500,body:'disk full'}):route.continue());
-  await page.locator('#open-settings').click();await page.locator('#save-settings').click();
+  await page.locator('#nav-settings').click();await page.locator('#settings-tab-display').click();await page.locator('#save-settings').click();
   await expect(page.locator('#settings-error')).toContainText('Host settings were not saved: disk full');
   await expect(page.locator('#settings-error')).toContainText('Display preferences are stored separately');
   await expect(page.locator('#settings-dialog')).toBeVisible();
@@ -219,7 +219,7 @@ test('settings toast: success tone for saved settings, error tone and inline det
 
   // Errors keep the error tone and assertive role.
   await page.route('**/api/settings',route=>route.request().method()==='GET'?route.fulfill({status:503,body:'settings unavailable'}):route.continue());
-  await page.locator('#open-settings').click();
+  await page.locator('#nav-settings').click();
   await expect(toast).toHaveText('settings unavailable');
   await expect(toast).toHaveAttribute('data-tone','error');
   await expect(toast).toHaveAttribute('role','alert');
@@ -238,7 +238,7 @@ test('phone: long lines wrap by default, touch targets and settings fit the view
   }
   await blocks(page).nth(0).scrollIntoViewIfNeeded();await page.screenshot({path:'.cache/display-preferences-phone.png'});
   // Explicit "never wrap" still keeps horizontal scrolling inside the block, not the page.
-  await page.locator('#open-settings').evaluate(n=>n.click());
+  await page.locator('#nav-settings').evaluate(n=>n.click());await page.locator('#settings-tab-display').click();
   const select=page.getByLabel('Long lines in code blocks');await expect(select).toBeVisible();
   const [dialogBox,selectBox]=[await page.locator('#settings-dialog').boundingBox(),await select.boundingBox()];
   expect(selectBox.x+selectBox.width).toBeLessThanOrEqual(dialogBox.x+dialogBox.width);

@@ -79,6 +79,13 @@ function providerNote() {
   $('provider-note').textContent=p.id==='demo'?'Local test agent. No model calls, API key, or file changes.':p.id==='opencode'?(p.installed?'Native ACP. Choose an advertised free model. Availability and limits may change.':'Install OpenCode on this host or set AGENTWORKS_OPENCODE_PATH.'):!p.installed?'Adapter not installed. Run npm ci --ignore-scripts.':p.authMode==='existing'?'Uses the existing agent sign-in on this host. If it has expired, sign in with the CLI and try again.':!p.keyPresent?`Set ${p.id==='claude'?'ANTHROPIC_API_KEY':'OPENAI_API_KEY or CODEX_API_KEY'} before starting the server.`:'API key available on the host. Messages use your provider account.';
   $('create-submit').disabled=!p.installed||(p.authMode==='api_key'&&!p.keyPresent)||creating||worktrees.blocked();
 }
+const communicationLabels={off:'Off',participant:'Participant',coordinator:'Coordinator'};
+function updateCommunicationDefault(){
+  const project=projects.find(p=>p.id===$('create-project').value);
+  const role=project?.defaultCommunicationRole||config.defaultCommunicationRole||'participant';
+  $('create-agent-access').querySelector('option[value=""]').textContent=`Use ${project?.defaultCommunicationRole?'project':'global'} default · ${communicationLabels[role]}`;
+  $('create-communication-note').textContent='Participant exchanges project messages. Coordinator can also start sessions and turns, cancel turns, and run project automations. Change session access later in Agents & inbox.';
+}
 function openCreate(context={}) {
   if(!config)return;
   updateProjectControls();
@@ -88,7 +95,7 @@ function openCreate(context={}) {
   $('create-project').value=projectId||'';
   const locations=readStorage(localStorage,'agentworks-project-locations',{});
   $('create-resume-policy').checked=false;
-  $('create-agent-access').value='off';$('create-error').textContent='';$('directory').value=context.cwd||workspaceContext?.cwd||locations[projectId||'ungrouped']||active?.cwd||config.roots[0];$('session-title').value=context.title||'';
+  $('create-agent-access').value='';updateCommunicationDefault();$('create-error').textContent='';$('directory').value=context.cwd||workspaceContext?.cwd||locations[projectId||'ungrouped']||active?.cwd||config.roots[0];$('session-title').value=context.title||'';
   if(context.provider&&$('provider').querySelector(`option[value="${context.provider}"]`))$('provider').value=context.provider;
   $('fork-boundary').replaceChildren(new Option('Latest completed turn at submission',''));$('fork-context').value='auto';$('fork-summary').value='';
   renderForkHeader();resetCreateModels();providerNote();
@@ -346,9 +353,11 @@ async function refreshSessions(){
 }
 function openProjectDialog(project=null){
   if(savingProject)return;
-  editingProject=project?.id||null;$('project-dialog-title').textContent=project?'Edit project':'New project';
-  $('project-name').value=project?.name||'';$('project-error').textContent='';$('delete-project').hidden=!project;
-  $('archive-project').hidden=!project;$('archive-project').textContent=project?.archived?'Unarchive project':'Archive project';
+  editingProject=project?.id||null;$('project-dialog-title').textContent=project?'Project settings':'New project';
+  $('project-name').value=project?.name||'';$('project-communication-role').value=project?.defaultCommunicationRole||'';
+  $('project-communication-role').querySelector('option[value=""]').textContent='Use global default · '+communicationLabels[config.defaultCommunicationRole||'participant'];
+  $('project-error').textContent='';$('delete-project').hidden=!project;$('archive-project').hidden=!project;
+  $('archive-project').textContent=project?.archived?'Unarchive project':'Archive project';
   policyEditor.open(editingProject);$('project-dialog').showModal();$('project-name').focus();
 }
 function resetTranscript(){transcript=[];tools=new Map();approvals=new Map();assistant=null;nodes.clear();turnEnds=new Map();workLogs?.reset();$('messages').replaceChildren();$('approval-area').replaceChildren();}
@@ -610,19 +619,19 @@ $('view-hosts').onclick=()=>setSidebarView('hosts');$('view-projects').onclick=(
 $('new-project').onclick=()=>openProjectDialog();$('create-project-new').onclick=()=>openProjectDialog();
 $('dismiss-project').onclick=()=>{if(!savingProject)$('project-dialog').close();};
 $('project-dialog').addEventListener('cancel',event=>{if(savingProject)event.preventDefault();});
-$('create-project').onchange=()=>{const remembered=readStorage(localStorage,'agentworks-project-locations',{})[$('create-project').value||'ungrouped'];if(remembered)$('directory').value=remembered;worktrees.projectChanged();};
+$('create-project').onchange=()=>{const remembered=readStorage(localStorage,'agentworks-project-locations',{})[$('create-project').value||'ungrouped'];if(remembered)$('directory').value=remembered;worktrees.projectChanged();updateCommunicationDefault();};
 $('project-form').onsubmit=async event=>{
   event.preventDefault();if(savingProject)return;savingProject=true;
-  for(const id of ['save-project','project-name','project-default-mode','project-require-worktree','archive-project','delete-project','dismiss-project'])$(id).disabled=true;
+  for(const id of ['save-project','project-name','project-default-mode','project-require-worktree','project-communication-role','archive-project','delete-project','dismiss-project'])$(id).disabled=true;
   $('project-error').textContent='';
   try{
     const policy=policyEditor.value();
-    const project=await api(editingProject?`/api/projects/${editingProject}`:'/api/projects',{method:editingProject?'PATCH':'POST',body:JSON.stringify({name:$('project-name').value})});
+    const project=await api(editingProject?`/api/projects/${editingProject}`:'/api/projects',{method:editingProject?'PATCH':'POST',body:JSON.stringify({name:$('project-name').value,defaultCommunicationRole:$('project-communication-role').value||null})});
     editingProject=project.id;$('delete-project').hidden=false;$('archive-project').hidden=false;
     try{await api(`/api/projects/${project.id}/workspace-policy`,{method:'PUT',body:JSON.stringify(policy)});}
     catch(error){throw new Error(`Project name saved. Workspace policy was not saved: ${error.message}. Retry Save project.`);}
-    await refreshSessions();if($('create-dialog').open){$('create-project').value=project.id;worktrees.projectChanged();}$('project-dialog').close();
-  }catch(error){$('project-error').textContent=error.message;}finally{savingProject=false;for(const id of ['save-project','project-name','project-default-mode','project-require-worktree','archive-project','delete-project','dismiss-project'])$(id).disabled=false;}
+    await refreshSessions();if($('create-dialog').open){$('create-project').value=project.id;worktrees.projectChanged();updateCommunicationDefault();}$('project-dialog').close();
+  }catch(error){$('project-error').textContent=error.message;}finally{savingProject=false;for(const id of ['save-project','project-name','project-default-mode','project-require-worktree','project-communication-role','archive-project','delete-project','dismiss-project'])$(id).disabled=false;}
 };
 // Archive and delete apply to the project's sessions too unless the user keeps them in Ungrouped.
 let removingProject=null;
@@ -694,7 +703,7 @@ $('create-form').onsubmit=async event=>{
   event.preventDefault();if(creating||worktrees.blocked())return;creating=true;providerNote();$('create-error').textContent='';
   const fork=forkSource;
   try{
-    const payload={resumePolicy:{enabled:$('create-resume-policy').checked},provider:$('provider').value,...worktrees.submission(),title:$('session-title').value,projectId:$('create-project').value||null,hostId:$('create-host').value,model:$('create-model').value,agentAccess:{communicate:$('create-agent-access').value!=='off',...Object.fromEntries(['startSessions','promptSessions','cancelSessions','runAutomations'].map(key=>[key,$('create-agent-access').value==='coordinator']))}};
+    const payload={resumePolicy:{enabled:$('create-resume-policy').checked},provider:$('provider').value,...worktrees.submission(),title:$('session-title').value,projectId:$('create-project').value||null,hostId:$('create-host').value,model:$('create-model').value,...($('create-agent-access').value?{agentAccess:{communicate:$('create-agent-access').value!=='off',...Object.fromEntries(['startSessions','promptSessions','cancelSessions','runAutomations'].map(key=>[key,$('create-agent-access').value==='coordinator']))}}:{})};
     if(fork)Object.assign(payload,{boundarySeq:$('fork-boundary').value?Number($('fork-boundary').value):null,context:$('fork-context').value,summary:$('fork-context').value==='summary'?$('fork-summary').value:null});
     const signature=JSON.stringify({source:fork?.id||null,payload});
     if(!pendingCreate||pendingCreate.signature!==signature)pendingCreate={signature,requestId:uuid()};
@@ -763,12 +772,44 @@ function addRoot(value=''){
   const remove=el('button','icon-button','×');remove.type='button';remove.setAttribute('aria-label','Remove root directory');remove.onclick=()=>{row.remove();if(!$('settings-roots').children.length)addRoot();};
   row.append(input,remove);$('settings-roots').append(row);return input;
 }
+// Keep category contents mounted so switching sections preserves unsaved edits.
+const settingsTabs=[...document.querySelectorAll('[data-settings-category]')];
+function selectSettingsCategory(category){
+  for(const tab of settingsTabs){
+    const selected=tab.dataset.settingsCategory===category;
+    tab.setAttribute('aria-selected',String(selected));tab.tabIndex=selected?0:-1;
+    $(tab.getAttribute('aria-controls')).hidden=!selected;
+  }
+  $('settings-dialog').querySelector('.settings-content').scrollTop=0;
+}
+const settingsNarrow=matchMedia('(max-width:900px)');
+const settingsOrientation=()=>$('settings-dialog').querySelector('[role="tablist"]').setAttribute('aria-orientation',settingsNarrow.matches?'horizontal':'vertical');
+settingsOrientation();settingsNarrow.addEventListener('change',settingsOrientation);
+for(const [index,tab] of settingsTabs.entries()){
+  tab.onclick=()=>{selectSettingsCategory(tab.dataset.settingsCategory);tab.scrollIntoView({block:'nearest',inline:'nearest'});};
+  tab.onkeydown=event=>{
+    const previous=settingsNarrow.matches?'ArrowLeft':'ArrowUp',next=settingsNarrow.matches?'ArrowRight':'ArrowDown';
+    let target;
+    if(event.key===previous)target=(index+settingsTabs.length-1)%settingsTabs.length;
+    else if(event.key===next)target=(index+1)%settingsTabs.length;
+    else if(event.key==='Home')target=0;
+    else if(event.key==='End')target=settingsTabs.length-1;
+    else return;
+    event.preventDefault();settingsTabs[target].click();settingsTabs[target].focus();
+  };
+}
+// Native form validation must reveal invalid fields in another category before focusing them.
+$('settings-form').addEventListener('invalid',event=>{
+  const panel=event.target.closest('[role="tabpanel"]');
+  if(panel)selectSettingsCategory(panel.id.replace('settings-panel-',''));
+},true);
 $('add-root').onclick=()=>addRoot().focus();
-$('open-settings').onclick=async()=>{
-  timeoutControls.load();
+async function openSettings(){
+  const timeoutsReady=timeoutControls.load();
   notifications.load().then(()=>notifications.mount($('notification-controls'))).catch(error=>notifications.mount($('notification-controls'),error));
   try{
-    const settings=await api('/api/settings');$('settings-roots').replaceChildren();for(const root of settings.roots)addRoot(root);$('settings-error').textContent='';$('settings-saved').textContent='';
+    const settings=await api('/api/settings');$('settings-roots').replaceChildren();for(const root of settings.roots)addRoot(root);$('settings-error').textContent='';$('settings-saved').textContent='Save applies global defaults and host settings. Display and notifications save immediately.';
+    $('default-communication-role').value=settings.defaultCommunicationRole||'participant';
     const fields=$('default-model-fields');fields.replaceChildren();
     for(const provider of config.providers.filter(p=>p.id!=='demo')){
       const id='default-model-'+provider.id,label=el('label','',provider.name+' default model');label.htmlFor=id;
@@ -796,7 +837,10 @@ $('open-settings').onclick=async()=>{
         fields.append(modeLabel,mode,note);
       }
     }
+    await timeoutsReady;
     $('settings-dialog').showModal();
+    $('settings-dialog').querySelector('.settings-content').scrollTop=0;
+    refreshService();
   }catch(e){toast(e.message);}
 };
 $('dismiss-settings').onclick=()=>$('settings-dialog').close();
@@ -804,14 +848,17 @@ $('settings-form').onsubmit=async event=>{
   event.preventDefault();$('save-settings').disabled=true;$('settings-error').textContent='';
   try{
     const defaultModels={};for(const input of $('default-model-fields').querySelectorAll('input')){if(input.value.trim())defaultModels[input.dataset.provider]=input.value.trim();}
-    const settings=await api('/api/settings',{method:'PUT',body:JSON.stringify({roots:rootValues().filter(Boolean),defaultModels,claudeDefaultPermissionMode:$('claude-default-permission-mode')?.value})});
-    config.roots=settings.roots;config.defaultModels=settings.defaultModels;applyRoots();$('settings-dialog').close();toast('Settings saved. They apply to new sessions.','success');
+    const timeouts=timeoutControls.pendingDefault();
+    const settings=await api('/api/settings',{method:'PUT',body:JSON.stringify({roots:rootValues().filter(Boolean),defaultModels,claudeDefaultPermissionMode:$('claude-default-permission-mode')?.value,defaultCommunicationRole:$('default-communication-role').value,...(timeouts?{timeouts}:{})})});
+    if(timeouts)timeoutControls.acceptDefault(timeouts);
+    config.roots=settings.roots;config.defaultModels=settings.defaultModels;config.defaultCommunicationRole=settings.defaultCommunicationRole||'participant';applyRoots();
+    $('settings-dialog').close();toast('Settings saved. They apply to new sessions.','success');
   }catch(e){$('settings-error').textContent='Host settings were not saved: '+e.message+' Display preferences are stored separately in this browser.';}finally{$('save-settings').disabled=false;}
 };
 document.addEventListener('keydown',event=>{if(event.key==='n'&&!event.ctrlKey&&!event.metaKey&&!event.altKey&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)&&!document.querySelector('dialog[open]')){event.preventDefault();openCreate();}});
 const diffView=setupDiff({api,root:$('side-diff')});
 timeoutControls=setupTimeoutControls({$,api,getActive:()=>active});
-workspace=createWorkspace({api,toast,labels,uuid,getConfig:()=>config,getActive:()=>active,selectSession,openCreate,refreshSessions,enhanceBlocks:display.enhance,openSettings:()=>$('open-settings').click(),
+workspace=createWorkspace({api,toast,labels,uuid,getConfig:()=>config,getActive:()=>active,selectSession,openCreate,refreshSessions,enhanceBlocks:display.enhance,openSettings,
   overview(){ $('conversation').hidden=true;$('welcome').hidden=false;localStorage.removeItem('agentworks-session'); },
   openPanel:tab=>sidePanel?.open(tab),
   appendDraft(text){if(!active)return;const current=$('prompt').value;$('prompt').value=current?current+'\n\n'+text:text;drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));},
@@ -853,7 +900,7 @@ setupPalettes({
     newSession:()=>openCreate(),
     importSession:()=>openImport(),
     newProject:()=>openProjectDialog(),
-    settings:()=>$('open-settings').click(),
+    settings:openSettings,
     agents:()=>{if(active)$('session-agents').click();},
     workspaceInfo:()=>{if(active)$('session-workspace').click();},
     diff:()=>sidePanel.open('diff'),
@@ -973,7 +1020,7 @@ $('lifecycle-menu').addEventListener('keydown',event=>{if(event.key==='Escape'){
 // Polling never submits or replays a restart request. Identity is server-owned and durable.
 const serviceSection=document.createElement('fieldset');serviceSection.id='service-controls';
 serviceSection.innerHTML=`<legend>Service · all projects</legend><p id="service-status" role="status" aria-live="polite">Loading service status…</p><label for="service-mode">Restart behavior</label><select id="service-mode"><option value="wait">Wait until all work is idle</option><option value="interrupt">Interrupt ALL active sessions</option></select><label for="service-expiry">Drain expiry (seconds, 5–900)</label><input id="service-expiry" type="number" min="5" max="900" value="300"><label for="service-release">Prepared release (blank keeps current executable)</label><input id="service-release" maxlength="128" placeholder="Immutable release basename"><button type="button" id="service-restart">Restart service</button><button type="button" id="service-cancel" hidden>Cancel pending restart</button><p id="service-error" class="error-text" role="alert"></p>`;
-$('display-preferences').after(serviceSection);
+$('settings-service-slot').replaceWith(serviceSection);
 let servicePending=null,servicePolling=false;
 async function refreshService(){
  if(servicePolling||!$('settings-dialog').open)return;servicePolling=true;
@@ -992,4 +1039,4 @@ $('service-restart').onclick=async()=>{
  catch(e){$('service-error').textContent=e.message+' Check durable status before requesting again.';}await refreshService();
 };
 $('service-cancel').onclick=async()=>{if(!servicePending)return;try{await api('/api/service/restart/cancel',{method:'POST',body:JSON.stringify({actor:servicePending.actor,requestId:servicePending.request.requestId})});await refreshService();}catch(e){$('service-error').textContent=e.message;}};
-setInterval(refreshService,1000);$('open-settings').addEventListener('click',()=>setTimeout(refreshService,150));
+setInterval(refreshService,1000);

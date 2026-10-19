@@ -212,7 +212,7 @@ test('models at creation, command and skill discovery, host settings',async({pag
   await page.goto('/');
   const original=await page.evaluate(()=>fetch('/api/settings').then(r=>r.json()));
   try{
-    await page.locator('#open-settings').click();
+    await page.locator('#nav-settings').click();
     await expect(page.locator('#settings-roots input')).toHaveCount(original.roots.length);
     await expect(page.locator('#settings-roots input').first()).toHaveValue(original.roots[0]);
     await page.locator('#add-root').click();
@@ -220,6 +220,7 @@ test('models at creation, command and skill discovery, host settings',async({pag
     await page.locator('#settings-roots input').last().fill(original.roots[0]);
     await page.getByRole('button',{name:'Remove root directory'}).last().click();
     await expect(page.locator('#settings-roots input')).toHaveCount(original.roots.length);
+    await page.locator('#settings-tab-models').click();
     await page.locator('#default-model-codex').fill('test-default-model');
     await page.locator('#save-settings').click();
     await expect(page.locator('#settings-dialog')).not.toBeVisible();
@@ -251,7 +252,7 @@ test('models at creation, command and skill discovery, host settings',async({pag
     await page.locator('#command-list button').click();
     await expect(page.locator('#prompt')).toHaveValue('$demo-skill ');
     await page.setViewportSize({width:390,height:844});
-    await page.locator('#menu:visible,#session-home:visible').click();await page.locator('#open-settings').click();
+    await page.locator('#menu:visible,#session-home:visible').click();await page.locator('#nav-settings').click();
     await expect(page.locator('#settings-dialog')).toBeVisible();
     await page.screenshot({path:'.cache/prototype-settings.png'});
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);

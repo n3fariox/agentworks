@@ -1361,7 +1361,7 @@ mod tests {
                 .catalog
                 .lock()
                 .unwrap()
-                .project(None, "Owned scope")
+                .project(None, "Owned scope", None)
                 .unwrap()
                 .id;
             let other = f
@@ -1369,7 +1369,7 @@ mod tests {
                 .catalog
                 .lock()
                 .unwrap()
-                .project(None, "Other scope")
+                .project(None, "Other scope", None)
                 .unwrap()
                 .id;
             f.recipient.data.lock().unwrap().project_id = Some(project.clone());

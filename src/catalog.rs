@@ -12,6 +12,12 @@ pub struct Project {
     pub name: String,
     #[serde(default, rename = "workspacePolicy")]
     pub workspace_policy: crate::worktrees::Policy,
+    #[serde(
+        default,
+        rename = "defaultCommunicationRole",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub default_communication_role: Option<crate::communication::Role>,
     #[serde(default, rename = "locationIds")]
     pub location_ids: Vec<String>,
     #[serde(default)]
@@ -30,6 +36,8 @@ pub struct Settings {
     pub roots: Option<Vec<PathBuf>>,
     #[serde(default)]
     pub default_models: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_communication_role: Option<crate::communication::Role>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_default_permission_mode: Option<crate::permission_modes::ClaudeDefault>,
     /// L-07 saved default; absent keeps the built-in default.
@@ -87,7 +95,19 @@ impl Catalog {
     pub fn contains(&self, id: &str) -> bool {
         self.data.projects.iter().any(|p| p.id == id)
     }
-    pub fn project(&mut self, id: Option<&str>, name: &str) -> Result<Project, String> {
+    pub fn communication_role(&self, project_id: Option<&str>) -> crate::communication::Role {
+        project_id
+            .and_then(|id| self.data.projects.iter().find(|p| p.id == id))
+            .and_then(|p| p.default_communication_role)
+            .or(self.data.settings.default_communication_role)
+            .unwrap_or_default()
+    }
+    pub fn project(
+        &mut self,
+        id: Option<&str>,
+        name: &str,
+        role: Option<Option<crate::communication::Role>>,
+    ) -> Result<Project, String> {
         let name = name.trim();
         if name.is_empty() || name.chars().count() > 80 {
             return Err("Use a project name between 1 and 80 characters".into());
@@ -111,6 +131,9 @@ impl Catalog {
                 .find(|p| p.id == id)
                 .ok_or("Project not found")?;
             project.name = name.into();
+            if let Some(role) = role {
+                project.default_communication_role = role;
+            }
             project.clone()
         } else {
             let project = Project {
@@ -119,6 +142,7 @@ impl Catalog {
                 location_ids: Vec::new(),
                 workspace_policy: Default::default(),
                 archived: false,
+                default_communication_role: role.flatten(),
             };
             data.projects.push(project.clone());
             project
@@ -198,6 +222,64 @@ impl Catalog {
 mod tests {
     use super::*;
     #[test]
+    fn communication_defaults_inherit_and_survive_reload() {
+        use crate::communication::Role;
+        let path = std::env::temp_dir().join(format!("agentworks-roles-{}.json", Uuid::new_v4()));
+        let mut catalog = Catalog::open(path.clone()).unwrap();
+        let project = catalog.project(None, "Inherited", None).unwrap();
+        assert_eq!(
+            catalog.communication_role(Some(&project.id)),
+            Role::Participant
+        );
+        let access = Role::default().access();
+        assert!(access.communicate);
+        assert!(
+            !access.start_sessions
+                && !access.prompt_sessions
+                && !access.cancel_sessions
+                && !access.run_automations
+                && !access.restart_service
+        );
+        catalog
+            .settings(Settings {
+                default_communication_role: Some(Role::Coordinator),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            catalog.communication_role(Some(&project.id)),
+            Role::Coordinator
+        );
+        catalog
+            .project(Some(&project.id), "Override", Some(Some(Role::Off)))
+            .unwrap();
+        catalog.project(Some(&project.id), "Renamed", None).unwrap();
+        let mut catalog = Catalog::open(path.clone()).unwrap();
+        assert_eq!(catalog.communication_role(None), Role::Coordinator);
+        assert_eq!(catalog.communication_role(Some(&project.id)), Role::Off);
+        catalog
+            .project(Some(&project.id), "Inherited again", Some(None))
+            .unwrap();
+        assert_eq!(
+            catalog.communication_role(Some(&project.id)),
+            Role::Coordinator
+        );
+        let access = Role::Coordinator.access();
+        assert!(
+            access.communicate
+                && access.start_sessions
+                && access.prompt_sessions
+                && access.cancel_sessions
+                && access.run_automations
+        );
+        assert!(!access.restart_service);
+        assert!(serde_json::from_value::<Role>(serde_json::json!("admin")).is_err());
+        let legacy: Project =
+            serde_json::from_value(serde_json::json!({"id":"old","name":"Legacy"})).unwrap();
+        assert_eq!(legacy.default_communication_role, None);
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
     fn claude_permission_default_is_compatible_and_persistent() {
         use crate::permission_modes::ClaudeDefault;
         let legacy: CatalogData = serde_json::from_value(serde_json::json!({
@@ -244,7 +326,7 @@ mod tests {
     fn projects_are_independent_of_locations_and_survive_reload() {
         let path = std::env::temp_dir().join(format!("agentworks-catalog-{}.json", Uuid::new_v4()));
         let mut catalog = Catalog::open(path.clone()).unwrap();
-        let project = catalog.project(None, "App").unwrap();
+        let project = catalog.project(None, "App", None).unwrap();
         let first = catalog.location(Path::new("/projects/app")).unwrap();
         let second = catalog
             .location(Path::new("/projects/app-worktree"))
@@ -254,7 +336,7 @@ mod tests {
             catalog.location(Path::new("/projects/app")).unwrap().id,
             first.id
         );
-        catalog.project(Some(&project.id), "Renamed").unwrap();
+        catalog.project(Some(&project.id), "Renamed", None).unwrap();
         catalog.set_archived(&project.id, true).unwrap();
         catalog
             .settings(Settings {
@@ -262,6 +344,7 @@ mod tests {
                 default_models: HashMap::from([("codex".into(), "example-model".into())]),
                 timeouts: None,
                 claude_default_permission_mode: None,
+                default_communication_role: None,
                 notifications: Default::default(),
             })
             .unwrap();

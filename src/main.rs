@@ -1033,8 +1033,9 @@ fn allowed_host(host: &str, bind: IpAddr, port: u16) -> bool {
             .is_ok_and(|ip| ip == bind)
 }
 async fn status(State(app): State<App>) -> Json<Value> {
+    let defaults = app.catalog.lock().unwrap().data.settings.clone();
     Json(
-        json!({"roots":effective_roots(&app),"defaultModels":app.catalog.lock().unwrap().data.settings.default_models,"providers":[
+        json!({"roots":effective_roots(&app),"defaultModels":defaults.default_models,"defaultCommunicationRole":defaults.default_communication_role.unwrap_or_default(),"providers":[
             {"id":"demo","name":"Demo agent","installed":true,"keyPresent":true},
             {"id":"claude","name":"Claude","installed":adapter_path("claude").exists(),"keyPresent":key_present("claude"),"authMode":if use_api_key(){"api_key"}else{"existing"}},
             {"id":"codex","name":"Codex","installed":adapter_path("codex").exists(),"keyPresent":key_present("codex"),"authMode":if use_api_key(){"api_key"}else{"existing"}},
@@ -1071,7 +1072,7 @@ async fn get_settings(State(app): State<App>) -> Json<Value> {
     let roots = effective_roots(&app);
     let settings = app.catalog.lock().unwrap().data.settings.clone();
     Json(
-        json!({"roots":roots,"defaultModels":settings.default_models,"claudeDefaultPermissionMode":settings.claude_default_permission_mode.unwrap_or_default()}),
+        json!({"roots":roots,"defaultModels":settings.default_models,"claudeDefaultPermissionMode":settings.claude_default_permission_mode.unwrap_or_default(),"defaultCommunicationRole":settings.default_communication_role.unwrap_or_default()}),
     )
 }
 
@@ -1156,6 +1157,9 @@ async fn save_settings(State(app): State<App>, Json(mut settings): Json<Settings
         settings.claude_default_permission_mode = settings
             .claude_default_permission_mode
             .or(current.claude_default_permission_mode);
+        settings.default_communication_role = settings
+            .default_communication_role
+            .or(current.default_communication_role);
         settings.timeouts = settings.timeouts.take().or(current.timeouts.clone());
         settings.notifications = current.notifications.clone();
         settings
@@ -1388,13 +1392,19 @@ async fn get_catalog(State(app): State<App>) -> Json<Value> {
 #[derive(Deserialize)]
 struct ProjectName {
     name: String,
+    #[serde(
+        default,
+        rename = "defaultCommunicationRole",
+        deserialize_with = "communication::role_patch"
+    )]
+    default_communication_role: Option<Option<communication::Role>>,
 }
 async fn create_project(State(app): State<App>, Json(req): Json<ProjectName>) -> ApiResult {
     let project = app
         .catalog
         .lock()
         .unwrap()
-        .project(None, &req.name)
+        .project(None, &req.name, req.default_communication_role)
         .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
     Ok(Json(json!(project)))
 }
@@ -1407,7 +1417,7 @@ async fn rename_project(
         .catalog
         .lock()
         .unwrap()
-        .project(Some(&id), &req.name)
+        .project(Some(&id), &req.name, req.default_communication_role)
         .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
     Ok(Json(json!(project)))
 }
@@ -1918,6 +1928,18 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
                 )
             })?;
     }
+    let initial_access = req.agent_access.clone().or_else(|| {
+        // Agent-created sessions and automation runs retain their explicit unprivileged behavior.
+        if req.control_origin.is_some() || req.automation.is_some() {
+            None
+        } else {
+            Some(
+                catalog
+                    .communication_role(req.project_id.as_deref())
+                    .access(),
+            )
+        }
+    });
     let (tx, _) = broadcast::channel(128);
     let title = req
         .title
@@ -2039,7 +2061,7 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             .insert(
                 &s.metadata(),
                 &s.data.lock().unwrap(),
-                req.agent_access.as_ref(),
+                initial_access.as_ref(),
                 creation_key,
             )
             .map_err(|_| {

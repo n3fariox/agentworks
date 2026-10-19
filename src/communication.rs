@@ -11,6 +11,33 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub type Result<T> = std::result::Result<T, (StatusCode, String)>;
+/// Human-selected defaults for newly created sessions. Service restart is never part of a role.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Role {
+    Off,
+    #[default]
+    Participant,
+    Coordinator,
+}
+impl Role {
+    pub fn access(self) -> Access {
+        Access {
+            communicate: self != Self::Off,
+            start_sessions: self == Self::Coordinator,
+            prompt_sessions: self == Self::Coordinator,
+            cancel_sessions: self == Self::Coordinator,
+            run_automations: self == Self::Coordinator,
+            restart_service: false,
+        }
+    }
+}
+// An omitted project field preserves its value; explicit null restores inheritance.
+pub fn role_patch<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Option<Role>>, D::Error> {
+    Option::<Role>::deserialize(deserializer).map(Some)
+}
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Access {

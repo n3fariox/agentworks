@@ -2,11 +2,19 @@
 
 Design and implementation checkpoint, October 17, 2026.
 
-Implemented: native Rust stdio MCP and private loopback service bridge; durable per-session capabilities, project-scoped text inboxes/replies/acknowledgements, audit activity, default-off browser presets and individual grants, explicit draft delivery, coordinator session creation/prompt/cancellation/manual automation runs, retry deduplication, and initiator visibility. Actual messaging has been verified with Claude, Codex, and OpenCode. Batch 007 adds default-off bounded inbox delivery ([policy, ledger and integration notes](work/INBOX-DELIVERY.md)); combined human-input queue integration remains a coordinator acceptance check. Cross-project grants, cross-host forwarding, external-client credentials, and file attachments remain deferred. See [usage and checks](README.md#agent-communication-and-mcp-control).
+Implemented: native Rust stdio MCP and private loopback service bridge; durable per-session capabilities, project-scoped text inboxes/replies/acknowledgements, audit activity, browser role presets and individual grants, explicit draft delivery, coordinator session creation/prompt/cancellation/manual automation runs, retry deduplication, and initiator visibility. Actual messaging has been verified with Claude, Codex, and OpenCode. Batch 007 adds default-off bounded inbox delivery ([policy, ledger and integration notes](work/INBOX-DELIVERY.md)); combined human-input queue integration remains a coordinator acceptance check. Cross-project grants, cross-host forwarding, external-client credentials, and file attachments remain deferred. See [usage and checks](README.md#agent-communication-and-mcp-control).
 
 Batch 001 additionally delivered durable self-authored completion reports and live Git/worktree context, using two concurrent Codex sessions inside Agentworks. See [the integration record](work/batches/001-parallel-coordination.md).
 
 The sections below describe the intended architecture, including later capabilities. The current implementation exposes no settings, deletion, access-grant, or harness-approval tools.
+
+## Communication role defaults
+
+Global Settings → Communication selects Off, Participant, or Coordinator for new sessions created by a human. The built-in default is Participant, enabling project messages without coordinator permissions. Project settings can select a role or inherit the global default. The session creation form shows the resolved default and allows an explicit role for that session. Existing sessions retain their saved access when defaults change; use the session’s Agents & inbox controls to change it.
+
+Participant enables project messages. Coordinator also enables starting sessions and turns, cancelling turns, and running existing project automations. No default role enables service restart. Agent-created child sessions and automation runs retain their unprivileged behavior.
+
+Global execution timeout defaults live in Settings. Session timeout overrides live in Session settings, alongside the session controls, and show the inherited default when no override is enabled.
 
 ## Shared foundation
 

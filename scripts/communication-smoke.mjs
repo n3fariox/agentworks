@@ -17,7 +17,7 @@ async function call(id,name,args={}){await idle(id);const old=await api(`/api/se
 function value(result){assert(!result.isError,JSON.stringify(result));return JSON.parse(result.content[0].text);}
 function denied(result,status=403){assert(result.isError,JSON.stringify(result));assert.equal(JSON.parse(result.content[0].text).status,status);}
 try{
- await start();const {roots}=await api('/api/status');const project=await api('/api/projects',{name:'Communication tests'});const other=await api('/api/projects',{name:'Other project'});
+ await start();const settings=await api('/api/settings');await api('/api/settings',{...settings,defaultCommunicationRole:'off'},'PUT');const {roots}=await api('/api/status');const project=await api('/api/projects',{name:'Communication tests'});const other=await api('/api/projects',{name:'Other project'});
  const create=(title,projectId=project.id)=>api('/api/sessions',{provider:'demo',cwd:roots[0],title,projectId});
  const a=await create('Sender'),b=await create('Recipient'),c=await create('Outside',other.id);await Promise.all([idle(a.id),idle(b.id),idle(c.id)]);
  assert.deepEqual((await call(a.id,'tools/list')).tools,[]);denied(await call(a.id,'read_inbox'));

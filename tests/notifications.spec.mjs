@@ -239,7 +239,7 @@ test('the stream and its settings are unavailable cross-origin',async()=>{
 
 test('settings report categories, projects and the saved policy',async({page})=>{
   await page.goto('/');
-  await page.locator('#open-settings').click();
+  await page.locator('#nav-settings').click();await page.locator('#settings-tab-notifications').click();
   await expect(page.locator('#notification-controls legend')).toHaveText('Notifications');
   await expect(page.locator('#notification-controls')).toContainText('Notify me about agent activity');
   // Permission is reported, never requested without a user action.
@@ -374,7 +374,7 @@ test('a click fetches a new session missing from the last sidebar refresh',async
 test('the app Settings flow asks only on Allow and can test actual display',async({page})=>{
   await captureNotifications(page,'default');
   await page.goto('/');
-  await page.locator('#open-settings').click();
+  await page.locator('#nav-settings').click();await page.locator('#settings-tab-notifications').click();
   await expect(page.locator('#notification-controls legend')).toHaveText('Notifications');
   expect(await page.evaluate(()=>window.__permissionRequests)).toEqual([]);
   await page.locator('#notifications-enabled').check();
@@ -395,7 +395,7 @@ test('the app Settings flow asks only on Allow and can test actual display',asyn
 
 test('denied permission has recovery instructions and no Allow button',async({page})=>{
   await captureNotifications(page,'denied');
-  await page.goto('/');await page.locator('#open-settings').click();
+  await page.goto('/');await page.locator('#nav-settings').click();await page.locator('#settings-tab-notifications').click();
   await expect(page.locator('#notification-controls')).toContainText('Blocked for this site');
   await expect(page.getByRole('button',{name:'Allow notifications in this browser'})).toHaveCount(0);
   expect(await page.evaluate(()=>window.__permissionRequests)).toEqual([]);
@@ -404,7 +404,7 @@ test('denied permission has recovery instructions and no Allow button',async({pa
 test('settings API failures are visible in the actual Settings dialog',async({page})=>{
   await captureNotifications(page);
   await page.route('**/api/notifications',route=>route.fulfill({status:503,body:'Fixture unavailable'}));
-  await page.goto('/');await page.locator('#open-settings').click();
+  await page.goto('/');await page.locator('#nav-settings').click();await page.locator('#settings-tab-notifications').click();
   await expect(page.locator('#notification-controls')).toContainText('Could not load notification settings');
   await expect(page.locator('#notifications-enabled')).toBeDisabled();
 });
@@ -417,7 +417,7 @@ test('HTTPS root proxy preserves Origin and supports permission, policy and even
     await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),watched.id);
     await page.goto(secureBase);
     expect(await page.evaluate(()=>isSecureContext)).toBe(true);
-    await page.locator('#open-settings').click();
+    await page.locator('#nav-settings').click();await page.locator('#settings-tab-notifications').click();
     await page.locator('#notifications-enabled').check();
     await expect(page.locator('#notifications-enabled')).toBeEnabled();
     expect((await api('/api/notifications')).settings.enabled).toBe(true);
