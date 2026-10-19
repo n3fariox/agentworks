@@ -121,7 +121,7 @@ test('Stop pauses the queue; nothing sends until a deliberate resume',async({pag
   await until(async()=>(await api(`/api/sessions/${session.id}/queue`)).queue.items[0].state==='sent');
 });
 
-test('sent entries are collapsed history and an empty paused queue offers Resume queue',async({page})=>{
+test('the queue panel disappears when no pending inputs remain',async({page})=>{
   await openSession(page);
   await type(page,'slow first turn');
   await type(page,'already sent');
@@ -137,17 +137,13 @@ test('sent entries are collapsed history and an empty paused queue offers Resume
   const queue=(await api(`/api/sessions/${session.id}/queue`)).queue;
   const pending=queue.items.find(item=>item.state==='paused');
   expect(pending).toBeTruthy();
-  await api(`/api/sessions/${session.id}/queue/${pending.id}`,undefined,'DELETE');
+  await page.getByRole('button',{name:`Remove queued input ${pending.id}`}).click();
 
-  await expect(page.locator('#input-queue')).toBeVisible();
-  await expect(page.locator('#input-queue .queue-head')).toContainText('Queued inputs (0)');
-  await expect(page.locator('#input-queue > ol .queue-item')).toHaveCount(0);
-  await expect(page.locator('.queue-history summary')).toHaveText('Recently sent (1)');
-  await expect(page.getByRole('button',{name:'Resume queue'})).toBeVisible();
-  await expect(page.getByRole('button',{name:'Resume & send next'})).toHaveCount(0);
-  await page.getByRole('button',{name:'Resume queue'}).click();
-  await expect(page.locator('.queue-paused')).toHaveCount(0);
-  await expect(page.locator('#session-state')).toHaveText('Ready');
+  await expect(page.locator('#input-queue')).toBeHidden();
+  await expect(page.locator('#input-queue .queue-head')).toHaveCount(0);
+  await expect(page.locator('.queue-history')).toHaveCount(0);
+  await expect(page.locator('#input-queue [data-queue-resume]')).toHaveCount(0);
+  expect((await api(`/api/sessions/${session.id}/queue`)).queue.paused).toContain('Cancelled');
 });
 
 test('approval wait label, queued input dispatches after approval completes the turn',async({page})=>{

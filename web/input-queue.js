@@ -61,8 +61,10 @@ export function setupInputQueue({$,api,uuid,getActive,getStatus,toolActive}){
     list.replaceChildren();
     const items=queue.items||[];
     const pending=items.filter(item=>item.state!=='sent'),sent=items.filter(item=>item.state==='sent');
-    list.hidden=!items.length&&!queue.paused;
-    if(!items.length&&!queue.paused)return;
+    // Sent history and a paused-but-empty queue have no actionable queued input.
+    // Keep the whole panel out of the layout until there is something pending.
+    list.hidden=pending.length===0;
+    if(!pending.length)return;
     const head=document.createElement('div');head.className='queue-head';
     const title=document.createElement('span');title.textContent=`Queued inputs (${pending.length})`;head.append(title);
     if(queue.paused){
