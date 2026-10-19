@@ -1,9 +1,10 @@
 # Codex subscription quota: implemented local contract
 
-Status: implemented for review; no merge or deployment. The original stop
-condition was revised to authorize a pinned local npm fork. This document
-supersedes the blocked proposal committed as `cd79c67`. The branch was first
-fast-forwarded cleanly from `f5f2c2a` to main `5f44324`.
+Status: merged and deployed. The original stop condition was revised to
+authorize a pinned local npm fork. This document supersedes the blocked
+proposal committed as `cd79c67`. Implementation commit `a9db125` was reviewed,
+fast-forwarded to main, and deployed as immutable release
+`.agentworks/bin/agentworks-a9db125`.
 
 ## Reproducible adapter path
 
@@ -119,13 +120,14 @@ The quota observation time is the adapter host's clock, not a provider-signed
 measurement timestamp. A restarted adapter starts with an empty push cache;
 persisted history can display historical quota until another push and real
 usage event arrive. Older event history lacking this metadata stays unavailable.
-The extension has deterministic handler/typed transport/UI coverage, but has
-not been run against a live subscription or deployed to the running service.
+The extension has deterministic handler/typed transport/UI coverage and has
+not been run against a live subscription. The deployed release and supervisor
+receipt are recorded in `work/batches/008-codex-subscription-quota.md`.
 
 Diagnosis evidence was recorded, not fetched afresh: manager rollout
 `/home/captain/.codex/sessions/2026/10/18/rollout-2026-10-18T10-51-28-01a14fb5-f8ee-7ac0-9ba0-956079843d48.jsonl:2831`
 at `2026-10-19T02:26:37.970Z` contained 15% used for a 300-minute primary and
 67% for a 10080-minute secondary. All 801 Codex ACP usage events examined then
 contained only `sessionUpdate`, `used`, and `size`. Those are historical values,
-not current account balances. No services/settings changed, sessions started,
-changes merged or deployment performed for this implementation.
+not current account balances. No account lookup or provider inference was
+performed as part of deployment.
