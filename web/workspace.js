@@ -66,7 +66,7 @@ export function createWorkspace(hooks){
   function fileUrl(file,download=false){return `/api/locations/${file.location.id}/file?path=${encodeURIComponent(file.path)}${download?'&download=true':''}`;}
   function localPath(href,base){
     if(!href||href.startsWith('#'))return null;
-    if(href.startsWith('file://'))return decodeURIComponent(href.slice(7));
+    if(/^file:/i.test(href)){try{const url=new URL(href);return ['','localhost'].includes(url.hostname)?decodeURIComponent(url.pathname):null;}catch{return null;}}
     if(/^[a-z][a-z0-9+.-]*:/i.test(href)||href.startsWith('//'))return null;
     const path=decodeURIComponent(href.split('#')[0]);return path.startsWith('/')?path:base+path;
   }
@@ -74,7 +74,7 @@ export function createWorkspace(hooks){
     const base=file.path.includes('/')?file.path.slice(0,file.path.lastIndexOf('/')+1):'';
     for(const link of node.querySelectorAll('a')){
       const path=localPath(link.getAttribute('href'),base);
-      if(path!==null){link.href='#';link.onclick=event=>{event.preventDefault();openFile(file.location,path,side);};}else{link.target='_blank';link.rel='noopener noreferrer';}
+      if(path!==null){link.href='#';link.onclick=event=>{event.preventDefault();openFile(file.location,path,side);};}else if(/^file:/i.test(link.getAttribute('href')||''))link.removeAttribute('href');else{link.target='_blank';link.rel='noopener noreferrer';}
     }
     for(const img of node.querySelectorAll('img')){const path=localPath(img.getAttribute('src'),base);if(path!==null)img.src=fileUrl({...file,path});img.loading='lazy';}
   }

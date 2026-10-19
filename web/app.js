@@ -424,7 +424,7 @@ function scheduleDraw(){if(!drawTimer)drawTimer=setTimeout(()=>{drawTimer=null;d
 function fileUrl(path,download=false){return `/api/sessions/${active.id}/file?path=${encodeURIComponent(path)}${download?'&download=true':''}`;}
 function localReference(href,base=''){
   if(!href||href.startsWith('#'))return null;
-  if(href.startsWith('file://'))return decodeURIComponent(href.slice(7));
+  if(/^file:/i.test(href)){try{const url=new URL(href);return ['','localhost'].includes(url.hostname)?decodeURIComponent(url.pathname):null;}catch{return null;}}
   if(/^[a-z][a-z0-9+.-]*:/i.test(href)||href.startsWith('//'))return null;
   const decoded=decodeURIComponent(href.split('#')[0]);
   return decoded.startsWith('/')?decoded:base+decoded;
@@ -433,6 +433,7 @@ function decorateMarkdown(node,base=''){
   for(const a of node.querySelectorAll('a')){
     const path=localReference(a.getAttribute('href'),base);
     if(path!==null){a.href='#';a.onclick=e=>{e.preventDefault();previewFile(path);};}
+    else if(/^file:/i.test(a.getAttribute('href')||''))a.removeAttribute('href');
     else {a.target='_blank';a.rel='noopener noreferrer';}
   }
   for(const img of node.querySelectorAll('img')){

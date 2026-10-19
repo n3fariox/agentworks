@@ -2026,6 +2026,9 @@ fn render_markdown(text: &str) -> String {
     pulldown_cmark::html::push_html(&mut out, parser);
     ammonia::Builder::default()
         .url_relative(ammonia::UrlRelative::PassThrough)
+        // Agents link host files as file:// URLs; the browser turns local ones
+        // into in-app previews instead of navigating.
+        .add_url_schemes(&["file"])
         .add_tag_attributes("code", &["class"])
         .attribute_filter(|element, attribute, value| {
             if element != "code" || attribute != "class" {
@@ -2073,6 +2076,12 @@ mod tests {
         assert!(!html.contains("<script"));
         assert!(!html.contains("javascript:"));
         assert!(!html.contains("onerror"));
+    }
+    #[test]
+    fn markdown_keeps_file_links() {
+        let html = render_markdown("[a](file:///home/x/a.png) [b](/home/x/b.png)");
+        assert!(html.contains(r#"href="file:///home/x/a.png""#));
+        assert!(html.contains(r#"href="/home/x/b.png""#));
     }
     #[test]
     fn markdown_keeps_only_code_language_classes() {
