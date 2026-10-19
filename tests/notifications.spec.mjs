@@ -41,7 +41,6 @@ async function startServer(){
   exited=false;log='';
   const env={...process.env,
     AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:'4413',AGENTWORKS_ROOTS:fixture,
-    AGENTWORKS_EXTERNAL_ORIGIN:secureBase,
     AGENTWORKS_CATALOG_PATH:join(fixture,'catalog.json'),AGENTWORKS_DB_PATH:join(fixture,'sessions.sqlite3'),AGENTWORKS_DEMO_STATE_DIR:join(fixture,'demo')};
   for(const key of ['AGENTWORKS_SUPERVISOR_DIR','AGENTWORKS_SUPERVISOR_TOKEN','AGENTWORKS_RELEASE_DIR','AGENTWORKS_RELEASE'])delete env[key];
   server=spawn(resolve('target/debug/agentworks'),[],{env,stdio:['ignore','pipe','pipe']});
@@ -59,7 +58,7 @@ test.beforeAll(async()=>{
   await startServer();
   // Preserve the browser's HTTPS Origin and public Host, as a root TLS proxy does.
   execFileSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',join(fixture,'key.pem'),'-out',join(fixture,'cert.pem'),'-days','1','-subj','/CN=localhost'],{stdio:'ignore'});
-  const upstream=req=>httpRequest({hostname:'127.0.0.1',port:4413,path:req.url,method:req.method,headers:req.headers});
+  const upstream=req=>httpRequest({hostname:'127.0.0.1',port:4413,path:req.url,method:req.method,headers:{...req.headers,'x-forwarded-proto':'https','x-forwarded-host':req.headers.host}});
   proxy=createHttpsServer({key:await readFile(join(fixture,'key.pem')),cert:await readFile(join(fixture,'cert.pem'))},(req,res)=>{
     const request=upstream(req);request.on('response',response=>{res.writeHead(response.statusCode,response.headers);response.pipe(res);});
     request.on('error',()=>{res.writeHead(502);res.end();});req.pipe(request);
@@ -432,7 +431,7 @@ test('HTTPS root proxy preserves Origin and supports permission, policy and even
   }finally{await context.close();}
 });
 
-test('unconfigured HTTPS origins and forged forwarded headers cannot authorize requests',async()=>{
+test('forwarded origin is derived from proxy headers and must match browser Origin',async()=>{
   for(const origin of ['https://unconfigured.example','http://localhost:4414']){
     const response=await fetch(base+'/api/notifications',{method:'PUT',headers:{Origin:origin,Host:'localhost:4414','X-Forwarded-Proto':'https','X-Forwarded-Host':'localhost:4414','Content-Type':'application/json'},body:'{}'});
     expect(response.status).toBe(403);
@@ -442,6 +441,8 @@ test('unconfigured HTTPS origins and forged forwarded headers cannot authorize r
     });
     expect(outcome).toContain('403');
   }
+  const response=await fetch(base+'/api/notifications',{method:'PUT',headers:{Origin:'https://proxy.example','Host':'localhost:4413','X-Forwarded-Proto':'https','X-Forwarded-Host':'proxy.example','Content-Type':'application/json'},body:JSON.stringify({enabled:false})});
+  expect(response.status).toBe(200);
 });
 
 test('real insecure HTTP hostname is explained even when Notification exists',async({page})=>{

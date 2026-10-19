@@ -55,7 +55,6 @@ struct App {
     roots: Arc<Vec<PathBuf>>,
     port: u16,
     bind: IpAddr,
-    external_origin: Option<browser_origin::ExternalOrigin>,
     catalog: Arc<Mutex<Catalog>>,
     discovery: Arc<tokio::sync::Semaphore>,
     store: Arc<Mutex<store::Store>>,
@@ -508,10 +507,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bind = std::env::var("AGENTWORKS_BIND")
         .unwrap_or_else(|_| "127.0.0.1".into())
         .parse::<IpAddr>()?;
-    let external_origin = std::env::var("AGENTWORKS_EXTERNAL_ORIGIN")
-        .ok()
-        .map(|value| browser_origin::ExternalOrigin::parse(&value))
-        .transpose()?;
     let roots: Vec<PathBuf> = match std::env::var_os("AGENTWORKS_ROOTS") {
         Some(paths) => std::env::split_paths(&paths).collect(),
         None => vec![std::env::current_dir()?],
@@ -546,7 +541,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         roots: Arc::new(roots),
         port,
         bind,
-        external_origin,
         catalog: catalog.clone(),
         store: Arc::new(Mutex::new(store)),
         run_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -935,12 +929,8 @@ async fn guard(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let direct_host = allowed_host(host, app.bind, app.port);
-    if !direct_host
-        && !app
-            .external_origin
-            .as_ref()
-            .is_some_and(|external| external.allows_host(host))
-    {
+    let forwarded_origin = browser_origin::forwarded_origin(&headers);
+    if !direct_host && forwarded_origin.is_none() {
         return (StatusCode::FORBIDDEN, "Unrecognized host").into_response();
     }
     let write = !matches!(req.method().as_str(), "GET" | "HEAD");
@@ -951,10 +941,7 @@ async fn guard(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         if !(direct_host && origin == format!("http://{host}"))
-            && !app
-                .external_origin
-                .as_ref()
-                .is_some_and(|external| external.allows_origin(origin))
+            && !browser_origin::origin_matches_forwarded(&headers, origin)
         {
             return (StatusCode::FORBIDDEN, "Same-origin requests required").into_response();
         }

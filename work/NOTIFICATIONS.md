@@ -27,22 +27,19 @@ browser profiles and devices. See [secure contexts](https://developer.mozilla.or
 and [permission requests](https://developer.mozilla.org/en-US/docs/Web/API/Notification/requestPermission_static).
 
 The backend serves HTTP, not TLS. For **root-hosted** HTTPS through a TLS proxy,
-set `AGENTWORKS_EXTERNAL_ORIGIN=https://agentbox.example` before starting the
-backend. Include a nonstandard public port when needed, with no subpath, query,
-fragment or credentials. Invalid configuration prevents startup. The proxy must
-forward HTTP requests and WebSocket upgrades to the backend while preserving the
-browser's `Origin`; either preserve the configured public Host or use a valid
-direct backend Host. The client uses `wss:` automatically from an HTTPS page.
+forward requests and WebSocket upgrades with the browser's `Origin` unchanged,
+and set singular `X-Forwarded-Proto` and `X-Forwarded-Host` headers. The backend
+derives the public origin from those headers and requires an exact match with
+`Origin`; changing the proxy's public host or port needs no app configuration
+change. The proxy must overwrite these headers rather than append client-supplied
+values. The client uses `wss:` automatically from an HTTPS page.
 
-The configured HTTPS origin is matched exactly for writes and event upgrades;
-unconfigured HTTPS origins are refused. Existing direct HTTP Host/Origin checks
-remain in force. `Forwarded` and `X-Forwarded-*` headers do not authorize anything.
-Keep the backend private and put authentication/access control at the proxy:
-origin validation is not authentication. This is a single explicit root origin,
-not general trusted-proxy/subpath/PWA support. UUID subpath hosting remains planned
-in [HOSTING.md](HOSTING.md); root-relative assets and APIs cannot be mounted there
-by just setting this variable. No TLS/proxy/service configuration is installed by
-this change.
+Forwarded headers are a deployment trust boundary: keep the backend private so
+untrusted clients cannot send requests directly with forged forwarding headers.
+Origin validation is not authentication; put access control at the proxy or use
+the app's authentication mode. Direct HTTP Host/Origin checks remain in force.
+This supports root hosting, not arbitrary subpaths or PWA hosting; UUID subpath
+hosting remains planned in [HOSTING.md](HOSTING.md).
 
 ## Delivery and limitations
 

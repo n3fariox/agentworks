@@ -713,7 +713,6 @@ mod tests {
                 roots: Arc::new(vec![root.clone()]),
                 port: 4505,
                 bind: "127.0.0.1".parse().unwrap(),
-                external_origin: None,
                 catalog: catalog.clone(),
                 discovery: Arc::new(tokio::sync::Semaphore::new(1)),
                 store: store.clone(),
