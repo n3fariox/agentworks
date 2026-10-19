@@ -11,6 +11,7 @@ import {setupUsageStatus} from '/usage-status.js';
 import {setupFlyout} from '/flyout.js';
 import {setupResize} from '/resize-handle.js';
 import {setupSidePanel} from '/side-panel.js';
+import {setupContextMenu} from '/context-menu.js';
 import {setupTimeoutControls} from '/timeout-controls.js';
 import {setupInputQueue,BUSY} from '/input-queue.js';
 import {setupNotifications} from '/notifications.js';
@@ -115,10 +116,10 @@ function applyForkModel(model){
   if(!modelPicked)resetCreateModels();
 }
 // L-08: the session a fork is taken from. Cleared by any non-fork open.
-async function openFork(){
-  const parent=active;if(!parent||!config)return;
+async function openFork(parent=active){
+  if(!parent||!config)return;
   $('lifecycle-menu').open=false;
-  const generation=openCreate({fork:{id:parent.id,title:parent.title,provider:parent.provider,cwd:parent.cwd,model:modelConfig?.currentValue||null,turns:0},
+  const generation=openCreate({fork:{id:parent.id,title:parent.title,provider:parent.provider,cwd:parent.cwd,model:(active?.id===parent.id?modelConfig?.currentValue:null)||parent.model||null,turns:0},
     projectId:parent.projectId??null,cwd:parent.cwd,title:`${parent.title} (fork)`,provider:parent.provider,workspaceMode:'newWorktree'});
   const id=parent.id;
   try{
@@ -269,7 +270,7 @@ function badges(items){
 function treeGroup(key,label,items,{host=false,projectId=null,level=0,archived=false}={}){
   const group=el('details','tree-group level-'+level);group.dataset.group=key;
   const stateKey=sidebarView+':'+key;group.open=!collapsedGroups.has(stateKey);
-  const heading=el('summary','tree-heading');heading.append(el('span','tree-chevron','›'));
+  const heading=el('summary','tree-heading');if(!host&&projectId){heading.dataset.projectId=projectId;heading.setAttribute('aria-haspopup','menu');}heading.append(el('span','tree-chevron','›'));
   heading.append(el('span',host?'tree-icon host':'tree-icon',host?'▤':'◇'),el('span','tree-label',label),badges(items));
   if(archived)heading.append(el('span','group-total','Archived'));
   if(host){const dot=el('span','connection-dot');dot.title='Connected';heading.append(dot);}
@@ -569,7 +570,7 @@ function draw(){
     let node=nodes.get(item.id);
     if(!node){
       if(item.type==='message'){
-        node=el('article','message '+item.role);node.append(el('div','avatar',item.role==='user'?'Y':icons[active.provider]));
+        node=el('article','message '+item.role);node.dataset.messageId=item.id;node.tabIndex=0;node.append(el('div','avatar',item.role==='user'?'Y':icons[active.provider]));
         const content=el('div','message-content');content.append(el('div','message-label',item.role==='user'?'You':labels[active.provider]),el('div','message-body'));node.append(content);
       }else if(item.type==='tool'){
         node=el('details','tool-card');node.append(el('summary'),el('pre'));
@@ -625,8 +626,8 @@ $('project-form').onsubmit=async event=>{
 };
 // Archive and delete apply to the project's sessions too unless the user keeps them in Ungrouped.
 let removingProject=null;
-function openProjectRemove(action){
-  const project=projects.find(p=>p.id===editingProject);if(!project)return;
+function openProjectRemove(action,project=projects.find(p=>p.id===editingProject)){
+  if(!project)return;
   const count=sessions.filter(s=>s.projectId===project.id).length;
   removingProject={id:project.id,action,count};
   const verb=action==='delete'?'Delete':'Archive';
@@ -638,15 +639,16 @@ function describeProjectRemove(){
   const {action,count}=removingProject,plural=count===1?'session':'sessions',verb=action==='delete'?'Deletes':'Hides';
   $('project-remove-description').textContent=$('project-remove-ungroup').checked
     ?`${verb} the project. Its ${count} ${plural} move to Ungrouped and keep running.`
-    :action==='delete'?`Deletes the project and the saved history of its ${count} ${plural}, stopping any running work.`
+    :action==='delete'?`Deletes the project and the saved history of its ${count} ${plural}, stopping any running work. Workspace files and branches remain. This cannot be undone.`
     :`Hides the project and archives its ${count} ${plural}. Archiving never stops running work.`;
 }
 $('project-remove-ungroup').onchange=describeProjectRemove;
-$('archive-project').onclick=async()=>{
-  const project=projects.find(p=>p.id===editingProject);if(!project)return;
-  if(!project.archived)return openProjectRemove('archive');
-  try{await api(`/api/projects/${project.id}/archive`,{method:'POST',body:JSON.stringify({archived:false})});$('project-dialog').close();await refreshSessions();}catch(error){$('project-error').textContent=error.message;}
-};
+async function archiveProject(project){
+  if(!project)return;
+  if(!project.archived)return openProjectRemove('archive',project);
+  try{await api(`/api/projects/${project.id}/archive`,{method:'POST',body:JSON.stringify({archived:false})});$('project-dialog').close();await refreshSessions();}catch(error){if($('project-dialog').open)$('project-error').textContent=error.message;else toast(error.message);}
+}
+$('archive-project').onclick=()=>archiveProject(projects.find(p=>p.id===editingProject));
 $('delete-project').onclick=()=>openProjectRemove('delete');
 $('dismiss-project-remove').onclick=()=>$('project-remove-dialog').close();
 $('project-remove-form').onsubmit=async event=>{
@@ -738,12 +740,17 @@ $('prompt').oninput=()=>{mentions.update();commandsOpen=/^[/\$]\S*$/.test($('pro
 $('prompt').onkeydown=event=>{if(mentions.keydown(event))return;if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault();$('composer').requestSubmit();}};
 $('resume-session').onclick=()=>{if(active)resumeSession(active.id);};
 $('stop').onclick=async()=>{try{await api(`/api/sessions/${active.id}/cancel`,{method:'POST',body:'{}'});}catch(e){toast(e.message);}};
-$('close-session').onclick=async()=>{
-  if(!active)return;
-  if(!confirm('Permanently delete this session and its saved transcript? Its harness will stop. Worktree files and branches remain. To keep history, choose Suspend harness instead. This cannot be undone.'))return;
-  const id=active.id;
-  try{await api(`/api/sessions/${id}`,{method:'DELETE'});closeActive();await refreshSessions();}catch(e){toast(e.message);}
-};
+async function deleteSession(session){
+  if(!session)return;
+  if(!confirm(`Permanently delete “${session.title}” and its saved transcript? Its harness will stop. Worktree files and branches remain. This cannot be undone.`))return;
+  const id=session.id;
+  try{
+    await api(`/api/sessions/${id}`,{method:'DELETE'});
+    if(active?.id===id)closeActive();
+    await refreshSessions();
+  }catch(e){toast(e.message);}
+}
+$('close-session').onclick=()=>deleteSession(active);
 function closeActive(){generation++;socket?.close();clearTimeout(retryTimer);active=null;localStorage.removeItem('agentworks-session');$('conversation').hidden=true;$('welcome').hidden=false;setTitle('Overview');}
 function applyRoots(){
   $('project-roots').replaceChildren();
@@ -916,11 +923,45 @@ $('rename-form').onsubmit=async event=>{
   event.preventDefault();const id=active?.id;if(!id)return;
   try{const updated=await api(`/api/sessions/${id}`,{method:'PATCH',body:JSON.stringify({title:$('rename-title').value})});if(active?.id===id){Object.assign(active,updated);setTitle(updated.title);}await refreshSessions();$('rename-dialog').close();}catch(e){$('rename-error').textContent=e.message;}
 };
-$('archive-session').onclick=async()=>{
-  const id=active?.id;if(!id)return;
-  try{const updated=await api(`/api/sessions/${id}`,{method:'PATCH',body:JSON.stringify({archived:!active.archived})});if(active?.id===id)Object.assign(active,updated);await refreshSessions();updateControls();}catch(e){toast(e.message);}
-};
-$('fork-session').onclick=openFork;
+async function archiveSession(session){
+  if(!session)return;
+  const id=session.id;
+  try{const updated=await api(`/api/sessions/${id}`,{method:'PATCH',body:JSON.stringify({archived:!session.archived})});if(active?.id===id)Object.assign(active,updated);await refreshSessions();updateControls();}catch(e){toast(e.message);}
+}
+$('archive-session').onclick=()=>archiveSession(active);
+$('fork-session').onclick=()=>openFork();
+setupContextMenu({onError:message=>toast(message),resolve(target){
+  const row=target.closest('.session-item');
+  if(row){
+    const session=sessions.find(s=>s.id===row.dataset.sessionId);if(!session)return null;
+    return {origin:row,label:`Actions for ${session.title}`,actions:[
+      {label:'Fork session…',run:()=>openFork(session)},
+      {label:session.archived?'Unarchive session':'Archive session',run:()=>archiveSession(session)},
+      {label:'Delete history…',danger:true,run:()=>deleteSession(session)},
+    ]};
+  }
+  const heading=target.closest('.tree-heading[data-project-id]');
+  if(heading){
+    const project=projects.find(p=>p.id===heading.dataset.projectId);if(!project)return null;
+    return {origin:heading,label:`Actions for ${project.name}`,actions:[
+      {label:'Edit project…',run:()=>openProjectDialog(project)},
+      {label:project.archived?'Unarchive project':'Archive project…',run:()=>archiveProject(project)},
+      {label:'Delete project…',danger:true,run:()=>openProjectRemove('delete',project)},
+    ]};
+  }
+  if(target.closest('a,button,input,textarea,select,img,pre,code')||window.getSelection()?.toString())return null;
+  const node=target.closest('#messages article.message');
+  const message=node&&transcript.find(m=>m.id===node.dataset.messageId);
+  if(!message?.text)return null;
+  return {origin:node,label:'Message actions',actions:[
+    {label:'Copy message',run:async()=>{if(!await display.copy(message.text))throw new Error('Could not copy the message. Select its text and copy manually.');toast('Message copied.','success');}},
+    {label:'Quote in reply',run:()=>{
+      const quote=message.text.split('\n').map(line=>'> '+line).join('\n');
+      const prompt=$('prompt');prompt.value=(prompt.value?prompt.value+'\n\n':'')+quote+'\n\n';
+      prompt.dispatchEvent(new Event('input'));prompt.focus();
+    }},
+  ]};
+}});
 $('suspend-session').onclick=async()=>{
   const id=active?.id;if(!id)return;
   try{const updated=await api(`/api/sessions/${id}/suspend`,{method:'POST',body:'{}'});if(active?.id===id){Object.assign(active,updated);status=updated.status;updateControls();}await refreshSessions();}catch(e){toast(e.message);}

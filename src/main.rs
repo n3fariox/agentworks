@@ -642,6 +642,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route(
+            "/context-menu.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../web/context-menu.js"),
+                )
+            }),
+        )
+        .route(
             "/flyout.js",
             get(|| async {
                 (

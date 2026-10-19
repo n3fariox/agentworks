@@ -138,5 +138,5 @@ export function setupDisplayPreferences({root=document,storage=localStorage}={})
   }
 
   apply();
-  return {enhance,mount,preferences:()=>({...preferences})};
+  return {enhance,mount,copy,preferences:()=>({...preferences})};
 }
