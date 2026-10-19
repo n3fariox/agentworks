@@ -44,10 +44,12 @@ try{
   await api(`/api/sessions/${s.id}/prompt`,{text:'quota active-approval',requestId:'timeout-wait-'+includeWait});
   await until(async()=>(await snap(s.id)).approvals.length===1);cases.push(s);
  }
+ await api(`/api/sessions/${cases[0].id}/queue`,{text:'Never auto-send after timeout',requestId:'queued-before-total-timeout'});
  const timed=await until(async()=>{const s=await snap(cases[0].id);return s.session.status==='idle'&&s;},75000);
  assert.equal(timed.events.find(e=>e.kind==='timeout')?.data.kind,'total');assert.equal(timed.events.find(e=>e.kind==='turn_end')?.data.timedOut,'total');assert.equal(timed.approvals.length,0);assert.equal(timed.session.continuation.dueAt,null);assert.equal(timed.session.continuation.limited,false);assert.equal(timed.session.continuation.attempts,0);assert.equal(timed.session.continuation.phase,null);assert.equal(timed.events.filter(e=>e.kind==='user').length,1);
+ const queueAfterTimeout=await api(`/api/sessions/${cases[0].id}/queue`);assert(queueAfterTimeout.queue.paused);assert.equal(queueAfterTimeout.queue.items[0].state,'paused');await sleep(1000);assert.equal((await snap(cases[0].id)).events.filter(e=>e.kind==='user').length,1);
  const paused=await snap(cases[1].id);assert.equal(paused.session.status,'waiting');assert.equal(paused.events.filter(e=>e.kind==='timeout'||e.kind==='timeout_warning').length,0);
  const approval=paused.approvals[0];const allow=approval.request.options.find(o=>o.kind==='allow_once');assert(allow);
  await api(`/api/sessions/${cases[1].id}/approvals/${approval.id}`,{optionId:allow.optionId});const done=await idle(cases[1].id);assert(!done.events.some(e=>e.kind==='timeout'));assert.equal(done.session.continuation.dueAt,null);
- console.log('PASS timeout validation/settings consistency, failed-write rollback, restart/native preservation, override clearing, real total expiry, paused approval clocks and no quota replay');
+ console.log('PASS timeout validation/settings consistency, failed-write rollback, restart/native preservation, override clearing, real total expiry, paused approval clocks, explicit queue paused after timeout, and no quota replay');
 }finally{if(server)await stop();}
