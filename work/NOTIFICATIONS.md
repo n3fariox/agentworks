@@ -69,9 +69,9 @@ the [Notification constructor documentation](https://developer.mozilla.org/en-US
 
 ## Recovery and verification
 
-This implementation recovers U-02 from `fca994b` onto main base `a3c90d8`, retaining
-the newer Claude permission-mode defaults. The old implementation had never been
-merged or deployed: the investigated live release `agentworks-054714a` returned
+This implementation recovers U-02 from `fca994b` onto main base `c260794`, retaining
+the newer session forks and Claude permission-mode defaults. At recovery time,
+the old implementation had not been merged or deployed: the investigated live release `agentworks-054714a` returned
 404 for the notification module/API. That release is not changed by this work.
 Assets are embedded in the executable, so copying a JS file into a source tree
 does not update a running release.
@@ -101,3 +101,49 @@ checks, six supervisor tests, fixture restart checks, all 25 notification browse
 tests within the full 101-passed browser suite (one opt-in OpenCode test skipped),
 and graceful WebSocket shutdown. Test data/builds stayed in this worktree or
 temporary directories; no live release, service configuration or data was changed.
+
+## Merge takeover audit (2026-10-19)
+
+Reviewed candidate `fca994b1db26056240e4fb5717655430c006c772` against main
+`b82170453ec212e19c39eb071c1e5ae1d89f98d6`. Their merge base is `054714a`.
+The candidate-only history consists of implementation checkpoint `25d9ce6`,
+merge `e078637` (which brings in `054714a`) and final implementation `fca994b`.
+The candidate worktree was clean. The original commits are not ancestors of main,
+but their feature is already integrated by recovery commit
+`cc17195ddceeb8f48246951627cbc99cf465ed56`. No feature cherry-pick is needed.
+
+The candidate's `src/notifications.rs` and `src/inbox_delivery.rs` are identical
+to main. Reviewed the remaining API, catalog, asset and app wiring against the
+candidate diff; main retains it alongside newer work. Main additionally reports
+display/API/connection failures, tests HTTPS and preserves the newer defaults.
+Retain fork fixture fix `1e2a88b257fa3627b59c45604bfe5d42bc307bbf`, proxy origin
+derivation `a4566eb8e3f14593c8b6d57caa1830ac9f8c8339` and secure WebSocket scheme
+normalization `ce3f07330cad60e32b367d04be729579671c15fb`.
+
+The handoff reports 78 Rust / 18 notification / 93 browser passed for the older
+candidate; these are not current main results. The candidate source defines 18 notification
+cases; this review validates the current integrated implementation instead of
+rerunning that obsolete tree. Native permission prompts and OS delivery remain
+unverified by automation. Focus suppression is per receiving tab: a second tab
+can notify even while another tab is watching the source session. Claims survive
+reconnect/reload only while retained among the newest 1000 IDs. Storage failure,
+a crash after claiming, a lagging stream or a disconnect can lose notices.
+Question requests share the approval category and generic approval message.
+
+The first isolated full verification on port 4497 passed all 25 notification
+cases but finished with 112 browser tests passed, one skipped and one failed.
+The queue suite retained idle harnesses between tests, so its thirteenth test
+failed during setup at the 12-harness limit before exercising storage faults.
+The takeover changes only that suite's fixture cleanup to delete each test's
+session and resets its session reference before setup; application code is
+unchanged. The rerun uses fresh verification state on port 4496.
+
+Current takeover validation: `cargo test --locked --offline` passed 90 tests;
+`cargo build --locked --offline`, `cargo fmt --check`, JavaScript syntax checks
+and `git diff --check` passed. After the fixture cleanup, the full isolated
+`AGENTWORKS_VERIFY_PORT=4496 node scripts/verify.mjs` passed its smoke checks,
+six supervisor tests, isolated restart fixture, 113 browser tests (including all
+25 notification cases; one opt-in OpenCode case skipped), and graceful WebSocket
+shutdown. Inherited supervisor/release variables were removed for both runs.
+No merge blocker remains. No deployment or live service restart was performed;
+the test suite restarted only its own isolated fixture processes.

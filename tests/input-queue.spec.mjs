@@ -44,8 +44,9 @@ test.beforeAll(async()=>{
   server=launch(4511,fixture);await ready(server,base);
 });
 test.afterAll(()=>server?.child.kill());
-test.beforeEach(async()=>{session=await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Queue test'});await until(async()=>await state()==='idle');});
-test.afterEach(async()=>{if(session)await call(`/api/sessions/${session.id}/stop`,{});});
+test.beforeEach(async()=>{session=null;session=await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Queue test'});await until(async()=>await state()==='idle');});
+// Release each test's harness so later cases cannot exhaust the server's limit.
+test.afterEach(async()=>{if(session)await api(`/api/sessions/${session.id}`,undefined,'DELETE');});
 
 test('queue during a turn: FIFO order, edit/remove, activity label, dispatch only after normal completion',async({page})=>{
   await openSession(page);
