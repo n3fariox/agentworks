@@ -19,6 +19,7 @@ try{
     if(ready)break;await delay(100);
   }
   assert(ready,'Server readiness timed out');
+  await run('node',['tests/codex-subscription.test.mjs']);
   await run('node',['scripts/mcp-wire-smoke.mjs']);
   await run('node',['scripts/smoke.mjs']);
   await run('node',['scripts/projects-smoke.mjs']);

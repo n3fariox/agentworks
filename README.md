@@ -31,6 +31,8 @@ Only this explicit API-key mode isolates provider configuration/authentication u
 
 The app uses pinned local ACP adapters installed by `npm ci`, without downloading an adapter at session creation. Claude wraps its SDK; Codex wraps app-server. Project-local agent instructions may be loaded by the harness. Run `npm ci --ignore-scripts` on each execution machine; the Rust binary alone does not contain Node/adapters/provider dependencies.
 
+Codex uses the tracked local `2.2.2-agentworks.1` fork in `vendor/codex-acp` to attach cached subscription windows to genuine context usage events. The usage display preserves each window's source observation time separately from context. No extra account queries or polling are performed; quotas appear after native push notifications and a genuine usage event. See the [implemented metadata contract and limitations](work/CODEX-SUBSCRIPTION-QUOTA-PROPOSAL.md).
+
 To check the ACP handshake without making an inference request:
 
 ```bash

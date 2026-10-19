@@ -1,0 +1,39 @@
+{
+  "name": "@agentclientprotocol/codex-acp",
+  "version": "2.2.2-agentworks.1",
+  "description": "",
+  "main": "dist/index.js",
+  "bin": {
+    "codex-acp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md",
+    "AGENTWORKS.md",
+    "AGENTWORKS.patch",
+    "upstream.sha256"
+  ],
+  "homepage": "https://github.com/agentclientprotocol/codex-acp#readme",
+  "bugs": {
+    "url": "https://github.com/agentclientprotocol/codex-acp/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/agentclientprotocol/codex-acp.git"
+  },
+  "keywords": [],
+  "author": "Agent Client Protocol",
+  "license": "Apache-2.0",
+  "type": "module",
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^1.5.0",
+    "@openai/codex": "^0.160.1",
+    "cross-spawn": "^7.0.6",
+    "diff": "^9.0.0",
+    "open": "^11.0.1",
+    "vscode-jsonrpc": "^9.0.1",
+    "zod": "^4.0.0"
+  },
+  "private": true
+}

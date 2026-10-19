@@ -1,0 +1,11 @@
+{
+  "observedAtMs": 1792376797970,
+  "notifications": [
+    {"limitId":"codex","limitName":null,"primary":{"usedPercent":15,"windowDurationMins":300,"resetsAt":1792385436},"secondary":{"usedPercent":67,"windowDurationMins":10080,"resetsAt":1792874966}},
+    {"limitId":"research","limitName":"Research","primary":{"usedPercent":0,"windowDurationMins":90},"secondary":{"usedPercent":100,"windowDurationMins":2880,"resetsAt":null}},
+    {"limitId":"codex","primary":{"resetsAt":1792385500}},
+    {"limitId":"research","primary":{"usedPercent":25}},
+    {"limitId":"codex","primary":{"usedPercent":null}},
+    {"limitId":"research","secondary":null}
+  ]
+}

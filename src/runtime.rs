@@ -614,6 +614,24 @@ pub async fn run(
 mod tests {
     use super::*;
     #[test]
+    fn codex_subscription_metadata_survives_typed_acp_notification() {
+        // Same typed receive/serialize boundary used by on_receive_notification.
+        let update = json!({
+            "sessionUpdate":"usage_update", "used":1234, "size":200000,
+            "_meta":{"_codex/subscriptionLimits":{"version":1,"limits":[{
+                "limitId":"codex", "primary":{
+                    "usedPercent":{"value":15,"observedAtMs":1792376797970_u64},
+                    "resetsAt":{"value":1792385436,"observedAtMs":1792376797970_u64}
+                }
+            }]}}
+        });
+        let notification: SessionNotification = serde_json::from_value(json!({
+            "sessionId":"parent", "update":update
+        }))
+        .unwrap();
+        assert_eq!(serde_json::to_value(notification.update).unwrap(), update);
+    }
+    #[test]
     fn existing_signin_inherits_credential_locations_and_does_not_force_api_keys() {
         for provider in ["claude", "codex"] {
             let config = agent_config(provider, false, false);
