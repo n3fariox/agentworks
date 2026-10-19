@@ -187,4 +187,3 @@ body[data-code-wrap=scroll] .tool-card pre,body[data-code-wrap=scroll] .approval
   .menu-open .layout>main{flex:none;order:1;height:auto;min-height:0}
   .menu-open #sidebar{position:static;order:2;flex:1;min-height:0;width:auto;height:auto;transform:none;overflow-y:auto;border-right:0;padding-top:14px}
 }
-
