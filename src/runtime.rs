@@ -798,6 +798,9 @@ mod fork_tests {
             let store = Arc::new(Mutex::new(
                 crate::store::Store::open(&dir.join("sessions.sqlite3")).unwrap(),
             ));
+            let catalog = Arc::new(Mutex::new(
+                crate::Catalog::open(dir.join("catalog.json")).unwrap(),
+            ));
             let mut data: crate::SessionData = serde_json::from_value(json!({
                 "status":"starting","seq":0,"requests":[],"models":null,"available_commands":[],"turn_active":false,
                 "lineage":{"parentId":"parent","parentProvider":"codex","parentCwd":"/old","context":"auto",
@@ -823,6 +826,7 @@ mod fork_tests {
                 mcp_endpoint: "127.0.0.1:1".parse().unwrap(),
                 mcp_token: Mutex::new("child-token".into()),
                 mcp_refresh_pending: AtomicBool::new(false),
+                notifications: crate::notifications::Hub::new(catalog),
             });
             store
                 .lock()
