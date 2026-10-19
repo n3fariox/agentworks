@@ -20,7 +20,7 @@ try{
  await start();
  const {roots}=await api('/api/status');
  const project=await api('/api/projects',{name:'Completion tests'}),other=await api('/api/projects',{name:'Other'});
- const create=(title,projectId=project.id)=>api('/api/sessions',{provider:'demo',cwd:roots[0],title,projectId});
+ const create=(title,projectId=project.id)=>api('/api/sessions',{provider:'demo',cwd:roots[0],title,projectId,agentAccess:{}});
  const a=await create('Author'),b=await create('Peer'),c=await create('Outside',other.id);
  await Promise.all([idle(a.id),idle(b.id),idle(c.id)]);
  denied(await call(a.id,'get_completion'));denied(await call(a.id,'report_completion',{status:'blocked',summary:'No access',requestId:'no'}));
