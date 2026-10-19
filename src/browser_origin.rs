@@ -5,10 +5,12 @@ use axum::http::{HeaderMap, Uri};
 /// and valid. The deployment must keep the backend private and have its proxy
 /// overwrite these headers.
 pub fn forwarded_origin(headers: &HeaderMap) -> Option<String> {
-    let scheme = single_header(headers, "x-forwarded-proto")?;
-    if scheme != "http" && scheme != "https" {
-        return None;
-    }
+    let forwarded_scheme = single_header(headers, "x-forwarded-proto")?;
+    let scheme = match forwarded_scheme {
+        "http" | "ws" => "http",
+        "https" | "wss" => "https",
+        _ => return None,
+    };
     let authority = single_header(headers, "x-forwarded-host")?;
     let authority: axum::http::uri::Authority = authority.parse().ok()?;
     if authority.as_str().contains('@') || authority.as_str().contains(',') {
@@ -82,6 +84,16 @@ mod tests {
         assert!(!origin_matches_forwarded(
             &headers,
             "http://agentbox.example"
+        ));
+
+        let websocket_headers = proxy_headers("wss", "AgentBox.example:443");
+        assert_eq!(
+            forwarded_origin(&websocket_headers).as_deref(),
+            Some("https://agentbox.example")
+        );
+        assert!(origin_matches_forwarded(
+            &websocket_headers,
+            "https://agentbox.example"
         ));
     }
 
