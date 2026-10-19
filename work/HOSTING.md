@@ -2,6 +2,11 @@
 
 Status: planned requirements; no deployment, implementation or agent batch started. Support the existing direct/VPN setup and the user's public Traefik hosting convention, for example `https://hexfall.home.oksmiths.com/a1b918dd-2b91-4fc2-8822-e6a559503040/`. Traefik terminates TLS and may strip the UUID prefix before forwarding to the local app.
 
+U-02 now supports one explicitly configured **root-hosted** HTTPS origin through
+`AGENTWORKS_EXTERNAL_ORIGIN`; see [notifications HTTPS setup](NOTIFICATIONS.md).
+This permits the exact external Origin/public Host without trusting forwarded
+headers. It does not implement the subpath/mount, authentication or PWA work below.
+
 ## Reference implementation
 
 Reviewed local xcom-game sources: `tools/web/publish.py` uses relative asset references and registers the worker relative to the public page URL; `game/branding/web/manifest.webmanifest` uses relative start URL/scope; `game/branding/web/service-worker.js` currently uses network-only navigation handling; `tools/web/app.py` reads forwarded host/prefix for deployment metadata. Adopt the mount-awareness patterns, with Agentworks-specific API, WebSocket and origin protections. Its D058 document contains a proposed offline-game design; that proposal is not Agentworks's cache policy.
@@ -13,7 +18,7 @@ Reviewed local xcom-game sources: `tools/web/publish.py` uses relative asset ref
 - Direct root hosting remains supported. Establish one canonical external app base, using explicit deployment configuration and, when enabled, validated headers from configured trusted proxy peers. Keep public mount/URL generation distinct from the backend's stripped routing path; apply a prefix exactly once.
 - Use relative module imports/static links and a shared URL helper for all API calls, event WebSockets, file previews/images/downloads, redirects and navigation links. Preserve encoded paths and query parameters. Avoid relying on every helper accepting root-relative `/api/...` URLs. A browser URL helper can resolve against the module/app base without requiring an HTML `<base>` tag; the current CSP forbids that tag.
 - Normalize the entry trailing slash so `/<uuid>` reaches `/<uuid>/` without losing the prefix or query. Decide whether the redirect belongs to Traefik or the app and document the proxy setup. Do not add UUID assumptions to ordinary API routing.
-- Update host/origin validation for configured external HTTPS origins and WebSocket upgrades. The current guard compares Origin against `http://Host` and requires the backend listener port, so changing frontend paths alone is insufficient. Trust forwarded host/proto/prefix only in the configured proxy mode; preserve direct-request protections and the private internal MCP bridge.
+- Extend the explicit root-origin host/origin validation to the mount/proxy contract. The default guard compares Origin against `http://Host` and requires the backend listener port; `AGENTWORKS_EXTERNAL_ORIGIN` additionally permits one exact configured HTTPS origin/public authority. Changing frontend paths alone is insufficient. Trust forwarded host/proto/prefix only in the configured proxy mode; preserve direct-request protections and the private internal MCP bridge.
 - Namespace local/session storage by deployment identity/mount to prevent session selections, drafts, pending request IDs and settings colliding when multiple instances share an origin. Subpaths are deployment boundaries for routing/state, not browser origin security boundaries. Document how the existing hosting authentication layer or app credentials protect the public agent-control surface; a UUID path does not replace authentication.
 - Provide a reviewed Traefik example covering Host + mount matching, StripPrefix, TLS, HTTP/WebSocket forwarding and external origin configuration. Reuse an existing authenticated hosting layer where configured rather than removing Origin checks to make proxying work.
 

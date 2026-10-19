@@ -33,6 +33,9 @@ pub struct Settings {
     /// L-07 saved default; absent keeps the built-in default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeouts: Option<crate::timeouts::Policy>,
+    /// U-02 saved notification policy; absent keeps the default (off).
+    #[serde(default)]
+    pub notifications: crate::notifications::Settings,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct CatalogData {
@@ -68,6 +71,15 @@ impl Catalog {
     pub fn settings(&mut self, settings: Settings) -> io::Result<()> {
         let mut data = self.data.clone();
         data.settings = settings;
+        self.save(data)
+    }
+    /// U-02 updates only the notification policy, leaving other settings untouched.
+    pub fn notifications(
+        &mut self,
+        notifications: crate::notifications::Settings,
+    ) -> io::Result<()> {
+        let mut data = self.data.clone();
+        data.settings.notifications = notifications;
         self.save(data)
     }
     pub fn contains(&self, id: &str) -> bool {
@@ -233,6 +245,7 @@ mod tests {
                 default_models: HashMap::from([("codex".into(), "example-model".into())]),
                 timeouts: None,
                 claude_default_permission_mode: None,
+                notifications: Default::default(),
             })
             .unwrap();
         let mut reopened = Catalog::open(path.clone()).unwrap();

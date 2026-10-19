@@ -12,6 +12,7 @@ import {setupFlyout} from '/flyout.js';
 import {setupSidebarResize} from '/sidebar-resize.js';
 import {setupTimeoutControls} from '/timeout-controls.js';
 import {setupInputQueue,BUSY} from '/input-queue.js';
+import {setupNotifications} from '/notifications.js';
 const $ = id => document.getElementById(id);
 // randomUUID is unavailable on plain HTTP remote origins; getRandomValues is supported.
 const uuid = () => globalThis.crypto.randomUUID?.() ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -51,6 +52,8 @@ const worktrees=setupWorktreeControls({$,api,onChange:()=>{if(config)providerNot
 const policyEditor=setupPolicyEditor({$,api});
 const display=setupDisplayPreferences();display.mount($('display-preferences'));
 workLogs=setupWorkLogs({el});workLogs.mount($('display-preferences'),()=>scheduleDraw());
+// U-02: policy lives on the server; the browser only requests permission and shows.
+const notifications=setupNotifications({getSessions:()=>sessions,getActive:()=>active,selectSession,toast});
 
 async function api(path, options={}) {
   const response=await fetch(path,{...options,headers:{'Content-Type':'application/json',...options.headers}});
@@ -730,6 +733,7 @@ function addRoot(value=''){
 $('add-root').onclick=()=>addRoot().focus();
 $('open-settings').onclick=async()=>{
   timeoutControls.load();
+  notifications.load().then(()=>notifications.mount($('notification-controls'))).catch(error=>notifications.mount($('notification-controls'),error));
   try{
     const settings=await api('/api/settings');$('settings-roots').replaceChildren();for(const root of settings.roots)addRoot(root);$('settings-error').textContent='';$('settings-saved').textContent='';
     const fields=$('default-model-fields');fields.replaceChildren();
@@ -786,6 +790,7 @@ async function init(){
   await refreshSessions();
   const saved=sessions.find(s=>s.id===localStorage.getItem('agentworks-session'));if(saved)selectSession(saved);workspace.restoreView();
   setInterval(()=>refreshSessions().catch(()=>{}),5000);
+  notifications.start();
 }
 init().catch(error=>toast('Cannot reach the local server: '+error.message));
 

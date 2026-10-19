@@ -705,14 +705,16 @@ mod tests {
             let store = Arc::new(Mutex::new(
                 crate::store::Store::open(&root.join("db.sqlite3")).unwrap(),
             ));
+            let catalog = Arc::new(Mutex::new(
+                crate::Catalog::open(root.join("catalog.json")).unwrap(),
+            ));
             let app = App {
                 sessions: Default::default(),
                 roots: Arc::new(vec![root.clone()]),
                 port: 4505,
                 bind: "127.0.0.1".parse().unwrap(),
-                catalog: Arc::new(Mutex::new(
-                    crate::Catalog::open(root.join("catalog.json")).unwrap(),
-                )),
+                external_origin: None,
+                catalog: catalog.clone(),
                 discovery: Arc::new(tokio::sync::Semaphore::new(1)),
                 store: store.clone(),
                 run_lock: Default::default(),
@@ -720,6 +722,7 @@ mod tests {
                 communication_lock: Default::default(),
                 mcp_endpoint: "127.0.0.1:4505".parse().unwrap(),
                 restart: Arc::new(crate::service_restart::Manager::new()),
+                notifications: crate::notifications::Hub::new(catalog),
             };
             let make = |id: &str| {
                 let d:crate::SessionData=serde_json::from_value(json!({"status":"idle","seq":0,"requests":[],"models":null,"available_commands":[],"turn_active":false,"project_id":"project","provider_session_id":format!("native-{id}")})).unwrap();
@@ -765,6 +768,7 @@ mod tests {
                     mcp_endpoint: app.mcp_endpoint,
                     mcp_token: Mutex::new("fixture-only".into()),
                     mcp_refresh_pending: Default::default(),
+                    notifications: app.notifications.clone(),
                 });
                 app.sessions.lock().unwrap().insert(id.into(), s.clone());
                 (s, receiver)

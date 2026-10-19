@@ -1,4 +1,5 @@
 mod automations;
+mod browser_origin;
 mod catalog;
 mod communication;
 mod completion;
@@ -10,6 +11,7 @@ mod input_queue;
 mod lifecycle;
 mod limit_resume;
 mod mcp;
+mod notifications;
 mod permission_modes;
 mod runtime;
 mod service_restart;
@@ -53,6 +55,7 @@ struct App {
     roots: Arc<Vec<PathBuf>>,
     port: u16,
     bind: IpAddr,
+    external_origin: Option<browser_origin::ExternalOrigin>,
     catalog: Arc<Mutex<Catalog>>,
     discovery: Arc<tokio::sync::Semaphore>,
     store: Arc<Mutex<store::Store>>,
@@ -62,6 +65,8 @@ struct App {
     communication_lock: Arc<tokio::sync::Mutex<()>>,
     mcp_endpoint: std::net::SocketAddr,
     restart: Arc<service_restart::Manager>,
+    /// U-02 cross-session stream of noteworthy events.
+    notifications: notifications::Hub,
 }
 
 struct Session {
@@ -82,6 +87,8 @@ struct Session {
     mcp_endpoint: std::net::SocketAddr,
     mcp_token: Mutex<String>,
     mcp_refresh_pending: std::sync::atomic::AtomicBool,
+    /// U-02; cloned from the app hub so `emit` needs no global state.
+    notifications: notifications::Hub,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -202,6 +209,28 @@ impl Session {
         }
         state.seq += 1;
         let event = json!({"seq":state.seq,"kind":kind,"data":data});
+        // U-02: fan out noteworthy events to connected browsers.
+        if let Some(category) = notifications::classify(kind, &event["data"]) {
+            let (title, project_id) = (
+                state
+                    .lifecycle
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| self.title.clone()),
+                state.project_id.clone(),
+            );
+            self.notifications.publish(
+                &notifications::Context {
+                    session_id: &self.id,
+                    title: &title,
+                    provider: &self.provider,
+                    project_id: project_id.as_deref(),
+                },
+                state.seq,
+                category,
+                &event["data"],
+            );
+        }
         state.bytes += event.to_string().len();
         state.events.push_back(event.clone());
         while state.events.len() > MAX_EVENTS || state.bytes > MAX_EVENT_BYTES {
@@ -479,6 +508,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bind = std::env::var("AGENTWORKS_BIND")
         .unwrap_or_else(|_| "127.0.0.1".into())
         .parse::<IpAddr>()?;
+    let external_origin = std::env::var("AGENTWORKS_EXTERNAL_ORIGIN")
+        .ok()
+        .map(|value| browser_origin::ExternalOrigin::parse(&value))
+        .transpose()?;
     let roots: Vec<PathBuf> = match std::env::var_os("AGENTWORKS_ROOTS") {
         Some(paths) => std::env::split_paths(&paths).collect(),
         None => vec![std::env::current_dir()?],
@@ -506,19 +539,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let restored = store.load().map_err(|e| e.to_string())?;
     let mcp_listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let mcp_endpoint = mcp_listener.local_addr()?;
+    let catalog = Arc::new(Mutex::new(Catalog::open(catalog_path)?));
     let app = App {
         sessions: Default::default(),
         discovery: Arc::new(tokio::sync::Semaphore::new(2)),
         roots: Arc::new(roots),
         port,
         bind,
-        catalog: Arc::new(Mutex::new(Catalog::open(catalog_path)?)),
+        external_origin,
+        catalog: catalog.clone(),
         store: Arc::new(Mutex::new(store)),
         run_lock: Arc::new(tokio::sync::Mutex::new(())),
         workspace_lock: Arc::new(tokio::sync::Mutex::new(())),
         communication_lock: Arc::new(tokio::sync::Mutex::new(())),
         mcp_endpoint,
         restart: Arc::new(service_restart::Manager::new()),
+        notifications: notifications::Hub::new(catalog),
     };
     if let Some(policy) = app
         .catalog
@@ -568,6 +604,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             mcp_endpoint: app.mcp_endpoint,
             mcp_token: Mutex::new(Uuid::new_v4().to_string()),
             mcp_refresh_pending: std::sync::atomic::AtomicBool::new(false),
+            notifications: app.notifications.clone(),
         });
         if interrupted {
             s.emit("interrupted",json!({"message":"The server stopped during this turn. It was not automatically retried. Check the last tool result before continuing."}));
@@ -634,6 +671,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (
                     [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
                     include_str!("../web/usage-status.js"),
+                )
+            }),
+        )
+        .route(
+            "/notifications.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../web/notifications.js"),
                 )
             }),
         )
@@ -763,6 +809,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/settings", get(get_settings).put(save_settings))
         .route("/api/timeouts", get(get_timeouts).put(save_timeouts))
         .route(
+            "/api/notifications",
+            get(get_notifications).put(save_notifications),
+        )
+        .route("/api/notifications/events", get(notification_events))
+        .route(
             "/api/sessions/{id}/timeouts",
             axum::routing::put(save_session_timeouts),
         )
@@ -883,7 +934,13 @@ async fn guard(
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if !allowed_host(host, app.bind, app.port) {
+    let direct_host = allowed_host(host, app.bind, app.port);
+    if !direct_host
+        && !app
+            .external_origin
+            .as_ref()
+            .is_some_and(|external| external.allows_host(host))
+    {
         return (StatusCode::FORBIDDEN, "Unrecognized host").into_response();
     }
     let write = !matches!(req.method().as_str(), "GET" | "HEAD");
@@ -893,7 +950,12 @@ async fn guard(
             .get(header::ORIGIN)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        if origin != format!("http://{host}") {
+        if !(direct_host && origin == format!("http://{host}"))
+            && !app
+                .external_origin
+                .as_ref()
+                .is_some_and(|external| external.allows_origin(origin))
+        {
             return (StatusCode::FORBIDDEN, "Same-origin requests required").into_response();
         }
     }
@@ -964,6 +1026,35 @@ async fn get_settings(State(app): State<App>) -> Json<Value> {
         json!({"roots":roots,"defaultModels":settings.default_models,"claudeDefaultPermissionMode":settings.claude_default_permission_mode.unwrap_or_default()}),
     )
 }
+
+/// U-02 saved policy; browser capability and permission stay in the browser.
+async fn get_notifications(State(app): State<App>) -> Json<Value> {
+    let catalog = app.catalog.lock().unwrap();
+    Json(json!({
+        "settings":catalog.data.settings.notifications,
+        "categories":notifications::Event::ALL.iter().map(|e|json!({"id":e,"label":e.label()})).collect::<Vec<_>>(),
+        "projects":catalog.data.projects.iter().map(|p|json!({"id":p.id,"name":p.name})).collect::<Vec<_>>(),
+    }))
+}
+async fn save_notifications(
+    State(app): State<App>,
+    Json(settings): Json<notifications::Settings>,
+) -> ApiResult {
+    settings
+        .validate()
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    app.catalog
+        .lock()
+        .unwrap()
+        .notifications(settings.clone())
+        .map_err(|_| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not save notification settings",
+            )
+        })?;
+    Ok(Json(json!({"settings":settings})))
+}
 async fn save_settings(State(app): State<App>, Json(mut settings): Json<Settings>) -> ApiResult {
     let _workspace = app.workspace_lock.lock().await;
     let roots = settings
@@ -1018,6 +1109,7 @@ async fn save_settings(State(app): State<App>, Json(mut settings): Json<Settings
             .claude_default_permission_mode
             .or(current.claude_default_permission_mode);
         settings.timeouts = settings.timeouts.take().or(current.timeouts.clone());
+        settings.notifications = current.notifications.clone();
         settings
     })?;
     Ok(get_settings(State(app.clone())).await)
@@ -1780,6 +1872,7 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
         mcp_endpoint: app.mcp_endpoint,
         mcp_token: Mutex::new(Uuid::new_v4().to_string()),
         mcp_refresh_pending: std::sync::atomic::AtomicBool::new(false),
+        notifications: app.notifications.clone(),
     });
     {
         let mut sessions = app.sessions.lock().unwrap();
@@ -2144,6 +2237,34 @@ async fn events(
 ) -> Result<Response, (StatusCode, String)> {
     let s = session(&app, &id)?;
     Ok(ws.on_upgrade(move |socket| event_socket(socket, s)))
+}
+
+/// U-02 cross-session stream. Carries only noteworthy, policy-allowed events and
+/// deliberately no snapshot: a reconnect must not replay notices already seen.
+async fn notification_events(
+    State(app): State<App>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, (StatusCode, String)> {
+    let receiver = app.notifications.subscribe();
+    Ok(ws.on_upgrade(move |socket| notification_socket(socket, receiver)))
+}
+async fn notification_socket(socket: WebSocket, mut rx: broadcast::Receiver<Value>) {
+    let (mut sink, mut stream) = socket.split();
+    loop {
+        tokio::select! {
+            next=rx.recv()=>{
+                // A lagging tab loses notices rather than blocking the session that
+                // produced them; it re-reads the sidebar on its next poll.
+                let Ok(event)=next else {break};
+                if sink.send(Message::Text(event.to_string().into())).await.is_err(){break;}
+            }
+            incoming=stream.next()=>match incoming {
+                Some(Ok(Message::Ping(data)))=>{if sink.send(Message::Pong(data)).await.is_err(){break;}}
+                Some(Ok(Message::Close(_)))|None|Some(Err(_))=>break,
+                _=>{}
+            }
+        }
+    }
 }
 async fn event_socket(socket: WebSocket, s: Arc<Session>) {
     let mut rx = s.tx.subscribe();
