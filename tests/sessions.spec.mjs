@@ -179,6 +179,33 @@ test('project hierarchies preserve draft, stream, selection and independent expa
 });
 
 
+test('desktop session browser and composer: model label, resizable sidebar, usage popover',async({page})=>{
+  await page.setViewportSize({width:1280,height:900});
+  await page.goto('/');await page.evaluate(()=>localStorage.removeItem('agentworks-sidebar-width'));await page.reload();
+  await page.locator('#new-session').click();await page.locator('#provider').selectOption('demo');
+  await page.locator('#load-models').click();await page.locator('#create-model').selectOption('demo/quick');
+  await page.locator('#session-title').fill('Browser test desktop chrome');await page.locator('#create-submit').click();
+  await expect(page.locator('#session-state')).toHaveText('Ready');
+  // The session browser shows the model, not the working directory name.
+  const item=page.locator('.session-item[aria-current=true] small');
+  await expect(item).toHaveText('Demo agent · Quick (local demo)');
+  // Drag the sidebar edge wider; the width persists across reloads and resets on double-click.
+  const sidebar=page.locator('#sidebar'),handle=page.locator('#sidebar-resize');
+  const before=(await sidebar.boundingBox()).width,box=await handle.boundingBox();
+  await page.mouse.move(box.x+box.width/2,box.y+200);await page.mouse.down();await page.mouse.move(box.x+box.width/2+150,box.y+200,{steps:5});await page.mouse.up();
+  const wider=(await sidebar.boundingBox()).width;expect(wider).toBeGreaterThan(before+120);
+  await page.reload();await expect(page.locator('#session-state')).toHaveText('Ready');
+  expect(Math.abs((await sidebar.boundingBox()).width-wider)).toBeLessThan(2);
+  await handle.focus();await page.keyboard.press('ArrowLeft');expect((await sidebar.boundingBox()).width).toBeLessThan(wider);
+  await handle.dblclick();expect(Math.abs((await sidebar.boundingBox()).width-before)).toBeLessThan(2);
+  // Desktop composer: no inline statusline or footer; the ⋯ popover holds usage and actions.
+  await expect(page.locator('.usage-status-toggle')).toBeHidden();
+  await expect(page.locator('.composer-foot')).toHaveCount(0);
+  await expect(page.locator('#composer-hint')).toBeVisible();
+  await page.locator('#composer-more').click();
+  await expect(page.locator('.usage-status-toggle')).toBeVisible();await expect(page.locator('#show-commands')).toBeVisible();
+  await page.keyboard.press('Escape');await expect(page.locator('#composer-menu')).toBeHidden();
+});
 test('models at creation, command and skill discovery, host settings',async({page})=>{
   await page.goto('/');
   const original=await page.evaluate(()=>fetch('/api/settings').then(r=>r.json()));
@@ -209,7 +236,8 @@ test('models at creation, command and skill discovery, host settings',async({pag
     await page.locator('#create-submit').click();
     await expect(page.locator('#session-state')).toHaveText('Ready');
     await expect(page.locator('#model-picker')).toHaveValue('demo/quick');
-    await page.locator('#show-commands').click();
+    // Commands & skills live in the composer ⋯ popover at every width.
+    await page.locator('#composer-more').click();await page.locator('#show-commands').click();
     await expect(page.locator('#command-list')).toContainText('$demo-skill');
     await page.locator('#command-list button').filter({hasText:'/help'}).click();
     await expect(page.locator('#prompt')).toHaveValue('/help ');

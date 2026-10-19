@@ -138,6 +138,9 @@ async fn git(app: &App, cwd: &FsPath, args: &[&str]) -> Result<String, Error> {
 }
 struct Repository {
     top: PathBuf,
+    /// Main checkout root; new worktrees live beside each other under it even
+    /// when created from a linked worktree.
+    main_top: PathBuf,
     linked: bool,
 }
 async fn repository(app: &App, cwd: &FsPath) -> Result<Repository, Error> {
@@ -155,8 +158,15 @@ async fn repository(app: &App, cwd: &FsPath) -> Result<Repository, Error> {
         std::fs::canonicalize(common).map_err(|_| bad("Git common directory is unavailable"))?;
     allowed(app, &dir)?;
     allowed(app, &common)?;
+    let main_top = common
+        .file_name()
+        .filter(|name| *name == ".git")
+        .and(common.parent())
+        .filter(|parent| allowed(app, parent).is_ok())
+        .map_or_else(|| top.clone(), FsPath::to_path_buf);
     Ok(Repository {
         top,
+        main_top,
         linked: dir != common,
     })
 }
@@ -406,7 +416,7 @@ pub async fn prepare(
             let path = workspace
                 .and_then(|w| w.path.as_ref())
                 .map(PathBuf::from)
-                .unwrap_or_else(|| repo.top.join(".worktrees").join(&unique));
+                .unwrap_or_else(|| repo.main_top.join(".worktrees").join(&unique));
             let path = destination(app, &path)?;
             let parent = path
                 .parent()

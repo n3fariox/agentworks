@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {spawn, execFileSync} from 'node:child_process';
 import {once} from 'node:events';
 import {mkdir, mkdtemp, writeFile, readFile, access, symlink, chmod, unlink, rename} from 'node:fs/promises';
-import {resolve, join} from 'node:path';
+import {resolve, join, dirname} from 'node:path';
 import {randomUUID} from 'node:crypto';
 const port=Number(process.env.AGENTWORKS_POLICY_PORT||4351);
 assert(port>=4351&&port<=4355,'Use an isolated test port from 4351 through 4355');
@@ -68,6 +68,8 @@ try{
  const input={provider:'demo',cwd:repo,projectId:p.id,requestId:'tree-once',workspace:{mode:'newWorktree'}};
  const [first,duplicate]=await Promise.all([api('/api/sessions','POST',input),api('/api/sessions','POST',input)]);assert.equal(first.id,duplicate.id);assert.equal(first.cwd.startsWith(join(repo,'.worktrees')+'/'),true);await idle(first.id);
  assert.equal(await readFile(join(first.cwd,'tracked.txt'),'utf8'),'committed\n');await assert.rejects(access(join(first.cwd,'credentials-untracked')));assert.equal(git(first.cwd,'rev-parse','HEAD'),committed);assert(git(first.cwd,'branch','--show-current').startsWith('agentworks/'));
+ // A worktree started from a linked worktree goes beside it under the main checkout, not nested inside it.
+ const sibling=await create({cwd:first.cwd,projectId:p.id,workspace:{mode:'newWorktree'}});await idle(sibling.id);assert.equal(dirname(sibling.cwd),join(repo,'.worktrees'));await remove(sibling);
  await api('/api/sessions','POST',{...input,title:'changed'},409);
  const unique=await create({workspace:{mode:'newWorktree'}});assert.notEqual(unique.cwd,first.cwd);await remove(unique);await access(unique.cwd);
  const customPath=join(root,'custom');const custom=await create({workspace:{mode:'newWorktree',branch:'custom-policy-test',baseRef:'main',path:customPath}});await idle(custom.id);assert.equal(custom.cwd,customPath);assert.equal(git(customPath,'branch','--show-current'),'custom-policy-test');await remove(custom);

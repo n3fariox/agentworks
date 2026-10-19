@@ -9,6 +9,7 @@ import {setupDisplayPreferences} from '/display-preferences.js';
 import {setupWorkLogs,observeTool} from '/work-logs.js';
 import {setupUsageStatus} from '/usage-status.js';
 import {setupFlyout} from '/flyout.js';
+import {setupSidebarResize} from '/sidebar-resize.js';
 import {setupTimeoutControls} from '/timeout-controls.js';
 import {setupInputQueue,BUSY} from '/input-queue.js';
 const $ = id => document.getElementById(id);
@@ -29,6 +30,7 @@ let config, sessions=[], active=null, socket=null, generation=0, connected=false
 const usageStatus=setupUsageStatus({root:$('usage-status'),getProvider:()=>active?.provider,chip:$('composer-info')});
 const composerMenu=setupFlyout({menu:$('composer-menu'),triggers:[$('composer-more'),$('composer-info')]});
 const sessionMenu=setupFlyout({menu:$('session-menu'),triggers:[$('session-more')]});
+setupSidebarResize({handle:$('sidebar-resize'),layout:document.querySelector('.layout'),sidebar:$('sidebar')});
 setInterval(()=>usageStatus.render(),60000);
 let timeoutControls=null;
 let transcript=[], tools=new Map(), approvals=new Map(), assistant=null, status='starting';
@@ -225,9 +227,16 @@ function treeGroup(key,label,items,{host=false,projectId=null,level=0}={}){
 function sessionButton(s){
   const button=el('button','session-item'+(active?.id===s.id?' selected':''));button.type='button';button.dataset.sessionId=s.id;button.title=s.cwd;
   button.append(el('span','session-icon',icons[s.provider]));
-  const copy=el('span','session-copy');copy.append(el('strong','',s.title),el('small','',`${s.archived?'Archived · ':''}${s.automation?'Automation · ':''}${labels[s.provider]} · ${basename(s.cwd)}`));
+  const copy=el('span','session-copy');copy.append(el('strong','',s.title),el('small','',`${s.archived?'Archived · ':''}${s.automation?'Automation · ':''}${labels[s.provider]}${s.model?' · '+s.model:''}`));
   button.append(copy,el('span','status-dot '+s.status));button.onclick=()=>selectSession(s);
   if(active?.id===s.id)button.setAttribute('aria-current','true');return button;
+}
+// Keep the session browser's model label in step with live model changes.
+function syncModelLabel(){
+  const row=active&&sessions.find(s=>s.id===active.id),value=modelConfig?.currentValue;
+  if(!row||!value)return;
+  const model=modelConfig.options?.find(o=>o.value===value)?.name||value;
+  if(row.model!==model){row.model=model;if(!replaying)sidebar();}
 }
 function sidebar(){
   const visibleSessions=sessions.filter(s=>$('session-filter').value==='all'||!!s.archived===($('session-filter').value==='archived'));
@@ -321,7 +330,7 @@ function connect(gen){
       replaying=true;try{for(const item of e.events)if(item.kind!=='session_updated')consume(item);}finally{replaying=false;}
       Object.assign(active,e.session);setTitle(active.title);
       active.continuation=e.session.continuation;
-      approvals=new Map(e.approvals.map(a=>[a.id,a.request]));status=e.session.status;modelConfig=e.models;permissionModes=e.permissionModes;if(status==='suspended'&&!e.session.explicitlySuspended)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();inputQueue.set(e.session.inputQueue);inputQueue.observe(status,{live:false});
+      approvals=new Map(e.approvals.map(a=>[a.id,a.request]));status=e.session.status;modelConfig=e.models;syncModelLabel();permissionModes=e.permissionModes;if(status==='suspended'&&!e.session.explicitlySuspended)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();inputQueue.set(e.session.inputQueue);inputQueue.observe(status,{live:false});
       if(e.storageError){$('session-notice').textContent=e.storageError;$('session-notice').hidden=false;}
       if(e.truncated){$('session-notice').textContent='Showing recent output. The full transcript is saved on this host.';$('session-notice').hidden=false;}
     }else consume(e,true);
@@ -353,7 +362,7 @@ function consume(e,live=false){
     Object.assign(active,d);setTitle(active.title);const row=sessions.find(s=>s.id===active.id);if(row)Object.assign(row,d);sidebar();
   }
   else if(e.kind==='continuation'){renderContinuation();}
-  else if(e.kind==='models'){modelConfig=d;}
+  else if(e.kind==='models'){modelConfig=d;syncModelLabel();}
   else if(e.kind==='permission_modes'){permissionModes=d;}
   else if(e.kind==='commands'){availableCommands=Array.isArray(d)?d:[];renderCommands();}
   else if(e.kind==='user'){assistant=null;if(d.inboxDelivery)transcript.push({id:uuid(),type:'notice',text:'Automatic inbox turn authorized by you; peer messages are untrusted context.'});else if(d.initiatedBy)transcript.push({id:uuid(),type:'notice',text:'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});addMessage('user',d.text).seq=e.seq;}

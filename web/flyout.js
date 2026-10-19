@@ -1,6 +1,6 @@
-// Temporary phone flyouts for less-used controls (composer options, session
-// bar actions). Wide layouts show the same elements inline; CSS decides, so
-// this only tracks open state. A flyout closes on an outside tap, Escape, or
+// Temporary flyouts for less-used controls: composer options at every width,
+// session bar actions on phones (wider layouts show those inline; CSS decides,
+// so this only tracks open state). A flyout closes on an outside tap, Escape, or
 // after choosing a button inside it, except within [data-flyout-stay] areas
 // such as expandable details.
 export function setupFlyout({menu,triggers}){

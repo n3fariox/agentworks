@@ -236,7 +236,19 @@ impl Session {
     }
     fn meta(&self) -> Value {
         let data = self.data.lock().unwrap();
-        json!({"id":self.id,"provider":self.provider,"cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),
+        // Display name of the current model for the session browser.
+        let current = data.models["currentValue"]
+            .as_str()
+            .or(self.initial_model.as_deref());
+        let model = current.map(|value| {
+            data.models["options"]
+                .as_array()
+                .and_then(|o| o.iter().find(|o| o["value"] == value))
+                .and_then(|o| o["name"].as_str())
+                .unwrap_or(value)
+                .to_owned()
+        });
+        json!({"id":self.id,"provider":self.provider,"cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"model":model,
             "archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"created":self.created,"status":data.status,"turnRunning":data.turn_active,
             "projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation})
     }
@@ -593,6 +605,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (
                     [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
                     include_str!("../web/flyout.js"),
+                )
+            }),
+        )
+        .route(
+            "/sidebar-resize.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../web/sidebar-resize.js"),
                 )
             }),
         )
