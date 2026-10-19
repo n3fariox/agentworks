@@ -243,9 +243,9 @@ $('import-form').onsubmit=async event=>{
 };
 function projectName(id){return projects.find(p=>p.id===id)?.name||'Ungrouped';}
 function updateProjectControls(){
-  const ordered=[...projects].sort((a,b)=>a.name.localeCompare(b.name));
   for(const id of ['create-project','session-project','import-project']){
-    const select=$(id), signature=JSON.stringify(ordered), current=id==='session-project'?active?.projectId:select.value;
+    const select=$(id), current=id==='session-project'?active?.projectId:select.value;
+    const ordered=projects.filter(p=>!p.archived||p.id===current).sort((a,b)=>a.name.localeCompare(b.name)), signature=JSON.stringify(ordered);
     if(select.dataset.projects!==signature){
       select.replaceChildren();const ungrouped=el('option','','Ungrouped');ungrouped.value='';select.append(ungrouped);
       for(const project of ordered){const option=el('option','',project.name);option.value=project.id;select.append(option);}
@@ -266,11 +266,12 @@ function badges(items){
   if(!running&&!waiting&&items.length)wrap.append(el('span','group-total',String(items.length)));
   return wrap;
 }
-function treeGroup(key,label,items,{host=false,projectId=null,level=0}={}){
+function treeGroup(key,label,items,{host=false,projectId=null,level=0,archived=false}={}){
   const group=el('details','tree-group level-'+level);group.dataset.group=key;
   const stateKey=sidebarView+':'+key;group.open=!collapsedGroups.has(stateKey);
   const heading=el('summary','tree-heading');heading.append(el('span','tree-chevron','›'));
   heading.append(el('span',host?'tree-icon host':'tree-icon',host?'▤':'◇'),el('span','tree-label',label),badges(items));
+  if(archived)heading.append(el('span','group-total','Archived'));
   if(host){const dot=el('span','connection-dot');dot.title='Connected';heading.append(dot);}
   if(!host&&projectId){
     const rename=el('button','group-action','⋯');rename.type='button';rename.setAttribute('aria-label','Edit project '+label);
@@ -297,11 +298,14 @@ function syncModelLabel(){
   if(row.model!==model){row.model=model;if(!replaying)sidebar();}
 }
 function sidebar(){
-  const visibleSessions=sessions.filter(s=>$('session-filter').value==='all'||!!s.archived===($('session-filter').value==='archived'));
+  const filter=$('session-filter').value;
+  const visibleSessions=sessions.filter(s=>filter==='all'||!!s.archived===(filter==='archived'));
+  // Archived projects appear with archived sessions; active projects holding archived sessions do too.
+  const visibleProjects=projects.filter(p=>filter==='all'||(filter==='archived'?p.archived||visibleSessions.some(s=>s.projectId===p.id):!p.archived));
   $('session-count').textContent=visibleSessions.length;
   for(const view of ['hosts','projects'])$('view-'+view).setAttribute('aria-selected',String(sidebarView===view));
   const area=$('sessions'),scroll=area.scrollTop;area.replaceChildren();
-  const buckets=[...projects.map(p=>({id:p.id,name:p.name})).sort((a,b)=>a.name.localeCompare(b.name)),{id:null,name:'Ungrouped'}];
+  const buckets=[...visibleProjects.map(p=>({id:p.id,name:p.name,archived:!!p.archived})).sort((a,b)=>a.name.localeCompare(b.name)),{id:null,name:'Ungrouped'}];
   function addSessions(container,items){
     for(const session of items)container.append(sessionButton(session));
     if(!items.length)container.append(el('div','empty-group','No sessions yet'));
@@ -312,8 +316,8 @@ function sidebar(){
       const top=treeGroup('host:'+host.id,host.name,hostItems,{host:true});
       for(const project of buckets){
         const items=hostItems.filter(s=>(s.projectId||null)===project.id);
-        if(project.id===null&&!items.length&&projects.length)continue;
-        const child=treeGroup(`host:${host.id}:project:${project.id||'ungrouped'}`,project.name,items,{projectId:project.id,level:1});
+        if(project.id===null&&!items.length&&visibleProjects.length)continue;
+        const child=treeGroup(`host:${host.id}:project:${project.id||'ungrouped'}`,project.name,items,{projectId:project.id,level:1,archived:project.archived});
         addSessions(child.children,items);top.children.append(child.group);
       }
       area.append(top.group);
@@ -321,8 +325,8 @@ function sidebar(){
   }else{
     for(const project of buckets){
       const projectItems=visibleSessions.filter(s=>(s.projectId||null)===project.id);
-      if(project.id===null&&!projectItems.length&&projects.length)continue;
-      const top=treeGroup('project:'+(project.id||'ungrouped'),project.name,projectItems,{projectId:project.id});
+      if(project.id===null&&!projectItems.length&&visibleProjects.length)continue;
+      const top=treeGroup('project:'+(project.id||'ungrouped'),project.name,projectItems,{projectId:project.id,archived:project.archived});
       for(const host of hosts){
         const items=projectItems.filter(s=>s.hostId===host.id);
         const child=treeGroup(`project:${project.id||'ungrouped'}:host:${host.id}`,host.name,items,{host:true,projectId:project.id,level:1});
@@ -336,13 +340,14 @@ function sidebar(){
 async function refreshSessions(){
   const [list,catalog]=await Promise.all([api('/api/sessions?archived=all'),api('/api/catalog')]);
   sessions=list;projects=catalog.projects;hosts=catalog.hosts;
-  if(active){const current=sessions.find(s=>s.id===active.id);if(current){active.projectId=current.projectId;active.hostId=current.hostId;active.automation=current.automation;}}
+  if(active){const current=sessions.find(s=>s.id===active.id);if(current){active.projectId=current.projectId;active.hostId=current.hostId;active.automation=current.automation;active.archived=current.archived;}}
   sidebar();workspace?.sync(catalog,sessions);
 }
 function openProjectDialog(project=null){
   if(savingProject)return;
   editingProject=project?.id||null;$('project-dialog-title').textContent=project?'Edit project':'New project';
   $('project-name').value=project?.name||'';$('project-error').textContent='';$('delete-project').hidden=!project;
+  $('archive-project').hidden=!project;$('archive-project').textContent=project?.archived?'Unarchive project':'Archive project';
   policyEditor.open(editingProject);$('project-dialog').showModal();$('project-name').focus();
 }
 function resetTranscript(){transcript=[];tools=new Map();approvals=new Map();assistant=null;nodes.clear();turnEnds=new Map();workLogs?.reset();$('messages').replaceChildren();$('approval-area').replaceChildren();}
@@ -607,20 +612,54 @@ $('project-dialog').addEventListener('cancel',event=>{if(savingProject)event.pre
 $('create-project').onchange=()=>{const remembered=readStorage(localStorage,'agentworks-project-locations',{})[$('create-project').value||'ungrouped'];if(remembered)$('directory').value=remembered;worktrees.projectChanged();};
 $('project-form').onsubmit=async event=>{
   event.preventDefault();if(savingProject)return;savingProject=true;
-  for(const id of ['save-project','project-name','project-default-mode','project-require-worktree','delete-project','dismiss-project'])$(id).disabled=true;
+  for(const id of ['save-project','project-name','project-default-mode','project-require-worktree','archive-project','delete-project','dismiss-project'])$(id).disabled=true;
   $('project-error').textContent='';
   try{
     const policy=policyEditor.value();
     const project=await api(editingProject?`/api/projects/${editingProject}`:'/api/projects',{method:editingProject?'PATCH':'POST',body:JSON.stringify({name:$('project-name').value})});
-    editingProject=project.id;$('delete-project').hidden=false;
+    editingProject=project.id;$('delete-project').hidden=false;$('archive-project').hidden=false;
     try{await api(`/api/projects/${project.id}/workspace-policy`,{method:'PUT',body:JSON.stringify(policy)});}
     catch(error){throw new Error(`Project name saved. Workspace policy was not saved: ${error.message}. Retry Save project.`);}
     await refreshSessions();if($('create-dialog').open){$('create-project').value=project.id;worktrees.projectChanged();}$('project-dialog').close();
-  }catch(error){$('project-error').textContent=error.message;}finally{savingProject=false;for(const id of ['save-project','project-name','project-default-mode','project-require-worktree','delete-project','dismiss-project'])$(id).disabled=false;}
+  }catch(error){$('project-error').textContent=error.message;}finally{savingProject=false;for(const id of ['save-project','project-name','project-default-mode','project-require-worktree','archive-project','delete-project','dismiss-project'])$(id).disabled=false;}
 };
-$('delete-project').onclick=async()=>{
-  if(!editingProject||!confirm('Delete this project group? Its sessions will move to Ungrouped and keep running.'))return;
-  try{await api(`/api/projects/${editingProject}`,{method:'DELETE'});$('project-dialog').close();await refreshSessions();}catch(error){$('project-error').textContent=error.message;}
+// Archive and delete apply to the project's sessions too unless the user keeps them in Ungrouped.
+let removingProject=null;
+function openProjectRemove(action){
+  const project=projects.find(p=>p.id===editingProject);if(!project)return;
+  const count=sessions.filter(s=>s.projectId===project.id).length;
+  removingProject={id:project.id,action,count};
+  const verb=action==='delete'?'Delete':'Archive';
+  $('project-remove-title').textContent=`${verb} ${project.name}`;$('confirm-project-remove').textContent=`${verb} project`;
+  $('project-remove-ungroup').checked=false;$('project-remove-error').textContent='';describeProjectRemove();
+  $('project-remove-dialog').showModal();
+}
+function describeProjectRemove(){
+  const {action,count}=removingProject,plural=count===1?'session':'sessions',verb=action==='delete'?'Deletes':'Hides';
+  $('project-remove-description').textContent=$('project-remove-ungroup').checked
+    ?`${verb} the project. Its ${count} ${plural} move to Ungrouped and keep running.`
+    :action==='delete'?`Deletes the project and the saved history of its ${count} ${plural}, stopping any running work.`
+    :`Hides the project and archives its ${count} ${plural}. Archiving never stops running work.`;
+}
+$('project-remove-ungroup').onchange=describeProjectRemove;
+$('archive-project').onclick=async()=>{
+  const project=projects.find(p=>p.id===editingProject);if(!project)return;
+  if(!project.archived)return openProjectRemove('archive');
+  try{await api(`/api/projects/${project.id}/archive`,{method:'POST',body:JSON.stringify({archived:false})});$('project-dialog').close();await refreshSessions();}catch(error){$('project-error').textContent=error.message;}
+};
+$('delete-project').onclick=()=>openProjectRemove('delete');
+$('dismiss-project-remove').onclick=()=>$('project-remove-dialog').close();
+$('project-remove-form').onsubmit=async event=>{
+  event.preventDefault();if(!removingProject)return;
+  const {id,action}=removingProject,sessionsMode=$('project-remove-ungroup').checked?'ungroup':'cascade';
+  $('confirm-project-remove').disabled=true;
+  try{
+    if(action==='delete')await api(`/api/projects/${id}?sessions=${sessionsMode}`,{method:'DELETE'});
+    else await api(`/api/projects/${id}/archive`,{method:'POST',body:JSON.stringify({archived:true,sessions:sessionsMode})});
+    $('project-remove-dialog').close();$('project-dialog').close();removingProject=null;
+    await refreshSessions();
+    if(active&&!sessions.some(s=>s.id===active.id))closeActive();
+  }catch(error){$('project-remove-error').textContent=error.message;}finally{$('confirm-project-remove').disabled=false;}
 };
 $('session-project').onchange=async event=>{
   try{const updated=await api(`/api/sessions/${active.id}/project`,{method:'POST',body:JSON.stringify({projectId:event.target.value||null})});Object.assign(active,updated);workspace?.sessionSelected(active);await refreshSessions();}
@@ -703,8 +742,9 @@ $('close-session').onclick=async()=>{
   if(!active)return;
   if(!confirm('Permanently delete this session and its saved transcript? Its harness will stop. Worktree files and branches remain. To keep history, choose Suspend harness instead. This cannot be undone.'))return;
   const id=active.id;
-  try{await api(`/api/sessions/${id}`,{method:'DELETE'});generation++;socket?.close();clearTimeout(retryTimer);active=null;localStorage.removeItem('agentworks-session');$('conversation').hidden=true;$('welcome').hidden=false;setTitle('Overview');await refreshSessions();}catch(e){toast(e.message);}
+  try{await api(`/api/sessions/${id}`,{method:'DELETE'});closeActive();await refreshSessions();}catch(e){toast(e.message);}
 };
+function closeActive(){generation++;socket?.close();clearTimeout(retryTimer);active=null;localStorage.removeItem('agentworks-session');$('conversation').hidden=true;$('welcome').hidden=false;setTitle('Overview');}
 function applyRoots(){
   $('project-roots').replaceChildren();
   for(const root of config.roots){const option=el('option');option.value=root;$('project-roots').append(option);}

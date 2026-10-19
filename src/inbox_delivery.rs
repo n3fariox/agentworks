@@ -1414,7 +1414,13 @@ mod tests {
                     }
                     "delete" => {
                         let _ = runtime
-                            .block_on(crate::delete_project(State(app), Path(project)))
+                            .block_on(crate::delete_project(
+                                State(app),
+                                Path(project),
+                                axum::extract::Query(crate::ProjectRemoval {
+                                    sessions: crate::ProjectSessions::Ungroup,
+                                }),
+                            ))
                             .unwrap();
                     }
                     _ => {

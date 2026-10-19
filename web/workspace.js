@@ -9,7 +9,7 @@ export function createWorkspace(hooks){
   const save=()=>localStorage.setItem('agentworks-workspace',JSON.stringify({view:state.view,projectId:state.projectId,locationKey:state.locationKey,path:state.path,filePath:state.file?.path||null,automationId:state.automationId}));
   function option(select,value,label){const node=el('option','',label);node.value=value;select.append(node);}
   function options(select,items,value){const signature=JSON.stringify(items);if(select.dataset.items!==signature){select.replaceChildren();for(const [id,label]of items)option(select,id,label);select.dataset.items=signature;}select.value=value;}
-  function projectOptions(select,value){options(select,[['','Ungrouped'],...catalog.projects.map(p=>[p.id,p.name])],value||'');}
+  function projectOptions(select,value){options(select,[['','Ungrouped'],...catalog.projects.filter(p=>!p.archived||p.id===value).map(p=>[p.id,p.name])],value||'');}
   const shortPath=path=>path.replaceAll('\\','/').split('/').filter(Boolean).slice(-2).join('/')||'/';
   const currentLocation=()=>catalog.locations.find(l=>l.id===state.locationKey);
   function directory(){return currentLocation()?.path||(state.locationKey.startsWith('root:')?state.locationKey.slice(5):hooks.getConfig()?.roots[0])||'';}

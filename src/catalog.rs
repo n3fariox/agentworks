@@ -14,6 +14,8 @@ pub struct Project {
     pub workspace_policy: crate::worktrees::Policy,
     #[serde(default, rename = "locationIds")]
     pub location_ids: Vec<String>,
+    #[serde(default)]
+    pub archived: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -116,6 +118,7 @@ impl Catalog {
                 name: name.into(),
                 location_ids: Vec::new(),
                 workspace_policy: Default::default(),
+                archived: false,
             };
             data.projects.push(project.clone());
             project
@@ -137,6 +140,19 @@ impl Catalog {
             .workspace_policy = policy;
         self.save(data)
             .map_err(|_| "Could not save workspace policy".into())
+    }
+    pub fn set_archived(&mut self, id: &str, archived: bool) -> Result<Project, String> {
+        let mut data = self.data.clone();
+        let project = data
+            .projects
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or("Project not found")?;
+        project.archived = archived;
+        let project = project.clone();
+        self.save(data)
+            .map_err(|_| "Could not save project metadata")?;
+        Ok(project)
     }
     pub fn remove(&mut self, id: &str) -> Result<(), String> {
         if !self.contains(id) {
@@ -239,6 +255,7 @@ mod tests {
             first.id
         );
         catalog.project(Some(&project.id), "Renamed").unwrap();
+        catalog.set_archived(&project.id, true).unwrap();
         catalog
             .settings(Settings {
                 roots: Some(vec![PathBuf::from("/projects")]),
@@ -250,6 +267,7 @@ mod tests {
             .unwrap();
         let mut reopened = Catalog::open(path.clone()).unwrap();
         assert_eq!(reopened.data.projects[0].name, "Renamed");
+        assert!(reopened.data.projects[0].archived);
         assert_eq!(
             reopened.data.settings.default_models["codex"],
             "example-model"

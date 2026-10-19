@@ -32,7 +32,7 @@ try{
   await until(async()=>{const s=await api('/api/sessions/'+session.id);return s.session.status==='idle';});
   let runs=await api('/api/automations/'+def.id+'/runs');assert.equal(runs.length,1);assert.equal(runs[0].status,'completed');assert.equal(runs[0].sessionId,session.id);
   await api('/api/automations/'+def.id,'PUT',{...input,enabled:false});const paused=await fetch(base+'/api/automations/'+def.id+'/run',{method:'POST',headers,body:JSON.stringify({requestId:randomUUID()})});assert.equal(paused.status,409);
-  await api('/api/projects/'+project.id,'DELETE');project=null;assert.equal((await api('/api/automations')).find(d=>d.id===def.id).projectId,null);
+  await api('/api/projects/'+project.id+'?sessions=ungroup','DELETE');project=null;assert.equal((await api('/api/automations')).find(d=>d.id===def.id).projectId,null);
   await api('/api/automations/'+def.id,'DELETE');assert((await api('/api/sessions')).some(s=>s.id===session.id));
   await api('/api/sessions/'+session.id,'DELETE');created.length=0;runs=await api('/api/automations/'+def.id+'/runs');assert.equal(runs[0].status,'deleted');assert.equal(runs[0].sessionId,null);
   const repeated=await fetch(base+'/api/automations/'+def.id+'/run',{method:'POST',headers,body:JSON.stringify(request)});assert.equal(repeated.status,410);

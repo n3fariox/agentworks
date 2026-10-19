@@ -45,8 +45,12 @@ pub async fn update(
             "Use a title of 1–80 characters without control characters",
         ));
     }
-    if req.archived == Some(true) {
-        crate::inbox_delivery::cancel(&s, "Recipient archived")?;
+    apply(&s, title, req.archived)
+}
+/// Commits title/archive metadata; callers hold the run lock.
+pub fn apply(s: &Session, title: Option<String>, archived: Option<bool>) -> ApiResult {
+    if archived == Some(true) {
+        crate::inbox_delivery::cancel(s, "Recipient archived")?;
     }
     {
         let mut data = s.data.lock().unwrap();
@@ -54,7 +58,7 @@ pub async fn update(
         if let Some(title) = title {
             next.lifecycle.title = Some(title);
         }
-        if let Some(archived) = req.archived {
+        if let Some(archived) = archived {
             next.lifecycle.archived = archived;
         }
         // Commit before publishing: failed metadata changes are never acknowledged.

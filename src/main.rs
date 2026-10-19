@@ -838,6 +838,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/projects/{id}",
             axum::routing::patch(rename_project).delete(delete_project),
         )
+        .route("/api/projects/{id}/archive", post(archive_project))
         .route(
             "/api/projects/{id}/workspace-policy",
             get(worktrees::get_policy).put(worktrees::put_policy),
@@ -1401,10 +1402,53 @@ async fn rename_project(
         .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
     Ok(Json(json!(project)))
 }
-async fn delete_project(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
+/// What happens to a project's sessions when the project is archived or deleted.
+/// The default applies the same operation; `ungroup` moves them to Ungrouped instead.
+#[derive(Clone, Copy, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ProjectSessions {
+    #[default]
+    Cascade,
+    Ungroup,
+}
+#[derive(Default, Deserialize)]
+struct ProjectRemoval {
+    #[serde(default)]
+    sessions: ProjectSessions,
+}
+fn project_sessions(app: &App, id: &str) -> Vec<Arc<Session>> {
+    app.sessions
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|s| s.data.lock().unwrap().project_id.as_deref() == Some(id))
+        .cloned()
+        .collect()
+}
+/// Callers hold the communication and run locks.
+fn ungroup_sessions(
+    app: &App,
+    sessions: &[Arc<Session>],
+    reason: &str,
+) -> Result<(), (StatusCode, String)> {
+    for s in sessions {
+        s.data.lock().unwrap().project_id = None;
+        inbox_delivery::revoke_related(app, s, reason)?;
+        s.emit("session_updated", json!({"projectId":null}));
+    }
+    Ok(())
+}
+async fn delete_project(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Query(req): Query<ProjectRemoval>,
+) -> ApiResult {
     let _gate = app.communication_lock.lock().await;
     let _run = app.run_lock.lock().await;
     let _workspace = app.workspace_lock.lock().await;
+    if !app.catalog.lock().unwrap().contains(&id) {
+        return Err(fail(StatusCode::BAD_REQUEST, "Project not found"));
+    }
     app.store
         .lock()
         .unwrap()
@@ -1415,28 +1459,56 @@ async fn delete_project(State(app): State<App>, Path(id): Path<String>) -> ApiRe
                 "Could not update automation projects",
             )
         })?;
+    let affected = project_sessions(&app, &id);
+    if req.sessions == ProjectSessions::Cascade {
+        // Delete sessions before the project so a failure leaves a retryable project.
+        for s in &affected {
+            delete_session_locked(&app, s).await?;
+        }
+    }
     app.catalog
         .lock()
         .unwrap()
         .remove(&id)
         .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
-    let affected: Vec<_> = app.sessions.lock().unwrap().values().cloned().collect();
-    for s in &affected {
-        let moved = {
-            let mut data = s.data.lock().unwrap();
-            if data.project_id.as_deref() == Some(&id) {
-                data.project_id = None;
-                true
-            } else {
-                false
-            }
-        };
-        if moved {
-            inbox_delivery::revoke_related(&app, s, "Project deleted")?;
-            s.emit("session_updated", json!({"projectId":null}));
-        }
+    if req.sessions == ProjectSessions::Ungroup {
+        ungroup_sessions(&app, &affected, "Project deleted")?;
     }
     Ok(Json(json!({"ok":true})))
+}
+#[derive(Deserialize)]
+struct ProjectArchive {
+    archived: bool,
+    #[serde(default)]
+    sessions: ProjectSessions,
+}
+/// Archiving cascades to sessions (or ungroups them); unarchiving restores the
+/// project and the sessions still inside it. Archiving never stops work.
+async fn archive_project(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(req): Json<ProjectArchive>,
+) -> ApiResult {
+    let _gate = app.communication_lock.lock().await;
+    let _run = app.run_lock.lock().await;
+    if !app.catalog.lock().unwrap().contains(&id) {
+        return Err(fail(StatusCode::BAD_REQUEST, "Project not found"));
+    }
+    let affected = project_sessions(&app, &id);
+    if req.archived && req.sessions == ProjectSessions::Ungroup {
+        ungroup_sessions(&app, &affected, "Project archived")?;
+    } else {
+        for s in &affected {
+            let _ = lifecycle::apply(s, None, Some(req.archived))?;
+        }
+    }
+    let project = app
+        .catalog
+        .lock()
+        .unwrap()
+        .set_archived(&id, req.archived)
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(json!(project)))
 }
 #[derive(Deserialize)]
 struct ProjectChoice {
@@ -2207,17 +2279,22 @@ async fn delete_session(State(app): State<App>, Path(id): Path<String>) -> ApiRe
     let _gate = app.communication_lock.lock().await;
     let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
-    inbox_delivery::revoke_related(&app, &s, "Session deleted")?;
-    let _ = lifecycle::suspend_locked(&s).await?;
-    app.store.lock().unwrap().delete(&id).map_err(|_| {
+    delete_session_locked(&app, &s).await?;
+    Ok(Json(json!({"ok":true})))
+}
+/// Callers hold the communication and run locks.
+async fn delete_session_locked(app: &App, s: &Session) -> Result<(), (StatusCode, String)> {
+    inbox_delivery::revoke_related(app, s, "Session deleted")?;
+    let _ = lifecycle::suspend_locked(s).await?;
+    app.store.lock().unwrap().delete(&s.id).map_err(|_| {
         fail(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Could not delete saved session",
         )
     })?;
-    app.sessions.lock().unwrap().remove(&id);
+    app.sessions.lock().unwrap().remove(&s.id);
     s.status("closed");
-    Ok(Json(json!({"ok":true})))
+    Ok(())
 }
 #[derive(Deserialize)]
 struct Decision {

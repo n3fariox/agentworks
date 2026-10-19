@@ -19,7 +19,7 @@ try{
   assert.equal(moved.locationId,s.locationId);assert.equal(moved.cwd,s.cwd);assert.equal(moved.projectId,second.id);
   const afterMove=await api(path);assert.equal(afterMove.session.status,'waiting');assert.equal(afterMove.approvals[0].id,waiting.approvals[0].id);
   await api('/api/projects/'+second.id,'PATCH',{name:'Smoke renamed '+randomUUID()});
-  await api('/api/projects/'+second.id,'DELETE');
+  await api('/api/projects/'+second.id+'?sessions=ungroup','DELETE');
   const afterDelete=await api(path);assert.equal(afterDelete.session.projectId,null);assert.equal(afterDelete.approvals.length,1);
   await api(path+'/approvals/'+waiting.approvals[0].id,'POST',{optionId:'deny'});
   await until(async()=>{const snap=await api(path);return snap.session.status==='idle';});
