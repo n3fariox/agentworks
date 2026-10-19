@@ -148,7 +148,7 @@ pub fn get(app: &App, s: &Session, req: Query) -> mail::Result<Value> {
             "Completion report access is not granted",
         ));
     }
-    let id = req.session_id.as_deref().unwrap_or(&s.id);
+    let id = mail::session_ref(req.session_id.as_deref().unwrap_or(&s.id));
     let scope = if id == s.id {
         None
     } else {

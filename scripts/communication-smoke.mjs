@@ -22,16 +22,20 @@ try{
  const a=await create('Sender'),b=await create('Recipient'),c=await create('Outside',other.id);await Promise.all([idle(a.id),idle(b.id),idle(c.id)]);
  assert.deepEqual((await call(a.id,'tools/list')).tools,[]);denied(await call(a.id,'read_inbox'));
  await enable(a.id);await enable(b.id);await enable(c.id);
- const peers=value(await call(a.id,'list_sessions'));assert.deepEqual(peers.sessions.map(s=>s.id),[b.id]);
+ const peers=value(await call(a.id,'list_sessions'));assert.deepEqual(peers.sessions.map(s=>s.id),[b.id]);assert.equal(peers.sessions[0].uri,'agentworks://sessions/'+b.id);assert.equal(peers.selfUri,'agentworks://sessions/'+a.id);
  denied(await call(a.id,'send_message',{sender:c.id,recipient:b.id,text:'Forged sender',requestId:'spoof'}),400);
  const sent=value(await call(a.id,'send_message',{recipient:b.id,text:'Durable peer message',requestId:'first'}));
  const duplicate=value(await call(a.id,'send_message',{recipient:b.id,text:'Durable peer message',requestId:'first'}));assert.equal(duplicate.id,sent.id);assert(duplicate.duplicate);
  denied(await call(a.id,'send_message',{recipient:b.id,text:'Changed payload',requestId:'first'}),409);
+ // agentworks://sessions/<id> URIs are equivalent to bare IDs, including for retry deduplication and project scoping.
+ assert.equal(value(await call(a.id,'send_message',{recipient:'agentworks://sessions/'+b.id,text:'Durable peer message',requestId:'first'})).id,sent.id);
+ denied(await call(a.id,'send_message',{recipient:'agentworks://sessions/'+c.id,text:'No crossing projects',requestId:'outside-uri'}));
  denied(await call(a.id,'send_message',{recipient:c.id,text:'No crossing projects',requestId:'outside'}));
  let inbox=value(await call(b.id,'read_inbox'));assert.equal(inbox.messages.length,1);assert.equal(inbox.messages[0].sender,a.id);
  denied(await call(c.id,'acknowledge_message',{messageId:sent.id}),404);
- value(await call(b.id,'acknowledge_message',{messageId:sent.id}));
- value(await call(b.id,'send_message',{recipient:a.id,text:'Received',requestId:'reply',replyTo:sent.id}));
+ assert.equal(sent.uri,'agentworks://messages/'+sent.id);assert.equal(inbox.messages[0].uri,sent.uri);assert.equal(inbox.messages[0].senderUri,'agentworks://sessions/'+a.id);
+ value(await call(b.id,'acknowledge_message',{messageId:sent.uri}));
+ value(await call(b.id,'send_message',{recipient:a.id,text:'Received',requestId:'reply',replyTo:sent.uri}));denied(await call(b.id,'send_message',{recipient:a.id,text:'Bad ref',requestId:'reply-bad',replyTo:'agentworks://messages/x'}),400);
  denied(await call(a.id,'start_session',{provider:'demo',cwd:roots[0],requestId:'ungranted'}));
  denied(await call(a.id,'prompt_session',{sessionId:b.id,text:'Unwanted work',requestId:'ungranted'}));
  denied(await call(a.id,'cancel_session',{sessionId:b.id}));

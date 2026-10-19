@@ -117,18 +117,18 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
 fn tools(a: &mail::Access) -> Value {
     let mut tools = Vec::new();
     if a.enabled() {
-        tools.push(tool("list_sessions","List participating peers and their status in this project. Coordinators also see project sessions without messaging access.",json!({}),&[]));
+        tools.push(tool("list_sessions","List participating peers and their status in this project. Each has an id and an agentworks://sessions/<id> uri; tools accept either. Coordinators also see project sessions without messaging access.",json!({}),&[]));
     }
     if a.communicate {
-        tools.push(tool("read_inbox","Read received and sent messages after a cursor. Reading does not acknowledge or run a turn.",json!({"after":{"type":"integer","minimum":0}}),&[]));
-        tools.push(tool("send_message","Persist a message to a participating project peer. Does not wake or interrupt it. Reuse requestId only for the same message.",json!({"recipient":{"type":"string"},"text":{"type":"string","maxLength":16384},"requestId":{"type":"string","maxLength":100},"replyTo":{"type":"integer"}}),&["recipient","text","requestId"]));
-        tools.push(tool("acknowledge_message","Acknowledge receipt of a message in your own inbox; does not indicate task completion.",json!({"messageId":{"type":"integer"}}),&["messageId"]));
+        tools.push(tool("read_inbox","Read received and sent messages after a cursor. Messages and sessions carry agentworks:// uris that tools accept verbatim. Reading does not acknowledge or run a turn.",json!({"after":{"type":"integer","minimum":0}}),&[]));
+        tools.push(tool("send_message","Persist a message to a participating project peer. Does not wake or interrupt it. Reuse requestId only for the same message.",json!({"recipient":{"type":"string","description":"Session ID or agentworks://sessions/<id> URI, passed exactly as given in list_sessions or a prompt."},"text":{"type":"string","maxLength":16384},"requestId":{"type":"string","maxLength":100},"replyTo":{"type":"string","description":"Message number or agentworks://messages/<n> URI, passed exactly as given in read_inbox or a prompt."}}),&["recipient","text","requestId"]));
+        tools.push(tool("acknowledge_message","Acknowledge receipt of a message in your own inbox; does not indicate task completion.",json!({"messageId":{"type":"string","description":"Message number or agentworks://messages/<n> URI, passed exactly as given in read_inbox or a prompt."}}),&["messageId"]));
     }
     if a.communicate {
         tools.push(tool("report_completion", "Persist your own completion claim. Does not review, merge, test, or change turn status. Reuse requestId only for identical payloads.", json!({"status":{"type":"string","enum":["completed","blocked"]},"summary":{"type":"string","maxLength":4096},"branch":{"type":"string","maxLength":256},"commit":{"type":"string","pattern":"^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"},"checks":{"type":"array","maxItems":32,"items":{"type":"object","properties":{"name":{"type":"string","maxLength":256},"result":{"type":"string","maxLength":2048}},"required":["name","result"],"additionalProperties":false}},"requestId":{"type":"string","maxLength":100}}), &["status","summary","requestId"]));
     }
     if a.communicate || mail::coordinator(a) {
-        tools.push(tool("get_completion", "Read the latest agent claim for yourself or a permitted same-project session. Claims are not proof of review or success.", json!({"sessionId":{"type":"string"}}), &[]));
+        tools.push(tool("get_completion", "Read the latest agent claim for yourself or a permitted same-project session. Claims are not proof of review or success.", json!({"sessionId":{"type":"string","description":"Session ID or agentworks://sessions/<id> URI, passed exactly as given in list_sessions or a prompt."}}), &[]));
     }
     if a.restart_service {
         tools.push(tool("get_service_status", "Read global service activity and durable restart/handoff outcomes. Requires live restartService grant.",json!({}), &[]));
@@ -144,13 +144,13 @@ fn tools(a: &mail::Access) -> Value {
         tools.push(tool("start_session","Start an unprivileged session in this project. Does not submit a prompt. Reuse requestId on retry.",json!({"provider":{"type":"string","enum":["demo","claude","codex","opencode"]},"cwd":{"type":"string"},"inheritResumePolicy":{"type":"boolean","default":false},"title":{"type":"string"},"model":{"type":"string"},"requestId":{"type":"string","maxLength":50},"workspace":{"type":"object","properties":{"mode":{"type":"string","enum":["directory","newWorktree","existingWorktree"]},"branch":{"type":"string"},"baseRef":{"type":"string"},"path":{"type":"string"}},"required":["mode"],"additionalProperties":false}}),&["provider","cwd","requestId"]));
     }
     if a.prompt_sessions {
-        tools.push(tool("prompt_session","Submit a new turn to an idle session in this project; starts model work. Reuse requestId on retry.",json!({"sessionId":{"type":"string"},"text":{"type":"string"},"requestId":{"type":"string","maxLength":50}}),&["sessionId","text","requestId"]));
+        tools.push(tool("prompt_session","Submit a new turn to an idle session in this project; starts model work. Reuse requestId on retry.",json!({"sessionId":{"type":"string","description":"Session ID or agentworks://sessions/<id> URI, passed exactly as given in list_sessions or a prompt."},"text":{"type":"string"},"requestId":{"type":"string","maxLength":50}}),&["sessionId","text","requestId"]));
     }
     if a.cancel_sessions {
         tools.push(tool(
             "cancel_session",
             "Request cancellation of a running turn in this project.",
-            json!({"sessionId":{"type":"string"}}),
+            json!({"sessionId":{"type":"string","description":"Session ID or agentworks://sessions/<id> URI, passed exactly as given in list_sessions or a prompt."}}),
             &["sessionId"],
         ));
     }
@@ -234,8 +234,7 @@ async fn dispatch(app: &App, s: &Session, operation: &str, args: Value) -> mail:
         }
         "acknowledge_message" => {
             mail::require(app, s, "communicate")?;
-            let id = args["messageId"]
-                .as_i64()
+            let id = mail::message_ref(&args["messageId"])
                 .ok_or_else(|| crate::fail(StatusCode::BAD_REQUEST, "Missing messageId"))?;
             mail::acknowledge(app, s, id)
         }

@@ -25,6 +25,7 @@
     "test:diff": "playwright test tests/diff.spec.mjs",
     "test:fork-ui": "playwright test tests/fork.spec.mjs",
     "test:palettes": "playwright test tests/palettes.spec.mjs",
+    "test:mentions": "playwright test tests/mentions.spec.mjs",
     "test:display": "playwright test tests/display-preferences.spec.mjs",
     "test:notifications": "playwright test tests/notifications.spec.mjs",
     "test:service-restart": "node scripts/service-restart-smoke.mjs",

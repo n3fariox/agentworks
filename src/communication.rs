@@ -56,7 +56,17 @@ pub struct SendMessage {
     pub recipient: String,
     pub text: String,
     pub request_id: String,
+    #[serde(default, deserialize_with = "reply_ref")]
     pub reply_to: Option<i64>,
+}
+fn reply_ref<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<i64>, D::Error> {
+    let v = Value::deserialize(d)?;
+    if v.is_null() {
+        return Ok(None);
+    }
+    message_ref(&v)
+        .map(Some)
+        .ok_or_else(|| serde::de::Error::custom("invalid replyTo"))
 }
 fn db_error(_: impl std::fmt::Display) -> (StatusCode, String) {
     fail(
@@ -96,7 +106,7 @@ impl crate::store::Store {
             return Err(fail(StatusCode::BAD_REQUEST, "Invalid message cursor"));
         }
         let mut q=self.connection.prepare("SELECT id,sender,sender_title,recipient,recipient_title,text,reply_to,created,acknowledged FROM agent_messages WHERE (sender=?1 OR recipient=?1) AND id>?2 ORDER BY id LIMIT 21").map_err(db_error)?;
-        let mut messages=q.query_map(params![id,after],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"sender":r.get::<_,String>(1)?,"senderTitle":r.get::<_,String>(2)?,"recipient":r.get::<_,String>(3)?,"recipientTitle":r.get::<_,String>(4)?,"text":r.get::<_,String>(5)?,"replyTo":r.get::<_,Option<i64>>(6)?,"created":r.get::<_,i64>(7)?,"acknowledged":r.get::<_,bool>(8)?}))).map_err(db_error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?;
+        let mut messages=q.query_map(params![id,after],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"uri":format!("{MESSAGE_URI}{}",r.get::<_,i64>(0)?),"sender":r.get::<_,String>(1)?,"senderUri":session_uri(&r.get::<_,String>(1)?),"senderTitle":r.get::<_,String>(2)?,"recipient":r.get::<_,String>(3)?,"recipientUri":session_uri(&r.get::<_,String>(3)?),"recipientTitle":r.get::<_,String>(4)?,"text":r.get::<_,String>(5)?,"replyTo":r.get::<_,Option<i64>>(6)?,"replyToUri":r.get::<_,Option<i64>>(6)?.map(|n|format!("{MESSAGE_URI}{n}")),"created":r.get::<_,i64>(7)?,"acknowledged":r.get::<_,bool>(8)?}))).map_err(db_error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?;
         let has_more = messages.len() > 20;
         messages.truncate(20);
         Ok(
@@ -127,8 +137,23 @@ pub fn access(app: &App, s: &Session) -> Result<Access> {
 pub fn project(s: &Session) -> Option<String> {
     s.data.lock().unwrap().project_id.clone()
 }
+/// Stable reference agents can copy verbatim into tool calls.
+pub const SESSION_URI: &str = "agentworks://sessions/";
+pub fn session_uri(id: &str) -> String {
+    format!("{SESSION_URI}{id}")
+}
+/// Accepts a bare session ID or an `agentworks://sessions/<id>` URI.
+pub fn session_ref(id: &str) -> &str {
+    id.strip_prefix(SESSION_URI).unwrap_or(id)
+}
+pub const MESSAGE_URI: &str = "agentworks://messages/";
+/// Accepts a message number or an `agentworks://messages/<n>` URI.
+pub fn message_ref(v: &Value) -> Option<i64> {
+    v.as_i64()
+        .or_else(|| v.as_str()?.strip_prefix(MESSAGE_URI)?.parse().ok())
+}
 pub fn peer(app: &App, actor: &Session, id: &str) -> Result<Arc<Session>> {
-    let target = session(app, id)?;
+    let target = session(app, session_ref(id))?;
     let scope = project(actor);
     if scope.is_none() || scope != project(&target) {
         return Err(fail(
@@ -177,11 +202,11 @@ pub fn peers(app: &App, s: &Session) -> Result<Value> {
             if p.id != s.id && project(&p) == scope && (coordinator || access(app, &p)?.communicate)
             {
                 let d = p.data.lock().unwrap();
-                values.push(json!({"id":p.id,"title":d.lifecycle.title.as_deref().unwrap_or(&p.title),"archived":d.lifecycle.archived,"provider":p.provider,"status":d.status,"hostId":p.host_id}));
+                values.push(json!({"id":p.id,"uri":session_uri(&p.id),"title":d.lifecycle.title.as_deref().unwrap_or(&p.title),"archived":d.lifecycle.archived,"provider":p.provider,"status":d.status,"hostId":p.host_id}));
             }
         }
     }
-    Ok(json!({"self":s.id,"projectId":scope,"sessions":values}))
+    Ok(json!({"self":s.id,"selfUri":session_uri(&s.id),"projectId":scope,"sessions":values}))
 }
 pub fn send(app: &App, s: &Session, req: SendMessage) -> Result<Value> {
     require(app, s, "communicate")?;
@@ -206,13 +231,13 @@ pub fn send(app: &App, s: &Session, req: SendMessage) -> Result<Value> {
     let tx = store.connection.transaction().map_err(db_error)?;
     let previous:Option<(i64,String,String,Option<i64>)>=tx.query_row("SELECT id,recipient,text,reply_to FROM agent_messages WHERE sender=?1 AND request_id=?2",params![s.id,req.request_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(db_error)?;
     if let Some((id, recipient, text, reply)) = previous {
-        if recipient != req.recipient || text != req.text || reply != req.reply_to {
+        if recipient != target.id || text != req.text || reply != req.reply_to {
             return Err(fail(
                 StatusCode::CONFLICT,
                 "Request ID already used for a different message",
             ));
         }
-        return Ok(json!({"id":id,"duplicate":true}));
+        return Ok(json!({"id":id,"uri":format!("{MESSAGE_URI}{id}"),"duplicate":true}));
     }
     if let Some(reply) = req.reply_to {
         let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM agent_messages WHERE id=?1 AND ((sender=?2 AND recipient=?3) OR (sender=?3 AND recipient=?2)))",params![reply,s.id,target.id],|r|r.get(0)).map_err(db_error)?;
@@ -257,7 +282,7 @@ pub fn send(app: &App, s: &Session, req: SendMessage) -> Result<Value> {
     drop(store);
     s.emit("mailbox_updated", json!({"messageId":id}));
     target.emit("mailbox_updated", json!({"messageId":id}));
-    Ok(json!({"id":id,"duplicate":false}))
+    Ok(json!({"id":id,"uri":format!("{MESSAGE_URI}{id}"),"duplicate":false}))
 }
 pub fn acknowledge(app: &App, s: &Session, id: i64) -> Result<Value> {
     let count = app
