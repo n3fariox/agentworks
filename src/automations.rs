@@ -295,6 +295,7 @@ pub async fn run(
             automation: Some(origin),
             queued_prompt: Some(def.prompt),
             control_origin: None,
+            fork: None,
         }),
     )
     .await?;

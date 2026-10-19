@@ -2,7 +2,7 @@
 export function setupWorktreeControls({$,api,onChange}) {
   const defaults={defaultMode:'directory',requireWorktree:false};
   const names={directory:'Use project directory',newWorktree:'Create new worktree',existingWorktree:'Use existing worktree'};
-  let policy={...defaults},policyGeneration=0,listGeneration=0,ready=true,loading=false;
+  let policy={...defaults},policyGeneration=0,listGeneration=0,ready=true,loading=false,policyLoad=Promise.resolve();
   function render(){
     const mode=$('workspace-mode').value;
     document.querySelector('label[for=directory]').textContent=mode==='directory'?'Working directory':'Source directory';
@@ -17,7 +17,9 @@ export function setupWorktreeControls({$,api,onChange}) {
     $('existing-worktree').replaceChildren(new Option('Discover and select a linked worktree',''));
     $('worktree-discovery-note').textContent='Main, locked and prunable worktrees cannot be selected.';
   }
-  async function projectChanged(){
+  // `preferred` lets a caller suggest a mode (forking suggests its own worktree).
+  // Project policy still wins: a required worktree is never downgraded to a directory.
+  async function loadPolicy(preferred){
     const gen=++policyGeneration,id=$('create-project').value;
     ready=false;policy={...defaults};$('workspace-mode').value='directory';
     $('worktree-branch').value='';$('worktree-base').value='';clearList();
@@ -25,10 +27,12 @@ export function setupWorktreeControls({$,api,onChange}) {
     try{
       const result=id?await api(`/api/projects/${encodeURIComponent(id)}/workspace-policy`):defaults;
       if(gen!==policyGeneration)return;
-      policy=result;ready=true;$('workspace-mode').value=policy.defaultMode;
+      policy=result;ready=true;
+      $('workspace-mode').value=preferred&&names[preferred]&&!(policy.requireWorktree&&preferred==='directory')?preferred:policy.defaultMode;
       $('workspace-policy-note').textContent=`Project default: ${names[policy.defaultMode]}${policy.requireWorktree?' · Isolated worktree required':''}`;render();
     }catch(error){if(gen===policyGeneration){$('workspace-policy-note').textContent=`Cannot load workspace policy: ${error.message}`;render();}}
   }
+  function projectChanged(preferred=null){policyLoad=loadPolicy(preferred);return policyLoad;}
   $('workspace-mode').onchange=render;
   $('directory').addEventListener('input',()=>{clearList();render();});
   $('existing-worktree').onchange=render;
@@ -49,6 +53,9 @@ export function setupWorktreeControls({$,api,onChange}) {
   };
   return {
     projectChanged,
+    // Resolves once the current project policy has settled, so a caller that fills
+    // in fields afterwards cannot race the mode it suggested.
+    settled:()=>policyLoad,
     blocked:()=>!ready||loading||($('workspace-mode').value==='existingWorktree'&&!$('existing-worktree').value),
     submission(){
       if(this.blocked())throw new Error('Load the project policy and select an eligible workspace first.');

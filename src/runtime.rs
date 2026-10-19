@@ -2,11 +2,11 @@ use crate::{Approval, Session, adapter_path, opencode_path, use_api_key};
 use agent_client_protocol::schema::{
     ProtocolVersion,
     v1::{
-        AuthenticateRequest, CancelNotification, ContentBlock, InitializeRequest,
-        ListSessionsRequest, LoadSessionRequest, NewSessionRequest, PromptRequest,
-        RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-        ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigOptionValue,
-        SessionNotification, SetSessionConfigOptionRequest, TextContent,
+        AuthenticateRequest, CancelNotification, ContentBlock, ForkSessionRequest,
+        InitializeRequest, ListSessionsRequest, LoadSessionRequest, NewSessionRequest,
+        PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
+        RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome,
+        SessionConfigOptionValue, SessionNotification, SetSessionConfigOptionRequest, TextContent,
     },
 };
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo};
@@ -237,6 +237,71 @@ async fn open_session(
     let init = initialize(connection, &s.provider).await?;
     let saved = s.data.lock().unwrap().provider_session_id.clone();
     let Some(id) = saved else {
+        let lineage = s.data.lock().unwrap().lineage.clone();
+        if lineage.native_attempted {
+            return Err(agent_client_protocol::Error::internal_error().data("Native fork outcome is uncertain. Inspect provider history; automatic retry is disabled."));
+        }
+        if lineage.context == "auto"
+            && lineage.source_message_id.is_some()
+            && lineage.source_session_id.is_some()
+            && init["agentCapabilities"]["sessionCapabilities"]["fork"].is_object()
+        {
+            {
+                let mut data = s.data.lock().unwrap();
+                data.lineage.native_attempted = true;
+                s.store
+                    .lock()
+                    .unwrap()
+                    .save_state(&s.id, &data)
+                    .map_err(|_| {
+                        agent_client_protocol::Error::internal_error()
+                            .data("Could not persist native fork intent")
+                    })?;
+            }
+            let meta = json!({"jetbrains":{"air":{"fork":{"version":1,"messageId":lineage.source_message_id}}}});
+            let response = connection
+                .send_request(
+                    ForkSessionRequest::new(lineage.source_session_id.unwrap(), s.cwd.clone())
+                        .mcp_servers(crate::mcp::configuration(s))
+                        .meta(meta.as_object().unwrap().clone()),
+                )
+                .block_task()
+                .await?;
+            if Some(response.session_id.to_string())
+                == s.data.lock().unwrap().lineage.source_session_id
+            {
+                return Err(agent_client_protocol::Error::internal_error()
+                    .data("Harness returned the parent session as its fork; refusing to use it"));
+            }
+            {
+                let mut data = s.data.lock().unwrap();
+                data.provider_session_id = Some(response.session_id.to_string());
+                data.lineage.native_used = true;
+                data.carried_context = Some(format!(
+                    "Native fork at recorded parent boundary {}. Original transcript directory: {}. Current directory: {}. Relative references in inherited history mean the original directory; verify files before retargeting them.",
+                    lineage.boundary_seq,
+                    lineage.parent_cwd.unwrap_or_default(),
+                    s.cwd.display()
+                ));
+                s.store
+                    .lock()
+                    .unwrap()
+                    .save_state(&s.id, &data)
+                    .map_err(|_| {
+                        agent_client_protocol::Error::internal_error()
+                            .data("Could not persist native fork result; inspect provider history")
+                    })?;
+            }
+            s.emit(
+                "fork_mode",
+                json!({"mode":"native","boundarySeq":lineage.boundary_seq}),
+            );
+            return Ok(serde_json::to_value(response).unwrap_or(Value::Null));
+        }
+        if lineage.parent_id.is_some() {
+            s.emit("fork_mode", json!({"mode":"fresh","context":lineage.context,"truncated":lineage.truncated,
+                "detail":"Fresh provider session; recorded context is sent with the first prompt. Hidden provider state is not equivalent."}));
+        }
         if !s.data.lock().unwrap().requests.is_empty() {
             return Err(agent_client_protocol::Error::internal_error().data("Saved conversation has no harness session ID; its history is available but it cannot be resumed safely."));
         }
@@ -544,7 +609,24 @@ pub async fn run(
                             if !crate::inbox_delivery::begin(&s,owner,&provider_id.to_string()) {continue;}
                         }else{s.data.lock().unwrap().inbox_turn=None;}
 
-                        let request=connection.send_request(PromptRequest::new(provider_id.clone(),vec![ContentBlock::Text(TextContent::new(text))])).block_task();
+                        // L-08: a forked session hands its carried transcript to the
+                        // harness with this first prompt, as a separate block so the
+                        // user's own message stays exactly as they typed it.
+                        let carried=s.data.lock().unwrap().carried_context.take();
+                        let handoff=carried.is_some();
+                        let mut blocks=Vec::with_capacity(2);
+                        if let Some(carried)=carried {
+                            blocks.push(ContentBlock::Text(TextContent::new(carried)));
+                        }
+                        blocks.push(ContentBlock::Text(TextContent::new(text)));
+                        // Persist the claim before dispatch. Ambiguous delivery is never replayed.
+                        if handoff {
+                            s.emit("carried_context",json!({"phase":"claimed","detail":"Context dispatch claimed; interrupted or failed delivery requires inspection."}));
+                            if s.data.lock().unwrap().storage_error.is_some() {
+                                return Err(agent_client_protocol::Error::internal_error().data("Could not persist context dispatch"));
+                            }
+                        }
+                        let request=connection.send_request(PromptRequest::new(provider_id.clone(),blocks)).block_task();
                         tokio::pin!(request);
                         // Policy is fixed at launch; later edits apply to later turns.
                         let mut clock=crate::timeouts::Clock::new(crate::timeouts::effective(s.data.lock().unwrap().timeouts.clone()),crate::timeouts::now_ms());
@@ -698,5 +780,117 @@ mod tests {
         let claude = agent_config("claude", true, false);
         assert!(codex.environment()["CODEX_HOME"].ends_with(".agentworks/codex"));
         assert!(claude.environment()["CLAUDE_CONFIG_DIR"].ends_with(".agentworks/claude"));
+    }
+}
+
+#[cfg(test)]
+mod fork_tests {
+    use super::*;
+    use std::{collections::HashMap, sync::Mutex};
+
+    // Real ACP wire fixture: no provider binary, credentials or model calls.
+    #[tokio::test]
+    async fn native_fork_is_anchored_and_uncertain_creation_is_never_repeated() {
+        for reject in [false, true] {
+            let dir =
+                std::env::temp_dir().join(format!("agentworks-native-fork-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let store = Arc::new(Mutex::new(
+                crate::store::Store::open(&dir.join("sessions.sqlite3")).unwrap(),
+            ));
+            let mut data: crate::SessionData = serde_json::from_value(json!({
+                "status":"starting","seq":0,"requests":[],"models":null,"available_commands":[],"turn_active":false,
+                "lineage":{"parentId":"parent","parentProvider":"codex","parentCwd":"/old","context":"auto",
+                    "sourceSessionId":"source-native","sourceMessageId":"answer-1","boundarySeq":42}
+            })).unwrap();
+            data.carried_context = Some("recorded transcript".into());
+            let (tx, _) = tokio::sync::broadcast::channel(16);
+            let session = Arc::new(Session {
+                id: Uuid::new_v4().to_string(),
+                provider: "codex".into(),
+                cwd: dir.clone(),
+                title: "Child".into(),
+                initial_model: None,
+                created: 1,
+                host_id: "local".into(),
+                location_id: "local".into(),
+                data: Mutex::new(data),
+                tx,
+                commands: Mutex::new(None),
+                store: store.clone(),
+                approvals: Mutex::new(HashMap::new()),
+                worker: Mutex::new(None),
+                mcp_endpoint: "127.0.0.1:1".parse().unwrap(),
+                mcp_token: Mutex::new("child-token".into()),
+                mcp_refresh_pending: AtomicBool::new(false),
+            });
+            store
+                .lock()
+                .unwrap()
+                .insert(
+                    &session.metadata(),
+                    &session.data.lock().unwrap(),
+                    None,
+                    None,
+                )
+                .unwrap();
+            let script = r#"
+import sys,json
+for line in sys.stdin:
+ r=json.loads(line); m=r.get('method'); p=r.get('params',{})
+ if m=='initialize': out={'protocolVersion':1,'agentCapabilities':{'sessionCapabilities':{'fork':{},'resume':{}}},'authMethods':[]}
+ elif m=='session/fork':
+  assert p['sessionId']=='source-native'
+  assert p['_meta']['jetbrains']['air']['fork']['messageId']=='answer-1'
+  assert p['mcpServers'][0]['env'][1]['value']=='child-token'
+  if sys.argv[1]=='reject':
+   print(json.dumps({'jsonrpc':'2.0','id':r['id'],'error':{'code':-32603,'message':'ambiguous fork failure'}}),flush=True);continue
+  out={'sessionId':'child-native'}
+ elif m=='session/resume':
+  assert p['sessionId']=='child-native';out={}
+ else: raise Exception('Unexpected method '+str(m))
+ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':out}),flush=True)
+"#;
+            let agent = AcpAgent::new(
+                AcpAgentConfig::new("python3")
+                    .arg("-c")
+                    .arg(script)
+                    .arg(if reject { "reject" } else { "success" }),
+            );
+            let s = session.clone();
+            Client
+                .builder()
+                .connect_with(agent, move |connection: ConnectionTo<Agent>| async move {
+                    let first = open_session(&connection, &s).await;
+                    assert_eq!(first.is_err(), reject);
+                    assert!(s.data.lock().unwrap().lineage.native_attempted);
+                    if reject {
+                        let error = open_session(&connection, &s).await.unwrap_err();
+                        assert!(error.to_string().contains("uncertain"));
+                        assert_eq!(
+                            s.data.lock().unwrap().carried_context.as_deref(),
+                            Some("recorded transcript")
+                        );
+                    } else {
+                        assert_eq!(first.unwrap()["sessionId"], "child-native");
+                        assert!(s.data.lock().unwrap().lineage.native_used);
+                        assert_eq!(
+                            s.data.lock().unwrap().provider_session_id.as_deref(),
+                            Some("child-native")
+                        );
+                        // A reconnect resumes the durable child, without creating another fork.
+                        open_session(&connection, &s).await.unwrap();
+                    }
+                    Ok::<_, agent_client_protocol::Error>(())
+                })
+                .await
+                .unwrap();
+            let loaded = store.lock().unwrap().load().unwrap();
+            assert!(loaded[0].1.lineage.native_attempted);
+            assert_eq!(loaded[0].1.lineage.native_used, !reject);
+            drop(session);
+            drop(store);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 }

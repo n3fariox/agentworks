@@ -94,6 +94,16 @@ impl Store {
                 serde_json::to_string(state)?
             ],
         )?;
+        for event in &state.events {
+            tx.execute(
+                "INSERT INTO events(session_id,seq,payload) VALUES (?1,?2,?3)",
+                params![
+                    metadata.id,
+                    event["seq"].as_i64().ok_or("Invalid sequence")?,
+                    event.to_string()
+                ],
+            )?;
+        }
         if let Some(access) = access {
             tx.execute(
                 "INSERT INTO agent_access(session_id,grants) VALUES (?1,?2)",
@@ -375,6 +385,8 @@ impl Store {
                 storage_error: None,
                 continuation: Default::default(),
                 timeouts: None,
+                lineage: Default::default(),
+                carried_context: None,
             };
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO sessions(id,metadata,state) VALUES (?1,?2,?3)",
@@ -682,6 +694,8 @@ mod tests {
             storage_error: None,
             continuation: Default::default(),
             timeouts: None,
+            lineage: Default::default(),
+            carried_context: None,
         };
         {
             let mut store = Store::open(&path).unwrap();

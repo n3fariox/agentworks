@@ -45,6 +45,8 @@ let externalFetch=Promise.resolve();
 let drawTimer=null, retryTimer=null, reconnectDelay=500, creating=false;
 const nodes=new Map();
 let pendingCreate=readStorage(sessionStorage,'agentworks-pending-create',null);
+// L-08: set only while the new-session dialog is pre-filled from an existing session.
+let forkSource=null,forkGeneration=0,modelPicked=false;
 const worktrees=setupWorktreeControls({$,api,onChange:()=>{if(config)providerNote();}});
 const policyEditor=setupPolicyEditor({$,api});
 const display=setupDisplayPreferences();display.mount($('display-preferences'));
@@ -71,23 +73,71 @@ function providerNote() {
 function openCreate(context={}) {
   if(!config)return;
   updateProjectControls();
+  forkSource=context.fork||null;const generation=++forkGeneration;modelPicked=false;
   const workspaceContext=workspace?.context();
   const projectId=Object.hasOwn(context,'projectId')?context.projectId:workspaceContext?.projectId??active?.projectId??null;
   $('create-project').value=projectId||'';
   const locations=readStorage(localStorage,'agentworks-project-locations',{});
   $('create-resume-policy').checked=false;
-  $('create-agent-access').value='off';$('create-error').textContent='';$('directory').value=context.cwd||workspaceContext?.cwd||locations[projectId||'ungrouped']||active?.cwd||config.roots[0];$('session-title').value='';
-  resetCreateModels();worktrees.projectChanged();providerNote();$('create-dialog').showModal();
+  $('create-agent-access').value='off';$('create-error').textContent='';$('directory').value=context.cwd||workspaceContext?.cwd||locations[projectId||'ungrouped']||active?.cwd||config.roots[0];$('session-title').value=context.title||'';
+  if(context.provider&&$('provider').querySelector(`option[value="${context.provider}"]`))$('provider').value=context.provider;
+  $('fork-boundary').replaceChildren(new Option('Latest completed turn at submission',''));$('fork-context').value='auto';$('fork-summary').value='';
+  renderForkHeader();resetCreateModels();providerNote();
+  // Forking suggests its own worktree so the new session starts from this one's
+  // position; the base revision is filled in from Git once the policy has loaded.
+  worktrees.projectChanged(context.workspaceMode);
+  $('create-dialog').showModal();
+  return generation;
+}
+function renderForkHeader(){
+  const fork=forkSource;
+  $('create-fork-note').hidden=!fork;$('fork-options').hidden=!fork;
+  $('create-eyebrow').textContent=fork?'BRANCH OFF':'MAKE SOME SPACE';
+  $('create-heading').textContent=fork?'Fork session':'New session';
+  $('create-submit').textContent=fork?'Fork session ↗':'Create session ↗';
+  $('create-import').hidden=!!fork;
+  if(fork)$('create-fork-note').textContent=`Carrying over ${fork.turns?`${fork.turns} finished turn${fork.turns===1?'':'s'}`:'the recorded conversation'} from “${fork.title}”. A supported native fork is preferred; otherwise its transcript is handed over with your first message, not as hidden harness state.`;
+}
+// A model only carries over to the same harness. Applied once the parent's own
+// snapshot answers, so it does not depend on the event stream being connected.
+function applyForkModel(model){
+  if(!model||forkSource?.model===model)return;
+  forkSource.model=model;
+  // Never replace a model the human has already chosen in this dialog.
+  if(!modelPicked)resetCreateModels();
+}
+// L-08: the session a fork is taken from. Cleared by any non-fork open.
+async function openFork(){
+  const parent=active;if(!parent||!config)return;
+  $('lifecycle-menu').open=false;
+  const generation=openCreate({fork:{id:parent.id,title:parent.title,provider:parent.provider,cwd:parent.cwd,model:modelConfig?.currentValue||null,turns:0},
+    projectId:parent.projectId??null,cwd:parent.cwd,title:`${parent.title} (fork)`,provider:parent.provider,workspaceMode:'newWorktree'});
+  const id=parent.id;
+  try{
+    // The parent's committed position becomes the fork's default base revision, but
+    // only once the suggested worktree mode has actually been applied.
+    const [,workspace,parentState]=await Promise.all([worktrees.settled(),api(`/api/sessions/${id}/workspace`).catch(()=>null),api(`/api/sessions/${id}`).catch(()=>null)]);
+    if(generation!==forkGeneration||forkSource?.id!==id||!$('create-dialog').open)return;
+    if(workspace?.commit&&$('workspace-mode').value==='newWorktree'&&!$('worktree-base').value)$('worktree-base').value=workspace.commit;
+    applyForkModel(parentState?.models?.currentValue);
+    const completed=(parentState?.events||[]).filter(e=>e.kind==='turn_end'&&e.data?.stopReason!=='cancelled'&&!e.data?.timedOut);
+    forkSource.turns=completed.length;
+    for(const [i,e] of completed.entries())$('fork-boundary').append(new Option(`Completed turn ${i+1} · event ${e.seq}`,String(e.seq)));
+    renderForkHeader();
+  }catch(e){toast(e.message);}
 }
 function resetCreateModels(){
   discoveryGeneration++;
   const select=$('create-model');select.replaceChildren();
-  const defaultId=config.defaultModels?.[$('provider').value];
-  const option=el('option','',defaultId?`Saved default · ${defaultId}`:'Harness default');option.value=defaultId||'';select.append(option);
+  // A forked session keeps the parent's model when it keeps the parent's harness.
+  const carried=forkSource?.model&&forkSource.provider===$('provider').value?forkSource.model:null;
+  const defaultId=carried||config.defaultModels?.[$('provider').value];
+  const option=el('option','',carried?`From “${forkSource.title}” · ${carried}`:defaultId?`Saved default · ${defaultId}`:'Harness default');option.value=defaultId||'';select.append(option);
   $('load-models').disabled=false;$('model-note').textContent='Load available models from the agent without sending a prompt.';
 }
 async function loadCreateModels(){
   const gen=++discoveryGeneration,provider=$('provider').value,cwd=$('directory').value;
+  modelPicked=true;
   $('load-models').disabled=true;$('model-note').textContent='Asking the harness for models…';
   try{
     const result=await api('/api/models',{method:'POST',body:JSON.stringify({provider,cwd})});
@@ -374,6 +424,14 @@ function consume(e,live=false){
   else if(e.kind==='storage_error'){status='error';$('session-notice').textContent=d.message;$('session-notice').hidden=false;}
   else if(e.kind==='error'){transcript.push({id:uuid(),type:'error',text:d.message});assistant=null;}
   else if(e.kind==='turn_end'){assistant=null;turnEnds.set(transcript.at(-1)?.id,{seq:e.seq,stopReason:d?.timedOut?`timeout_${d.timedOut}`:d?.stopReason});}
+  else if(e.kind==='fork'){
+    // L-08: the carried transcript belongs to another session; say so plainly.
+    transcript.push({id:uuid(),type:'notice',
+      text:`Forked from “${d.parentTitle}” after ${d.boundaryTurn===1?'its first finished turn':`turn ${d.boundaryTurn}`}${d.parentProvider?` (${labels[d.parentProvider]||d.parentProvider})`:''}. The conversation below is recorded history. Context handoff uses the chosen native or fresh-session method.`});
+    assistant=null;
+  }
+  else if(e.kind==='fork_mode'){assistant=null;transcript.push({id:uuid(),type:'notice',text:d.mode==='native'?'Provider native fork created at the recorded boundary.':`${d.detail}${d.truncated?' Available source history is truncated.':''}`});}
+  else if(e.kind==='carried_context'){assistant=null;transcript.push({id:uuid(),type:'notice',text:'Context handoff dispatched with this message; interrupted delivery requires inspection.'});}
   else if(e.kind==='acp'){
     switch(d.sessionUpdate){
       case 'user_message_chunk':{
@@ -385,11 +443,11 @@ function consume(e,live=false){
       }
       case 'agent_message_chunk':{
         if(d.content?.type==='text'){
-          if(!assistant||(d.messageId&&assistant.providerMessageId&&d.messageId!==assistant.providerMessageId))assistant=addMessage('assistant','');assistant.providerMessageId=d.messageId;assistant.text+=d.content.text;
+          if(!assistant||(d.messageId&&assistant.providerMessageId&&d.messageId!==assistant.providerMessageId))assistant=addMessage('assistant','');assistant.providerMessageId=d.messageId;assistant.referenceCwd=d.forkSourceCwd;assistant.text+=d.content.text;
         }else if(d.content?.type==='image'){
           transcript.push({id:uuid(),type:'image',content:d.content});assistant=null;
         }else if(d.content?.type==='resource_link'){
-          assistant=null;addMessage('assistant',`[${d.content.name||'Open file'}](${d.content.uri})`);
+          assistant=null;addMessage('assistant',`[${d.content.name||'Open file'}](${d.content.uri})`).referenceCwd=d.forkSourceCwd;
         }break;
       }
       case 'tool_call':{
@@ -479,7 +537,7 @@ function updateMarkdown(message,body){
     const text=message.text;message.markdownPending=true;
     try{
       const result=await api('/api/markdown',{method:'POST',body:JSON.stringify({text})});
-      message.html=result.html;body.innerHTML=result.html;body.classList.add('markdown');decorateMarkdown(body);display.enhance(body,message.id);
+      message.html=result.html;body.innerHTML=result.html;body.classList.add('markdown');decorateMarkdown(body,message.referenceCwd?message.referenceCwd.replace(/\/$/,'')+'/':'');display.enhance(body,message.id);
     }catch{body.textContent=message.text;}finally{
       message.markdownPending=false;
       if(text!==message.text){delete body.dataset.source;updateMarkdown(message,body);}
@@ -585,6 +643,7 @@ $('menu').onclick=()=>document.body.classList.toggle('menu-open');$('session-hom
 $('provider').onchange=()=>{providerNote();resetCreateModels();};
 $('directory').onchange=resetCreateModels;
 $('load-models').onclick=loadCreateModels;
+$('create-model').onchange=()=>{modelPicked=true;};
 $('show-commands').onclick=()=>{commandsOpen=!commandsOpen;renderCommands();};
 $('show-usage').onclick=async()=>{
   if(!active||status!=='idle')return;
@@ -604,15 +663,19 @@ $('model-picker').onchange=async event=>{
 };
 $('create-form').onsubmit=async event=>{
   event.preventDefault();if(creating||worktrees.blocked())return;creating=true;providerNote();$('create-error').textContent='';
+  const fork=forkSource;
   try{
     const payload={resumePolicy:{enabled:$('create-resume-policy').checked},provider:$('provider').value,...worktrees.submission(),title:$('session-title').value,projectId:$('create-project').value||null,hostId:$('create-host').value,model:$('create-model').value,agentAccess:{communicate:$('create-agent-access').value!=='off',...Object.fromEntries(['startSessions','promptSessions','cancelSessions','runAutomations'].map(key=>[key,$('create-agent-access').value==='coordinator']))}};
-    const signature=JSON.stringify(payload);
+    if(fork)Object.assign(payload,{boundarySeq:$('fork-boundary').value?Number($('fork-boundary').value):null,context:$('fork-context').value,summary:$('fork-context').value==='summary'?$('fork-summary').value:null});
+    const signature=JSON.stringify({source:fork?.id||null,payload});
     if(!pendingCreate||pendingCreate.signature!==signature)pendingCreate={signature,requestId:uuid()};
     sessionStorage.setItem('agentworks-pending-create',JSON.stringify(pendingCreate));
-    const created=await api('/api/sessions',{method:'POST',body:JSON.stringify({...payload,requestId:pendingCreate.requestId})});
+    const path=fork?`/api/sessions/${fork.id}/fork`:'/api/sessions';
+    const created=await api(path,{method:'POST',body:JSON.stringify({...payload,requestId:pendingCreate.requestId})});
     pendingCreate=null;sessionStorage.removeItem('agentworks-pending-create');
     const locations=readStorage(localStorage,'agentworks-project-locations',{});locations[created.projectId||'ungrouped']=created.cwd;localStorage.setItem('agentworks-project-locations',JSON.stringify(locations));
     sessions.unshift(created);$('create-dialog').close();selectSession(created);
+    if(fork)toast(`Forked from “${fork.title}”. Its recorded history and lineage are preserved; the selected context handoff is applied.`,'success');
   }catch(e){$('create-error').textContent=e.message;}finally{creating=false;providerNote();}
 };
 // L-05: one stable pending identity per session (survives switches, reloads and lost
@@ -755,6 +818,7 @@ setupPalettes({
     workspaceInfo:()=>{if(active)$('session-workspace').click();},
     diff:()=>{if(active)$('session-diff').click();},
     lifecycle:()=>{if(active){$('lifecycle-menu').open=true;$('lifecycle-menu').querySelector('button').focus();}},
+    forkSession:()=>{if(active)openFork();},
     resume:()=>{if(active&&connected&&['suspended','error'].includes(status))resumeSession(active.id);},
     stop:()=>{if(active&&connected&&['running','waiting'].includes(status))$('stop').click();},
     usage:()=>{if(active&&connected&&status==='idle')$('show-usage').click();},
@@ -822,6 +886,7 @@ $('archive-session').onclick=async()=>{
   const id=active?.id;if(!id)return;
   try{const updated=await api(`/api/sessions/${id}`,{method:'PATCH',body:JSON.stringify({archived:!active.archived})});if(active?.id===id)Object.assign(active,updated);await refreshSessions();updateControls();}catch(e){toast(e.message);}
 };
+$('fork-session').onclick=openFork;
 $('suspend-session').onclick=async()=>{
   const id=active?.id;if(!id)return;
   try{const updated=await api(`/api/sessions/${id}/suspend`,{method:'POST',body:'{}'});if(active?.id===id){Object.assign(active,updated);status=updated.status;updateControls();}await refreshSessions();}catch(e){toast(e.message);}

@@ -3,6 +3,7 @@ mod catalog;
 mod communication;
 mod completion;
 mod diff;
+mod fork;
 mod git_context;
 mod inbox_delivery;
 mod input_queue;
@@ -129,6 +130,12 @@ struct SessionData {
     /// L-05 explicit human queued inputs (distinct from `queued_prompt`).
     #[serde(default)]
     input_queue: input_queue::Queue,
+    /// L-08 fork lineage; empty for a session that was not forked.
+    #[serde(default)]
+    lineage: fork::Lineage,
+    /// L-08 fork context held until the first prompt hands it to the harness.
+    #[serde(default)]
+    carried_context: Option<String>,
 }
 
 struct Approval {
@@ -254,13 +261,13 @@ impl Session {
         });
         json!({"id":self.id,"provider":self.provider,"cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"model":model,
             "archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"created":self.created,"status":data.status,"turnRunning":data.turn_active,
-            "projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation})
+            "projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage})
     }
     fn snapshot(&self) -> Value {
         let approvals = self.approvals.lock().unwrap();
         let data = self.data.lock().unwrap();
         json!({"kind":"snapshot","seq":data.seq,"session":{"id":self.id,"provider":self.provider,
-            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"inputQueue":data.input_queue},"events":data.events,
+            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"inputQueue":data.input_queue},"events":data.events,
             "truncated":data.events.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
             "permissionModes":data.permission_modes,"models":data.models,"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|json!({"id":id,"request":a.request})).collect::<Vec<_>>()})
@@ -825,6 +832,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/{id}/suspend", post(lifecycle::suspend))
         .route("/api/sessions/{id}/resume", post(resume))
         .route("/api/sessions/{id}/model", post(set_model))
+        .route("/api/sessions/{id}/fork", post(fork_session))
         .route(
             "/api/sessions/{id}/permission-mode",
             get(permission_modes::get).post(permission_modes::set),
@@ -1225,6 +1233,7 @@ async fn import_session(State(app): State<App>, Json(req): Json<ImportSession>) 
             automation: None,
             queued_prompt: None,
             control_origin: None,
+            fork: None,
         }),
     )
     .await
@@ -1403,6 +1412,134 @@ async fn get_session(State(app): State<App>, Path(id): Path<String>) -> ApiResul
     Ok(Json(session(&app, &id)?.snapshot()))
 }
 
+/// L-08: creation options default to the parent's; a stable requestId is required.
+/// The endpoint can
+/// also be used directly. The child is always a new session under normal project
+/// policy; conversation forking and worktree creation stay separate choices.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Fork {
+    boundary_seq: Option<u64>,
+    context: Option<String>,
+    summary: Option<String>,
+    title: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    #[serde(rename = "projectId")]
+    project_id: Option<String>,
+    #[serde(rename = "hostId")]
+    host_id: Option<String>,
+    cwd: Option<String>,
+    workspace: Option<worktrees::Workspace>,
+    #[serde(rename = "agentAccess")]
+    agent_access: Option<communication::Access>,
+    #[serde(rename = "requestId")]
+    request_id: Option<String>,
+    #[serde(rename = "resumePolicy")]
+    resume_policy: Option<limit_resume::PolicyInput>,
+}
+
+async fn fork_session(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(req): Json<Fork>,
+) -> ApiResult {
+    let _run = app.run_lock.lock().await;
+    service_restart::allow_start(&app)?;
+    limit_resume::new_policy(req.resume_policy.clone())?;
+    // Read-only: the parent's transcript is snapshotted without sending anything, so
+    // a running turn is never interrupted and pending work is never copied.
+    let _workspace = app.workspace_lock.lock().await;
+    let request_id = req
+        .request_id
+        .as_deref()
+        .filter(|id| !id.is_empty() && id.len() <= 100 && !id.chars().any(char::is_control))
+        .ok_or_else(|| {
+            fail(
+                StatusCode::BAD_REQUEST,
+                "Fork creation requires a stable requestId",
+            )
+        })?;
+    let key = format!("fork:{id}:{request_id}");
+    let payload = serde_json::to_string(&req).unwrap();
+    let prior = app
+        .store
+        .lock()
+        .unwrap()
+        .reserve_creation(&key, &payload)
+        .map_err(|e| fail(StatusCode::CONFLICT, e.to_string()))?;
+    if let Some(child) = prior {
+        return session(&app, &child).map(|s| Json(s.meta()));
+    }
+    let parent = session(&app, &id)?;
+    let seed = fork::seed(
+        &parent,
+        req.boundary_seq,
+        req.context.as_deref().unwrap_or("auto"),
+        req.summary.as_deref(),
+    )?;
+    let provider = req
+        .provider
+        .clone()
+        .unwrap_or_else(|| parent.provider.clone());
+    let (title, inherited_model, project_id) = {
+        let data = parent.data.lock().unwrap();
+        (
+            data.lifecycle
+                .title
+                .clone()
+                .unwrap_or_else(|| parent.title.clone()),
+            // A model only carries over to the same harness; another agent advertises
+            // its own models and would reject a foreign ID.
+            (provider == parent.provider)
+                .then(|| {
+                    data.models["currentValue"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .or_else(|| parent.initial_model.clone())
+                })
+                .flatten(),
+            req.project_id.clone().or_else(|| data.project_id.clone()),
+        )
+    };
+    let result = create_session_inner(
+        &app,
+        Create {
+            resume_policy: req.resume_policy,
+            inherited_resume: None,
+            workspace: req.workspace,
+            request_id: req.request_id,
+            agent_access: req.agent_access,
+            provider,
+            cwd: req
+                .cwd
+                .unwrap_or_else(|| parent.cwd.to_string_lossy().into_owned()),
+            title: Some(
+                req.title
+                    .unwrap_or_else(|| format!("{title} (fork)"))
+                    .chars()
+                    .take(80)
+                    .collect(),
+            ),
+            model: req.model.or(inherited_model),
+            project_id,
+            host_id: req.host_id,
+            external_id: None,
+            external_host: false,
+            automation: None,
+            queued_prompt: None,
+            control_origin: None,
+            fork: Some(seed),
+        },
+        Some(&key),
+    )
+    .await;
+    if let Err((_, message)) = &result {
+        let _ = app.store.lock().unwrap().creation_error(&key, message);
+    }
+    result
+}
+
 #[derive(Serialize, Deserialize)]
 struct Create {
     #[serde(rename = "resumePolicy")]
@@ -1432,6 +1569,9 @@ struct Create {
     queued_prompt: Option<String>,
     #[serde(skip)]
     control_origin: Option<communication::ControlOrigin>,
+    /// L-08 prepared carry-over; built by the fork endpoint, never by a client.
+    #[serde(skip)]
+    fork: Option<fork::Seed>,
 }
 async fn create_session(State(app): State<App>, Json(req): Json<Create>) -> ApiResult {
     limit_resume::new_policy(req.resume_policy.clone())?;
@@ -1575,6 +1715,7 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
         .chars()
         .take(80)
         .collect();
+    let fork = req.fork;
     let s = Arc::new(Session {
         id: Uuid::new_v4().to_string(),
         provider: req.provider.clone(),
@@ -1628,6 +1769,8 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
                 .inherited_resume
                 .unwrap_or(limit_resume::new_policy(req.resume_policy)?),
             timeouts: None,
+            lineage: Default::default(),
+            carried_context: None,
         }),
         tx,
         commands: Mutex::new(None),
@@ -1673,6 +1816,9 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
                 StatusCode::CONFLICT,
                 "Limit: 12 active harnesses. Restart the server to suspend idle sessions first.",
             ));
+        }
+        if let Some(seed) = fork {
+            fork::apply(&s, seed, &s.cwd)?;
         }
         worktrees::arm_creation(app, creation_key)?;
         app.store

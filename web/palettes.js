@@ -162,6 +162,7 @@ export function actionItems(state={},handlers={}){
   if(hasSession){
     if(handlers.diff)add('session-diff','Session diff','Current session','Inspect unstaged, branch or commit changes',handlers.diff);
     if(handlers.lifecycle)add('session-actions','Session actions','Current session','Rename, archive, suspend or delete history',handlers.lifecycle);
+    if(handlers.forkSession)add('session-fork','Fork session','Current session','Carry this conversation into a new session, agent or worktree',handlers.forkSession);
     add('session-agents','Agents and inbox','Current session','Access, messages and control activity',()=>handlers.agents?.());
     add('session-workspace','Workspace info','Current session','Directory, branch and commit',()=>handlers.workspaceInfo?.());
     if(['suspended','error'].includes(status))

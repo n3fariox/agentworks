@@ -6,7 +6,7 @@ rust-version = "1.89"
 publish = false
 
 [dependencies]
-agent-client-protocol = { version = "=3.4.0", features = ["process"] }
+agent-client-protocol = { version = "=3.4.0", features = ["process", "unstable_session_fork"] }
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

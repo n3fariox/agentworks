@@ -311,6 +311,7 @@ async fn dispatch(app: &App, s: &Session, operation: &str, args: Value) -> mail:
                     request,
                     payload: args.clone(),
                 }),
+                fork: None,
             };
             crate::create_session(State(app.clone()), Json(req))
                 .await
