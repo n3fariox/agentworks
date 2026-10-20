@@ -2,9 +2,9 @@ use crate::{Approval, Session, adapter_path, opencode_path, use_api_key};
 use agent_client_protocol::schema::{
     ProtocolVersion,
     v1::{
-        AuthenticateRequest, CancelNotification, ContentBlock, ForkSessionRequest,
-        InitializeRequest, ListSessionsRequest, LoadSessionRequest, NewSessionRequest,
-        PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
+        AuthenticateRequest, CancelNotification, ClientCapabilities, ContentBlock,
+        ForkSessionRequest, InitializeRequest, ListSessionsRequest, LoadSessionRequest,
+        NewSessionRequest, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
         RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome,
         SessionConfigOptionValue, SessionNotification, SetSessionConfigOptionRequest, TextContent,
     },
@@ -172,12 +172,24 @@ pub fn safe_error(message: &str) -> String {
     safe.chars().take(2500).collect()
 }
 
+fn initialize_request() -> InitializeRequest {
+    // Receive adapter-owned output only. This does not advertise terminal/* process hosting.
+    InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
+        ClientCapabilities::new().meta(
+            json!({"terminal_output": true, "terminal_output_delta": true})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+    )
+}
+
 pub async fn probe(provider: &str) -> Result<(), Box<dyn std::error::Error>> {
     prepare(provider)?;
     let name = provider.to_string();
     let result=tokio::time::timeout(Duration::from_secs(30),Client.builder()
         .connect_with(agent(provider), move |connection:ConnectionTo<Agent>|async move {
-            let init=connection.send_request(InitializeRequest::new(ProtocolVersion::V1)).block_task().await?;
+            let init=connection.send_request(initialize_request()).block_task().await?;
             println!("{}",json!({"provider":name,"protocolVersion":init.protocol_version,"agentInfo":init.agent_info,
                 "capabilities":init.agent_capabilities,"authMethods":init.auth_methods}));
             Ok(())
@@ -194,7 +206,7 @@ async fn initialize(
     provider: &str,
 ) -> Result<Value, agent_client_protocol::Error> {
     let init = connection
-        .send_request(InitializeRequest::new(ProtocolVersion::V1))
+        .send_request(initialize_request())
         .block_task()
         .await?;
     if init.protocol_version != ProtocolVersion::V1 {
@@ -708,6 +720,30 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn terminal_output_capabilities_and_raw_metadata_survive_v1() {
+        let request = serde_json::to_value(super::initialize_request()).unwrap();
+        assert_eq!(request["clientCapabilities"]["terminal"], false);
+        assert_eq!(
+            request["clientCapabilities"]["_meta"]["terminal_output"],
+            true
+        );
+        assert_eq!(
+            request["clientCapabilities"]["_meta"]["terminal_output_delta"],
+            true
+        );
+        let raw = serde_json::json!({
+            "sessionId":"fixture-session",
+            "update":{"sessionUpdate":"tool_call_update","toolCallId":"build",
+                "_meta":{"terminal_output_delta":{"terminal_id":"build","data":"\u{1b}[32m[1 / 3]\r"},
+                    "terminal_exit":{"terminal_id":"build","exit_code":1,"signal":null},
+                    "unknown_fixture":{"keep":true}}}
+        });
+        let notification: super::SessionNotification = serde_json::from_value(raw.clone()).unwrap();
+        let stored = serde_json::to_value(notification.update).unwrap();
+        assert_eq!(stored["_meta"], raw["update"]["_meta"]);
+    }
+
     use super::*;
     #[test]
     fn codex_subscription_metadata_survives_typed_acp_notification() {

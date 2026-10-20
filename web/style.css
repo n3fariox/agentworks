@@ -310,3 +310,10 @@ dialog.image-viewer{width:96vw;max-width:96vw;height:92dvh;max-height:92dvh;padd
 .diff-line .tok-comment{color:#b0bac9}
 #diff-patch .source-line{line-height:1.6}
 #diff-patch{padding:8px 0}
+
+/* Built-in Bazel progress stays visible while the raw tool details are folded. */
+.tool-card summary{min-width:0}
+.tool-card .tool-title{min-width:0;overflow-wrap:anywhere}
+.tool-activity{display:block;font-size:11px;line-height:1.6;color:var(--muted);overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.tool-activity.has-progress{color:var(--text)}
+.tool-activity.is-running::before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--accent);margin-right:7px;vertical-align:middle;animation:pulse 1.8s infinite}
