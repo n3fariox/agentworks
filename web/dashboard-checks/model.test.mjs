@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {sessionState, counts, usageMeters} from '../dashboard.js';
+import {sessionState, counts, usageMeters, activelyTurning, latestQuota, quotaAvailability} from '../dashboard.js';
 import {emptyUsage, applyUsageEvent} from '../usage-status.js';
 
 const event = data => ({kind:'acp',seq:2,data:{sessionUpdate:'usage_update',...data}});
@@ -27,4 +27,37 @@ test('quota meters accept only reported scales and keep source freshness', () =>
 test('subagent observations and unverified scalar utilization cannot supply meters', () => {
   assert.deepEqual(usageMeters(applyUsageEvent(emptyUsage(),event({used:20,size:100,_meta:{subagent:'other'}}))),[]);
   assert.deepEqual(usageMeters(applyUsageEvent(emptyUsage(),event({_meta:{'_claude/rateLimit':{utilization:.5}}}))),[]);
+});
+test('dashboard activity excludes archived or non-turning sessions and picks latest quota without summing sources', () => {
+  assert.equal(activelyTurning({turnRunning:true}),true);
+  assert.equal(activelyTurning({turnRunning:true,archived:true}),false);
+  assert.equal(activelyTurning({status:'running'}),false);
+  const first = {id:'old',provider:'codex',created:1}, second = {id:'new',provider:'codex',created:2};
+  const oldState = applyUsageEvent(emptyUsage(),event({_meta:{'_codex/subscriptionLimits':{version:1,limits:[{limitId:'codex',primary:{usedPercent:{value:30,observedAtMs:1000}}}]}}}));
+  const newState = applyUsageEvent(emptyUsage(),event({_meta:{'_codex/subscriptionLimits':{version:1,limits:[{limitId:'codex',primary:{usedPercent:{value:60,observedAtMs:2000}}}]}}}));
+  const latest = latestQuota([first,second],new Map([[first.id,{state:oldState}],[second.id,{state:newState}]]),'codex');
+  assert.equal(latest.state.codexQuota['["codex","primary"]'].usedPercent.value,60);
+  assert.equal(latest.sources,1);
+});
+
+test('missing fields and enterprise labels never imply an unmetered plan or account USD spend', () => {
+  const state = applyUsageEvent(emptyUsage(), event({cost:{amount:42,currency:'USD'},_meta:{
+    '_codex/subscriptionLimits':{version:1,limits:[{limitId:'enterprise',planType:'enterprise',credits:{unlimited:true},individualLimit:{used:'50',limit:'100'}}]},
+    '_claude/rateLimit':{status:'allowed',plan:'enterprise'}
+  }}));
+  assert.equal(quotaAvailability(state,{readable:1}).label,'No cap reported');
+  assert.match(quotaAvailability(state,{readable:1}).detail,/USD is unavailable/);
+  for (const coverage of [{},{readable:1,failed:1},{readable:1,truncated:1}]) {
+    assert.equal(quotaAvailability(state,coverage).label,'Quota unavailable');
+  }
+  assert.deepEqual(usageMeters(state),[]);
+  const capped = applyUsageEvent(state,event({_meta:{'_claude/rateLimit':{unifiedWindows:{five_hour:{utilization:0}}}}}));
+  assert.equal(quotaAvailability(capped,{readable:1}).label,'Reported quota windows');
+  assert.equal(usageMeters(capped)[0].percent,0);
+});
+test('latest Codex window uses percentage observation time ahead of session creation time', () => {
+  const sessions = [{id:'older-session',provider:'codex',created:1},{id:'newer-session',provider:'codex',created:2}];
+  const observation = (value, at) => ({state:applyUsageEvent(emptyUsage(),event({_meta:{'_codex/subscriptionLimits':{version:1,limits:[{limitId:'codex',primary:{usedPercent:{value,observedAtMs:at}}}]}}}))});
+  const result = latestQuota(sessions,new Map([['older-session',observation(60,2000)],['newer-session',observation(30,1000)]]),'codex');
+  assert.equal(Object.values(result.state.codexQuota)[0].usedPercent.value,60);
 });

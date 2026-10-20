@@ -15,7 +15,7 @@ const env = {...process.env, AGENTWORKS_BIND:'127.0.0.1', AGENTWORKS_PORT:'4531'
   AGENTWORKS_ROOTS:fixture, AGENTWORKS_CATALOG_PATH:join(fixture,'catalog.json'),
   AGENTWORKS_DB_PATH:join(fixture,'sessions.sqlite3'), AGENTWORKS_DEMO_STATE_DIR:join(fixture,'demo')};
 for (const key of Object.keys(env)) if (/^AGENTWORKS_(SUPERVISOR|RELEASE)/.test(key)) delete env[key];
-const server = spawn(resolve('.cache/b009-u10-target/debug/agentworks'), [], {env, stdio:['ignore','pipe','pipe']});
+const server = spawn(resolve(process.env.AGENTWORKS_DASHBOARD_TEST_BINARY || '.cache/b009-u10-target/debug/agentworks'), [], {env, stdio:['ignore','pipe','pipe']});
 let log = '', proxy, browser;
 for (const stream of [server.stdout,server.stderr]) stream.on('data', chunk => log += chunk);
 const sockets = new Set();
@@ -26,7 +26,7 @@ try {
     await new Promise(resolve => setTimeout(resolve,100));
   }
   assert.ok(ready,log);
-  assert.deepEqual(await (await fetch(upstream+'/api/sessions?archived=all')).json(), []);
+  assert.deepEqual(await (await fetch(upstream+'/api/sessions')).json(), []);
   for (const [path, mime] of [['/dashboard','text/html'],['/dashboard.js','text/javascript'],['/dashboard.css','text/css']]) {
     const response = await fetch(upstream+path); assert.equal(response.status,200); assert.ok(response.headers.get('content-type').startsWith(mime));
     assert.equal(response.headers.get('cache-control'),'no-store');
@@ -49,15 +49,16 @@ try {
   await page.getByRole('button',{name:'Refresh dashboard'}).waitFor();
   await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
   assert.match(await page.locator('#hosts').innerText(),/Local/);
-  assert.match(await page.locator('#hosts').innerText(),/0 sessions/);
-  assert.match(await page.locator('#accounts').innerText(),/No source sessions/);
+  assert.match(await page.locator('#hosts').innerText(),/0 active turns/);
+  assert.match(await page.locator('#accounts').innerText(),/Quota unavailable|No cap reported/);
   console.log('PASS real Rust hosting and empty read APIs');
   await page.goto(origin+mount);
   await page.locator('#nav-dashboard').waitFor();
   assert.equal(await page.locator('#nav-dashboard').getAttribute('href'),'./dashboard');
+  assert.equal(await page.locator('#workspace-nav .workspace-nav-item').first().getAttribute('id'),'nav-dashboard');
   errors.length = 0;
   const sessions = [
-    {id:'cx-one',title:'Codex source one',provider:'codex',status:'running',turnRunning:true,projectId:'p1',hostId:'local'},
+    {id:'cx-one',title:'Codex source one',provider:'codex',status:'running',turnRunning:true,projectId:'p1',hostId:'local',created:20},
     {id:'cx-two',title:'Codex source two',provider:'codex',status:'waiting',projectId:'p1',hostId:'local'},
     {id:'cl-one',title:'Claude <script> source',provider:'claude',status:'idle',projectId:'p1',hostId:'local'},
     {id:'wait-input',title:'Waiting input',provider:'demo',status:'waiting',projectId:'p1',hostId:'local'},
@@ -87,46 +88,77 @@ try {
     if (failed.has(path)) return route.fulfill({status:503,body:'fixture failure'});
     let body;
     if (path === 'api/catalog') body = {hosts:[{id:'local',name:'Local',status:'connected'},{id:'remote',name:'Remote',status:'disconnected'}],projects:[{id:'p1',name:'Active project'},{id:'p2',name:'Archived project',archived:true},{id:'p0',name:'Empty project'}],locations:[]};
-    else if (path === 'api/sessions') {assert.equal(url.searchParams.get('archived'),'all');body = empty?[]:sessions;}
+    else if (path === 'api/sessions') {assert.equal(url.searchParams.has('archived'),false);body = empty?[]:sessions;}
     else if (path === 'api/status') body = {providers:[{id:'claude',installed:true,authMode:'existing',keyPresent:false},{id:'codex',installed:true,authMode:'api_key',keyPresent:true}],credentials:secret};
-    else if (path === 'api/activity') body = {sessions:sessions.map(s=>({...s,pendingApprovals:s.id==='cx-two'?2:0}))};
     else if (snapshots[decodeURIComponent(path.split('/').at(-1))]) body = snapshots[decodeURIComponent(path.split('/').at(-1))];
     else return route.fulfill({status:404,body:'not found'});
     await route.fulfill({contentType:'application/json',body:JSON.stringify(body)});
   });
   await page.locator('#nav-dashboard').click();
   await page.waitForURL(origin+mount+'dashboard');
+  assert.equal(await page.locator('#workspace-nav').isVisible(),true);
   await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
   assert.equal(await page.title(),'Operations dashboard · Agentworks');
   const hostText = await page.locator('#hosts').innerText();
-  assert.match(hostText,/connected/); assert.match(hostText,/disconnected/); assert.match(hostText,/7 sessions/); assert.match(hostText,/unreported/);
+  assert.match(hostText,/connected/); assert.match(hostText,/disconnected/); assert.match(hostText,/1 active turn/);
   const active = page.locator('details.project').filter({has:page.locator('summary',{hasText:'Active project'})});
-  assert.match(await active.locator('summary').innerText(),/4 sessions/);
-  assert.match(await active.locator('summary').innerText(),/1 Running/);
-  assert.match(await active.locator('summary').innerText(),/2 Waiting for approval\/input/);
+  assert.match(await active.locator('summary').innerText(),/1 active turn/);
   await active.locator('summary').click();
-  assert.match(await active.innerText(),/2 pending approval/);
+  assert.match(await active.innerText(),/Taking a turn/);
+  assert.doesNotMatch(await active.innerText(),/Waiting input|Archived session|Closed session|Failed session/);
   const archived = page.locator('details.project').filter({has:page.locator('summary',{hasText:'Archived project'})});
-  assert.match(await archived.locator('summary').innerText(),/2 Stopped/);
-  assert.match(await page.locator('#projects').innerText(),/Unknown project \(missing\)/);
-  assert.match(await page.locator('#accounts').innerText(),/Connection unknown/);
+  assert.match(await archived.locator('summary').innerText(),/0 active turns/);
+  assert.doesNotMatch(await page.locator('#projects').innerText(),/Archived session/);
+  assert.match(await page.locator('main').innerText(),/Account identity and authentication are not verified/);
   assert.match(await page.locator('#accounts').innerText(),/configured \(unverified\)/);
   assert.match(await page.locator('#accounts').innerText(),/Freshness unknown/);
   assert.match(await page.locator('#accounts').innerText(),/stale/);
-  assert.match(await page.locator('#accounts').innerText(),/History is truncated/);
-  assert.match(await page.locator('#accounts').innerText(),/snapshot could not be read/);
-  assert.match(await page.locator('#accounts').innerText(),/no supported usage observations/i);
-  assert.equal(await page.locator('meter').count(),6);
+  assert.equal(await page.locator('#accounts h4.quota-state').count(),2);
+  assert.equal(await page.locator('meter').count(),3);
   assert.equal(await page.getByLabel(/primary.*quota used: 31.0%/).getAttribute('value'),'31');
-  assert.equal(await page.getByLabel(/primary.*quota used: 70.0%/).getAttribute('value'),'70');
+  assert.equal(await page.getByLabel(/primary.*quota used/).count(),1);
   assert.ok(!(await page.locator('body').innerText()).includes(secret));
   assert.equal(await page.locator('#accounts script').count(),0);
-  assert.equal(await page.locator('#accounts h4').filter({hasText:'Claude <script> source'}).count(),1);
   assert.equal(await page.locator('meter').evaluateAll(nodes=>nodes.every(n=>n.labels.length>0&&n.getAttribute('aria-describedby'))),true);
   assert.equal(await page.getByRole('heading',{level:1}).count(),1);
   // Begin a fresh keyboard/read-only pass after the main app has navigated away.
   // Its notification stream can start while the dashboard link is being clicked.
   requests.length = 0; websockets.length = 0;
+  await page.reload();
+  await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
+  // A manual quota refresh must leave the host/project DOM (including open
+  // details) intact, reread only GET snapshots, and preserve source freshness.
+  const project = page.locator('details.project').first();
+  await project.locator('summary').click();
+  await page.evaluate(() => {window.originalHosts = document.querySelector('#hosts').firstChild; window.originalProjects = document.querySelector('#projects').firstChild;});
+  requests.length = 0;
+  snapshots['cx-one'].events.push(codex(45));
+  await page.getByRole('button',{name:'Refresh quota observations',exact:true}).click();
+  await page.waitForFunction(()=>!document.querySelector('#refresh-quota').disabled);
+  assert.equal(await page.evaluate(() => window.originalHosts === document.querySelector('#hosts').firstChild && window.originalProjects === document.querySelector('#projects').firstChild),true);
+  assert.equal(await project.getAttribute('open'),'');
+  assert.equal(await page.getByLabel(/primary.*quota used: 45.0%/).getAttribute('value'),'45');
+  assert.match(await page.locator('#quota-refresh-status').innerText(),/not a live account refresh/);
+  assert.match(await page.locator('#accounts').innerText(),/stale/);
+  assert.match(await page.locator('#accounts').innerText(),/1 unavailable · 1 truncated/);
+  assert.ok(!requests.some(req=>req.url.includes('api/catalog')));
+  assert.ok(requests.some(req=>req.url.endsWith('api/sessions/cx-one')));
+  // A failed quota refresh clears quota rather than presenting stale cache as a
+  // successful refresh, while the workspace cards remain untouched.
+  failed = new Set(['api/sessions']);
+  await page.getByRole('button',{name:'Refresh quota observations',exact:true}).click();
+  await page.waitForFunction(()=>!document.querySelector('#refresh-quota').disabled);
+  assert.match(await page.locator('#accounts').innerText(),/Quota unavailable/);
+  assert.equal(await page.locator('meter').count(),0);
+  assert.match(await page.locator('#quota-refresh-status').innerText(),/reads failed/);
+  assert.equal(await page.evaluate(() => window.originalHosts === document.querySelector('#hosts').firstChild && window.originalProjects === document.querySelector('#projects').firstChild),true);
+  failed = new Set();
+  snapshots['cl-one'] = {events:[usage({cost:{amount:42,currency:'USD'},_meta:{'_claude/rateLimit':{plan:'enterprise'}}})]};
+  await page.getByRole('button',{name:'Refresh quota observations',exact:true}).click();
+  await page.waitForFunction(()=>!document.querySelector('#refresh-quota').disabled);
+  assert.match(await page.locator('#accounts').innerText(),/No cap reported/);
+  assert.ok(!(await page.locator('#accounts').innerText()).includes('42.00'));
+  console.log('PASS isolated quota refresh, failure/recovery, unchanged workspace DOM, coverage and no unlimited/spend inference');
   await page.reload();
   await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
   await page.keyboard.press('Tab');
@@ -142,20 +174,20 @@ try {
   }
   await page.emulateMedia({colorScheme:'light',reducedMotion:'reduce'});
   await page.screenshot({path:'.cache/u10-dashboard-mobile.png',fullPage:true});
-  console.log('PASS HTTPS proxy mount, all states, per-session meters, freshness, keyboard, responsive 320–1280px');
-  failed = new Set(['api/catalog','api/sessions','api/status','api/activity']);
+  console.log('PASS HTTPS proxy mount, active turns, top-level quota, freshness, keyboard, responsive 320–1280px');
+  failed = new Set(['api/catalog','api/sessions','api/status']);
   await page.getByRole('button',{name:'Refresh dashboard'}).click();
   await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
-  assert.equal(await page.locator('#errors .error').count(),4);
+  assert.equal(await page.locator('#errors .error').count(),3);
   assert.match(await page.locator('#hosts').innerText(),/unavailable/);
   assert.match(await page.locator('#projects').innerText(),/unavailable/);
   assert.equal(await page.locator('meter').count(),0);
-  assert.ok(!(await page.locator('#hosts').innerText()).includes('0 sessions'));
+  assert.ok(!(await page.locator('#hosts').innerText()).includes('0 active turns'));
   failed = new Set(); empty = true;
   await page.getByRole('button',{name:'Refresh dashboard'}).click();
   await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
   assert.equal(await page.locator('#errors .error').count(),0);
-  assert.match(await page.locator('#accounts').innerText(),/No source sessions/);
+  assert.match(await page.locator('#accounts').innerText(),/Quota unavailable|No cap reported/);
   assert.equal(await page.locator('meter').count(),0);
   assert.deepEqual(errors,[]);
   assert.deepEqual(websockets,[]);
