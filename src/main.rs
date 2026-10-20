@@ -5,6 +5,7 @@ mod communication;
 mod completion;
 mod controllers;
 mod diff;
+mod elicitation;
 mod fork;
 mod git_context;
 mod hosting;
@@ -157,7 +158,17 @@ struct SessionData {
 
 struct Approval {
     request: Value,
-    answer: oneshot::Sender<Option<String>>,
+    /// `permission` (session/request_permission) or `question` (elicitation/create).
+    kind: &'static str,
+    /// L-02: why a question cannot be shown as a form; it can still be skipped or cancelled.
+    unsupported: Option<String>,
+    /// Permission: the option ID string. Question: the ACP elicitation response.
+    answer: oneshot::Sender<Option<Value>>,
+}
+impl Approval {
+    fn event(&self, id: &str) -> Value {
+        json!({"id":id,"kind":self.kind,"request":self.request,"unsupported":self.unsupported})
+    }
 }
 
 impl Session {
@@ -312,7 +323,7 @@ impl Session {
             "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"])},"events":data.events,
             "truncated":data.events.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
             "permissionModes":data.permission_modes,"models":data.models,"commands":data.available_commands,"storageError":data.storage_error,
-            "approvals":approvals.iter().map(|(id,a)|json!({"id":id,"request":a.request})).collect::<Vec<_>>()})
+            "approvals":approvals.iter().map(|(id,a)|a.event(id)).collect::<Vec<_>>()})
     }
     fn display_title(&self) -> String {
         self.data
@@ -760,6 +771,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route(
+            "/questions.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../web/questions.js"),
+                )
+            }),
+        )
+        .route(
             "/mentions.js",
             get(|| async {
                 (
@@ -958,6 +978,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(permission_modes::get).post(permission_modes::set),
         )
         .route("/api/sessions/{id}/approvals/{approval}", post(approve))
+        .route(
+            "/api/sessions/{id}/questions/{question}",
+            post(answer_question),
+        )
         .route("/api/sessions/{id}/events", get(events))
         .route("/api/sessions/{id}/file", get(file))
         .route("/api/sessions/{id}/workspace", get(git_context::workspace))
@@ -2457,18 +2481,76 @@ async fn approve(
 ) -> ApiResult {
     let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
-    let approval = {
+    let option = req.option_id.clone();
+    resolve_approval(
+        &s,
+        &approval_id,
+        "Approval",
+        |a| {
+            if a.kind != "permission"
+                || !a.request["options"]
+                    .as_array()
+                    .is_some_and(|opts| opts.iter().any(|o| o["optionId"] == option))
+            {
+                return Err(fail(StatusCode::BAD_REQUEST, "Invalid approval option"));
+            }
+            Ok(json!(option))
+        },
+        json!({"id":approval_id,"optionId":req.option_id}),
+    )?;
+    Ok(Json(json!({"ok":true})))
+}
+/// L-02: answer, skip (`decline`) or cancel a pending question. Validation is
+/// authoritative here; a retried `submissionId` is acknowledged without re-sending.
+async fn answer_question(
+    State(app): State<App>,
+    Path((id, question_id)): Path<(String, String)>,
+    Json(req): Json<elicitation::Answer>,
+) -> ApiResult {
+    let _run = app.run_lock.lock().await;
+    let s = session(&app, &id)?;
+    if let Some(action) = elicitation::delivered(&id, &question_id, &req.submission_id) {
+        return Ok(Json(json!({"ok":true,"duplicate":true,"action":action})));
+    }
+    let result = resolve_approval(
+        &s,
+        &question_id,
+        "Question",
+        |a| {
+            if a.kind != "question" {
+                return Err(fail(StatusCode::BAD_REQUEST, "Not a question"));
+            }
+            elicitation::response(&a.request, a.unsupported.is_some(), &req)
+                .map_err(|e| fail(StatusCode::BAD_REQUEST, e))
+        },
+        json!({"id":question_id,"action":req.action}),
+    );
+    if let Err((StatusCode::CONFLICT, _)) = &result {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "This question was already answered elsewhere or withdrawn because the turn ended",
+        ));
+    }
+    result?;
+    elicitation::remember(&id, &question_id, &req.submission_id, &req.action);
+    Ok(Json(json!({"ok":true,"action":req.action})))
+}
+/// Validate and remove one pending approval/question, hand the answer to the agent
+/// and restore `running` when nothing else is pending.
+fn resolve_approval(
+    s: &Session,
+    approval_id: &str,
+    noun: &str,
+    answer: impl FnOnce(&Approval) -> Result<Value, (StatusCode, String)>,
+    resolved: Value,
+) -> Result<(), (StatusCode, String)> {
+    let (approval, value) = {
         let mut pending = s.approvals.lock().unwrap();
         let a = pending
-            .get(&approval_id)
-            .ok_or_else(|| fail(StatusCode::CONFLICT, "Approval is no longer pending"))?;
-        if !a.request["options"]
-            .as_array()
-            .is_some_and(|opts| opts.iter().any(|o| o["optionId"] == req.option_id))
-        {
-            return Err(fail(StatusCode::BAD_REQUEST, "Invalid approval option"));
-        }
-        pending.remove(&approval_id).unwrap()
+            .get(approval_id)
+            .ok_or_else(|| fail(StatusCode::CONFLICT, format!("{noun} is no longer pending")))?;
+        let value = answer(a)?;
+        (pending.remove(approval_id).unwrap(), value)
     };
     let approvals = s.approvals.lock().unwrap();
     let running = {
@@ -2480,19 +2562,18 @@ async fn approve(
         running
     };
     drop(approvals);
-    approval
-        .answer
-        .send(Some(req.option_id.clone()))
-        .map_err(|_| fail(StatusCode::CONFLICT, "Agent no longer awaits this approval"))?;
-    s.emit(
-        "approval_resolved",
-        json!({"id":approval_id,"optionId":req.option_id}),
-    );
+    approval.answer.send(Some(value)).map_err(|_| {
+        fail(
+            StatusCode::CONFLICT,
+            format!("Agent no longer awaits this {}", noun.to_lowercase()),
+        )
+    })?;
+    s.emit("approval_resolved", resolved);
     if running {
         // The prompt may have completed immediately after receiving the answer.
         s.emit("status", json!({"status":"running"}));
     }
-    Ok(Json(json!({"ok":true})))
+    Ok(())
 }
 async fn events(
     State(app): State<App>,
