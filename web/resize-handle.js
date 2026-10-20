@@ -30,3 +30,31 @@ export function setupResize({handle,target,panel,variable,key,min,max,initial,ed
     event.preventDefault();
   });
 }
+
+// Native vertical resizing sets a preferred minimum. Automatic sizing may grow
+// above it for content, but never collapses the user's chosen writing space.
+export function setupPromptResize(area){
+  let preferred=0,expected='',dragging=false,dragHeight=0;
+  const size=()=>{
+    if(dragging||!area.getClientRects().length)return;
+    if(area.style.height&&area.style.height!==expected)preferred=area.getBoundingClientRect().height;
+    const css=getComputedStyle(area),min=parseFloat(css.minHeight)||48,max=parseFloat(css.maxHeight)||320;
+    area.style.height='0px';
+    const border=area.offsetHeight-area.clientHeight;
+    const height=Math.min(max,Math.max(min,preferred,area.scrollHeight+border));
+    expected=height+'px';area.style.height=expected;
+  };
+  const observer=new ResizeObserver(()=>{
+    // Native resize changes inline height; layout/width changes do not.
+    if(area.style.height&&area.style.height!==expected){preferred=area.getBoundingClientRect().height;expected=area.style.height;}
+    size();
+  });observer.observe(area);
+  area.addEventListener('pointerdown',event=>{
+    const r=area.getBoundingClientRect();
+    if(event.button===0&&event.clientX>=r.right-20&&event.clientY>=r.bottom-20){dragging=true;dragHeight=r.height;}
+  });
+  const finish=()=>{if(!dragging)return;dragging=false;const height=area.getBoundingClientRect().height;if(Math.abs(height-dragHeight)>.5)preferred=height;expected=area.style.height;size();};
+  window.addEventListener('pointerup',finish);window.addEventListener('pointercancel',finish);
+  area.addEventListener('input',size);window.addEventListener('resize',size);size();
+  return {size};
+}

@@ -371,6 +371,7 @@ impl Store {
                     .filter(|e| e["kind"] == "user")
                     .filter_map(|e| e["data"]["requestId"].as_str().map(str::to_owned))
                     .collect(),
+                last_prompt: events.iter().rev().find(|e| e["kind"] == "user").cloned(),
                 models: snapshot["models"].clone(),
                 permission_modes: snapshot["permissionModes"].clone(),
                 initial_claude_permission_mode: None,
@@ -681,6 +682,9 @@ mod tests {
             events: VecDeque::new(),
             bytes: 0,
             requests: Default::default(),
+            last_prompt: Some(
+                json!({"seq":0,"kind":"user","data":{"text":"  exact prompt\n\n  ","requestId":"original"}}),
+            ),
             models: Value::Null,
             permission_modes: Value::Null,
             initial_claude_permission_mode: None,
@@ -723,6 +727,13 @@ mod tests {
             assert_eq!(loaded.len(), 1);
             assert_eq!(loaded[0].1.status, "idle");
             assert_eq!(loaded[0].1.events.len(), 1);
+            // The recovery source persists independently of the visible event
+            // window, which may no longer include a long-running turn's user event.
+            assert_eq!(loaded[0].1.last_prompt, state.last_prompt);
+            assert_eq!(
+                loaded[0].1.last_prompt.as_ref().unwrap()["data"]["text"],
+                "  exact prompt\n\n  "
+            );
             assert_eq!(
                 loaded[0].1.provider_session_id.as_deref(),
                 Some("provider-session")

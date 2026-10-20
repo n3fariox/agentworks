@@ -399,9 +399,13 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
                     "Use your harness cancellation instead",
                 ));
             }
-            crate::cancel(State(app.clone()), Path(target.id.clone()))
-                .await
-                .map(|j| j.0)
+            crate::cancel(
+                State(app.clone()),
+                Path(target.id.clone()),
+                axum::extract::Query(crate::CancelTarget::default()),
+            )
+            .await
+            .map(|j| j.0)
         }
         "list_automations" | "run_automation" => {
             mail::require_actor(app, a, "run_automations")?;

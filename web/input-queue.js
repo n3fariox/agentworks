@@ -121,3 +121,57 @@ export function setupInputQueue({$,api,uuid,getActive,getStatus,toolActive}){
   }
   return {set,enqueue,observe,reset,render,renderActivity,hasPending:()=>(queue.items||[]).some(i=>['queued','paused','sending','error'].includes(i.state))};
 }
+
+// Recovery copies a stopped prompt; it never removes recorded/provider history.
+// Exact editor text is kept separately from expanded mentions/wire payloads.
+export function setupPromptRecovery({area,storage,getSession,onChange}){
+  const read=key=>{try{return JSON.parse(storage.getItem(key))||{};}catch{return {};}};
+  const submissions=read('agentworks-submitted-drafts'),handled=read('agentworks-recovered-stops'),pending=read('agentworks-stop-recovery');
+  const save=()=>{storage.setItem('agentworks-submitted-drafts',JSON.stringify(submissions));storage.setItem('agentworks-recovered-stops',JSON.stringify(handled));storage.setItem('agentworks-stop-recovery',JSON.stringify(pending));};
+  const turns=new Map();
+  const panel=document.createElement('div');panel.className='notice-card';panel.setAttribute('role','status');area.closest('form').before(panel);
+  function render(){
+    panel.replaceChildren();const items=pending[getSession()]||[];panel.hidden=!items.length;
+    for(const item of items){
+      const row=document.createElement('div'),note=document.createElement('p');
+      note.textContent=item.outcome==='cancelled'?'Cancelled. History and tool effects are retained. Edit the prompt and send deliberately to start a new turn.':item.outcome==='error'?'Cancellation ended with an error. Inspect the retained history before retrying.':item.finished?'The turn completed while Stop was being handled. Its prompt is available to edit. History was retained; sending starts a new turn.':'Stop requested. The prompt is available to edit. Cancellation may finish after more output arrives. History and tool effects are retained; sending starts a new turn.';row.append(note);
+      if(item.text!==null){
+        const button=document.createElement('button');button.type='button';button.className='text-button';button.textContent='Edit recovered prompt (keep current draft)';
+        button.onclick=()=>{const previous=area.value;area.value=item.text;item.text=previous||null;save();onChange();area.focus();render();};row.append(button);
+      }
+      const dismiss=document.createElement('button');dismiss.type='button';dismiss.className='text-button';dismiss.textContent='Dismiss';
+      dismiss.onclick=()=>{if(item.text!==null&&!confirm('Dismiss the recovered draft? Your current draft stays in the composer.'))return;pending[getSession()]=items.filter(i=>i!==item);save();render();};row.append(dismiss);panel.append(row);
+    }
+  }
+  return {
+    render,
+    submitted(sid,submission,draft){submissions[sid+':'+submission.requestId]={draft};save();},
+    recovered(sid,requestId){return !!handled[sid+':'+requestId];},
+    consume(sid,event){
+      if(event.kind==='user'){
+        const previous=turns.get(sid);
+        if(previous&&event.seq>previous.seq)delete submissions[sid+':'+previous.requestId];
+        turns.set(sid,{seq:event.seq,requestId:event.data.requestId});
+        pending[sid]=(pending[sid]||[]).filter(item=>!(event.seq>item.userSeq&&item.text===null));save();render();
+      }
+      if(['turn_end','error','interrupted'].includes(event.kind)){
+        const turn=turns.get(sid);if(turn){
+          turn.outcome=event.kind==='turn_end'?event.data.stopReason:'error';
+          for(const item of pending[sid]||[])if(item.userSeq===turn.seq){item.outcome=turn.outcome;item.finished=true;}
+          save();render();
+        }
+      }
+      if(event.kind!=='stop_requested')return;
+      const d=event.data,key=sid+':'+(d.requestId||d.userSeq);
+      if(handled[key])return;
+      handled[key]=true;
+      const sent=submissions[sid+':'+d.requestId],text=sent?sent.draft:d.text;
+      if(typeof text!=='string'){save();return;}
+      const outcome=turns.get(sid)?.seq===d.userSeq?turns.get(sid)?.outcome:null;
+      const item={text,userSeq:d.userSeq,outcome,finished:!!d.alreadyFinished||!!outcome};
+      (pending[sid]??=[]).push(item);
+      if(sid===getSession()&&(!area.value||area.value===text)){area.value=text;item.text=null;onChange();}
+      save();render();
+    },
+  };
+}
