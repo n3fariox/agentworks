@@ -25,6 +25,18 @@ pub async fn index() -> Html<String> {
 
 pub async fn asset(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
     let (mime, body): (&str, &[u8]) = match name.as_str() {
+        "dashboard" => (
+            "text/html; charset=utf-8",
+            include_bytes!("../web/dashboard.html"),
+        ),
+        "dashboard.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("../web/dashboard.js"),
+        ),
+        "dashboard.css" => (
+            "text/css; charset=utf-8",
+            include_bytes!("../web/dashboard.css"),
+        ),
         "review-queue.js" => (
             "text/javascript; charset=utf-8",
             include_bytes!("../web/review-queue.js"),
@@ -58,4 +70,48 @@ pub async fn asset(axum::extract::Path(name): axum::extract::Path<String>) -> Re
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     ([(header::CONTENT_TYPE, mime)], body).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::to_bytes, extract::Path};
+
+    #[tokio::test]
+    async fn dashboard_assets_are_served_with_explicit_mime_types() {
+        for (name, mime, marker) in [
+            (
+                "dashboard",
+                "text/html; charset=utf-8",
+                "Operations dashboard",
+            ),
+            ("dashboard.js", "text/javascript; charset=utf-8", "appUrl"),
+            (
+                "dashboard.css",
+                "text/css; charset=utf-8",
+                ".operations-dashboard",
+            ),
+        ] {
+            let response = asset(Path(name.to_string())).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CONTENT_TYPE], mime);
+            let body = to_bytes(response.into_body(), 128 * 1024).await.unwrap();
+            assert!(std::str::from_utf8(&body).unwrap().contains(marker));
+        }
+        assert_eq!(
+            asset(Path("dashboard-private".into())).await.status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn dashboard_links_keep_the_public_proxy_mount() {
+        let page = index().await.0;
+        assert!(page.contains("id=\"nav-dashboard\""));
+        assert!(page.contains("href=\"./dashboard\""));
+        let dashboard = include_str!("../web/dashboard.html");
+        assert!(dashboard.contains("src=\"./dashboard.js\""));
+        assert!(dashboard.contains("href=\"./dashboard.css\""));
+        assert!(!dashboard.contains("<base"));
+    }
 }
