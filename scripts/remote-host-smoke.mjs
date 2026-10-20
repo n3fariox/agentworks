@@ -86,8 +86,9 @@ try{
   await settled(async()=>(await agents(work)).length===0,'Agent survived the dropped link');
   await until(box.id,h=>h.status==='connected','No reconnect after drop');
   assert.equal(workers().length,1);assert.notEqual(workers()[0],first);
-  const dropped=(await api(`/api/sessions/${remote.id}`)).session.status;
-  assert.ok(!['idle','running'].includes(dropped),'Session still looked live after the drop: '+dropped);
+  const dropped=await api(`/api/sessions/${remote.id}`);
+  assert.equal(dropped.session.status,'suspended');
+  assert.match(dropped.events.filter(e=>e.kind==='interrupted').at(-1).data.message,/host dropped/);
   await api(`/api/sessions/${remote.id}/resume`,{});
   assert.match(await prompt(remote.id,'after the drop'),/after the drop/);
 

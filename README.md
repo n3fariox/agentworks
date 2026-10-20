@@ -179,7 +179,7 @@ Use the sidebar's **Hosts / Projects** toggle to browse the same sessions in eit
 - Hosts: Local → Project → Session
 - Projects: Project → Local → Session
 
-Sessions run on the Local host. Other machines can be added as remote hosts (below). They appear in the list with their connection status but cannot run sessions yet. Projects are logical groups, independent of host paths: several directories/worktrees can share a project, and the same model supports grouping across remote hosts.
+Sessions run on the Local host. Other machines can be added as remote hosts (below). They appear in the list with their connection status and can run chat sessions. Projects are logical groups, independent of host paths: several directories/worktrees can share a project, and the same model supports grouping across remote hosts.
 
 Use **＋** beside Sessions to create a project, or create one in the new-session dialog. The project's **⋯** button opens rename/delete controls. A session's project selector moves it between groups, including **Ungrouped**, while its agent, working directory, and conversation keep running. Deleting a group moves its sessions to Ungrouped.
 
@@ -195,13 +195,18 @@ In the Hosts view, **＋** beside the Hosts heading adds a remote host: a name, 
 ssh -T -o BatchMode=yes … <destination> '<command> agent --stdio'
 ```
 
-The remote `agentworks agent` prints a ready line and then talks to the server over WebSocket on ssh's own stdin and stdout. Anything the remote shell prints before the ready line, such as a login banner, is skipped. All session state stays on this server. The worker only runs processes on its own machine. If the link drops, the worker exits and the server reconnects with backoff, the same as a server restart. **Running sessions on a remote host is not implemented yet.** For now a connected host reports its hostname, platform, version, and detected providers.
+The remote `agentworks agent` prints a ready line and then talks to the server over WebSocket on ssh's own stdin and stdout. Anything the remote shell prints before the ready line, such as a login banner, is skipped. All session state stays on this server. The worker only runs processes on its own machine. If the link drops, the worker stops everything it started and exits, and the server reconnects with backoff, the same as a server restart. A connected host reports its hostname, platform, version, and the providers that can actually start there.
+
+**Chat sessions on a remote host.** Use **⋯** on the host to set its working directories, using the host's own paths (`~/` is the remote user's home). Then start a session with **＋** on the host, or choose the host in the new-session dialog. The worker starts the agent's adapter in that directory on the host and relays its ACP traffic. The server keeps the conversation, approvals, and history as for local sessions, and the agent uses the host's own sign-ins. If the link drops, the host's sessions are suspended with a notice and the interrupted turn is not retried. Resume them once the host reconnects.
+
+Remote sessions are chat-only for now. Worktrees, imports of existing sessions, forks, the file browser and previews, Git context and diffs, model discovery in the new-session dialog (change the model once the session starts), and Agentworks MCP tools (agent communication) are local only. Queued input, automatic continuation after limit resets, and inbox wake-up skip remote sessions. See Phase 6 in the roadmap for the plan.
 
 Requirements:
 
 - SSH from this server's user to the destination works non-interactively, using key or agent authentication and a host key already in `known_hosts`. Ports, users, and jump hosts come from `~/.ssh/config`. The server has no SSH settings or credentials of its own.
 - The server process can use your key. A passphrase-protected key needs an SSH agent reachable through `SSH_AUTH_SOCK` in the server's environment. Services, including the Agentworks supervisor, often start without one. Either start the server with `SSH_AUTH_SOCK` pointing at a long-lived agent, such as systemd's `ssh-agent.service` socket at `$XDG_RUNTIME_DIR/ssh-agent.socket` with your key added, or use a dedicated key without a passphrase that is authorized only on the hosts you add. If a host reports `Permission denied` while `SSH_AUTH_SOCK` is unset, the status message says so.
 - Agentworks is built on the remote host from the same version, with `npm ci --ignore-scripts` run there. The remote command defaults to `agentworks` on the remote `PATH`; set it to a full path such as `~/agentworks/target/release/agentworks` otherwise. Provider detection uses the adapter paths of the checkout the binary was built from.
+- Tools on the host, such as node for the adapters and the `opencode`, `codex`, and `claude` CLIs, come from its PATH. A non-interactive ssh command does not run shell startup files, so tools installed with mise would be missing. The worker therefore applies `mise env` for each session's directory itself, including that project's own mise configuration, falling back to the global configuration if the project's cannot be used (for example, if it is not trusted).
 
 No ports or socket files are opened on either machine. SSH provides authentication and encryption, so there is no separate enrollment secret. Hover a host's status dot for details. When a host is offline, the reason, including ssh's last output, also appears under it. **↻** reconnects immediately, and **×** removes a host with no sessions and stops its worker. `AGENTWORKS_SSH` selects a different ssh program.
 

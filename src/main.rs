@@ -2191,6 +2191,16 @@ fn start_worker(s: &Arc<Session>) {
     let worker = tokio::spawn(async move {
         if let Err(error) = runtime::run(worker_s.clone(), rx).await {
             worker_s.clear_approvals();
+            // A dropped host link is handled like a server restart: the turn
+            // is not retried and the session resumes once the host is back.
+            if worker_s.host_id != "local"
+                && hosts::registry().is_some_and(|h| h.live(&worker_s.host_id).is_none())
+            {
+                let was_active = std::mem::take(&mut worker_s.data.lock().unwrap().turn_active);
+                worker_s.emit("interrupted",json!({"message":if was_active {"The connection to this session's host dropped during a turn. It was not retried. Resume once the host reconnects, and check the last tool result before continuing."} else {"The connection to this session's host dropped. Resume once the host reconnects."}}));
+                worker_s.status("suspended");
+                return;
+            }
             {
                 let mut data = worker_s.data.lock().unwrap();
                 if data.continuation.phase.as_deref() == Some("opening") {
