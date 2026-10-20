@@ -5,7 +5,7 @@ The user authorized two independent Codex work sessions for U-05 and U-10 on 202
 | Work | Branch | Ownership | Isolated test ports |
 | --- | --- | --- | --- |
 | U-05 Bazel build progress first slice | `agentworks/u05-bazel-progress` | Own runtime output handling, `web/app.js`, `web/style.css` and focused tests. Do not edit `src/main.rs`, `src/hosting.rs`, `web/index.html`, dashboard files, dependencies or shared build outputs. | 4521–4525 |
-| U-10 operations dashboard | `agentworks/u10-operations-dashboard` | Own dashboard page/assets, `src/hosting.rs`, and `src/main.rs` only if a read-only API addition is necessary. Do not edit `src/runtime.rs`, `web/app.js`, `web/style.css`, dependencies or shared build outputs. | 4531–4535 |
+| U-10 operations dashboard | `agentworks/u10-operations-dashboard` | Own `web/index.html` navigation, dashboard page/assets, `src/hosting.rs`, and `src/main.rs` only if a read-only API addition is necessary. Do not edit `src/runtime.rs`, `web/app.js`, `web/style.css`, dependencies or shared build outputs. | 4531–4535 |
 
 U-05 acceptance is the bounded first slice recorded in the backlog: built-in Bazel phase and reported action/test counts from live tool output; correct handling of snapshots/deltas, ANSI and carriage-return updates, split lines and changing totals; raw output retained; normal elapsed activity when output is absent/unusable; tool status remains authoritative. No public parser/plugin API or configurable matching system in this slice. Use deterministic recorded fixtures and isolated tests; do not depend on paid/live provider inference.
 
