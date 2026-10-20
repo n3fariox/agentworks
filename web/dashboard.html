@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark light"><title>Operations dashboard · Agentworks</title>
+  <link rel="stylesheet" href="./dashboard.css"><script type="module" src="./dashboard.js"></script>
+</head>
+<body class="operations-dashboard">
+  <a class="skip-link" href="#content">Skip to dashboard</a>
+  <header class="topbar"><a href="./" class="brand">a<span>·</span> agentworks</a><nav aria-label="Workspace navigation"><a href="./">Sessions</a><a href="./dashboard" aria-current="page">Dashboard</a></nav><span class="readonly">Read-only</span></header>
+  <main id="content" tabindex="-1">
+    <div class="page-heading"><div><p class="eyebrow">WORKSPACE OPERATIONS</p><h1>Operations dashboard</h1><p>Hosts, projects, and reported provider usage in one place.</p></div><button id="refresh" type="button">Refresh dashboard</button></div>
+    <p id="refresh-status" role="status" aria-live="polite">Loading dashboard…</p>
+    <p class="note">Snapshot view. Refresh to update. Counts include archived sessions; archiving does not stop a session.</p>
+    <div id="errors" role="alert"></div>
+    <section aria-labelledby="hosts-heading"><div class="section-heading"><h2 id="hosts-heading">Hosts</h2><p>Connection state reported by the catalog</p></div><div id="hosts" class="cards"><p>Loading hosts…</p></div></section>
+    <section aria-labelledby="projects-heading"><div class="section-heading"><h2 id="projects-heading">Projects &amp; session states</h2><p>Reported state is shown for every session</p></div><div id="projects"><p>Loading projects…</p></div></section>
+    <section aria-labelledby="accounts-heading"><div class="section-heading"><h2 id="accounts-heading">Claude &amp; Codex accounts</h2><p>Configuration and session observations</p></div><p class="note">Account identity and connection are not verified by the available API. Quota observations belong to their source sessions and may describe the same account. They are never added together. No account services or harness commands are queried.</p><div id="accounts" class="cards accounts"><p>Loading provider status…</p></div></section>
+    <noscript><p>This dashboard needs JavaScript to read workspace status. Enable JavaScript and reload.</p></noscript>
+  </main>
+</body>
+</html>
