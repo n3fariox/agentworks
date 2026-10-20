@@ -6,7 +6,7 @@ Project create/edit exposes the default mode and an isolation requirement. Requi
 
 Project name and workspace policy use separate API operations. If policy saving fails after project creation or rename, the dialog explicitly reports that the name was saved and retries against the saved project ID. It never repeats project creation after a known successful POST. An ambiguous network failure during the project POST itself remains an API limitation because project creation has no idempotency contract.
 
-Session create requests include a request ID. Identical failed attempts reuse it, including after a reload in the same tab (`sessionStorage`); changed payloads use a new ID. Success clears the pending attempt. Backend preparation errors remain visible; retry never performs client-side cleanup. If the backend marks a preparation permanently failed, inspect the retained branch/files before making a changed attempt. Session deletion explicitly retains worktree files and branches. Worktree cleanup/merge controls are deferred.
+Session create requests include a request ID. Identical failed attempts reuse it, including after a reload in the same tab (`sessionStorage`); changed payloads use a new ID. Success clears the pending attempt. Backend preparation errors remain visible; retry never performs client-side cleanup. If the backend marks a preparation permanently failed, inspect the retained branch/files before making a changed attempt. Session deletion explicitly retains worktree files and branches. Archive cleanup of session-created worktrees asks before deleting changes ([C-04b](work/WORKTREE-CLEANUP.md)); merge controls are deferred.
 
 ## Checks
 

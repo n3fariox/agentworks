@@ -33,6 +33,10 @@ pub async fn asset(axum::extract::Path(name): axum::extract::Path<String>) -> Re
             "text/javascript; charset=utf-8",
             include_bytes!("../web/worktree-ownership.js"),
         ),
+        "controllers.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("../web/controllers.js"),
+        ),
         "pwa.js" => (
             "text/javascript; charset=utf-8",
             include_bytes!("../web/pwa.js"),

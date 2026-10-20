@@ -21,7 +21,7 @@ let server,browser;const delay=ms=>new Promise(r=>setTimeout(r,ms));
 async function until(check){for(let i=0;i<300;i++){const v=await check();if(v)return v;await delay(50);}throw new Error('Test timed out');}
 async function api(path,method='GET',body,status=200){const r=await fetch(base+path,{method,headers,body:body===undefined?undefined:JSON.stringify(body)}),text=await r.text();assert.equal(r.status,status,`${method} ${path}: ${text}`);return status===200?JSON.parse(text):text;}
 async function start(){server=spawn(resolve('target/debug/agentworks'),[],{env,stdio:['ignore','inherit','inherit']});await until(async()=>{assert.equal(server.exitCode,null,'Server exited');try{return(await fetch(base+'/api/status')).ok;}catch{return false;}});}
-async function stop(){const ended=once(server,'exit');server.kill('SIGINT');const timer=setTimeout(()=>server.kill('SIGKILL'),8000);timer.unref();const [code]=await ended;clearTimeout(timer);assert.equal(code,0);server=null;}
+async function stop(check=true){const ended=once(server,'exit');server.kill('SIGINT');const timer=setTimeout(()=>server.kill('SIGKILL'),8000);timer.unref();const [code]=await ended;clearTimeout(timer);server=null;if(check)assert.equal(code,0,'Server must shut down cleanly');}
 const snap=id=>api('/api/sessions/'+id);
 const idle=id=>until(async()=>{const s=await snap(id);assert.notEqual(s.session.status,'error',JSON.stringify(s.events.filter(e=>e.kind==='error')));return s.session.status==='idle'&&s;});
 const exists=path=>access(path).then(()=>true,()=>false);
@@ -140,4 +140,4 @@ try{
  await until(async()=>(await snap(active.id)).session.archived);assert.equal(await exists(active.cwd),false);
  assert.deepEqual(errors,[]);
  console.log(`Worktree cleanup smoke passed; fixtures retained in ${dir}`);
-}finally{await browser?.close();if(server)await stop();}
+}finally{await browser?.close();if(server)await stop(false);}

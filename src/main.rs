@@ -3,6 +3,7 @@ mod browser_origin;
 mod catalog;
 mod communication;
 mod completion;
+mod controllers;
 mod diff;
 mod fork;
 mod git_context;
@@ -546,6 +547,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let restored = store.load().map_err(|e| e.to_string())?;
     let mcp_listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let mcp_endpoint = mcp_listener.local_addr()?;
+    // C-01: external stdio bridges discover this process's loopback endpoint here.
+    controllers::publish_endpoint(db_path.with_extension("mcp-endpoint"), mcp_endpoint)?;
     let catalog = Arc::new(Mutex::new(Catalog::open(catalog_path)?));
     let app = App {
         sessions: Default::default(),
@@ -862,6 +865,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(worktrees::get_policy).put(worktrees::put_policy),
         )
         .route("/api/worktrees/list", post(worktrees::list))
+        .route(
+            "/api/projects/{id}/controllers",
+            get(controllers::list).post(controllers::create),
+        )
+        .route("/api/controllers/{id}/revoke", post(controllers::revoke))
+        .route("/api/controllers/{id}/audit", get(controllers::audit))
         .route("/api/sessions/{id}/project", post(assign_project))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route(
@@ -1505,6 +1514,8 @@ async fn delete_project(
         .unwrap()
         .remove(&id)
         .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    // Controllers are scoped to exactly one project and do not outlive it.
+    app.store.lock().unwrap().revoke_project_controllers(&id)?;
     if req.sessions == ProjectSessions::Ungroup {
         ungroup_sessions(&app, &affected, "Project deleted")?;
     }
@@ -2183,6 +2194,9 @@ async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
 struct Prompt {
     #[serde(skip)]
     initiated_by: Option<String>,
+    /// C-01 controller display name; sessions are resolved by ID in the browser.
+    #[serde(skip)]
+    initiator_title: Option<String>,
     text: String,
     #[serde(rename = "requestId")]
     request_id: String,
@@ -2215,7 +2229,13 @@ async fn prompt(
         input_queue::Bound::Conflict => return Err(input_queue::conflict()),
         input_queue::Bound::New => {}
     }
-    accept_prompt(&s, req.text, req.request_id, req.initiated_by)
+    accept_prompt(
+        &s,
+        req.text,
+        req.request_id,
+        req.initiated_by,
+        req.initiator_title,
+    )
 }
 /// Shared turn acceptance for direct prompts and L-05 queued dispatch. Callers hold
 /// `run_lock` and have passed `service_restart::allow_start`.
@@ -2224,6 +2244,7 @@ fn accept_prompt(
     text: String,
     request_id: String,
     initiated_by: Option<String>,
+    initiator_title: Option<String>,
 ) -> ApiResult {
     {
         let mut data = s.data.lock().unwrap();
@@ -2246,7 +2267,7 @@ fn accept_prompt(
     }
     s.emit(
         "user",
-        json!({"text":text,"requestId":request_id,"initiatedBy":initiated_by}),
+        json!({"text":text,"requestId":request_id,"initiatedBy":initiated_by,"initiatorTitle":initiator_title}),
     );
     s.emit("status", json!({"status":"running"}));
     if let Err(error) = s.send_command(runtime::Command::Prompt(text)) {

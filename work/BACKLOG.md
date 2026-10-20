@@ -11,6 +11,8 @@ This board distinguishes delivered behavior from the older architecture proposal
 | C-02 | Read-only session Git/worktree context | Delivered in batch 001 | Main/linked/detached/non-Git states; branch/path/commit visible on desktop and phone; no repository mutation |
 | C-03 | Durable completion claims | Delivered in batch 001 | Self-authored scoped MCP reports; idempotency; restart persistence; visible claims with commits, checks and blockers; no automatic work |
 | C-04a | Enforced worktree launches | Delivered in batch 002 | Project defaults and mandatory isolation; new/existing worktree selection; common browser/MCP/automation checks; durable retry behavior; preserved history |
+| C-01 | Named external controller identity | Implemented on `agentworks/c04b-c01`; pending review/integration | Project-scoped, revocable controller credentials with attributed operations; see [CONTROLLERS.md](CONTROLLERS.md) |
+| C-04b | Worktree ownership and cleanup | Implemented on `agentworks/c04b-c01`; pending review/integration | Ownership/dirty state, clean removal on archive with branch-based restore, confirmed dirty removal, unsafe cleanup refused; see [WORKTREE-CLEANUP.md](WORKTREE-CLEANUP.md) |
 
 ## Completed priority feature
 
@@ -20,8 +22,8 @@ This board distinguishes delivered behavior from the older architecture proposal
 
 | ID | Task | Acceptance |
 | --- | --- | --- |
-| C-01 | Named external controller identity | Explicit, revocable project-scoped credentials for this conversation/external MCP clients, with attributed operations; no borrowing an existing session's identity |
-| C-04b | Worktree ownership and cleanup | Build on delivered creation/selection; show ownership and dirty state, refuse unsafe cleanup, and keep integration/merge privileges explicit |
+| C-01 | Named external controller identity — implemented, pending integration | Explicit, revocable project-scoped credentials for this conversation/external MCP clients, with attributed operations; no borrowing an existing session's identity |
+| C-04b | Worktree ownership and cleanup — implemented, pending integration | Build on delivered creation/selection; show ownership and dirty state, refuse unsafe cleanup, and keep integration/merge privileges explicit |
 | C-05 | Review and merge queue | Record proposed commits, review/test results and integration state separately from agent completion claims; apply one integration at a time |
 | C-06 | Optional inbox delivery/wake-up — implemented and verified in batch 007; bounded coordinator policy enabled after deployment | Opt-in queued delivery with stable request IDs, loop/cost bounds, cancellation and crash recovery; messages alone continue not to start work |
 

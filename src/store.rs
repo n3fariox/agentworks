@@ -69,9 +69,11 @@ impl Store {
           CREATE INDEX IF NOT EXISTS agent_completions_latest ON agent_completions(author,id DESC);
           CREATE TABLE IF NOT EXISTS session_creations(request_key TEXT PRIMARY KEY,payload TEXT NOT NULL,session_id TEXT,error TEXT,mutation_started INTEGER NOT NULL DEFAULT 0);
           COMMIT;")?;
+        // C-01 controllers are additive; version 7 binaries ignore the extra table.
         connection.execute_batch(&format!(
-            "BEGIN; {} PRAGMA user_version=7; COMMIT;",
-            crate::inbox_delivery::SCHEMA
+            "BEGIN; {} {} PRAGMA user_version=7; COMMIT;",
+            crate::inbox_delivery::SCHEMA,
+            crate::controllers::SCHEMA
         ))?;
         Ok(Self {
             connection,

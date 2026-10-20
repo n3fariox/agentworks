@@ -1,6 +1,6 @@
 # Session lifecycle (L-01)
 
-Rename and archive change saved session metadata. Archive only hides a session from the default list: its harness, active turn and continuation policy keep running. The sidebar offers Active, Archived and All filters. External harness discovery identifies an already-registered archived conversation and opens that conversation instead of importing a duplicate.
+Rename and archive change saved session metadata. Archive only hides a session from the default list: its harness, active turn and continuation policy keep running. The exception is a clean (or explicitly confirmed) worktree created by the session: archive suspends the idle harness, removes that checkout, and keeps its branch for restore on unarchive. See [C-04b](WORKTREE-CLEANUP.md). The sidebar offers Active, Archived and All filters. External harness discovery identifies an already-registered archived conversation and opens that conversation instead of importing a duplicate.
 
 Stop cancels an active turn and disables usage-limit continuation, including pending timers. The harness normally remains available for another human turn. If Stop arrives while the native context is opening or model configuration is in progress, Agentworks suspends the harness instead of queuing a cancellation behind initialization.
 

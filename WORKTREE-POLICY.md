@@ -1,6 +1,6 @@
 # Project workspace policy and worktree launches
 
-Workspace preparation runs in the backend before starting any session harness, including demo sessions. Browser creation, MCP `start_session` and manual automation runs use the same preparation function. Existing registered sessions resume in their saved canonical cwd, regardless of later policy changes. Session deletion retains the worktree, branch and every file; cleanup and merge controls are deferred.
+Workspace preparation runs in the backend before starting any session harness, including demo sessions. Browser creation, MCP `start_session` and manual automation runs use the same preparation function. Existing registered sessions resume in their saved canonical cwd, regardless of later policy changes. Session deletion retains the worktree, branch and every file. Archive cleanup of worktrees created by a session is described in [work/WORKTREE-CLEANUP.md](work/WORKTREE-CLEANUP.md); merge controls are deferred.
 
 ## HTTP API
 
@@ -35,11 +35,11 @@ The async lock order is communication, automation run, workspace preparation, th
 
 ## Bounds and limitations
 
-Git subprocesses use argument arrays, null stdin, disabled hooks/fsmonitor/recursive submodule checkout, no prompts, and cleared inherited `GIT_*` repository/config overrides. No force/reset/remove operation exists. Each subprocess has a 10-second timeout and a 256 KiB output cap; complete workspace preparation has a 12-second timeout. Existing read-only Workspace inspection retains its 3-second/16 KiB bounds. Output overflow fails explicitly; partial lists are not accepted. Import verification is capped at 100 discovery pages and 12 seconds.
+Git subprocesses use argument arrays, null stdin, disabled hooks/fsmonitor/recursive submodule checkout, no prompts, and cleared inherited `GIT_*` repository/config overrides. Preparation never forces, resets or removes; archive cleanup is limited to session-owned worktrees (see [WORKTREE-CLEANUP.md](work/WORKTREE-CLEANUP.md)). Each subprocess has a 10-second timeout and a 256 KiB output cap; complete workspace preparation has a 12-second timeout. Existing read-only Workspace inspection retains its 3-second/16 KiB bounds. Output overflow fails explicitly; partial lists are not accepted. Import verification is capped at 100 discovery pages and 12 seconds.
 
 Source cwd, worktree roots and Git administrative/common directories must be within effective allowed roots. Destination paths must be absolute and cannot traverse parent components or symlinks. Ancestors are checked again and the absent destination is reserved with exclusive directory creation immediately before Git mutation; canonical cwd and current roots are checked before launch. This remains same-OS-user execution: malicious concurrent filesystem replacement by another process is not eliminated by pathname checks, and Git repository configuration and tracked content remain trusted inputs. Committed credentials, if present in repository history, are ordinary tracked content; untracked credentials are not copied.
 
-Worktrees are local only. Bare sources, non-UTF-8 Git output and unavailable provider discovery are rejected. Missing/prunable worktrees are omitted from discovery because they cannot be safely canonicalized. There is no cleanup, merge, branch adoption, incomplete-checkout recovery, scheduling or paid-inference testing in this feature.
+Worktrees are local only. Bare sources, non-UTF-8 Git output and unavailable provider discovery are rejected. Missing/prunable worktrees are omitted from discovery because they cannot be safely canonicalized. There is no merge, branch adoption, incomplete-checkout recovery, scheduling or paid-inference testing in this feature.
 
 ## Validation
 

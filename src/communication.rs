@@ -70,6 +70,13 @@ pub struct ControlOrigin {
     pub request: String,
     #[serde(default)]
     pub payload: Value,
+    /// C-01 display name for external controllers, which are not sessions.
+    #[serde(
+        default,
+        rename = "actorTitle",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub actor_title: Option<String>,
 }
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -133,7 +140,7 @@ impl crate::store::Store {
             return Err(fail(StatusCode::BAD_REQUEST, "Invalid message cursor"));
         }
         let mut q=self.connection.prepare("SELECT id,sender,sender_title,recipient,recipient_title,text,reply_to,created,acknowledged FROM agent_messages WHERE (sender=?1 OR recipient=?1) AND id>?2 ORDER BY id LIMIT 21").map_err(db_error)?;
-        let mut messages=q.query_map(params![id,after],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"uri":format!("{MESSAGE_URI}{}",r.get::<_,i64>(0)?),"sender":r.get::<_,String>(1)?,"senderUri":session_uri(&r.get::<_,String>(1)?),"senderTitle":r.get::<_,String>(2)?,"recipient":r.get::<_,String>(3)?,"recipientUri":session_uri(&r.get::<_,String>(3)?),"recipientTitle":r.get::<_,String>(4)?,"text":r.get::<_,String>(5)?,"replyTo":r.get::<_,Option<i64>>(6)?,"replyToUri":r.get::<_,Option<i64>>(6)?.map(|n|format!("{MESSAGE_URI}{n}")),"created":r.get::<_,i64>(7)?,"acknowledged":r.get::<_,bool>(8)?}))).map_err(db_error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?;
+        let mut messages=q.query_map(params![id,after],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"uri":format!("{MESSAGE_URI}{}",r.get::<_,i64>(0)?),"sender":r.get::<_,String>(1)?,"senderUri":actor_uri(&r.get::<_,String>(1)?),"senderTitle":r.get::<_,String>(2)?,"recipient":r.get::<_,String>(3)?,"recipientUri":actor_uri(&r.get::<_,String>(3)?),"recipientTitle":r.get::<_,String>(4)?,"text":r.get::<_,String>(5)?,"replyTo":r.get::<_,Option<i64>>(6)?,"replyToUri":r.get::<_,Option<i64>>(6)?.map(|n|format!("{MESSAGE_URI}{n}")),"created":r.get::<_,i64>(7)?,"acknowledged":r.get::<_,bool>(8)?}))).map_err(db_error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?;
         let has_more = messages.len() > 20;
         messages.truncate(20);
         Ok(
@@ -169,6 +176,83 @@ pub const SESSION_URI: &str = "agentworks://sessions/";
 pub fn session_uri(id: &str) -> String {
     format!("{SESSION_URI}{id}")
 }
+/// Session URI, or controller URI for `controller:<id>` actors.
+pub fn actor_uri(id: &str) -> String {
+    match id.strip_prefix(crate::controllers::ACTOR_PREFIX) {
+        Some(c) => format!("{}{c}", crate::controllers::URI),
+        None => session_uri(id),
+    }
+}
+/// Authenticated tool caller: a session's harness or a named external controller (C-01).
+/// Controllers never borrow a session identity; their IDs carry the `controller:` prefix.
+#[derive(Clone)]
+pub struct Actor {
+    pub id: String,
+    pub title: String,
+    pub project: Option<String>,
+    pub session: Option<Arc<Session>>,
+}
+impl Actor {
+    pub fn of(s: &Arc<Session>) -> Self {
+        Self {
+            id: s.id.clone(),
+            title: s.display_title(),
+            project: project(s),
+            session: Some(s.clone()),
+        }
+    }
+    pub fn controller(c: &crate::controllers::Controller) -> Self {
+        Self {
+            id: crate::controllers::actor_id(&c.id),
+            title: c.name.clone(),
+            project: Some(c.project_id.clone()),
+            session: None,
+        }
+    }
+}
+/// Grants are reread on every call, so revocation applies to existing connections.
+pub fn actor_access(app: &App, a: &Actor) -> Result<Access> {
+    if a.session.is_some() {
+        return app.store.lock().unwrap().access(&a.id);
+    }
+    let id =
+        a.id.strip_prefix(crate::controllers::ACTOR_PREFIX)
+            .unwrap_or_default();
+    Ok(app
+        .store
+        .lock()
+        .unwrap()
+        .controller(id)?
+        .map(|c| Access {
+            restart_service: false,
+            ..c.access
+        })
+        .unwrap_or_default())
+}
+fn permitted(a: &Access, capability: &str) -> bool {
+    match capability {
+        "communicate" => a.communicate,
+        "start_sessions" => a.start_sessions,
+        "prompt_sessions" => a.prompt_sessions,
+        "cancel_sessions" => a.cancel_sessions,
+        "run_automations" => a.run_automations,
+        "restart_service" => a.restart_service,
+        _ => false,
+    }
+}
+fn not_granted(capability: &str) -> (StatusCode, String) {
+    fail(
+        StatusCode::FORBIDDEN,
+        format!("Agentworks capability not granted: {capability}"),
+    )
+}
+pub fn require_actor(app: &App, a: &Actor, capability: &str) -> Result<Access> {
+    let access = actor_access(app, a)?;
+    if !permitted(&access, capability) {
+        return Err(not_granted(capability));
+    }
+    Ok(access)
+}
 /// Accepts a bare session ID or an `agentworks://sessions/<id>` URI.
 pub fn session_ref(id: &str) -> &str {
     id.strip_prefix(SESSION_URI).unwrap_or(id)
@@ -180,9 +264,11 @@ pub fn message_ref(v: &Value) -> Option<i64> {
         .or_else(|| v.as_str()?.strip_prefix(MESSAGE_URI)?.parse().ok())
 }
 pub fn peer(app: &App, actor: &Session, id: &str) -> Result<Arc<Session>> {
+    peer_of(app, &project(actor), id)
+}
+pub fn peer_of(app: &App, scope: &Option<String>, id: &str) -> Result<Arc<Session>> {
     let target = session(app, session_ref(id))?;
-    let scope = project(actor);
-    if scope.is_none() || scope != project(&target) {
+    if scope.is_none() || *scope != project(&target) {
         return Err(fail(
             StatusCode::FORBIDDEN,
             "Target is outside this session's project",
@@ -192,28 +278,19 @@ pub fn peer(app: &App, actor: &Session, id: &str) -> Result<Arc<Session>> {
 }
 pub fn require(app: &App, s: &Session, capability: &str) -> Result<Access> {
     let a = access(app, s)?;
-    let permitted = match capability {
-        "communicate" => a.communicate,
-        "start_sessions" => a.start_sessions,
-        "prompt_sessions" => a.prompt_sessions,
-        "cancel_sessions" => a.cancel_sessions,
-        "run_automations" => a.run_automations,
-        "restart_service" => a.restart_service,
-        _ => false,
-    };
-    if !permitted {
-        return Err(fail(
-            StatusCode::FORBIDDEN,
-            format!("Agentworks capability not granted: {capability}"),
-        ));
+    if !permitted(&a, capability) {
+        return Err(not_granted(capability));
     }
     Ok(a)
 }
 pub fn coordinator(a: &Access) -> bool {
     a.start_sessions || a.prompt_sessions || a.cancel_sessions || a.run_automations
 }
-pub fn peers(app: &App, s: &Session) -> Result<Value> {
-    let grants = access(app, s)?;
+pub fn peers(app: &App, s: &Arc<Session>) -> Result<Value> {
+    peers_as(app, &Actor::of(s))
+}
+pub fn peers_as(app: &App, a: &Actor) -> Result<Value> {
+    let grants = actor_access(app, a)?;
     if !grants.enabled() {
         return Err(fail(
             StatusCode::FORBIDDEN,
@@ -221,22 +298,38 @@ pub fn peers(app: &App, s: &Session) -> Result<Value> {
         ));
     }
     let coordinator = coordinator(&grants);
-    let scope = project(s);
+    let scope = a.project.clone();
     let candidates: Vec<_> = app.sessions.lock().unwrap().values().cloned().collect();
     let mut values = Vec::new();
+    let mut controllers = Vec::new();
+    if let Some(project) = scope.as_deref().filter(|_| grants.communicate) {
+        // Minimal metadata so sessions can reply to messaging controllers.
+        for c in app.store.lock().unwrap().live_controllers(project)? {
+            let id = crate::controllers::actor_id(&c.id);
+            if c.access.communicate && id != a.id {
+                controllers
+                    .push(json!({"id":id,"uri":actor_uri(&id),"title":c.name,"kind":"controller"}));
+            }
+        }
+    }
     if scope.is_some() {
         for p in candidates {
-            if p.id != s.id && project(&p) == scope && (coordinator || access(app, &p)?.communicate)
+            if p.id != a.id && project(&p) == scope && (coordinator || access(app, &p)?.communicate)
             {
                 let d = p.data.lock().unwrap();
                 values.push(json!({"id":p.id,"uri":session_uri(&p.id),"title":d.lifecycle.title.as_deref().unwrap_or(&p.title),"archived":d.lifecycle.archived,"provider":p.provider,"status":d.status,"hostId":p.host_id}));
             }
         }
     }
-    Ok(json!({"self":s.id,"selfUri":session_uri(&s.id),"projectId":scope,"sessions":values}))
+    Ok(
+        json!({"self":a.id,"selfUri":actor_uri(&a.id),"projectId":scope,"sessions":values,"controllers":controllers}),
+    )
 }
-pub fn send(app: &App, s: &Session, req: SendMessage) -> Result<Value> {
-    require(app, s, "communicate")?;
+pub fn send(app: &App, s: &Arc<Session>, req: SendMessage) -> Result<Value> {
+    send_as(app, &Actor::of(s), req)
+}
+pub fn send_as(app: &App, s: &Actor, req: SendMessage) -> Result<Value> {
+    require_actor(app, s, "communicate")?;
     if req.text.trim().is_empty()
         || req.text.len() > 16384
         || req.request_id.is_empty()
@@ -247,18 +340,39 @@ pub fn send(app: &App, s: &Session, req: SendMessage) -> Result<Value> {
             "Message must be 1–16384 bytes with a request ID up to 100 bytes",
         ));
     }
-    let target = peer(app, s, &req.recipient)?;
-    require(app, &target, "communicate")?;
-    if target.id == s.id {
+    // Recipient is a same-project session or a live messaging controller.
+    let (target_id, target_title, target) =
+        if let Some(id) = crate::controllers::reference(&req.recipient) {
+            let c = app
+                .store
+                .lock()
+                .unwrap()
+                .controller(id)?
+                .filter(|c| s.project.as_ref() == Some(&c.project_id))
+                .ok_or_else(|| {
+                    fail(
+                        StatusCode::FORBIDDEN,
+                        "Target is outside this session's project",
+                    )
+                })?;
+            if !c.access.communicate {
+                return Err(not_granted("communicate"));
+            }
+            (crate::controllers::actor_id(&c.id), c.name, None)
+        } else {
+            let target = peer_of(app, &s.project, &req.recipient)?;
+            require(app, &target, "communicate")?;
+            (target.id.clone(), target.display_title(), Some(target))
+        };
+    if target_id == s.id {
         return Err(fail(StatusCode::BAD_REQUEST, "Choose another session"));
     }
-    let sender_title = s.display_title();
-    let target_title = target.display_title();
+    let sender_title = s.title.clone();
     let mut store = app.store.lock().unwrap();
     let tx = store.connection.transaction().map_err(db_error)?;
     let previous:Option<(i64,String,String,Option<i64>)>=tx.query_row("SELECT id,recipient,text,reply_to FROM agent_messages WHERE sender=?1 AND request_id=?2",params![s.id,req.request_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(db_error)?;
     if let Some((id, recipient, text, reply)) = previous {
-        if recipient != target.id || text != req.text || reply != req.reply_to {
+        if recipient != target_id || text != req.text || reply != req.reply_to {
             return Err(fail(
                 StatusCode::CONFLICT,
                 "Request ID already used for a different message",
@@ -267,7 +381,7 @@ pub fn send(app: &App, s: &Session, req: SendMessage) -> Result<Value> {
         return Ok(json!({"id":id,"uri":format!("{MESSAGE_URI}{id}"),"duplicate":true}));
     }
     if let Some(reply) = req.reply_to {
-        let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM agent_messages WHERE id=?1 AND ((sender=?2 AND recipient=?3) OR (sender=?3 AND recipient=?2)))",params![reply,s.id,target.id],|r|r.get(0)).map_err(db_error)?;
+        let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM agent_messages WHERE id=?1 AND ((sender=?2 AND recipient=?3) OR (sender=?3 AND recipient=?2)))",params![reply,s.id,target_id],|r|r.get(0)).map_err(db_error)?;
         if !valid {
             return Err(fail(
                 StatusCode::FORBIDDEN,
@@ -278,7 +392,7 @@ pub fn send(app: &App, s: &Session, req: SendMessage) -> Result<Value> {
     let count: i64 = tx
         .query_row(
             "SELECT count(*) FROM agent_messages WHERE recipient=?1 AND acknowledged=0",
-            [&target.id],
+            [&target_id],
             |r| r.get(0),
         )
         .map_err(db_error)?;
@@ -301,17 +415,21 @@ pub fn send(app: &App, s: &Session, req: SendMessage) -> Result<Value> {
             "Message rate exceeded; retry later",
         ));
     }
-    tx.execute("INSERT INTO agent_messages(sender,sender_title,recipient,recipient_title,text,reply_to,created,request_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![s.id,sender_title,target.id,target_title,req.text,req.reply_to,now(),req.request_id]).map_err(db_error)?;
+    tx.execute("INSERT INTO agent_messages(sender,sender_title,recipient,recipient_title,text,reply_to,created,request_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![s.id,sender_title,target_id,target_title,req.text,req.reply_to,now(),req.request_id]).map_err(db_error)?;
     let id = tx.last_insert_rowid();
-    tx.execute("INSERT INTO agent_audit(actor,action,target,outcome,created) VALUES (?1,'send_message',?2,'accepted',?3)",params![s.id,target.id,now()]).map_err(db_error)?;
-    crate::inbox_delivery::enqueue(&tx, &target.id, id)?;
+    tx.execute("INSERT INTO agent_audit(actor,action,target,outcome,created) VALUES (?1,'send_message',?2,'accepted',?3)",params![s.id,target_id,now()]).map_err(db_error)?;
+    // Only session peers can feed opt-in wake delivery; controllers need an explicit prompt grant.
+    if target.is_some() && s.session.is_some() {
+        crate::inbox_delivery::enqueue(&tx, &target_id, id)?;
+    }
     tx.commit().map_err(db_error)?;
     drop(store);
-    s.emit("mailbox_updated", json!({"messageId":id}));
-    target.emit("mailbox_updated", json!({"messageId":id}));
+    for session in [s.session.as_ref(), target.as_ref()].into_iter().flatten() {
+        session.emit("mailbox_updated", json!({"messageId":id}));
+    }
     Ok(json!({"id":id,"uri":format!("{MESSAGE_URI}{id}"),"duplicate":false}))
 }
-pub fn acknowledge(app: &App, s: &Session, id: i64) -> Result<Value> {
+pub fn acknowledge(app: &App, recipient: &str, id: i64) -> Result<Value> {
     let count = app
         .store
         .lock()
@@ -319,7 +437,7 @@ pub fn acknowledge(app: &App, s: &Session, id: i64) -> Result<Value> {
         .connection
         .execute(
             "UPDATE agent_messages SET acknowledged=1 WHERE id=?1 AND recipient=?2",
-            params![id, s.id],
+            params![id, recipient],
         )
         .map_err(db_error)?;
     if count == 0 {
@@ -423,12 +541,13 @@ pub async fn ack_message(
 ) -> ApiResult {
     let _gate = app.communication_lock.lock().await;
     let s = session(&app, &id)?;
-    Ok(Json(acknowledge(&app, &s, message)?))
+    Ok(Json(acknowledge(&app, &s.id, message)?))
 }
 pub async fn audit_log(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     session(&app, &id)?;
     let store = app.store.lock().unwrap();
-    let mut q=store.connection.prepare("SELECT actor,action,target,outcome,created FROM agent_audit WHERE actor=?1 OR target=?1 ORDER BY id DESC LIMIT 100").map_err(db_error)?;
-    let events=q.query_map([id],|r|Ok(json!({"actor":r.get::<_,String>(0)?,"action":r.get::<_,String>(1)?,"target":r.get::<_,String>(2)?,"outcome":r.get::<_,String>(3)?,"created":r.get::<_,i64>(4)?}))).map_err(db_error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?;
+    // Controller names are joined in so attributed operations stay readable after revocation.
+    let mut q=store.connection.prepare("SELECT a.actor,a.action,a.target,a.outcome,a.created,c.name FROM agent_audit a LEFT JOIN agent_controllers c ON a.actor='controller:'||c.id WHERE a.actor=?1 OR a.target=?1 ORDER BY a.id DESC LIMIT 100").map_err(db_error)?;
+    let events=q.query_map([id],|r|Ok(json!({"actor":r.get::<_,String>(0)?,"action":r.get::<_,String>(1)?,"target":r.get::<_,String>(2)?,"outcome":r.get::<_,String>(3)?,"created":r.get::<_,i64>(4)?,"actorTitle":r.get::<_,Option<String>>(5)?}))).map_err(db_error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?;
     Ok(Json(json!({"events":events})))
 }
