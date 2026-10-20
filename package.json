@@ -18,6 +18,8 @@
     "test:completion": "node scripts/completion-smoke.mjs",
     "test:git-context": "playwright test tests/git-context.spec.mjs",
     "test:worktree-policy": "node scripts/worktree-policy-smoke.mjs",
+    "test:worktree-cleanup": "node scripts/worktree-cleanup-smoke.mjs",
+    "test:controllers": "node scripts/controller-smoke.mjs",
     "test:fork": "node scripts/fork-smoke.mjs",
     "test:worktree-ui": "playwright test tests/worktree-launch.spec.mjs",
     "test:limit-resume": "node scripts/limit-resume-smoke.mjs",

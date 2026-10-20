@@ -1,5 +1,6 @@
-//! Workspace preparation is shared by every new-session entry point. No cleanup is implicit.
-use crate::{ApiResult, App, Create, checked_cwd, effective_roots, fail};
+//! Workspace preparation is shared by every new-session entry point. Cleanup is limited to
+//! worktrees a session created itself, on explicit human archive/remove requests.
+use crate::{ApiResult, App, Create, checked_cwd, effective_roots, fail, worktree_cleanup::Owned};
 use axum::{
     Json,
     extract::{Path, State},
@@ -102,7 +103,7 @@ pub fn creation_payload(req: &Create) -> String {
     json!({"create":req,"automation":req.automation.as_ref().map(|a| (&a.automation_id,&a.request_id)),"prompt":req.queued_prompt}).to_string()
 }
 
-fn allowed(app: &App, path: &FsPath) -> Result<PathBuf, Error> {
+pub(crate) fn allowed(app: &App, path: &FsPath) -> Result<PathBuf, Error> {
     effective_roots(app)
         .into_iter()
         .filter(|r| path.starts_with(r))
@@ -114,7 +115,7 @@ fn allowed(app: &App, path: &FsPath) -> Result<PathBuf, Error> {
             )
         })
 }
-async fn git(app: &App, cwd: &FsPath, args: &[&str]) -> Result<String, Error> {
+pub(crate) async fn git(app: &App, cwd: &FsPath, args: &[&str]) -> Result<String, Error> {
     let root = allowed(app, cwd)?;
     let (ok, out, err, _) = tokio::time::timeout(
         Duration::from_secs(10),
@@ -136,14 +137,15 @@ async fn git(app: &App, cwd: &FsPath, args: &[&str]) -> Result<String, Error> {
     }
     Ok(out)
 }
-struct Repository {
-    top: PathBuf,
+pub(crate) struct Repository {
+    pub top: PathBuf,
     /// Main checkout root; new worktrees live beside each other under it even
     /// when created from a linked worktree.
-    main_top: PathBuf,
-    linked: bool,
+    pub main_top: PathBuf,
+    pub common: PathBuf,
+    pub linked: bool,
 }
-async fn repository(app: &App, cwd: &FsPath) -> Result<Repository, Error> {
+pub(crate) async fn repository(app: &App, cwd: &FsPath) -> Result<Repository, Error> {
     let top = git(app, cwd, &["rev-parse", "--show-toplevel"]).await?;
     let top = checked_cwd(app, &top)?;
     let dir = git(app, cwd, &["rev-parse", "--absolute-git-dir"]).await?;
@@ -168,6 +170,7 @@ async fn repository(app: &App, cwd: &FsPath) -> Result<Repository, Error> {
         top,
         main_top,
         linked: dir != common,
+        common,
     })
 }
 
@@ -211,7 +214,7 @@ pub async fn list(State(app): State<App>, Json(req): Json<List>) -> ApiResult {
 
 // Resolve an absent destination through existing ancestors. Reject traversal and symlinks;
 // never reuse even an empty existing destination. OS-user filesystem races remain possible.
-fn destination(app: &App, path: &FsPath) -> Result<PathBuf, Error> {
+pub(crate) fn destination(app: &App, path: &FsPath) -> Result<PathBuf, Error> {
     if !path.is_absolute()
         || path
             .components()
@@ -318,7 +321,7 @@ pub async fn prepare(
     req: &Create,
     source: PathBuf,
     creation_key: Option<&str>,
-) -> Result<PathBuf, Error> {
+) -> Result<(PathBuf, Option<Owned>), Error> {
     let policy = {
         let catalog = app.catalog.lock().unwrap();
         match req.project_id.as_deref() {
@@ -351,6 +354,7 @@ pub async fn prepare(
     if mode == Mode::Directory && workspace.is_some_and(|w| w.path.is_some()) {
         return Err(bad("path only applies to worktree modes"));
     }
+    let mut owned = None;
     let cwd = match mode {
         Mode::Directory => source,
         Mode::ExistingWorktree => {
@@ -441,7 +445,17 @@ pub async fn prepare(
             checked_cwd(app, path_str)?;
             git(app, &repo.top, &["worktree", "add", "--no-track", "-b", &branch, "--", path_str, &commit]).await
                 .map_err(|(code, message)| (code, format!("{message}. Destination {} and any branch/files are retained; no cleanup was attempted", path.display())))?;
-            checked_cwd(app, path_str)?
+            let cwd = checked_cwd(app, path_str)?;
+            // Only checkouts created here are owned; selected/directory worktrees never are.
+            owned = Some(Owned {
+                path: cwd.clone(),
+                branch,
+                common_dir: repo.common.clone(),
+                main_top: repo.main_top.clone(),
+                base_commit: commit,
+                removed: None,
+            });
+            cwd
         }
     };
     if policy.require_worktree && !repository(app, &cwd).await?.linked {
@@ -450,9 +464,10 @@ pub async fn prepare(
         ));
     }
     // Includes directory mode and imports: all launches recheck effective roots at execution.
-    checked_cwd(
+    let cwd = checked_cwd(
         app,
         cwd.to_str()
             .ok_or_else(|| bad("Working directory must be UTF-8"))?,
-    )
+    )?;
+    Ok((cwd, owned))
 }

@@ -140,23 +140,23 @@ pub fn report(app: &App, s: &Session, req: Report) -> mail::Result<Value> {
     s.emit("completion_reported", json!({"reportId":id}));
     Ok(json!({"report":report,"duplicate":false}))
 }
-pub fn get(app: &App, s: &Session, req: Query) -> mail::Result<Value> {
-    let grants = mail::access(app, s)?;
+pub fn get(app: &App, a: &mail::Actor, req: Query) -> mail::Result<Value> {
+    let grants = mail::actor_access(app, a)?;
     if !grants.communicate && !mail::coordinator(&grants) {
         return Err(fail(
             StatusCode::FORBIDDEN,
             "Completion report access is not granted",
         ));
     }
-    let id = mail::session_ref(req.session_id.as_deref().unwrap_or(&s.id));
-    let scope = if id == s.id {
+    let id = mail::session_ref(req.session_id.as_deref().unwrap_or(&a.id));
+    let scope = if id == a.id {
         None
     } else {
-        let target = mail::peer(app, s, id)?;
+        let target = mail::peer_of(app, &a.project, id)?;
         if !mail::coordinator(&grants) {
             mail::require(app, &target, "communicate")?;
         }
-        mail::project(s)
+        a.project.clone()
     };
     app.store
         .lock()

@@ -69,10 +69,12 @@ impl Store {
           CREATE INDEX IF NOT EXISTS agent_completions_latest ON agent_completions(author,id DESC);
           CREATE TABLE IF NOT EXISTS session_creations(request_key TEXT PRIMARY KEY,payload TEXT NOT NULL,session_id TEXT,error TEXT,mutation_started INTEGER NOT NULL DEFAULT 0);
           COMMIT;")?;
+        // C-01 controllers and C-05 review records are additive schema migrations.
         connection.execute_batch(&format!(
-            "BEGIN; {} {} PRAGMA user_version=8; COMMIT;",
+            "BEGIN; {} {} {} PRAGMA user_version=8; COMMIT;",
             crate::inbox_delivery::SCHEMA,
-            crate::review_queue::SCHEMA
+            crate::review_queue::SCHEMA,
+            crate::controllers::SCHEMA
         ))?;
         Ok(Self {
             connection,
@@ -388,6 +390,7 @@ impl Store {
                 timeouts: None,
                 lineage: Default::default(),
                 carried_context: None,
+                worktree: None,
             };
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO sessions(id,metadata,state) VALUES (?1,?2,?3)",
@@ -697,6 +700,7 @@ mod tests {
             timeouts: None,
             lineage: Default::default(),
             carried_context: None,
+            worktree: None,
         };
         {
             let mut store = Store::open(&path).unwrap();

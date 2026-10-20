@@ -3,6 +3,7 @@ mod browser_origin;
 mod catalog;
 mod communication;
 mod completion;
+mod controllers;
 mod diff;
 mod fork;
 mod git_context;
@@ -17,9 +18,11 @@ mod permission_modes;
 mod review_queue;
 mod runtime;
 mod service_restart;
+mod sha256;
 mod store;
 mod timeouts;
 mod workspace;
+mod worktree_cleanup;
 mod worktrees;
 use catalog::{Catalog, Settings};
 
@@ -144,6 +147,9 @@ struct SessionData {
     /// L-08 fork context held until the first prompt hands it to the harness.
     #[serde(default)]
     carried_context: Option<String>,
+    /// C-04b; present only when Agentworks created this session's worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worktree: Option<worktree_cleanup::Owned>,
 }
 
 struct Approval {
@@ -291,13 +297,13 @@ impl Session {
         });
         json!({"id":self.id,"provider":self.provider,"cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"model":model,
             "archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"created":self.created,"status":data.status,"turnRunning":data.turn_active,
-            "projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage})
+            "projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data)})
     }
     fn snapshot(&self) -> Value {
         let approvals = self.approvals.lock().unwrap();
         let data = self.data.lock().unwrap();
         json!({"kind":"snapshot","seq":data.seq,"session":{"id":self.id,"provider":self.provider,
-            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"inputQueue":data.input_queue},"events":data.events,
+            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"inputQueue":data.input_queue},"events":data.events,
             "truncated":data.events.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
             "permissionModes":data.permission_modes,"models":data.models,"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|json!({"id":id,"request":a.request})).collect::<Vec<_>>()})
@@ -431,6 +437,12 @@ impl Session {
     }
 }
 
+fn worktree_summary(data: &SessionData) -> Value {
+    data.worktree.as_ref().map_or(
+        Value::Null,
+        |o| json!({"owned":true,"path":o.path,"branch":o.branch,"removed":o.removed.is_some()}),
+    )
+}
 fn fail(code: StatusCode, msg: impl Into<String>) -> (StatusCode, String) {
     (code, msg.into())
 }
@@ -536,6 +548,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let restored = store.load().map_err(|e| e.to_string())?;
     let mcp_listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let mcp_endpoint = mcp_listener.local_addr()?;
+    // C-01: external stdio bridges discover this process's loopback endpoint here.
+    controllers::publish_endpoint(db_path.with_extension("mcp-endpoint"), mcp_endpoint)?;
     let catalog = Arc::new(Mutex::new(Catalog::open(catalog_path)?));
     let app = App {
         sessions: Default::default(),
@@ -856,6 +870,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(worktrees::get_policy).put(worktrees::put_policy),
         )
         .route("/api/worktrees/list", post(worktrees::list))
+        .route(
+            "/api/projects/{id}/controllers",
+            get(controllers::list).post(controllers::create),
+        )
+        .route("/api/controllers/{id}/revoke", post(controllers::revoke))
+        .route("/api/controllers/{id}/audit", get(controllers::audit))
         .route("/api/sessions/{id}/project", post(assign_project))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route(
@@ -917,6 +937,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/{id}/events", get(events))
         .route("/api/sessions/{id}/file", get(file))
         .route("/api/sessions/{id}/workspace", get(git_context::workspace))
+        .route("/api/sessions/{id}/worktree", get(worktree_cleanup::status))
+        .route(
+            "/api/sessions/{id}/worktree/remove",
+            post(worktree_cleanup::remove),
+        )
         .route("/api/sessions/{id}/diff", get(diff::view))
         .route("/api/markdown", post(markdown))
         .route("/{name}", get(hosting::asset))
@@ -1495,6 +1520,8 @@ async fn delete_project(
         .unwrap()
         .remove(&id)
         .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    // Controllers are scoped to exactly one project and do not outlive it.
+    app.store.lock().unwrap().revoke_project_controllers(&id)?;
     if req.sessions == ProjectSessions::Ungroup {
         ungroup_sessions(&app, &affected, "Project deleted")?;
     }
@@ -1824,6 +1851,14 @@ async fn create_session(State(app): State<App>, Json(req): Json<Create>) -> ApiR
     }
     result
 }
+fn initial_agent_access(
+    explicit: Option<communication::Access>,
+    automation: bool,
+    project_role: communication::Role,
+) -> Option<communication::Access> {
+    explicit.or_else(|| (!automation).then(|| project_role.access()))
+}
+
 async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>) -> ApiResult {
     if req.model.as_ref().is_some_and(|m| m.len() > 256) {
         return Err(fail(StatusCode::BAD_REQUEST, "Model ID is too long"));
@@ -1898,7 +1933,7 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             "Limit: 12 active harnesses. Suspend idle sessions first.",
         ));
     }
-    let cwd = tokio::time::timeout(
+    let (cwd, owned_worktree) = tokio::time::timeout(
         std::time::Duration::from_secs(12),
         worktrees::prepare(app, &req, source, creation_key),
     )
@@ -1933,18 +1968,13 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
                 )
             })?;
     }
-    let initial_access = req.agent_access.clone().or_else(|| {
-        // Agent-created sessions and automation runs retain their explicit unprivileged behavior.
-        if req.control_origin.is_some() || req.automation.is_some() {
-            None
-        } else {
-            Some(
-                catalog
-                    .communication_role(req.project_id.as_deref())
-                    .access(),
-            )
-        }
-    });
+    // MCP-created sessions use the same explicit project/global default as browser-created
+    // sessions. This is not inherited from the controller. Automation runs remain unprivileged.
+    let initial_access = initial_agent_access(
+        req.agent_access.clone(),
+        req.automation.is_some(),
+        catalog.communication_role(req.project_id.as_deref()),
+    );
     let (tx, _) = broadcast::channel(128);
     let title = req
         .title
@@ -2009,6 +2039,7 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             timeouts: None,
             lineage: Default::default(),
             carried_context: None,
+            worktree: owned_worktree,
         }),
         tx,
         commands: Mutex::new(None),
@@ -2115,6 +2146,18 @@ async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     let _run = app.run_lock.lock().await;
     service_restart::allow_start(&app)?;
     let s = session(&app, &id)?;
+    if s.data
+        .lock()
+        .unwrap()
+        .worktree
+        .as_ref()
+        .is_some_and(|w| w.removed.is_some())
+    {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "This session's worktree was removed on archive; unarchive it to recreate the worktree",
+        ));
+    }
     if !installed(&s.provider) || !s.cwd.is_dir() {
         return Err(fail(
             StatusCode::CONFLICT,
@@ -2160,6 +2203,9 @@ async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
 struct Prompt {
     #[serde(skip)]
     initiated_by: Option<String>,
+    /// C-01 controller display name; sessions are resolved by ID in the browser.
+    #[serde(skip)]
+    initiator_title: Option<String>,
     text: String,
     #[serde(rename = "requestId")]
     request_id: String,
@@ -2192,7 +2238,13 @@ async fn prompt(
         input_queue::Bound::Conflict => return Err(input_queue::conflict()),
         input_queue::Bound::New => {}
     }
-    accept_prompt(&s, req.text, req.request_id, req.initiated_by)
+    accept_prompt(
+        &s,
+        req.text,
+        req.request_id,
+        req.initiated_by,
+        req.initiator_title,
+    )
 }
 /// Shared turn acceptance for direct prompts and L-05 queued dispatch. Callers hold
 /// `run_lock` and have passed `service_restart::allow_start`.
@@ -2201,6 +2253,7 @@ fn accept_prompt(
     text: String,
     request_id: String,
     initiated_by: Option<String>,
+    initiator_title: Option<String>,
 ) -> ApiResult {
     {
         let mut data = s.data.lock().unwrap();
@@ -2223,7 +2276,7 @@ fn accept_prompt(
     }
     s.emit(
         "user",
-        json!({"text":text,"requestId":request_id,"initiatedBy":initiated_by}),
+        json!({"text":text,"requestId":request_id,"initiatedBy":initiated_by,"initiatorTitle":initiator_title}),
     );
     s.emit("status", json!({"status":"running"}));
     if let Err(error) = s.send_command(runtime::Command::Prompt(text)) {
@@ -2517,6 +2570,34 @@ fn render_markdown(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn agent_sessions_use_project_role_without_inheriting_controller_grants() {
+        let participant = initial_agent_access(None, false, communication::Role::Participant)
+            .expect("participant role should be materialized");
+        assert!(participant.communicate);
+        assert!(!participant.start_sessions);
+        assert!(!participant.prompt_sessions);
+        assert!(!participant.cancel_sessions);
+        assert!(!participant.run_automations);
+        assert!(!participant.restart_service);
+        assert!(!participant.manage_review_queue);
+
+        let coordinator = initial_agent_access(None, false, communication::Role::Coordinator)
+            .expect("explicit project coordinator role should be materialized");
+        assert!(coordinator.start_sessions);
+        assert!(!coordinator.restart_service);
+        assert!(!coordinator.manage_review_queue);
+
+        assert!(initial_agent_access(None, true, communication::Role::Coordinator).is_none());
+        let preserved = initial_agent_access(
+            Some(communication::Access::default()),
+            false,
+            communication::Role::Coordinator,
+        )
+        .expect("explicit access should win over defaults");
+        assert!(!preserved.enabled());
+    }
+
     #[test]
     fn host_checks_follow_bind_address() {
         let local = "127.0.0.1".parse().unwrap();

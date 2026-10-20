@@ -31,6 +31,7 @@ const create=(body)=>api('/api/sessions','POST',{provider:'demo',cwd:repo,...bod
 const prompt=(id,text)=>api(`/api/sessions/${id}/prompt`,'POST',{text,requestId:randomUUID()});
 try{
  await start();
+ const settings=await api('/api/settings');await api('/api/settings','PUT',{...settings,defaultCommunicationRole:'off'});
 
  // A session with no recorded conversation has nothing to carry over.
  const empty=await create({title:'Empty session'});
@@ -88,7 +89,7 @@ try{
 
  // Nothing is granted by forking: no coordinator access, no continuation timer.
  const access=await api(`/api/sessions/${forked.id}/agent-access`);
- assert.deepEqual(access,{communicate:false,startSessions:false,promptSessions:false,cancelSessions:false,runAutomations:false,restartService:false},'Forking grants no Agentworks access');
+ assert.deepEqual(access,{communicate:false,startSessions:false,promptSessions:false,cancelSessions:false,runAutomations:false,restartService:false,manageReviewQueue:false},'Forking grants no Agentworks access');
  assert.equal(child.session.continuation.enabled,false);
  assert.equal(child.session.continuation.parent,null);
 

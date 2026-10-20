@@ -23,10 +23,14 @@ impl Filter {
     }
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Update {
     title: Option<String>,
     archived: Option<bool>,
+    /// C-04b archive cleanup of an owned worktree; omitted means `auto`.
+    worktree: Option<crate::worktree_cleanup::Cleanup>,
+    /// Fingerprint from `GET /worktree` that the human confirmed for dirty removal.
+    confirm_dirty: Option<String>,
 }
 pub async fn update(
     State(app): State<App>,
@@ -45,7 +49,38 @@ pub async fn update(
             "Use a title of 1–80 characters without control characters",
         ));
     }
-    apply(&s, title, req.archived)
+    if req.archived != Some(true) && (req.worktree.is_some() || req.confirm_dirty.is_some()) {
+        return Err(fail(
+            StatusCode::BAD_REQUEST,
+            "worktree and confirmDirty only apply when archiving",
+        ));
+    }
+    let was_archived = s.data.lock().unwrap().lifecycle.archived;
+    let mut cleanup = None;
+    if req.archived == Some(true) && !was_archived {
+        cleanup = Some(
+            crate::worktree_cleanup::cleanup(
+                &app,
+                &s,
+                req.worktree.unwrap_or_default(),
+                req.confirm_dirty.as_deref(),
+            )
+            .await?,
+        );
+    }
+    let mut restored = None;
+    if req.archived == Some(false) && was_archived {
+        // A failed or occupied restore leaves the session archived.
+        restored = crate::worktree_cleanup::restore(&app, &s).await?;
+    }
+    let Json(mut meta) = apply(&s, title, req.archived)?;
+    if let Some(outcome) = cleanup {
+        meta["worktreeCleanup"] = outcome;
+    }
+    if let Some(outcome) = restored {
+        meta["worktreeRestore"] = outcome;
+    }
+    Ok(Json(meta))
 }
 /// Commits title/archive metadata; callers hold the run lock.
 pub fn apply(s: &Session, title: Option<String>, archived: Option<bool>) -> ApiResult {

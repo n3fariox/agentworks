@@ -3,6 +3,8 @@ import {setupInboxDelivery} from './inbox-delivery.js';
 import {setupDiff} from './diff.js';
 import {setupWorktreeControls,setupPolicyEditor} from './worktree-controls.js';
 import {setupGitContext} from './git-context.js';
+import {setupWorktreeOwnership} from './worktree-ownership.js';
+import {setupControllers} from './controllers.js';
 import {createWorkspace} from './workspace.js';
 import {setupCommunication} from './communication.js';
 import {setupPalettes} from './palettes.js';
@@ -357,7 +359,7 @@ function openProjectDialog(project=null){
   editingProject=project?.id||null;$('project-dialog-title').textContent=project?'Project settings':'New project';
   $('project-name').value=project?.name||'';$('project-communication-role').value=project?.defaultCommunicationRole||'';
   $('project-communication-role').querySelector('option[value=""]').textContent='Use global default · '+communicationLabels[config.defaultCommunicationRole||'participant'];
-  $('project-error').textContent='';$('delete-project').hidden=!project;$('archive-project').hidden=!project;
+  $('project-error').textContent='';$('delete-project').hidden=!project;$('archive-project').hidden=!project;$('open-controllers').hidden=!project;
   $('archive-project').textContent=project?.archived?'Unarchive project':'Archive project';
   policyEditor.open(editingProject);$('project-dialog').showModal();$('project-name').focus();
 }
@@ -440,7 +442,7 @@ function consume(e,live=false){
   else if(e.kind==='models'){modelConfig=d;syncModelLabel();}
   else if(e.kind==='permission_modes'){permissionModes=d;}
   else if(e.kind==='commands'){availableCommands=Array.isArray(d)?d:[];renderCommands();}
-  else if(e.kind==='user'){assistant=null;if(d.inboxDelivery)transcript.push({id:uuid(),type:'notice',text:'Automatic inbox turn authorized by you; peer messages are untrusted context.'});else if(d.initiatedBy)transcript.push({id:uuid(),type:'notice',text:'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});addMessage('user',d.text).seq=e.seq;}
+  else if(e.kind==='user'){assistant=null;if(d.inboxDelivery)transcript.push({id:uuid(),type:'notice',text:'Automatic inbox turn authorized by you; peer messages are untrusted context.'});else if(d.initiatedBy)transcript.push({id:uuid(),type:'notice',text:d.initiatedBy.startsWith('controller:')?'Turn started by external controller '+(d.initiatorTitle||d.initiatedBy):'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});addMessage('user',d.text).seq=e.seq;}
   else if(e.kind==='status'){
     status=d.status;if(!replaying)inputQueue.observe(status,{live});if(active){active.status=status;if(d.explicitlySuspended!==undefined)active.explicitlySuspended=d.explicitlySuspended;const s=sessions.find(s=>s.id===active.id);if(s)s.status=status;}sidebar();
   }else if(e.kind==='approval'){approvals.set(d.id,d.request);}
@@ -881,6 +883,8 @@ setupCommunication({api,getActive:()=>active,getSessions:()=>sessions,selectSess
 setupInboxDelivery({api,getActive:()=>active,toast,uuid});
 
 setupGitContext({api,getActive:()=>active});
+const worktreeOwnership=setupWorktreeOwnership({api,toast});
+setupControllers({api,toast,getProject:()=>editingProject});
 
 // A chosen harness command only reaches the composer; nothing here submits a turn.
 function insertCommand(text) {
@@ -974,7 +978,7 @@ $('rename-form').onsubmit=async event=>{
 async function archiveSession(session){
   if(!session)return;
   const id=session.id;
-  try{const updated=await api(`/api/sessions/${id}`,{method:'PATCH',body:JSON.stringify({archived:!session.archived})});if(active?.id===id)Object.assign(active,updated);await refreshSessions();updateControls();}catch(e){toast(e.message);}
+  try{const updated=await worktreeOwnership.archive(session);if(!updated)return;if(active?.id===id)Object.assign(active,updated);await refreshSessions();updateControls();}catch(e){toast(e.message);}
 }
 $('archive-session').onclick=()=>archiveSession(active);
 $('fork-session').onclick=()=>openFork();

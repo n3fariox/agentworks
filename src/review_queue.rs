@@ -420,10 +420,10 @@ pub async fn post(
         req,
     )?))
 }
-/// MCP scope comes only from authenticated session state; no caller-supplied actor/project.
-pub fn agent(app: &App, s: &crate::Session, args: Value, write: bool) -> mail::Result<Value> {
-    mail::require(app, s, "manage_review_queue")?;
-    let project = mail::project(s).ok_or_else(|| {
+/// MCP scope comes only from authenticated actor state; no caller-supplied actor/project.
+pub fn agent(app: &App, a: &mail::Actor, args: Value, write: bool) -> mail::Result<Value> {
+    mail::require_actor(app, a, "manage_review_queue")?;
+    let project = a.project.clone().ok_or_else(|| {
         fail(
             StatusCode::FORBIDDEN,
             "Review queue requires project membership",
@@ -436,7 +436,7 @@ pub fn agent(app: &App, s: &crate::Session, args: Value, write: bool) -> mail::R
         update(
             &mut app.store.lock().unwrap().connection,
             &project,
-            &s.id,
+            &a.id,
             req,
         )
     } else {

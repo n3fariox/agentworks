@@ -10,8 +10,8 @@ export function setupCommunication({api,getActive,getSessions,selectSession,toas
   for(const [key,label] of capabilities){const row=node('label','');row.className='workspace-check';const input=document.createElement('input');input.type='checkbox';input.id='agent-grant-'+key;input.addEventListener('change',()=>$('agent-preset').value='custom');row.append(input,document.createTextNode(label));$('agent-grants').append(row);}
   function preset(){const value=$('agent-preset').value;if(value==='custom')return;for(const [key] of capabilities)$('agent-grant-'+key).checked=(value==='coordinator'&&!['restartService','manageReviewQueue'].includes(key))||(value==='participant'&&key==='communicate');}
   $('agent-preset').addEventListener('change',preset);
-  $('agent-origin').addEventListener('click',()=>{const active=getActive();const actor=active?.initiatedBy?.actor||active?.automation?.initiatedBy;const source=getSessions().find(s=>s.id===actor);if(source)selectSession(source);else toast('The initiating session is no longer available.');});
-  setInterval(()=>{const active=getActive();const actor=active?.initiatedBy?.actor||active?.automation?.initiatedBy;$('agent-origin').hidden=!actor;$('agent-origin').textContent=actor?'Started by '+(getSessions().find(s=>s.id===actor)?.title||'agent session'):'';},1000);
+  $('agent-origin').addEventListener('click',()=>{const active=getActive();const actor=active?.initiatedBy?.actor||active?.automation?.initiatedBy;const source=getSessions().find(s=>s.id===actor);if(source)selectSession(source);else toast(actor?.startsWith('controller:')?'Started by an external controller, not a session.':'The initiating session is no longer available.');});
+  setInterval(()=>{const active=getActive();const actor=active?.initiatedBy?.actor||active?.automation?.initiatedBy;$('agent-origin').hidden=!actor;$('agent-origin').textContent=actor?'Started by '+(active?.initiatedBy?.actorTitle?'external controller '+active.initiatedBy.actorTitle:getSessions().find(s=>s.id===actor)?.title||'agent session'):'';},1000);
   function render(){
     const list=$('agent-inbox');list.replaceChildren();
     if(!messages.length)list.append(node('p','No messages yet. Agents can use their Agentworks MCP inbox at checkpoints.'));
@@ -47,7 +47,7 @@ export function setupCommunication({api,getActive,getSessions,selectSession,toas
       const seen=new Set(messages.map(m=>m.id));messages.push(...data.messages.filter(m=>!seen.has(m.id)));after=data.nextCursor;
       $('agent-more-messages').hidden=!data.hasMore;render();
       const audit=await api(`/api/sessions/${current}/agent-audit`);if(current!==id)return;
-      $('agent-audit').replaceChildren(...audit.events.slice(0,20).map(e=>node('div',`${new Date(e.created).toLocaleTimeString()} · ${e.actor==='human'?'You':getSessions().find(s=>s.id===e.actor)?.title||e.actor.slice(0,8)} · ${e.action} · ${e.outcome}`)));
+      $('agent-audit').replaceChildren(...audit.events.slice(0,20).map(e=>node('div',`${new Date(e.created).toLocaleTimeString()} · ${e.actor==='human'?'You':e.actorTitle?'Controller '+e.actorTitle:getSessions().find(s=>s.id===e.actor)?.title||e.actor.slice(0,8)} · ${e.action} · ${e.outcome}`)));
     }catch(e){$('agent-error').textContent=e.message;}finally{loading=false;}
   }
   $('agent-more-messages').addEventListener('click',()=>refresh());
