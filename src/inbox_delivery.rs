@@ -1,4 +1,4 @@
-//! Human-authorized, bounded inbox turns in an already attached native context.
+//! Human-authorized inbox turns in an already attached native context.
 //! Mailbox cursors and acknowledgements are deliberately independent of this ledger.
 use crate::{ApiResult, App, Session, communication as mail, fail, session};
 use axum::{
@@ -36,6 +36,9 @@ pub struct Turn {
     pub generation: u64,
     pub native: String,
 }
+/// A saved human authorization. `deadline: None` is a standing authorization that does not
+/// expire on its own; `max_turns: None` is the explicit human choice of no total-turn cap.
+/// Legacy rows persist both as finite numbers and load unchanged.
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Policy {
@@ -43,14 +46,36 @@ pub struct Policy {
     generation: u64,
     project: Option<String>,
     native: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
     cwd: String,
-    deadline: u64,
-    max_turns: u32,
+    #[serde(default = "missing_deadline")]
+    deadline: Option<u64>,
+    #[serde(default = "missing_turn_cap")]
+    max_turns: Option<u32>,
     attempts: u32,
     cooldown_seconds: u32,
     max_batch: u32,
     last_dispatch: u64,
     reason: Option<String>,
+}
+// Missing legacy fields must never silently authorize standing or uncapped work.
+fn missing_deadline() -> Option<u64> {
+    Some(0)
+}
+fn missing_turn_cap() -> Option<u32> {
+    Some(0)
+}
+impl Policy {
+    fn expired(&self, time: u64) -> bool {
+        self.deadline.is_some_and(|d| d <= time)
+    }
+    fn turns_exhausted(&self) -> bool {
+        self.max_turns.is_some_and(|n| self.attempts >= n)
+    }
+    fn standing(&self) -> bool {
+        self.enabled && self.deadline.is_none()
+    }
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -59,8 +84,13 @@ pub struct Input {
     request_id: String,
     deadline: Option<u64>,
     max_turns: Option<u32>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    unlimited_turns: bool,
     cooldown_seconds: Option<u32>,
     max_batch: Option<u32>,
+}
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 impl Input {
     fn validate(&self, time: u64) -> Result<()> {
@@ -70,11 +100,20 @@ impl Input {
                 "A stable request ID of 1–100 bytes is required",
             ));
         }
+        // A stop time is optional: without one the authorization stands until the human
+        // disables it. The total-turn cap is either finite or explicitly uncapped.
+        let deadline_ok = match self.deadline {
+            None => true,
+            Some(d) => d > time && d <= time + 86_400_000,
+        };
+        let turns_ok = if self.unlimited_turns {
+            self.max_turns.is_none()
+        } else {
+            self.max_turns.is_some_and(|n| (1..=20).contains(&n))
+        };
         if self.enabled
-            && (!self
-                .deadline
-                .is_some_and(|d| d > time && d <= time + 86_400_000)
-                || !self.max_turns.is_some_and(|n| (1..=20).contains(&n))
+            && (!deadline_ok
+                || !turns_ok
                 || !self
                     .cooldown_seconds
                     .is_some_and(|n| (5..=3600).contains(&n))
@@ -82,7 +121,7 @@ impl Input {
         {
             return Err(fail(
                 StatusCode::BAD_REQUEST,
-                "Explicitly choose 1–20 turns, deadline within 24 hours, 5–3600 second cooldown and 1–10 messages per batch",
+                "Explicitly choose 1–20 total turns or no total-turn cap, an optional stop time within 24 hours, a 5–3600 second cooldown and 1–10 messages per batch",
             ));
         }
         Ok(())
@@ -345,7 +384,7 @@ pub fn enqueue(tx: &Transaction<'_>, recipient: &str, message: i64) -> Result<()
             |r| r.get(0),
         )
         .map_err(error)?;
-    let eligible = p.deadline > now() && p.attempts < p.max_turns && pending < 20;
+    let eligible = !p.expired(now()) && !p.turns_exhausted() && pending < 20;
     tx.execute("INSERT INTO inbox_deliveries(message_id,recipient,generation,state,reason) VALUES(?1,?2,?3,?4,?5)",params![message,recipient,p.generation as i64,if eligible {"queued"}else{"cancelled"},if eligible {None}else{Some("Authorization or pending-message bound reached")}]).map_err(error)?;
     Ok(())
 }
@@ -435,14 +474,23 @@ pub async fn configure(
         generation: old.generation + 1,
         project,
         native,
+        provider: Some(s.provider.clone()),
         cwd,
-        deadline: input.deadline.unwrap_or(0),
-        max_turns: input.max_turns.unwrap_or(0),
+        deadline: input.deadline,
+        max_turns: if input.unlimited_turns {
+            None
+        } else {
+            input.max_turns
+        },
         cooldown_seconds: input.cooldown_seconds.unwrap_or(5),
         max_batch: input.max_batch.unwrap_or(1),
         reason: Some(
             if input.enabled {
-                "Human enabled bounded inbox turns"
+                if input.deadline.is_some() {
+                    "Human enabled inbox turns until a chosen stop time"
+                } else {
+                    "Human enabled standing inbox turns"
+                }
             } else {
                 "Human disabled inbox turns"
             }
@@ -478,25 +526,115 @@ pub(crate) fn restore(data: &mut crate::SessionData) {
         }
     }
 }
-/// Startup never replays a possibly submitted native turn. All persisted authorizations pause.
+/// Restart validation. A saved authorization survives only while the exact session row,
+/// native provider context, project, canonical directory and live grant still match what
+/// the human authorized; anything else fails closed and requires deliberate reauthorization.
+fn restart_reason(db: &rusqlite::Connection, id: &str, p: &Policy) -> Result<Option<String>> {
+    if p.max_batch == 0 || p.cooldown_seconds == 0 || p.max_turns == Some(0) {
+        return Ok(Some(
+            "Saved authorization bounds are incomplete; human reauthorization required".into(),
+        ));
+    }
+    if p.expired(now()) {
+        return Ok(Some(
+            "Authorization stop time reached; human reauthorization required".into(),
+        ));
+    }
+    let saved: Option<(String, String)> = db
+        .query_row(
+            "SELECT state,metadata FROM sessions WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((state, metadata)) = saved else {
+        return Ok(Some(
+            "Session is no longer saved; human reauthorization required".into(),
+        ));
+    };
+    let state: Value = serde_json::from_str(&state).map_err(error)?;
+    let metadata: crate::store::Metadata = serde_json::from_str(&metadata).map_err(error)?;
+    if metadata.id != id
+        || p.native.is_none()
+        || state["provider_session_id"].as_str() != p.native.as_deref()
+        || p.provider
+            .as_ref()
+            .is_some_and(|provider| *provider != metadata.provider)
+    {
+        return Ok(Some(
+            "Saved native context changed; human reauthorization required".into(),
+        ));
+    }
+    if p.project.is_none() || state["project_id"].as_str() != p.project.as_deref() {
+        return Ok(Some(
+            "Project assignment changed; human reauthorization required".into(),
+        ));
+    }
+    if state["lifecycle"]["archived"] == true || state["lifecycle"]["suspended"] == true {
+        return Ok(Some(
+            "Recipient archived or explicitly suspended; human reauthorization required".into(),
+        ));
+    }
+    if metadata.cwd.to_string_lossy() != p.cwd {
+        return Ok(Some(
+            "Working directory changed; human reauthorization required".into(),
+        ));
+    }
+    let grants: Option<String> = db
+        .query_row(
+            "SELECT grants FROM agent_access WHERE session_id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let live = grants
+        .and_then(|raw| serde_json::from_str::<mail::Access>(&raw).ok())
+        .is_some_and(|access| access.communicate);
+    if !live {
+        return Ok(Some(
+            "Communication grant is not live; human reauthorization required".into(),
+        ));
+    }
+    Ok(None)
+}
+/// A normal service restart preserves a standing authorization. A possibly submitted native
+/// turn is never replayed: it stays paused for inspection. Unclaimed queued mail stays queued
+/// and is dispatched only after the same native context is attached and every gate passes.
 pub fn reconcile(store: &mut crate::store::Store) -> Result<()> {
     let tx = store.connection.transaction().map_err(error)?;
-    tx.execute("UPDATE inbox_deliveries SET state='paused',reason='Restart during claim; inspect native results before reauthorization' WHERE state='claimed' OR (state='sent' AND reason IS NOT 'Native turn terminated')",[]).map_err(error)?;
-    let ids = {
+    tx.execute("UPDATE inbox_deliveries SET state='paused',reason='Restart during claim; inspect native results; this batch will not be replayed' WHERE state='claimed' OR (state='sent' AND reason IS NOT 'Native turn terminated')",[]).map_err(error)?;
+    let rows = {
         let mut q = tx
-            .prepare("SELECT session_id FROM inbox_policies")
+            .prepare("SELECT session_id,policy FROM inbox_policies")
             .map_err(error)?;
-        q.query_map([], |r| r.get::<_, String>(0))
+        q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
             .map_err(error)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(error)?
     };
-    for id in ids {
-        cancel_db(
-            &tx,
-            &id,
-            "Service restart; inspect and explicitly reauthorize",
-        )?;
+    for (id, raw) in rows {
+        // Legacy finite policies load unchanged; only enabled saved authorizations are judged.
+        let p: Policy = serde_json::from_str(&raw).map_err(error)?;
+        if !p.enabled {
+            continue;
+        }
+        match restart_reason(&tx, &id, &p)? {
+            Some(reason) => cancel_db(&tx, &id, &reason)?,
+            None => {
+                let label = if p.standing() {
+                    "Standing authorization"
+                } else {
+                    "Finite authorization"
+                };
+                let mut preserved = p;
+                preserved.reason = Some(format!(
+                    "{label} preserved across the service restart; disable at any time"
+                ));
+                save(&tx, &id, &preserved)?;
+            }
+        }
     }
     tx.commit().map_err(error)
 }
@@ -528,14 +666,28 @@ fn dispatch_inner(app: &App, s: &Session, human_pending: bool) -> Result<()> {
         return Ok(());
     }
     let d = s.data.lock().unwrap();
-    let invalid = if p.deadline <= now() || (p.attempts >= p.max_turns && !d.turn_active) {
-        Some("Deadline or turn bound reached")
+    // A saved authorization outlives a restart: a session left suspended with no explicit
+    // human suspend is waiting to be resumed, not a broken native context.
+    let awaiting_resume = matches!(d.status.as_str(), "suspended" | "resuming")
+        && !d.lifecycle.suspended
+        && !d.turn_active;
+    let invalid = if p.max_batch == 0 || p.cooldown_seconds == 0 {
+        Some("Saved authorization bounds are incomplete; human reauthorization required")
+    } else if p.expired(now()) {
+        Some("Authorization stop time reached")
+    } else if p.turns_exhausted() && !d.turn_active {
+        Some("Total turn bound reached")
     } else if d.lifecycle.archived
         || d.lifecycle.suspended
-        || matches!(d.status.as_str(), "suspended" | "error" | "closed")
+        || matches!(d.status.as_str(), "error" | "closed")
     {
         Some("Recipient archived, suspended or native context unavailable")
-    } else if d.project_id != p.project
+    } else if p.project.is_none()
+        || p.native.is_none()
+        || p.provider
+            .as_ref()
+            .is_some_and(|provider| *provider != s.provider)
+        || d.project_id != p.project
         || d.provider_session_id != p.native
         || s.cwd.to_string_lossy() != p.cwd
     {
@@ -550,10 +702,15 @@ fn dispatch_inner(app: &App, s: &Session, human_pending: bool) -> Result<()> {
     if mail::require(app, s, "communicate").is_err() {
         return cancel(s, "Recipient communication grant revoked");
     }
+    if !crate::checked_cwd(app, &p.cwd).is_ok_and(|cwd| cwd == s.cwd) {
+        return cancel(s, "Saved cwd unavailable; human reauthorization required");
+    }
+    // Dispatch resumes only once the same saved native context is attached again.
+    if awaiting_resume {
+        return Ok(());
+    }
     // Scope, roots and native attachment are checked immediately before the durable claim.
-    if !crate::checked_cwd(app, &p.cwd).is_ok_and(|cwd| cwd == s.cwd)
-        || s.commands.lock().unwrap().is_none()
-    {
+    if s.commands.lock().unwrap().is_none() {
         return cancel(
             s,
             "Saved native context or cwd unavailable; human inspection required",
@@ -671,6 +828,7 @@ mod tests {
             request_id: "human-1".into(),
             deadline: Some(2000),
             max_turns: Some(1),
+            unlimited_turns: false,
             cooldown_seconds: Some(5),
             max_batch: Some(1),
         };
@@ -679,6 +837,95 @@ mod tests {
         assert!(i.validate(1000).is_err());
         i.enabled = false;
         assert!(i.validate(1000).is_ok());
+    }
+    #[test]
+    fn standing_and_uncapped_choices_are_explicit() {
+        let base = |unlimited: bool| Input {
+            enabled: true,
+            request_id: "human-standing".into(),
+            deadline: None,
+            max_turns: None,
+            unlimited_turns: unlimited,
+            cooldown_seconds: Some(5),
+            max_batch: Some(1),
+        };
+        // A standing authorization has no deadline at all, so none can expire.
+        let mut standing = base(false);
+        standing.max_turns = Some(5);
+        assert!(standing.validate(1000).is_ok());
+        let policy = Policy {
+            enabled: true,
+            deadline: standing.deadline,
+            ..Default::default()
+        };
+        assert!(policy.standing());
+        assert!(!policy.expired(u64::MAX / 2));
+        // No total-turn cap is only reachable through the explicit human choice.
+        assert!(base(false).validate(1000).is_err());
+        assert!(base(true).validate(1000).is_ok());
+        let mut both = base(true);
+        both.max_turns = Some(3);
+        assert!(both.validate(1000).is_err());
+        // An explicit stop time is still accepted inside the 24 hour window.
+        let mut finite = base(true);
+        finite.deadline = Some(1000 + 86_400_000);
+        assert!(finite.validate(1000).is_ok());
+        finite.deadline = Some(1000 + 86_400_001);
+        assert!(finite.validate(1000).is_err());
+        // Legacy finite policies load unchanged and still expire.
+        let legacy: Policy = serde_json::from_value(json!({
+            "enabled":true,"generation":4,"project":"project","native":"native","cwd":"/tmp",
+            "deadline":1500,"maxTurns":20,"attempts":0,"cooldownSeconds":30,"maxBatch":5,
+            "lastDispatch":0,"reason":"Human enabled bounded inbox turns"
+        }))
+        .unwrap();
+        assert!(!legacy.standing());
+        assert!(legacy.expired(1500));
+        assert!(!legacy.expired(1499));
+        assert!(!legacy.turns_exhausted());
+        let mut capped = legacy.clone();
+        capped.attempts = 20;
+        assert!(capped.turns_exhausted());
+        // Incomplete legacy rows load fail-closed, never as standing/uncapped authorization.
+        let oldest: Policy = serde_json::from_value(json!({"enabled":true,"generation":1,"project":"project","native":"native","cwd":"/tmp","attempts":2,"cooldownSeconds":30,"maxBatch":5,"lastDispatch":0,"reason":"Human enabled bounded inbox turns"})).unwrap();
+        assert!(oldest.expired(1));
+        assert!(oldest.turns_exhausted());
+        assert!(!oldest.standing());
+        // Uncapped policies never report an exhausted bound.
+        let uncapped = Policy {
+            enabled: true,
+            attempts: 9_000,
+            ..Default::default()
+        };
+        assert!(!uncapped.turns_exhausted());
+    }
+    #[tokio::test]
+    async fn legacy_policy_request_retry_does_not_reauthorize_or_reset_attempts() {
+        let f = Fixture::new();
+        // Exact pre-upgrade serialized input, including its original field order.
+        let payload = r#"{"enabled":true,"requestId":"legacy-human","deadline":1000,"maxTurns":1,"cooldownSeconds":5,"maxBatch":1}"#;
+        f.app
+            .store
+            .lock()
+            .unwrap()
+            .connection
+            .execute(
+                "INSERT INTO inbox_policy_requests VALUES('recipient','legacy-human',?1)",
+                [payload],
+            )
+            .unwrap();
+        cancel(&f.recipient, "Explicit disable").unwrap();
+        let before = f.p();
+        let response = configure(
+            State(f.app.clone()),
+            Path(f.recipient.id.clone()),
+            Json(serde_json::from_str(payload).unwrap()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.0["policy"]["enabled"], false);
+        assert_eq!(response.0["policy"]["generation"], before.generation);
+        assert_eq!(response.0["policy"]["attempts"], before.attempts);
     }
     #[test]
     fn peer_text_is_quoted_data() {
@@ -779,9 +1026,10 @@ mod tests {
                 generation: 1,
                 project: Some("project".into()),
                 native: Some("native-recipient".into()),
+                provider: Some("demo".into()),
                 cwd: root.to_string_lossy().into_owned(),
-                deadline: now() + 60000,
-                max_turns: 2,
+                deadline: Some(now() + 60000),
+                max_turns: Some(2),
                 cooldown_seconds: 5,
                 max_batch: 2,
                 ..Default::default()
@@ -903,17 +1151,35 @@ mod tests {
             )
             .unwrap();
         reconcile(&mut f.app.store.lock().unwrap()).unwrap();
-        assert!(!f.p().enabled);
+        // A normal restart keeps a still-valid authorization; the uncertain claim is paused.
+        assert!(f.p().enabled);
+        f.drain();
+        let mut p = f.p();
+        p.last_dispatch = 0;
+        save(&f.app.store.lock().unwrap().connection, &f.recipient.id, &p).unwrap();
         f.dispatch(false);
-        assert!(f.receiver.try_recv().is_err());
+        assert!(matches!(
+            f.receiver.try_recv(),
+            Ok(crate::runtime::Command::InboxPrompt { .. })
+        ));
         let snap = snapshot(&f.app, &f.recipient.id).unwrap().0;
         assert!(
             snap["deliveries"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|d| d["state"] == "paused")
+                .any(|d| d["messageId"] == 1 && d["state"] == "paused")
         );
+        // The paused record is never re-queued or replayed by a later dispatch.
+        f.settle();
+        f.drain();
+        f.dispatch(false);
+        assert!(matches!(
+            f.receiver.try_recv(),
+            Ok(crate::runtime::Command::InboxPrompt { .. })
+        ));
+        assert_eq!(f.p().attempts, 2);
+        assert_eq!(f.row_id(1)["state"], "paused");
     }
     #[test]
     fn unavailable_native_context_and_exhausted_bound_never_start() {
@@ -926,7 +1192,7 @@ mod tests {
         let mut f = Fixture::new();
         f.message("one");
         let mut p = f.p();
-        p.attempts = p.max_turns;
+        p.attempts = p.max_turns.unwrap();
         save(&f.app.store.lock().unwrap().connection, &f.recipient.id, &p).unwrap();
         f.dispatch(false);
         assert!(!f.p().enabled);
@@ -957,7 +1223,7 @@ mod tests {
             Ok(crate::runtime::Command::InboxPrompt { .. })
         ));
         let mut p = f.p();
-        p.deadline = now() - 1;
+        p.deadline = Some(now() - 1);
         save(&f.app.store.lock().unwrap().connection, &f.recipient.id, &p).unwrap();
         f.dispatch(false);
         assert!(!f.p().enabled);
@@ -1056,6 +1322,15 @@ mod tests {
         fn row(&self) -> Value {
             snapshot(&self.app, &self.recipient.id).unwrap().0["deliveries"][0].clone()
         }
+        fn row_id(&self, message: i64) -> Value {
+            snapshot(&self.app, &self.recipient.id).unwrap().0["deliveries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|d| d["messageId"] == message)
+                .cloned()
+                .unwrap_or(Value::Null)
+        }
         fn sql(&self, sql: &str) {
             self.app
                 .store
@@ -1076,6 +1351,288 @@ mod tests {
         fn drain(&mut self) {
             while self.receiver.try_recv().is_ok() {}
         }
+        /// Finish the current automatic turn exactly as the runtime does, then clear the
+        /// cooldown so the next dispatch is evaluated rather than debounced.
+        fn settle(&self) {
+            let owner = self.recipient.data.lock().unwrap().inbox_turn.clone();
+            finished(&self.recipient, owner.as_ref());
+            self.recipient.status("idle");
+            let mut p = self.p();
+            p.last_dispatch = 0;
+            save(
+                &self.app.store.lock().unwrap().connection,
+                &self.recipient.id,
+                &p,
+            )
+            .unwrap();
+        }
+        /// Rewrite the saved policy as a human stand-in, e.g. standing or uncapped.
+        fn policy(&self, edit: impl FnOnce(&mut Policy)) {
+            let mut p = self.p();
+            edit(&mut p);
+            save(
+                &self.app.store.lock().unwrap().connection,
+                &self.recipient.id,
+                &p,
+            )
+            .unwrap();
+        }
+        /// The persisted session row a restart reads back.
+        fn restart(&self) {
+            reconcile(&mut self.app.store.lock().unwrap()).unwrap();
+            let mut d = self.recipient.data.lock().unwrap();
+            d.status = "suspended".into();
+            d.turn_active = false;
+            d.inbox_turn = None;
+        }
+        /// Deliberate resume: the same saved native context is attached again.
+        fn reattach(&mut self) {
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            *self.recipient.commands.lock().unwrap() = Some(tx);
+            self.receiver = rx;
+            self.recipient.status("idle");
+        }
+    }
+    #[test]
+    fn standing_authorization_never_expires_and_keeps_waking() {
+        let mut f = Fixture::new();
+        f.policy(|p| {
+            p.deadline = None;
+            p.max_turns = Some(1);
+        });
+        f.message("one");
+        f.dispatch(false);
+        assert!(matches!(
+            f.receiver.try_recv(),
+            Ok(crate::runtime::Command::InboxPrompt { .. })
+        ));
+        assert!(f.p().standing());
+        assert!(f.p().deadline.is_none());
+        f.settle();
+        // The former 20-turn/24-hour bounds no longer stop a standing authorization.
+        f.policy(|p| p.max_turns = None);
+        for n in 0..25 {
+            f.message(&format!("standing-{n}"));
+            f.dispatch(false);
+            assert!(
+                matches!(
+                    f.receiver.try_recv(),
+                    Ok(crate::runtime::Command::InboxPrompt { .. })
+                ),
+                "standing dispatch {n} did not run"
+            );
+            f.settle();
+            assert!(f.p().enabled);
+        }
+        assert_eq!(f.p().attempts, 26);
+        assert!(f.p().max_turns.is_none());
+        assert!(f.p().standing());
+    }
+    #[test]
+    fn restart_preserves_standing_authorization_and_waits_for_the_native_context() {
+        let mut f = Fixture::new();
+        f.policy(|p| {
+            p.deadline = None;
+            p.max_turns = Some(3);
+        });
+        f.message("one");
+        let before = f.p();
+        f.restart();
+        let after = f.p();
+        assert!(after.enabled);
+        assert!(after.standing());
+        assert_eq!(after.generation, before.generation);
+        assert_eq!(after.attempts, before.attempts);
+        assert_eq!(snapshot(&f.app, &f.recipient.id).unwrap().0["pending"], 1);
+        assert!(
+            after
+                .reason
+                .as_deref()
+                .is_some_and(|r| r.contains("preserved across the service restart"))
+        );
+        // Suspended with no attached harness: the authorization waits instead of self-revoking.
+        *f.recipient.commands.lock().unwrap() = None;
+        f.dispatch(false);
+        assert!(f.p().enabled);
+        assert_eq!(f.p().attempts, 0);
+        // Queued mail is dispatched only once the same saved context is attached again.
+        f.reattach();
+        f.dispatch(false);
+        assert!(matches!(
+            f.receiver.try_recv(),
+            Ok(crate::runtime::Command::InboxPrompt { .. })
+        ));
+        assert_eq!(f.p().attempts, 1);
+        assert!(f.p().enabled);
+    }
+    #[test]
+    fn restart_fails_closed_when_identity_scope_or_grant_changed() {
+        let cases = [
+            (
+                "provider",
+                "UPDATE sessions SET metadata=json_set(metadata,'$.provider','replacement') WHERE id='recipient'",
+            ),
+            (
+                "archived",
+                "UPDATE sessions SET state=json_set(state,'$.lifecycle.archived',json('true')) WHERE id='recipient'",
+            ),
+            (
+                "suspended",
+                "UPDATE sessions SET state=json_set(state,'$.lifecycle.suspended',json('true')) WHERE id='recipient'",
+            ),
+            (
+                "missing bounds",
+                "UPDATE inbox_policies SET policy=json_remove(policy,'$.maxTurns','$.deadline') WHERE session_id='recipient'",
+            ),
+            (
+                "native",
+                "UPDATE sessions SET state=json_set(state,'$.provider_session_id','replacement') WHERE id='recipient'",
+            ),
+            (
+                "project",
+                "UPDATE sessions SET state=json_set(state,'$.project_id','moved') WHERE id='recipient'",
+            ),
+            (
+                "directory",
+                "UPDATE sessions SET metadata=json_set(metadata,'$.cwd','/somewhere/else') WHERE id='recipient'",
+            ),
+            (
+                "grant",
+                "UPDATE agent_access SET grants='{}' WHERE session_id='recipient'",
+            ),
+        ];
+        for (label, mutation) in cases {
+            let f = Fixture::new();
+            f.policy(|p| p.deadline = None);
+            f.message("one");
+            f.sql(mutation);
+            f.restart();
+            let p = f.p();
+            assert!(!p.enabled, "{label} change kept a saved authorization");
+            assert!(
+                p.reason
+                    .as_deref()
+                    .is_some_and(|r| r.contains("human reauthorization required")),
+                "{label}: {:?}",
+                p.reason
+            );
+            assert_eq!(snapshot(&f.app, &f.recipient.id).unwrap().0["pending"], 0);
+        }
+    }
+    #[test]
+    fn legacy_finite_policies_load_and_still_expire_across_restart() {
+        let mut f = Fixture::new();
+        f.message("one");
+        let legacy = |deadline: u64, max_turns: u32| {
+            format!(
+                "{{\"enabled\":true,\"generation\":1,\"project\":\"project\",\"native\":\"native-recipient\",\"cwd\":{:?},\"deadline\":{deadline},\"maxTurns\":{max_turns},\"attempts\":0,\"cooldownSeconds\":5,\"maxBatch\":2,\"lastDispatch\":0,\"reason\":\"Human enabled bounded inbox turns\"}}",
+                f.root.to_string_lossy()
+            )
+        };
+        // A legacy finite authorization inside its window is preserved, not silently upgraded.
+        f.sql(&format!(
+            "INSERT OR REPLACE INTO inbox_policies(session_id,policy) VALUES('recipient','{}')",
+            legacy(now() + 60_000, 4)
+        ));
+        f.restart();
+        let p = f.p();
+        assert!(p.enabled);
+        assert!(p.deadline.is_some());
+        assert_eq!(p.max_turns, Some(4));
+        assert!(!p.standing());
+        // The same legacy row stops authorizing turns the moment its deadline passes.
+        f.sql(&format!(
+            "UPDATE inbox_policies SET policy='{}' WHERE session_id='recipient'",
+            legacy(now() - 1, 4)
+        ));
+        f.restart();
+        assert!(!f.p().enabled);
+        assert!(
+            f.p()
+                .reason
+                .as_deref()
+                .is_some_and(|r| r.contains("stop time reached"))
+        );
+        assert_eq!(snapshot(&f.app, &f.recipient.id).unwrap().0["pending"], 0);
+        // A legacy capped policy still stops at its saved total-turn bound.
+        f.sql(&format!(
+            "UPDATE inbox_policies SET policy='{}' WHERE session_id='recipient'",
+            legacy(now() + 600_000, 1)
+        ));
+        f.restart();
+        f.reattach();
+        f.message("fresh");
+        f.dispatch(false);
+        assert_eq!(f.p().attempts, 1);
+        f.settle();
+        f.message("second");
+        f.dispatch(false);
+        assert!(!f.p().enabled);
+        assert!(
+            f.p()
+                .reason
+                .as_deref()
+                .is_some_and(|r| r.contains("Total turn bound reached"))
+        );
+    }
+    #[tokio::test]
+    async fn human_can_authorize_standing_uncapped_and_explicitly_disable() {
+        let mut f = Fixture::new();
+        f.policy(|p| p.deadline = None);
+        configure(
+            State(f.app.clone()),
+            Path(f.recipient.id.clone()),
+            Json(Input {
+                enabled: true,
+                request_id: "standing-uncapped".into(),
+                deadline: None,
+                max_turns: None,
+                unlimited_turns: true,
+                cooldown_seconds: Some(5),
+                max_batch: Some(2),
+            }),
+        )
+        .await
+        .unwrap();
+        let p = f.p();
+        assert!(p.enabled && p.standing() && p.max_turns.is_none());
+        f.message("one");
+        f.dispatch(false);
+        assert!(matches!(
+            f.receiver.try_recv(),
+            Ok(crate::runtime::Command::InboxPrompt { .. })
+        ));
+        // Explicit disable revokes standing authorization and cancels pending wakes.
+        f.settle();
+        f.message("pending");
+        let response = configure(
+            State(f.app.clone()),
+            Path(f.recipient.id.clone()),
+            Json(Input {
+                enabled: false,
+                request_id: "standing-disabled".into(),
+                deadline: None,
+                max_turns: None,
+                unlimited_turns: false,
+                cooldown_seconds: None,
+                max_batch: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.0["policy"]["enabled"], false);
+        assert_eq!(response.0["pending"], 0);
+        let p = f.p();
+        assert!(!p.enabled);
+        assert!(!p.reason.unwrap().contains("preserved"));
+        assert_eq!(
+            snapshot(&f.app, &f.recipient.id).unwrap().0["policy"]["deadline"],
+            Value::Null
+        );
+        assert_eq!(
+            snapshot(&f.app, &f.recipient.id).unwrap().0["policy"]["maxTurns"],
+            Value::Null
+        );
     }
     #[test]
     fn fast_native_completion_before_submit_record_cannot_reopen_owner() {
@@ -1302,6 +1859,7 @@ mod tests {
                 request_id: "human-replacement".into(),
                 deadline: Some(now() + 60000),
                 max_turns: Some(2),
+                unlimited_turns: false,
                 cooldown_seconds: Some(5),
                 max_batch: Some(2),
             }),
