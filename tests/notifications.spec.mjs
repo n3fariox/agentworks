@@ -447,7 +447,8 @@ test('forwarded origin is derived from proxy headers and must match browser Orig
 
 test('real insecure HTTP hostname is explained even when Notification exists',async({page})=>{
   const code=await readFile('web/notifications.js','utf8');
-  await page.route('http://insecure.example/**',route=>route.fulfill({contentType:route.request().url().endsWith('.js')?'text/javascript':'text/html',body:route.request().url().endsWith('.js')?code:'<fieldset id="controls"></fieldset>'}));
+  const hosting=await readFile('web/hosting.js','utf8');
+  await page.route('http://insecure.example/**',route=>route.fulfill({contentType:route.request().url().endsWith('.js')?'text/javascript':'text/html',body:route.request().url().endsWith('/hosting.js')?hosting:route.request().url().endsWith('.js')?code:'<fieldset id="controls"></fieldset>'}));
   await page.goto('http://insecure.example/');
   await page.evaluate(async()=>{
     const {setupNotifications}=await import('/notifications.js');setupNotifications().mount(document.querySelector('#controls'));

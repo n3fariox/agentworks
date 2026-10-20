@@ -1,3 +1,4 @@
+import {localState as localStorage} from './hosting.js';
 // Desktop session browser width: drag or arrow-key the sidebar's right edge.
 // The width is a CSS variable on the layout and persists in localStorage;
 // phone layouts use an overlay sidebar and hide the handle.

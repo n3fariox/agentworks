@@ -6,6 +6,7 @@ mod completion;
 mod diff;
 mod fork;
 mod git_context;
+mod hosting;
 mod inbox_delivery;
 mod input_queue;
 mod lifecycle;
@@ -29,7 +30,7 @@ use axum::{
     },
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Response},
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use futures::{SinkExt, StreamExt};
@@ -619,10 +620,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(service_restart::status).post(service_restart::post),
         )
         .route("/api/service/restart/cancel", post(service_restart::cancel))
-        .route(
-            "/",
-            get(|| async { Html(include_str!("../web/index.html")) }),
-        )
+        .route("/", get(hosting::index))
         .route(
             "/app.js",
             get(|| async {
@@ -888,6 +886,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/{id}/workspace", get(git_context::workspace))
         .route("/api/sessions/{id}/diff", get(diff::view))
         .route("/api/markdown", post(markdown))
+        .route("/{name}", get(hosting::asset))
         .layer(DefaultBodyLimit::max(128 * 1024))
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app.clone());

@@ -1,3 +1,4 @@
+import {appUrl, localState as localStorage, sessionState as sessionStorage} from './hosting.js';
 export function createWorkspace(hooks){
   const $=id=>document.getElementById(id),el=(tag,cls,text)=>{const node=document.createElement(tag);if(cls)node.className=cls;if(text!==undefined)node.textContent=text;return node;};
   const read=(storage,key,fallback)=>{try{return JSON.parse(storage.getItem(key))??fallback;}catch{return fallback;}};
@@ -63,7 +64,7 @@ export function createWorkspace(hooks){
       if(result.truncated)list.append(el('p','field-note','Showing entries from the first 5,000 directory items.'));
     }catch(error){if(gen===filesGeneration){$('file-entries').replaceChildren();$('files-error').textContent=error.message;}}
   }
-  function fileUrl(file,download=false){return `/api/locations/${file.location.id}/file?path=${encodeURIComponent(file.path)}${download?'&download=true':''}`;}
+  function fileUrl(file,download=false){return appUrl(`/api/locations/${file.location.id}/file?path=${encodeURIComponent(file.path)}${download?'&download=true':''}`);}
   function localPath(href,base){
     if(!href||href.startsWith('#'))return null;
     if(/^file:/i.test(href)){try{const url=new URL(href);return ['','localhost'].includes(url.hostname)?decodeURIComponent(url.pathname):null;}catch{return null;}}

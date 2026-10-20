@@ -36,10 +36,11 @@ values. The client uses `wss:` automatically from an HTTPS page.
 
 Forwarded headers are a deployment trust boundary: keep the backend private so
 untrusted clients cannot send requests directly with forged forwarding headers.
-Origin validation is not authentication; put access control at the proxy or use
-the app's authentication mode. Direct HTTP Host/Origin checks remain in force.
-This supports root hosting, not arbitrary subpaths or PWA hosting; UUID subpath
-hosting remains planned in [HOSTING.md](HOSTING.md).
+Origin validation is not authentication; put access control at the proxy.
+`AGENTWORKS_AUTH_MODE` selects provider credentials, not web-client authentication.
+Direct HTTP Host/Origin checks remain in force.
+Public subpath routing and PWA installation are described in
+[HOSTING.md](HOSTING.md); the proxy must strip the mount and normalize its trailing slash.
 
 ## Delivery and limitations
 
@@ -55,16 +56,23 @@ overrides and muted sessions; the settings UI offers the global switch. Dedicate
 notification saves preserve roots/models/timeouts, and ordinary settings saves
 preserve the notification policy. Existing catalog files need no migration.
 
-Tabs atomically claim stable session/event IDs in IndexedDB before showing a
+Tabs atomically claim stable session/event IDs in mount-namespaced IndexedDB before showing a
 notice. This works without BroadcastChannel or Web Locks and retains the newest
 1000 claims through reloads. Separate browser profiles/devices have independent
 claims. If browser storage is unavailable, notices are suppressed to avoid
 cross-tab duplicates. A crash after claiming can lose a notice. The stream has no
 historical replay: disconnected browsers do not receive missed notices, and
-closing every tab stops delivery. There is no push service or service worker.
+closing every tab stops delivery. There is no push service. PWA support (enabled
+by default) registers a network-only installation worker, but notifications still use the
+page constructor rather than worker `showNotification()` or push events.
 Most mobile browsers require service-worker notifications and may reject direct display; the
 app reports that failure when it occurs. Browser/OS delivery remains best effort.
-HTTPS and permission alone do not provide mobile/background push support. See
+HTTPS, installation and permission alone do not provide mobile/background push support.
+iOS/iPadOS Web Push requires a supported OS (16.4+), a Home Screen web app and
+permission requested through direct user interaction. Supporting closed-page
+delivery needs push subscriptions and a server sender as well as worker handling;
+none of those are implemented. A service worker cannot keep this page WebSocket
+running indefinitely when the browser suspends or closes the app. See
 the [Notification constructor documentation](https://developer.mozilla.org/en-US/docs/Web/API/Notification/Notification).
 
 ## Recovery and verification
