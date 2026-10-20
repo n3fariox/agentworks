@@ -108,6 +108,9 @@ struct SessionData {
     #[serde(skip)]
     bytes: usize,
     requests: HashSet<String>,
+    /// Most recent submitted prompt survives the bounded in-memory event window.
+    #[serde(default)]
+    last_prompt: Option<Value>,
     models: Value,
     #[serde(default)]
     permission_modes: Value,
@@ -216,6 +219,9 @@ impl Session {
         }
         state.seq += 1;
         let event = json!({"seq":state.seq,"kind":kind,"data":data});
+        if kind == "user" {
+            state.last_prompt = Some(event.clone());
+        }
         // U-02: fan out noteworthy events to connected browsers.
         if let Some(category) = notifications::classify(kind, &event["data"]) {
             let (title, project_id) = (
@@ -296,14 +302,14 @@ impl Session {
                 .to_owned()
         });
         json!({"id":self.id,"provider":self.provider,"cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"model":model,
-            "archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"created":self.created,"status":data.status,"turnRunning":data.turn_active,
+            "archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"created":self.created,"status":data.status,"turnRunning":data.turn_active,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"]),
             "projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data)})
     }
     fn snapshot(&self) -> Value {
         let approvals = self.approvals.lock().unwrap();
         let data = self.data.lock().unwrap();
         json!({"kind":"snapshot","seq":data.seq,"session":{"id":self.id,"provider":self.provider,
-            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"inputQueue":data.input_queue},"events":data.events,
+            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"])},"events":data.events,
             "truncated":data.events.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
             "permissionModes":data.permission_modes,"models":data.models,"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|json!({"id":id,"request":a.request})).collect::<Vec<_>>()})
@@ -2032,6 +2038,7 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             events: VecDeque::new(),
             bytes: 0,
             requests: HashSet::new(),
+            last_prompt: None,
             models: Value::Null,
             permission_modes: Value::Null,
             initial_claude_permission_mode: permission_modes::initial_claude_default(
@@ -2303,10 +2310,35 @@ fn accept_prompt(
     }
     Ok(Json(json!({"accepted":true})))
 }
-async fn cancel(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
+#[derive(Default, Deserialize)]
+struct CancelTarget {
+    #[serde(rename = "userSeq")]
+    user_seq: Option<u64>,
+}
+async fn cancel(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Query(target): Query<CancelTarget>,
+) -> ApiResult {
     let _run = app.run_lock.lock().await;
-    let restart_error = service_restart::stop_requester(&app, &id).err();
     let s = session(&app, &id)?;
+    // Bind browser Stop to the displayed turn before any side effects. The run
+    // lock prevents another prompt being accepted while this cancellation queues.
+    let stopped_prompt = {
+        let data = s.data.lock().unwrap();
+        let user = data
+            .last_prompt
+            .as_ref()
+            .or_else(|| data.events.iter().rev().find(|e| e["kind"] == "user"));
+        if target.user_seq.is_some() && user.and_then(|e| e["seq"].as_u64()) != target.user_seq {
+            return Err(fail(
+                StatusCode::CONFLICT,
+                "The displayed turn changed; inspect before stopping",
+            ));
+        }
+        user.cloned()
+    };
+    let restart_error = service_restart::stop_requester(&app, &id).err();
     let inbox_error = inbox_delivery::cancel(&s, "Explicit Stop").err();
     let status = {
         let mut data = s.data.lock().unwrap();
@@ -2320,10 +2352,20 @@ async fn cancel(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
         status
     };
     s.emit("continuation", json!({"decision":"Explicit Stop"}));
+    if matches!(status.as_str(), "running" | "waiting") {
+        s.emit("status", json!({"status":"cancelling"}));
+    }
+    // ACP cancellation does not rewind provider history. Keep all events and
+    // persist a recovery marker, even if completion won the notification race.
+    if let Some(user) = stopped_prompt.filter(|_| {
+        matches!(status.as_str(), "running" | "waiting" | "cancelling")
+            || (status == "idle" && target.user_seq.is_some())
+    }) {
+        s.emit("stop_requested", json!({"userSeq":user["seq"],"requestId":user["data"]["requestId"],"text":user["data"]["text"],"alreadyFinished":!matches!(status.as_str(), "running" | "waiting" | "cancelling"),"historyRewound":false}));
+    }
     if matches!(status.as_str(), "starting" | "resuming" | "configuring") {
         let _ = lifecycle::suspend_locked(&s).await?;
     } else if status == "running" || status == "waiting" {
-        s.emit("status", json!({"status":"cancelling"}));
         if let Err(error) = s.send_command(runtime::Command::Cancel) {
             let _ = lifecycle::suspend_locked(&s).await?;
             return Err(error);

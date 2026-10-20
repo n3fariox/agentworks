@@ -14,11 +14,11 @@ import {setupDisplayPreferences} from './display-preferences.js';
 import {setupWorkLogs,observeTool} from './work-logs.js';
 import {setupUsageStatus} from './usage-status.js';
 import {setupFlyout} from './flyout.js';
-import {setupResize} from './resize-handle.js';
+import {setupResize,setupPromptResize} from './resize-handle.js';
 import {setupSidePanel} from './side-panel.js';
 import {setupContextMenu} from './context-menu.js';
 import {setupTimeoutControls} from './timeout-controls.js';
-import {setupInputQueue,BUSY} from './input-queue.js';
+import {setupInputQueue,setupPromptRecovery,BUSY} from './input-queue.js';
 import {setupNotifications} from './notifications.js';
 import {setupMentions} from './mentions.js';
 const $ = id => document.getElementById(id);
@@ -41,6 +41,9 @@ const composerMenu=setupFlyout({menu:$('composer-menu'),triggers:[$('composer-mo
 const sessionMenu=setupFlyout({menu:$('session-menu'),triggers:[$('session-more')]});
 setupResize({handle:$('sidebar-resize'),target:document.querySelector('.layout'),panel:$('sidebar'),variable:'--sidebar-width',key:'agentworks-sidebar-width',min:200,max:560,initial:228});
 setupResize({handle:$('side-panel-resize'),target:$('side-panel'),panel:$('side-panel'),variable:'--side-panel-width',key:'agentworks-side-panel-width',min:300,max:960,initial:420,edge:'left'});
+const promptResize=setupPromptResize($('prompt'));
+const promptRecovery=setupPromptRecovery({area:$('prompt'),storage:sessionStorage,getSession:()=>active?.id,onChange:()=>{$('prompt').dispatchEvent(new Event('input'));}});
+let currentUserSeq=null;
 let sidePanel=null;
 setInterval(()=>usageStatus.render(),60000);
 let timeoutControls=null;
@@ -388,11 +391,11 @@ function selectSession(s) {
   if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));scrollPositions.set(active.id,$('messages').scrollTop);}
   $('prompt').value=drafts[s.id]||'';restoreScroll=scrollPositions.get(s.id)??null;
   clearTimeout(retryTimer);generation++;socket?.close();socket=null;connected=false;
-  active=s;status=s.status;modelConfig=null;permissionModes=null;availableCommands=[];commandsOpen=false;renderCommands();mentions.close();composerMenu.close();sessionMenu.close();resetTranscript();usageStatus.reset();inputQueue.reset();
+  active=s;currentUserSeq=null;promptRecovery.render();status=s.status;modelConfig=null;permissionModes=null;availableCommands=[];commandsOpen=false;renderCommands();mentions.close();composerMenu.close();sessionMenu.close();resetTranscript();usageStatus.reset();inputQueue.reset();
   localStorage.setItem('agentworks-session',s.id);$('welcome').hidden=true;$('conversation').hidden=false;
   setTitle(s.title);$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;
   $('session-notice').hidden=true;document.body.classList.remove('menu-open');sidebar();updateControls();connect(generation);
-  workspace?.sessionSelected(s);sidePanel?.sessionChanged();
+  workspace?.sessionSelected(s);sidePanel?.sessionChanged();promptResize.size();
   if(s.status==='suspended'&&!s.explicitlySuspended)resumeSession(s.id);
 }
 function connect(gen){
@@ -405,8 +408,9 @@ function connect(gen){
     const e=JSON.parse(event.data);
     if(e.kind==='input_queue'){inputQueue.set(e.data);updateControls();return;}
     if(e.kind==='snapshot'){
-      resetTranscript();usageStatus.reset();status=e.session.status;Object.assign(active,e.session);
-      replaying=true;try{for(const item of e.events)if(item.kind!=='session_updated')consume(item);}finally{replaying=false;}
+      resetTranscript();usageStatus.reset();currentUserSeq=e.session.lastUserSeq??null;status=e.session.status;Object.assign(active,e.session);
+      replaying=true;try{const latestUser=e.events.findLast(item=>item.kind==='user');for(const item of e.events)if(item.kind!=='session_updated'&&(item.kind!=='stop_requested'||item.data.userSeq===(e.session.lastUserSeq??latestUser?.seq)||(!e.session.lastUserSeq&&!latestUser)))consume(item);}finally{replaying=false;}
+      currentUserSeq=e.session.lastUserSeq??currentUserSeq;
       Object.assign(active,e.session);setTitle(active.title);
       active.continuation=e.session.continuation;
       approvals=new Map(e.approvals.map(a=>[a.id,a.request]));status=e.session.status;modelConfig=e.models;syncModelLabel();permissionModes=e.permissionModes;if(status==='suspended'&&!e.session.explicitlySuspended)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();inputQueue.set(e.session.inputQueue);inputQueue.observe(status,{live:false});
@@ -559,6 +563,9 @@ function renderToolActivity(node,tool,sessionBusy){
 
 function consume(e,live=false){
   const d=e.data;
+  if(e.kind==='user')currentUserSeq=e.seq;
+  promptRecovery.consume(active.id,e);
+  if(e.kind==='stop_requested'&&pendingSends[active.id]?.requestId===d.requestId){delete pendingSends[active.id];sessionStorage.setItem('agentworks-pending-sends',JSON.stringify(pendingSends));}
   if(e.kind==='user'||e.kind==='turn_end')for(const tool of tools.values())if(tool.activityOutput&&!tool.activityOutput.turnEnded){tool.activityOutput.turnEnded=true;if(live&&!replaying)tool.activityOutput.turnEndedAt=Date.now();}
   usageStatus.consume(e,{live});
   if(d?.continuationState&&active)active.continuation=d.continuationState;
@@ -654,7 +661,7 @@ function updateControls(){
   const busy=['running','waiting','cancelling'].includes(status);
   $('session-state').textContent=status==='waiting'?'Needs your approval':status==='idle'?'Ready':status[0]?.toUpperCase()+status.slice(1);
   // Busy sessions keep the composer usable so input can be queued without losing the draft.
-  $('prompt').disabled=!connected||!(status==='idle'||busy);$('send').disabled=!connected||!(status==='idle'||busy);
+  $('prompt').disabled=!connected||!(status==='idle'||busy);$('send').disabled=!connected||status==='cancelling'||!(status==='idle'||busy);
   $('send').setAttribute('aria-label',busy?'Queue message':'Send message');$('send').textContent=busy?'＋':'↑';$('send').title=busy?'Queue to send after this turn ends':'';
   inputQueue.render();inputQueue.renderActivity();$('stop').hidden=!busy&&!['starting','resuming','configuring'].includes(status)&&!active?.continuation?.enabled;$('stop').disabled=!connected||status==='cancelling';
   $('prompt').placeholder=status==='starting'?'Starting your agent…':status==='waiting'?'Respond to the permission request above…':busy?'Your agent is working… type to queue a follow-up':status==='error'?'Session unavailable. Use Resume session to try again.':'What would you like to work on?';
@@ -836,14 +843,16 @@ function pendingFor(sid,text){
 }
 // draft is the composer text; submission.text may carry resolved @mentions.
 function settle(sid,submission,draft=submission.text){
-  if(active?.id===sid&&$('prompt').value===draft)$('prompt').value='';
-  if(drafts[sid]===draft)delete drafts[sid];sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));
+  const recovered=promptRecovery.recovered(sid,submission.requestId);
+  if(!recovered&&active?.id===sid&&$('prompt').value===draft){$('prompt').value='';promptResize.size();}
+  if(!recovered&&drafts[sid]===draft)delete drafts[sid];sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));
   if(pendingSends[sid]?.requestId===submission.requestId){delete pendingSends[sid];sessionStorage.setItem('agentworks-pending-sends',JSON.stringify(pendingSends));}
 }
 $('composer').onsubmit=async event=>{
   event.preventDefault();const text=$('prompt').value;if(!active||!text.trim())return;
-  if(!BUSY.includes(status)&&status!=='idle')return;
+  if(status==='cancelling'||(!BUSY.includes(status)&&status!=='idle'))return;
   const sid=active.id,submission={...pendingFor(sid,mentions.expand(text))};
+  promptRecovery.submitted(sid,submission,text);
   $('send').disabled=true;
   try{
     if(BUSY.includes(status))await inputQueue.enqueue(sid,submission);
@@ -859,7 +868,7 @@ $('composer').onsubmit=async event=>{
 $('prompt').oninput=()=>{mentions.update();commandsOpen=/^[/\$]\S*$/.test($('prompt').value);renderCommands();if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));}};
 $('prompt').onkeydown=event=>{if(mentions.keydown(event))return;if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault();$('composer').requestSubmit();}};
 $('resume-session').onclick=()=>{if(active)resumeSession(active.id);};
-$('stop').onclick=async()=>{try{await api(`/api/sessions/${active.id}/cancel`,{method:'POST',body:'{}'});}catch(e){toast(e.message);}};
+$('stop').onclick=async()=>{if(!active)return;const sid=active.id,seq=currentUserSeq;$('stop').disabled=true;try{await api(`/api/sessions/${sid}/cancel${seq!=null?'?userSeq='+seq:''}`,{method:'POST',body:'{}'});}catch(e){toast(e.message);}finally{updateControls();}};
 async function deleteSession(session){
   if(!session)return;
   if(!confirm(`Permanently delete “${session.title}” and its saved transcript? Its harness will stop. Worktree files and branches remain. This cannot be undone.`))return;
@@ -972,7 +981,7 @@ timeoutControls=setupTimeoutControls({$,api,getActive:()=>active});
 workspace=createWorkspace({api,toast,labels,uuid,getConfig:()=>config,getActive:()=>active,selectSession,openCreate,refreshSessions,enhanceBlocks:display.enhance,openSettings,
   overview(){ $('conversation').hidden=true;$('welcome').hidden=false;localStorage.removeItem('agentworks-session'); },
   openPanel:tab=>sidePanel?.open(tab),
-  appendDraft(text){if(!active)return;const current=$('prompt').value;$('prompt').value=current?current+'\n\n'+text:text;drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));},
+  appendDraft(text){if(!active)return;const current=$('prompt').value;$('prompt').value=current?current+'\n\n'+text:text;drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));promptResize.size();},
 });
 sidePanel=setupSidePanel({panel:$('side-panel'),tabs:{files:$('side-tab-files'),diff:$('side-tab-diff')},triggers:{files:$('session-files'),diff:$('session-diff')},close:$('side-close'),renderers:{files:workspace.sideFiles,diff:diffView},getActive:()=>active,phone});
 async function init(){
