@@ -1,7 +1,7 @@
 // R-06 isolated process/native demo/MCP/browser acceptance. No paid inference or live data.
 import assert from 'node:assert/strict';
 import {spawn,execFileSync} from 'node:child_process';
-import {mkdtemp,mkdir,copyFile,chmod,writeFile,readFile,unlink} from 'node:fs/promises';
+import {mkdtemp,mkdir,copyFile,chmod,writeFile,readFile,unlink,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {once} from 'node:events';
@@ -72,4 +72,8 @@ if [ "$1" = "--service-protocol" ]; then echo '{"serviceProtocol":1}'; exit 0; f
 exit 1
 `,{mode:0o700});await request(restart('failed-release',{release:'bad'}));await until(async()=>server.exitCode!==null);const outcome=JSON.parse(await readFile(join(control,'outcome.json')));assert.equal(outcome.phase,'failed');await stop();await start();assert.equal((await phase('failed-release','uncertain')).phase,'uncertain');
  console.log('PASS R-06: supervised process/release restart, durable identity/conflict, missing supervisor/release, drain/approval/start gates/cancel, MCP native handoff exactly once, history/native/grants/backup integrity, mobile dark/reconnect GET-only, bounded failed successor/uncertain recovery');
-}finally{if(browser)await browser.close();await stop();}
+}finally{
+ if(browser)await browser.close();await stop();
+ // Each run copies two release binaries; tmpfs /tmp fills quickly if they are kept.
+ if(process.env.AGENTWORKS_KEEP_FIXTURES)console.log('Fixture kept at '+dir);else await rm(dir,{recursive:true,force:true});
+}

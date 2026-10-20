@@ -4,7 +4,7 @@
 // scripts/fake-ssh.sh in place of ssh, so no SSH server or keys are needed.
 import assert from 'node:assert/strict';
 import {spawn,execFileSync} from 'node:child_process';
-import {mkdtemp,mkdir,symlink,readdir,readlink} from 'node:fs/promises';
+import {mkdtemp,mkdir,symlink,readdir,readlink,rm} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 import {once} from 'node:events';
 const dir=await mkdtemp(resolve('.cache/remote-host-'));
@@ -112,4 +112,5 @@ try{
   console.log('Remote host smoke passed');
 }finally{
   if(server)await stop();
+  if(process.env.AGENTWORKS_KEEP_FIXTURES)console.log('Fixture kept at '+dir);else await rm(dir,{recursive:true,force:true});
 }
