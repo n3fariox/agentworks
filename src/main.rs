@@ -709,6 +709,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route(
+            "/image-viewer.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../web/image-viewer.js"),
+                )
+            }),
+        )
+        .route(
+            "/chat-references.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../web/chat-references.js"),
+                )
+            }),
+        )
+        .route(
             "/workspace.js",
             get(|| async {
                 (
@@ -2521,7 +2539,30 @@ async fn file(
     Query(req): Query<FileQuery>,
 ) -> Result<Response, (StatusCode, String)> {
     let s = session(&app, &id)?;
-    workspace::serve_file(&s.cwd, req).await
+    // Canonicalize before checking roots: traversal and symlinks cannot escape
+    // the workspace roots currently allowed for this session's host.
+    checked_cwd(&app, &s.cwd.to_string_lossy())?;
+    let path = tokio::fs::canonicalize(s.cwd.join(&req.path))
+        .await
+        .map_err(|_| fail(StatusCode::NOT_FOUND, "File or directory not found"))?;
+    let roots = effective_roots(&app);
+    let root = roots
+        .iter()
+        .find(|root| path.starts_with(root))
+        .ok_or_else(|| {
+            fail(
+                StatusCode::FORBIDDEN,
+                "Path is outside allowed workspace roots",
+            )
+        })?;
+    workspace::serve_file(
+        root,
+        FileQuery {
+            path: path.to_string_lossy().into_owned(),
+            download: req.download,
+        },
+    )
+    .await
 }
 
 #[derive(Deserialize)]
@@ -2537,6 +2578,36 @@ fn render_markdown(text: &str) -> String {
         pulldown_cmark::Options::ENABLE_TABLES | pulldown_cmark::Options::ENABLE_STRIKETHROUGH,
     );
     let mut out = String::new();
+    let parser = parser.map(|event| match event {
+        pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) => {
+            // A bare filename with a line suffix resembles a URL scheme to the
+            // sanitizer. Make its relative-path meaning explicit before cleaning.
+            let parts: Vec<_> = dest_url.split(':').collect();
+            let local_line = (parts.len() == 2 || parts.len() == 3)
+                && parts[0].contains('.')
+                && !parts[0].contains('/')
+                && parts[1..]
+                    .iter()
+                    .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
+            let dest_url = if local_line {
+                format!("./{dest_url}").into()
+            } else {
+                dest_url
+            };
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link {
+                link_type,
+                dest_url,
+                title,
+                id,
+            })
+        }
+        event => event,
+    });
     pulldown_cmark::html::push_html(&mut out, parser);
     ammonia::Builder::default()
         .url_relative(ammonia::UrlRelative::PassThrough)
@@ -2621,9 +2692,13 @@ mod tests {
     }
     #[test]
     fn markdown_keeps_file_links() {
-        let html = render_markdown("[a](file:///home/x/a.png) [b](/home/x/b.png)");
+        let html = render_markdown(
+            "[a](file:///home/x/a.png) [b](/home/x/b.png) [line](sample.rs:42) [bad](javascript:42)",
+        );
         assert!(html.contains(r#"href="file:///home/x/a.png""#));
         assert!(html.contains(r#"href="/home/x/b.png""#));
+        assert!(html.contains(r#"href="./sample.rs:42""#));
+        assert!(!html.contains("javascript:"));
     }
     #[test]
     fn markdown_keeps_only_code_language_classes() {

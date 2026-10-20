@@ -125,16 +125,33 @@ export function createWorkspace(hooks){
     else if(file.loading)body.textContent='Loading file…';
     else if(file.type?.startsWith('image/')){const image=el('img','file-image');image.src=fileUrl(file);image.alt=file.path;body.append(image);}
     else if(file.type?.startsWith('text/')){
-      if(!file.source&&file.html){body.innerHTML=file.html;decorate(body,file,side);}else body.append(el('pre','workspace-source',file.text.slice(0,100000)));
+      if(!file.source&&file.html){body.innerHTML=file.html;decorate(body,file,side);}else body.append(el('pre','workspace-source',file.line?file.text:file.text.slice(0,100000)));
       hooks.enhanceBlocks?.(body,`workspace:${file.location.id}:${file.path}`,{language:!file.source&&file.html?'':/\.([\w+-]+)$/.exec(file.path)?.[1]||''});
-      const limit=!file.source&&file.html?24000:100000;if(file.text.length>limit)body.append(el('p','field-note','Preview shortened. Download the file to read it in full.'));
+      if(file.line&&file.source){
+        const code=body.querySelector('pre code');
+        if(code){
+          // Wrap just the requested source line, retaining highlighted tokens and
+          // the code block's exact raw copy buffer.
+          const lines=file.text.split('\n'),target=Math.min(file.line,lines.length);
+          const start=lines.slice(0,target-1).reduce((n,line)=>n+line.length+1,0),end=start+lines[target-1].length;
+          const walker=document.createTreeWalker(code,NodeFilter.SHOW_TEXT),positions=[];let offset=0;
+          while(walker.nextNode()){const node=walker.currentNode;positions.push({node,start:offset,end:offset+node.length});offset+=node.length;}
+          const first=positions.find(p=>p.end>=start),last=positions.find(p=>p.end>=end);
+          if(first&&last){
+            const range=document.createRange();range.setStart(first.node,start-first.start);range.setEnd(last.node,end-last.start);
+            const marker=el('span','referenced-line');marker.dataset.line=target;marker.setAttribute('aria-label',`Line ${target}`);marker.append(range.extractContents());range.insertNode(marker);
+            requestAnimationFrame(()=>{if(marker.isConnected)marker.scrollIntoView({block:'center',behavior:'instant'});});
+          }
+        }
+      }
+      const limit=!file.source&&file.html?24000:100000;if(!file.line&&file.text.length>limit)body.append(el('p','field-note','Preview shortened. Download the file to read it in full.'));
     }else body.append(el('p','field-note','Preview is unavailable for this format. Use Download to save it.'));
     const footer=el('div','workspace-preview-footer'),ask=el('button','text-button','Ask about this file ↗');ask.disabled=!!file.error||file.loading;ask.onclick=()=>askAbout(file);footer.append(ask);
     if(!side){const beside=el('button','text-button','Open beside chat');beside.disabled=!!file.error||file.loading;beside.onclick=()=>{const active=hooks.getActive();if(!active){hooks.openCreate({projectId:state.projectId,cwd:file.location.path});return;}if(active.cwd!==file.location.path){hooks.toast('Choose a session in this directory, or start one with Ask about this file.');return;}state.sideFile=file;showView('sessions');hooks.openPanel('files');};footer.append(beside);}
     area.append(footer);
   }
-  async function openFile(location,path,side=false){
-    const file={location,path,source:false,text:'',type:'',loading:true};if(side){state.sideFile=file;$('side-file-browser').hidden=true;$('workspace-preview').hidden=false;}else{state.file=file;for(const node of $('file-entries').querySelectorAll('button'))node.classList.toggle('selected',node.dataset.path===path);save();}renderPreview(file,side);
+  async function openFile(location,path,side=false,line=null){
+    const file={location,path,line,source:!!line,text:'',type:'',loading:true};if(side){state.sideFile=file;$('side-file-browser').hidden=true;$('workspace-preview').hidden=false;}else{state.file=file;for(const node of $('file-entries').querySelectorAll('button'))node.classList.toggle('selected',node.dataset.path===path);save();}renderPreview(file,side);
     try{
       const response=await fetch(fileUrl(file));if(!response.ok)throw new Error(await response.text());
       file.type=response.headers.get('content-type')||'';
@@ -237,8 +254,8 @@ export function createWorkspace(hooks){
   return {
     sync(next,list){catalog=next;sessions=list;contextControls();if(state.view==='automations')loadAutomations();},
     sessionSelected,showView,sideFiles,
-    // Chat links (images, Markdown, source) open in the side panel's Files tab.
-    openSideFile(session,path){openFile({id:session.locationId,path:session.cwd,sessionId:session.id},path,true);hooks.openPanel('files');},
+    // Chat file links open in the side panel's Files tab.
+    openSideFile(session,path,line=null){openFile({id:session.locationId,path:session.cwd,sessionId:session.id},path,true,line);hooks.openPanel('files');},
     context(){return {projectId:state.projectId,cwd:directory()};},
     restoreView(){if(initial.view&&initial.view!=='sessions'){state.projectId=initial.projectId||null;state.locationKey=initial.locationKey||'';state.path=initial.path||'';contextControls();showView(initial.view);if(initial.view==='files'&&initial.filePath){const expected=directory();ensureLocation().then(location=>{if(state.view==='files'&&directory()===expected&&!state.file)openFile(location,initial.filePath);}).catch(()=>{});}}},
     rootsChanged(){contextControls();if(state.view==='files')loadFiles();},

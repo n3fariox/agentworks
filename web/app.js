@@ -5,6 +5,8 @@ import {setupWorktreeControls,setupPolicyEditor} from './worktree-controls.js';
 import {setupGitContext} from './git-context.js';
 import {setupWorktreeOwnership} from './worktree-ownership.js';
 import {setupControllers} from './controllers.js';
+import {setupImageViewer} from './image-viewer.js';
+import {setupChatReferences} from './chat-references.js';
 import {createWorkspace} from './workspace.js';
 import {setupCommunication} from './communication.js';
 import {setupPalettes} from './palettes.js';
@@ -533,26 +535,8 @@ function updateControls(){
 }
 function scheduleDraw(){if(!drawTimer)drawTimer=setTimeout(()=>{drawTimer=null;draw();},70);}
 function fileUrl(path,download=false){return appUrl(`/api/sessions/${active.id}/file?path=${encodeURIComponent(path)}${download?'&download=true':''}`);}
-function localReference(href,base=''){
-  if(!href||href.startsWith('#'))return null;
-  if(/^file:/i.test(href)){try{const url=new URL(href);return ['','localhost'].includes(url.hostname)?decodeURIComponent(url.pathname):null;}catch{return null;}}
-  if(/^[a-z][a-z0-9+.-]*:/i.test(href)||href.startsWith('//'))return null;
-  const decoded=decodeURIComponent(href.split('#')[0]);
-  return decoded.startsWith('/')?decoded:base+decoded;
-}
-function decorateMarkdown(node,base=''){
-  for(const a of node.querySelectorAll('a')){
-    const path=localReference(a.getAttribute('href'),base);
-    if(path!==null){a.href='#';a.onclick=e=>{e.preventDefault();if(active)workspace?.openSideFile(active,path);};}
-    else if(/^file:/i.test(a.getAttribute('href')||''))a.removeAttribute('href');
-    else {a.target='_blank';a.rel='noopener noreferrer';}
-  }
-  for(const img of node.querySelectorAll('img')){
-    const path=localReference(img.getAttribute('src'),base);
-    if(path!==null){img.src=fileUrl(path);img.classList.add('opens-preview');img.title='Open in the side panel';img.onclick=()=>{if(active)workspace?.openSideFile(active,path);};}
-    img.loading='lazy';img.alt||='Agent image';
-  }
-}
+const imageViewer=setupImageViewer($('messages'));
+const decorateMarkdown=setupChatReferences({getSession:()=>active,openFile:(session,path,line)=>workspace?.openSideFile(session,path,line),fileUrl,imageViewer});
 function updateMarkdown(message,body){
   if(body.dataset.source===message.text)return;
   body.dataset.source=message.text;
@@ -588,7 +572,7 @@ function draw(){
         node=el('details','tool-card');node.append(el('summary'),el('pre'));
       }else if(item.type==='image'){
         node=el('div','message');const image=el('img','agent-image');
-        if(/^image\/(png|jpeg|gif|webp)$/.test(item.content.mimeType)&&item.content.data.length<14*1024*1024){image.src=`data:${item.content.mimeType};base64,${item.content.data}`;image.alt='Image from agent';node.append(image);}else node.textContent='Unsupported image format';
+        if(/^image\/(png|jpeg|gif|webp)$/.test(item.content.mimeType)&&item.content.data.length<14*1024*1024){image.src=`data:${item.content.mimeType};base64,${item.content.data}`;image.alt='Image from agent';imageViewer.decorate(image);node.append(image);}else node.textContent='Unsupported image format';
       }else node=el('div',item.type==='error'?'error-card':'notice-card',item.text);
       nodes.set(item.id,node);area.append(node);
     }
