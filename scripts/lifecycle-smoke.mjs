@@ -1,3 +1,4 @@
+import {removeFixture} from '../tests/support/cleanup.mjs';
 // L-01: isolated deterministic ACP, SQLite restart and dark desktop/mobile checks.
 // No credentials, real providers, live service, or shared fixtures are used.
 import assert from 'node:assert/strict';
@@ -98,5 +99,5 @@ try{
  // DELETE remains compatible for active workers; separate Suspend never deletes history.
  await api(path(id),undefined,'DELETE');await stop();await start();await api(path(id),undefined,'GET',404);
  assert.equal(git(),originalGit);assert.equal(worktrees(),originalWorktrees);assert.equal(await readFile(join(cwd,'retained.txt'),'utf8'),'Keep this workspace\n');
- console.log(`PASS: L-01 rename/archive discovery, active-stop/approval suspension, quota cancellation, crash/restart/native identity/claims/transcripts, resume race, deletion compatibility, dark desktop/mobile controls. Artifacts: ${dir}`);
-}finally{await browser?.close();if(server)await stop();}
+ console.log(`PASS: L-01 rename/archive discovery, active-stop/approval suspension, quota cancellation, crash/restart/native identity/claims/transcripts, resume race, deletion compatibility, dark desktop/mobile controls. Fixture root: ${dir}`);
+}finally{await browser?.close();if(server)await stop();await removeFixture(dir);}

@@ -1,3 +1,4 @@
+import {serverReady} from './support/cleanup.mjs';
 import {test,expect} from '@playwright/test';
 import {spawn} from 'node:child_process';
 import {mkdtemp,mkdir,rm} from 'node:fs/promises';
@@ -18,7 +19,7 @@ async function start(){
   for(const stream of [server.stdout,server.stderr])stream.on('data',s=>log+=s);
   for(let i=0;i<100;i++){
     if(exited)throw Error(log);
-    try{if((await fetch(base+'/api/status')).ok)return;}catch{}
+    if(await serverReady(server,base))return;
     await new Promise(r=>setTimeout(r,100));
   }
   throw Error('Server readiness timed out: '+log);

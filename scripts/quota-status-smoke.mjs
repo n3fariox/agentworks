@@ -1,3 +1,4 @@
+import {serverReady,removeFixture} from '../tests/support/cleanup.mjs';
 // B-02 isolated ACP fixtures. No provider inference, live catalog or live database.
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -6,7 +7,7 @@ import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {once} from 'node:events';
 const dir=await mkdtemp(join(tmpdir(),'agentworks-quota-status-'));
-const port=process.env.AGENTWORKS_QUOTA_STATUS_PORT||'4491',base=`http://127.0.0.1:${port}`;
+const port=process.env.AGENTWORKS_QUOTA_STATUS_PORT||'4493',base=`http://127.0.0.1:${port}`;
 let server,log='';
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 async function api(path,body,method=body===undefined?'GET':'POST') {
@@ -16,7 +17,7 @@ async function api(path,body,method=body===undefined?'GET':'POST') {
 async function start(){
  server=spawn(resolve('target/debug/agentworks'),[],{env:{...process.env,AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:port,AGENTWORKS_ROOTS:resolve('.'),AGENTWORKS_CATALOG_PATH:dir+'/catalog.json',AGENTWORKS_DB_PATH:dir+'/sessions.sqlite3',AGENTWORKS_DEMO_STATE_DIR:dir+'/demo',AGENTWORKS_DEMO_STATUS_DELAY_MS:'1800'},stdio:['ignore','pipe','pipe']});
  server.stdout.on('data',b=>log+=b);server.stderr.on('data',b=>log+=b);
- for(let i=0;i<100;i++){if(server.exitCode!==null)throw Error(log);try{if((await fetch(base+'/api/status')).ok)return;}catch{}await delay(80);}throw Error('Startup failed '+log);
+ for(let i=0;i<100;i++){if(server.exitCode!==null)throw Error(log);if(await serverReady(server,base))return;await delay(80);}throw Error('Startup failed '+log);
 }
 async function stop(signal='SIGINT'){if(server.exitCode!==null){server=null;return;}const exited=once(server,'exit');server.kill(signal);await exited;server=null;}
 const snapshot=id=>api(`/api/sessions/${id}`);
@@ -63,4 +64,4 @@ try {
  resumed=await wait(transport.id,x=>count(x)===1&&x.session.status==='idle');assert.equal(native(resumed),transportContext);assert.equal(resumed.session.continuation.limited,false);assert.equal(resumed.session.continuation.dueAt,null);
  assert.equal(original.attempts,0);
  console.log('PASS B-02: timer due during probe; duplicate request; exactly-once same native context; crash during probe without replay; stale/unknown/fresh evidence; concurrent Stop/disable; replacement input; fresh quota error; no auto-enable; dead read transport');
-} finally {if(server)await stop();}
+} finally {if(server)await stop();await removeFixture(dir);}

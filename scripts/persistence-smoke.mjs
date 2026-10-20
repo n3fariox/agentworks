@@ -1,3 +1,4 @@
+import {removeFixture} from '../tests/support/cleanup.mjs';
 // Owns an isolated server/database. Tests process restarts and crashes, not just browser reloads.
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -112,4 +113,5 @@ try{
   console.log('PASS: durable transcript/model/project/settings, imported history and automation runs, browser reconnect and draft, same harness context, crash/approval recovery, idempotency, missing-context failure and permanent deletion');
 }finally{
   await browser?.close();if(server)await stop();
+  await removeFixture(dir);
 }

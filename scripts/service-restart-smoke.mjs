@@ -1,3 +1,4 @@
+import {removeFixture} from '../tests/support/cleanup.mjs';
 // R-06 isolated process/native demo/MCP/browser acceptance. No paid inference or live data.
 import assert from 'node:assert/strict';
 import {spawn,execFileSync} from 'node:child_process';
@@ -72,4 +73,4 @@ if [ "$1" = "--service-protocol" ]; then echo '{"serviceProtocol":1}'; exit 0; f
 exit 1
 `,{mode:0o700});await request(restart('failed-release',{release:'bad'}));await until(async()=>server.exitCode!==null);const outcome=JSON.parse(await readFile(join(control,'outcome.json')));assert.equal(outcome.phase,'failed');await stop();await start();assert.equal((await phase('failed-release','uncertain')).phase,'uncertain');
  console.log('PASS R-06: supervised process/release restart, durable identity/conflict, missing supervisor/release, drain/approval/start gates/cancel, MCP native handoff exactly once, history/native/grants/backup integrity, mobile dark/reconnect GET-only, bounded failed successor/uncertain recovery');
-}finally{if(browser)await browser.close();await stop();}
+}finally{if(browser)await browser.close();await stop();await removeFixture(dir);}

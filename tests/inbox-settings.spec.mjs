@@ -1,3 +1,4 @@
+import {serverReady} from './support/cleanup.mjs';
 import {test,expect} from '@playwright/test';
 import {spawn,execFileSync} from 'node:child_process';
 import {mkdtemp,mkdir,rm} from 'node:fs/promises';
@@ -26,7 +27,7 @@ async function startServer(){
   for(const stream of [server.stdout,server.stderr])stream.on('data',s=>{log+=s.toString();});
   for(let i=0;i<100;i++){
     if(exited)throw new Error(log);
-    try{if((await fetch(base+'/api/status')).ok)break;}catch{}
+    if(await serverReady(server,base))break;
     await new Promise(r=>setTimeout(r,100));
     if(i===99)throw new Error('Isolated server readiness timed out: '+log);
   }

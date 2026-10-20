@@ -1,3 +1,4 @@
+import {removeFixture} from '../tests/support/cleanup.mjs';
 // Isolated L-07 persistence/failure and real runtime acceptance (~65s), no model inference.
 import assert from 'node:assert/strict';
 import {spawn,execFileSync} from 'node:child_process';
@@ -52,4 +53,4 @@ try{
  const approval=paused.approvals[0];const allow=approval.request.options.find(o=>o.kind==='allow_once');assert(allow);
  await api(`/api/sessions/${cases[1].id}/approvals/${approval.id}`,{optionId:allow.optionId});const done=await idle(cases[1].id);assert(!done.events.some(e=>e.kind==='timeout'));assert.equal(done.session.continuation.dueAt,null);
  console.log('PASS timeout validation/settings consistency, failed-write rollback, restart/native preservation, override clearing, real total expiry, paused approval clocks, explicit queue paused after timeout, and no quota replay');
-}finally{if(server)await stop();}
+}finally{if(server)await stop();await removeFixture(dir);}

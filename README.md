@@ -291,8 +291,10 @@ To verify persistence with an isolated database and real process restarts/crashe
 ```bash
 npm run test:persistence
 # Opt-in: prove Claude/Codex/OpenCode context retention with two short model prompts each:
-AGENTWORKS_TEST_HARNESS_RESUME=1 npm run test:persistence
+AGENTWORKS_KEEP_TEST_FIXTURES=1 AGENTWORKS_TEST_HARNESS_RESUME=1 npm run test:persistence
 ```
+
+Isolated smoke fixtures (catalogs, databases, demo state and Git worktrees) are removed after server shutdown, including on assertion failures. Set `AGENTWORKS_KEEP_TEST_FIXTURES=1` to retain them for inspection; remove the printed fixture directory when finished. Verification also uses a fresh fixture root on every run. Browser screenshots and failure reports remain in `.cache`. See the [fixture audit](work/TEST-FIXTURE-AUDIT.md) for coverage and remaining constraints.
 
 To check native history import without new inference, reuse the populated test fixtures from a prior native persistence run:
 

@@ -1,6 +1,7 @@
+import {serverReady,stopChild} from './support/cleanup.mjs';
 import {test,expect} from '@playwright/test';
 import {spawn} from 'node:child_process';
-import {mkdtemp,mkdir} from 'node:fs/promises';
+import {mkdtemp,mkdir,rm} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 
 // @-mentions: isolated server on port 4514; demo agent only.
@@ -16,10 +17,10 @@ test.beforeAll(async()=>{
   await mkdir('.cache',{recursive:true});fixture=await mkdtemp(resolve('.cache/mentions-'));
   server=spawn(resolve('target/debug/agentworks'),[],{env:{...process.env,AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:'4514',AGENTWORKS_ROOTS:fixture,
     AGENTWORKS_CATALOG_PATH:join(fixture,'catalog.json'),AGENTWORKS_DB_PATH:join(fixture,'sessions.sqlite3'),AGENTWORKS_DEMO_STATE_DIR:join(fixture,'demo')},stdio:'ignore'});
-  for(let i=0;i<100;i++){try{if((await fetch(base+'/api/status')).ok)return;}catch{}await new Promise(r=>setTimeout(r,100));}
+  for(let i=0;i<100;i++){if(await serverReady(server,base))return;await new Promise(r=>setTimeout(r,100));}
   throw new Error('server did not start');
 });
-test.afterAll(()=>server?.kill());
+test.afterAll(async()=>{await stopChild(server);if(fixture)await rm(fixture,{recursive:true,force:true});});
 
 test('unanchored @ fuzzy-picks project peers and resolves ids on send',async({page})=>{
   const project=await api('/api/projects',{name:'Mentions'});

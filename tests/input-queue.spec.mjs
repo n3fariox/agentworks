@@ -1,6 +1,7 @@
+import {serverReady,stopChild} from './support/cleanup.mjs';
 import {test,expect} from '@playwright/test';
 import {spawn} from 'node:child_process';
-import {mkdtemp,mkdir} from 'node:fs/promises';
+import {mkdtemp,mkdir,rm} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 
 // L-05: isolated servers/databases on assigned ports 4511-4512; demo agent only, no paid inference.
@@ -20,7 +21,7 @@ function launch(port,dir){
 async function ready(proc,url){
   for(let i=0;i<100;i++){
     if(proc.exited)throw new Error(proc.log);
-    try{if((await fetch(url+'/api/status')).ok)return;}catch{}
+    if(await serverReady(proc.child,url))return;
     await new Promise(r=>setTimeout(r,100));
   }
   throw new Error('Isolated server readiness timed out: '+proc.log);
@@ -43,7 +44,7 @@ test.beforeAll(async()=>{
   await mkdir('.cache',{recursive:true});fixture=await mkdtemp(resolve('.cache/input-queue-'));
   server=launch(4511,fixture);await ready(server,base);
 });
-test.afterAll(()=>server?.child.kill());
+test.afterAll(async()=>{await stopChild(server?.child);if(fixture)await rm(fixture,{recursive:true,force:true});});
 test.beforeEach(async()=>{session=null;session=await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Queue test'});await until(async()=>await state()==='idle');});
 // Release each test's harness so later cases cannot exhaust the server's limit.
 test.afterEach(async()=>{if(session)await api(`/api/sessions/${session.id}`,undefined,'DELETE');});
@@ -178,6 +179,7 @@ test('session switching keeps drafts and per-session queues; replay shows unknow
 
 test('mobile, keyboard and reduced motion',async({browser})=>{
   const context=await browser.newContext({viewport:{width:390,height:844},reducedMotion:'reduce',hasTouch:true});
+  try{
   const page=await context.newPage();
   await openSession(page);
   await type(page,'slow mobile');
@@ -191,12 +193,14 @@ test('mobile, keyboard and reduced motion',async({browser})=>{
   await remove.focus();await page.keyboard.press('Enter');
   await expect(page.locator('#input-queue')).toBeHidden();
   await api(`/api/sessions/${session.id}/stop`,{});
-  await context.close();
+  }finally{await context.close();}
 });
 
 test('restart during queued dispatch pauses as ambiguous and never replays',async()=>{
   const dir=await mkdtemp(resolve('.cache/input-queue-restart-'));const url='http://127.0.0.1:4512';
-  let proc=launch(4512,dir);await ready(proc,url);
+  let proc;
+  try{
+  proc=launch(4512,dir);await ready(proc,url);
   const s=await api('/api/sessions',{provider:'demo',cwd:dir,title:'Restart'},undefined,url);
   await until(async()=>await state(url,s.id)==='idle');
   await api(`/api/sessions/${s.id}/prompt`,{text:'quick',requestId:'first'},undefined,url);
@@ -205,7 +209,6 @@ test('restart during queued dispatch pauses as ambiguous and never replays',asyn
   await until(async()=>(await api(`/api/sessions/${s.id}/queue`,undefined,undefined,url)).queue.items[0].state==='sending');
   proc.child.kill('SIGKILL');await until(()=>proc.exited);
   proc=launch(4512,dir);await ready(proc,url);
-  try{
     const q=(await api(`/api/sessions/${s.id}/queue`,undefined,undefined,url)).queue;
     expect(q.items[0].state).toBe('error');
     expect(q.items[0].note).toContain('delivery unknown');
@@ -218,7 +221,7 @@ test('restart during queued dispatch pauses as ambiguous and never replays',asyn
     // Request bindings survive restart: original payload is a duplicate, changed payload is refused.
     expect((await api(`/api/sessions/${s.id}/queue`,{text:'later',requestId:'qb'},undefined,url)).result.duplicate).toBe(true);
     expect((await call(`/api/sessions/${s.id}/queue`,{text:'later changed',requestId:'qb'},undefined,url)).status).toBe(409);
-  }finally{proc.child.kill();}
+  }finally{await stopChild(proc?.child);await rm(dir,{recursive:true,force:true});}
 });
 
 test('late idempotency: removed/sent IDs stay bound and direct prompts never duplicate queued IDs',async()=>{
@@ -309,21 +312,22 @@ test('Send then Enter race queues the second input exactly once without losing i
 test('storage fault: queue changes are not acknowledged or applied when persistence fails',async()=>{
   const {DatabaseSync}=await import('node:sqlite');
   const dir=await mkdtemp(resolve('.cache/input-queue-fault-'));const url='http://127.0.0.1:4513';
-  const proc=launch(4513,dir);await ready(proc,url);
+  let proc,db;
   try{
+    proc=launch(4513,dir);await ready(proc,url);
     const s=await api('/api/sessions',{provider:'demo',cwd:dir,title:'Fault'},undefined,url);
     await until(async()=>await state(url,s.id)==='idle');
     const path=`/api/sessions/${s.id}/queue`;
     const ok=await api(path,{text:'kept',requestId:'k'},undefined,url);
     // Inject a write fault into this isolated database only.
-    const db=new DatabaseSync(join(dir,'sessions.sqlite3'));
+    db=new DatabaseSync(join(dir,'sessions.sqlite3'));
     db.exec(`CREATE TRIGGER inject_fault BEFORE UPDATE ON sessions WHEN NEW.state LIKE '%fault-me%' BEGIN SELECT RAISE(ABORT,'injected'); END;`);
     expect((await call(path,{text:'fault-me',requestId:'f'},undefined,url)).status).toBe(500);
     expect((await call(`${path}/${ok.result.id}`,{text:'fault-me edit',revision:0},'PATCH',url)).status).toBe(500);
     const q=(await api(path,undefined,undefined,url)).queue;
     expect(q.items.map(i=>[i.text,i.revision])).toEqual([['kept',0]]);
-    db.exec('DROP TRIGGER inject_fault');db.close();
+    db.exec('DROP TRIGGER inject_fault');db.close();db=null;
     // After the fault clears, the same request ID is accepted normally (it was never bound).
     expect((await api(path,{text:'fault-me',requestId:'f'},undefined,url)).result.duplicate).toBe(false);
-  }finally{proc.child.kill();}
+  }finally{try{db?.close();}finally{await stopChild(proc?.child);await rm(dir,{recursive:true,force:true});}}
 });

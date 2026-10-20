@@ -5,15 +5,33 @@ async function create(page,name,directory){
   await page.locator('#session-title').fill(name);
   if(directory)await page.locator('#directory').fill(directory);
   await page.locator('#create-submit').click();
+  await expect(page.locator('#create-dialog')).not.toBeVisible();
+  await expect(page.locator('#session-heading-title')).toHaveText(name);
   await expect(page.locator('#session-state')).toHaveText('Ready');
 }
 async function send(page,text){
   await page.locator('#prompt').fill(text);await page.locator('#send').click();
 }
-test.afterEach(async({page})=>{
-  const ids=await page.evaluate(async()=>{const r=await fetch('/api/sessions');return(await r.json()).filter(s=>s.title.startsWith('Browser test')).map(s=>s.id);}).catch(()=>[]);
-  for(const id of ids)await page.evaluate(id=>fetch('/api/sessions/'+id,{method:'DELETE'}),id);
-  await page.evaluate(async()=>{const c=await fetch('/api/catalog').then(r=>r.json());for(const p of c.projects.filter(p=>p.name.startsWith('Browser test')))await fetch('/api/projects/'+p.id,{method:'DELETE'});}).catch(()=>{});
+// Track this test's creations, including automation runs whose title differs
+// from the launch title. Never sweep another run's "Browser test" resources.
+const resources=new WeakMap();
+test.beforeEach(async({page})=>{
+  const owned={sessions:new Set(),projects:new Set(),automations:new Set(),pending:[]};
+  resources.set(page,owned);
+  page.on('response',response=>{
+    if(response.request().method()!=='POST'||!response.ok())return;
+    const path=new URL(response.url()).pathname;
+    const kind=path==='/api/projects'?'projects':path==='/api/automations'?'automations':
+      /^\/api\/sessions(?:\/import)?$/.test(path)||/^\/api\/automations\/[^/]+\/run$/.test(path)?'sessions':null;
+    if(kind)owned.pending.push(response.json().then(value=>{const id=value.id||value.session?.id;if(id)owned[kind].add(id);}));
+  });
+});
+test.afterEach(async({page,request})=>{
+  const owned=resources.get(page);await Promise.all(owned.pending);
+  for(const kind of ['sessions','automations','projects'])for(const id of owned[kind]){
+    const response=await request.delete(`/api/${kind}/${id}`,{headers:{Origin:new URL(page.url()).origin}});
+    expect([200,204,404]).toContain(response.status());
+  }
 });
 
 test('desktop: sessions, Markdown, approvals across reload, cancellation, project files',async({page})=>{
@@ -342,8 +360,9 @@ test('resume picker imports external history, paginates, and opens existing entr
 });
 
 test('side panel: files and diff beside the chat, resizable on desktop, full screen with Back on phones',async({page})=>{
-  const {mkdir,writeFile}=await import('node:fs/promises'),{resolve,join}=await import('node:path'),{randomUUID}=await import('node:crypto');
+  const {mkdir,writeFile,rm}=await import('node:fs/promises'),{resolve,join}=await import('node:path'),{randomUUID}=await import('node:crypto');
   const cwd=resolve('.cache/browser-side-panel-'+randomUUID());await mkdir(join(cwd,'src'),{recursive:true});
+  try{
   await writeFile(join(cwd,'notes.md'),'# Side notes');await writeFile(join(cwd,'src/main.js'),'export const answer=42;\n');
   await writeFile(join(cwd,'pic.png'),Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=','base64'));
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
@@ -360,7 +379,7 @@ test('side panel: files and diff beside the chat, resizable on desktop, full scr
   await page.locator('#side-tab-diff').click();await expect(page.locator('#side-diff')).toBeVisible();await expect(page.locator('#diff-status')).not.toHaveText('Loading diff…');
   await expect(page.locator('#side-files')).toBeHidden();await expect(page.locator('#session-diff')).toHaveAttribute('aria-expanded','true');
   await page.locator('#side-tab-files').click();await expect(page.locator('#workspace-preview')).toContainText('answer');
-  // A chat link to an image, or the inline image itself, opens it in the Files tab.
+  // Chat links open image files in Files; inline images use the image viewer.
   await page.locator('#side-close').click();
   await page.locator('#prompt').fill('See [the picture](pic.png) and ![inline picture](pic.png)');await page.locator('#send').click();
   await expect(page.locator('#session-state')).toHaveText('Ready');await expect(page.locator('#prompt')).toHaveValue('');await page.locator('#prompt').fill('Keep the side panel draft');
@@ -368,7 +387,10 @@ test('side panel: files and diff beside the chat, resizable on desktop, full scr
   await expect(panel).toBeVisible();await expect(page.locator('#side-tab-files')).toHaveAttribute('aria-selected','true');
   await expect(page.locator('#workspace-preview .workspace-preview-header strong')).toHaveText('pic.png');await expect(page.locator('#workspace-preview img.file-image')).toBeVisible();
   await page.locator('#side-close').click();await page.locator('.message.assistant img[alt="inline picture"]').click();
-  await expect(panel).toBeVisible();await expect(page.locator('#workspace-preview img.file-image')).toBeVisible();
+  const viewer=page.getByRole('dialog',{name:'Image viewer'});
+  await expect(viewer).toBeVisible();await expect(panel).toBeHidden();
+  await page.keyboard.press('Escape');await expect(viewer).toBeHidden();
+  await page.locator('#session-files').click();await expect(panel).toBeVisible();
   // Dragging the left edge widens the panel; the width and open state persist across reload.
   const before=(await panel.boundingBox()).width,edge=await page.locator('#side-panel-resize').boundingBox();
   await page.mouse.move(edge.x+edge.width/2,edge.y+300);await page.mouse.down();await page.mouse.move(edge.x+edge.width/2-160,edge.y+300,{steps:5});await page.mouse.up();
@@ -389,6 +411,7 @@ test('side panel: files and diff beside the chat, resizable on desktop, full scr
   await page.locator('#side-close').click();await expect(panel).toBeHidden();await expect(page.locator('#messages')).toBeVisible();
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
   expect(errors).toEqual([]);
+  }finally{await rm(cwd,{recursive:true,force:true});}
 });
 test('workspace: file browsing, side preview, drafts, and manual automation runs',async({page})=>{
   const {mkdir,writeFile,rm}=await import('node:fs/promises'),{resolve,join}=await import('node:path'),{randomUUID}=await import('node:crypto');
