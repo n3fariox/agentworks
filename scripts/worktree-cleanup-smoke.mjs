@@ -1,3 +1,4 @@
+import {removeFixture} from '../tests/support/cleanup.mjs';
 // C-04b: owned worktree archive cleanup/restore against real Git fixtures and the demo harness.
 // Owns its server, catalog, SQLite and repositories under .cache; never uses models or the live service.
 import assert from 'node:assert/strict';
@@ -139,5 +140,5 @@ try{
  await page.locator('#worktree-archive-remove').click();
  await until(async()=>(await snap(active.id)).session.archived);assert.equal(await exists(active.cwd),false);
  assert.deepEqual(errors,[]);
- console.log(`Worktree cleanup smoke passed; fixtures retained in ${dir}`);
-}finally{await browser?.close();if(server)await stop(false);}
+ console.log(`Worktree cleanup smoke passed; fixture root: ${dir}`);
+}finally{await browser?.close();if(server)await stop(false);await removeFixture(dir);}

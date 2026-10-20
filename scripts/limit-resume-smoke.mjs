@@ -1,3 +1,4 @@
+import {removeFixture} from '../tests/support/cleanup.mjs';
 // Deterministic local ACP/MCP/browser/SQLite checks. No provider model calls.
 import assert from 'node:assert/strict';
 import {spawn,execFileSync} from 'node:child_process';
@@ -60,4 +61,4 @@ c=sqlite3.connect(sys.argv[1]);r=c.execute('select state from sessions where id=
  const repeated=await create('Repeated quota',{enabled:true,maxAttempts:1});await prompt(repeated.id,'quota repeat');
  const exhausted=await waitFor(repeated.id,s=>count(s)===1&&s.session.status==='idle');assert.equal(exhausted.session.continuation.attempts,1);assert.equal(exhausted.session.continuation.dueAt,null);assert(exhausted.session.continuation.limited);
  console.log('PASS: L-09 local ACP quota/default-off/unknown/multiwindow/injected failure/Stop/human race, overdue crash+restart/native context+no replay, MCP inheritance/idempotency/revocation/grants, mobile dark controls');
-}finally{if(server)await stop();}
+}finally{if(server)await stop();await removeFixture(dir);}

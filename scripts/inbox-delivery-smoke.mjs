@@ -1,3 +1,4 @@
+import {removeFixture} from '../tests/support/cleanup.mjs';
 // Isolated C-06 acceptance. Deterministic demo ACP only; no model inference.
 import assert from 'node:assert/strict';
 import {spawn,execFileSync} from 'node:child_process';
@@ -115,5 +116,5 @@ try{
  const doomed=await create('Deleted recipient');await authorize(doomed);await send(doomed);await api(path(doomed),undefined,'DELETE');assert.equal(sql(`SELECT count(*) FROM inbox_policies WHERE session_id='${doomed}'`)[0][0],0);assert.equal(sql(`SELECT count(*) FROM inbox_deliveries WHERE recipient='${doomed}'`)[0][0],0);
  assert.equal(sql('PRAGMA user_version')[0][0],7);
  console.log('PASS completion cancellation, accessible mobile enable/cancel, restart ambiguity/no replay, unavailable native context, deletion and schema v7');
- console.log(`Artifacts: ${dir}`);
-}finally{if(browser)await browser.close();if(server)await stop();}
+ console.log(`Fixture root: ${dir}`);
+}finally{if(browser)await browser.close();if(server)await stop();await removeFixture(dir);}

@@ -1,3 +1,4 @@
+import {removeFixture} from '../tests/support/cleanup.mjs';
 // Deterministic HTTP/native-MCP/browser coverage, isolated from the live service.
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -69,4 +70,4 @@ try {
  assert.equal((await api(`/api/sessions/${a.id}/completion`)).report.summary,'Independent claim');
  const tail=await api(path+'?after='+ledger.nextCursor);assert.deepEqual(tail.events,[]);
  console.log('PASS: review queue HTTP, native MCP grants/scope/revocation, revisions/retries, independent claims, manual global slot, restart and mobile safe rendering');
-} finally {if(server)await stop();}
+} finally {if(server)await stop();await removeFixture(dir);}

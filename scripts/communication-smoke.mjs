@@ -1,3 +1,4 @@
+import {removeFixture} from '../tests/support/cleanup.mjs';
 // Exercises ACP -> native stdio MCP -> private service bridge, without model calls.
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -73,4 +74,4 @@ try{
  await api(`/api/sessions/${b.id}/resume`,{});await idle(b.id);assert.equal(value(await call(b.id,'read_inbox')).messages.length,2);
  await api(`/api/sessions/${a.id}` ,undefined,'DELETE');inbox=value(await call(b.id,'read_inbox'));assert.equal(inbox.messages[0].senderTitle,'Sender');
  console.log('PASS: native MCP messaging, grants, project isolation, denied controls, coordinator work, deduplication, revocation, persistence and sender tombstones');
-}finally{if(server)await stop();}
+}finally{if(server)await stop();await removeFixture(dir);}

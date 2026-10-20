@@ -1,6 +1,7 @@
+import {serverReady,stopChild} from './support/cleanup.mjs';
 import {test,expect} from '@playwright/test';
 import {spawn} from 'node:child_process';
-import {mkdir,rm} from 'node:fs/promises';
+import {mkdtemp,mkdir,rm} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 import {fuzzyScore,rankItems,sessionItems,sessionRanking,actionItems,commandText,statusLabel} from '../web/palettes.js';
 
@@ -17,10 +18,7 @@ async function api(path,body,method){
 
 test.beforeAll(async()=>{
   await mkdir('.cache',{recursive:true});
-  // A fixed fixture name keeps directory matching deterministic; nothing else uses this server or path.
-  fixture=resolve('.cache','palette-fixture');
-  await rm(fixture,{recursive:true,force:true});
-  await mkdir(fixture,{recursive:true});
+  fixture=await mkdtemp(resolve('.cache/palettes-'));
   for(const dir of [alpha(),zeta(),omega()])await mkdir(dir,{recursive:true});
   server=spawn(resolve('target/debug/agentworks'),[],{env:{...process.env,
     AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:'4431',AGENTWORKS_ROOTS:fixture,
@@ -31,13 +29,13 @@ test.beforeAll(async()=>{
   for(const stream of [server.stdout,server.stderr])stream.on('data',chunk=>{log+=chunk.toString();});
   for(let i=0;i<100;i++){
     if(exited)throw new Error(log);
-    try{if((await fetch(base+'/api/status')).ok)return;}catch{}
+    if(await serverReady(server,base))return;
     await new Promise(r=>setTimeout(r,100));
   }
   throw new Error('Isolated palette server readiness timed out: '+log);
 });
 test.afterAll(async()=>{
-  if(server&&!exited){const stopped=new Promise(r=>server.once('exit',r));server.kill('SIGTERM');await stopped;}
+  await stopChild(server);
   if(fixture)await rm(fixture,{recursive:true,force:true});
 });
 
@@ -302,12 +300,12 @@ test('desktop: shortcuts, fuzzy session switching, drafts, running turns and com
   await expect(page.locator('#palette-list')).toContainText('Second project');
   await expect(page.locator('#palette-list')).toContainText('Local');
   // The shared directory prefix still matches every session, at the lowest weight.
-  await page.locator('#palette-input').fill('palette-fixture');
+  await page.locator('#palette-input').fill(fixture.split('/').at(-1));
   await expect(page.locator('#palette-list [role=option]')).toHaveCount(3);
   // The shared prefix still matches every session, so the ranking has to pick the right directory first.
   await page.locator('#palette-input').fill('omega');
   await expect(page.locator('#palette-list [role=option]').first()).toContainText('Beta chat');
-  await expect(page.locator('#palette-list [role=option]').first()).toContainText('palette-fixture/omega');
+  await expect(page.locator('#palette-list [role=option]').first()).toContainText(fixture.split('/').at(-1)+'/omega');
   await page.keyboard.press('Enter');
   await expect(page.locator('#palette-dialog')).toBeHidden();
   await expect(page.locator('#header-title')).toHaveText('Beta chat');

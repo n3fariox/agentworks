@@ -1,3 +1,4 @@
+import {removeFixture} from '../tests/support/cleanup.mjs';
 // Batch 007: exercise the three schedulers together using isolated demo state.
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -53,5 +54,5 @@ try{
   assert(!users(done).some(u=>u.text==='Must await quota recovery'));
   await api(path(id)+'/queue/resume',{},'POST',409);await api(path(id)+'/stop',{});
   console.log('PASS combined FIFO-before-inbox, paused queue priority, deliberate resume, status-probe preservation and quota gates');
-  console.log(`Artifacts: ${dir}`);
-}finally{if(server&&server.exitCode===null){const exited=once(server,'exit');server.kill('SIGINT');await exited;}}
+  console.log(`Fixture root: ${dir}`);
+}finally{if(server&&server.exitCode===null){const exited=once(server,'exit');server.kill('SIGINT');await exited;}await removeFixture(dir);}

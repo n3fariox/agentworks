@@ -1,3 +1,4 @@
+import {removeFixture} from '../tests/support/cleanup.mjs';
 // Owns its server, catalog, SQLite and a real Git repository; no models, no UI, no keys.
 import assert from 'node:assert/strict';
 import {spawn, execFileSync} from 'node:child_process';
@@ -188,4 +189,5 @@ try{
  console.log('fork smoke: ok');
 } finally{
  if(server&&server.exitCode===null)await stop();
+  await removeFixture(dir);
 }

@@ -1,3 +1,4 @@
+import {removeFixture} from '../tests/support/cleanup.mjs';
 // C-01: named external controllers through the real stdio MCP bridge, as an external client uses it.
 // Owns its server, catalog, SQLite and demo state under .cache; never uses models or the live service.
 import assert from 'node:assert/strict';
@@ -114,5 +115,5 @@ try{
  // Deleting the project revokes its controllers.
  await api(`/api/projects/${p.id}?sessions=ungroup`,'DELETE');
  assert.equal((await m.call('list_sessions')).error.status,401);
- console.log(`Controller smoke passed; fixtures retained in ${dir}`);
-}finally{await browser?.close();for(const client of clients)await client.close().catch(()=>{});if(server)await stop();}
+ console.log(`Controller smoke passed; fixture root: ${dir}`);
+}finally{await browser?.close();for(const client of clients)await client.close().catch(()=>{});if(server)await stop();await removeFixture(dir);}

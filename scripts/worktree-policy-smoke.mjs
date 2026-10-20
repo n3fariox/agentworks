@@ -1,3 +1,4 @@
+import {removeFixture} from '../tests/support/cleanup.mjs';
 // Owns its server, catalog, SQLite, demo state and real Git fixtures; no models or UI.
 import assert from 'node:assert/strict';
 import {spawn, execFileSync} from 'node:child_process';
@@ -125,5 +126,5 @@ try{
  await api('/api/sessions','POST',input,410);assert.equal(treeCount(),before);
  await api('/api/settings','PUT',{roots:[plain],defaultModels:{}});await api('/api/worktrees/list','POST',{cwd:repo},403);await api('/api/sessions','POST',{provider:'demo',cwd:repo,workspace:{mode:'newWorktree'}},403);
  console.log('PASS: activity during preparation, Git timeout and output caps; directory compatibility; real committed/unique/custom/existing/nested worktrees; policy API/MCP/automation/import/resume; refs/branches/collisions/roots/symlinks; retained dirty files; concurrent, mutation-free retry, failed and restart-persistent request IDs; session deletion retains branch/tree');
- console.log('Retained isolated fixtures:',dir);
-}finally{if(server)await stop();}
+ console.log('Isolated fixture root:',dir);
+}finally{if(server)await stop();await removeFixture(dir);}

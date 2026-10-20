@@ -1,3 +1,4 @@
+import {stopChild} from '../tests/support/cleanup.mjs';
 // Regression: modern Claude MCP discovery requires resultType and private cache hints.
 import net from 'node:net';
 import {spawn} from 'node:child_process';
@@ -21,7 +22,7 @@ try{
    const list=await request('tools/list',{});assert.equal(list.result.tools[0].name,'read_inbox');
    if(modern){assert.equal(list.result.resultType,'complete');assert.equal(list.result.ttlMs,0);assert.equal(list.result.cacheScope,'private');}
    const call=await request('tools/call',{name:'read_inbox',arguments:{}});assert.equal(JSON.parse(call.result.content[0].text).ok,true);if(modern)assert.equal(call.result.resultType,'complete');
-  }finally{p.kill('SIGTERM');lines.close();}
+  }finally{await stopChild(p);lines.close();}
  }
  console.log('PASS: native MCP stdio legacy and modern discovery, tools/list cache isolation, and tool results');
-}finally{bridge.close();}
+}finally{await new Promise(resolve=>bridge.close(resolve));}

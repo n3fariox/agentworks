@@ -1,3 +1,4 @@
+import {removeFixture} from '../tests/support/cleanup.mjs';
 // Project archive/delete: sessions follow the project by default, or move to Ungrouped.
 // Isolated demo server; no credentials, real providers, or shared fixtures are used.
 import assert from 'node:assert/strict';
@@ -73,4 +74,4 @@ try{
  for(const id of ids)assert.equal((await find(id)).projectId,null);
  assert.deepEqual(errors,[]);
  console.log('Project lifecycle smoke passed');
-}finally{await browser?.close();if(server)await stop();}
+}finally{await browser?.close();if(server)await stop();await removeFixture(dir);}

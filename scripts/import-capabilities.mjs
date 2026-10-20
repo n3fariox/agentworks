@@ -4,7 +4,9 @@ import {DatabaseSync} from 'node:sqlite';
 const fixturePath=process.env.AGENTWORKS_IMPORT_FIXTURE_DB;
 assert(fixturePath,'Set AGENTWORKS_IMPORT_FIXTURE_DB to a native persistence-test database');
 const db=new DatabaseSync(fixturePath,{readOnly:true});
-const fixtures=db.prepare('SELECT metadata,state FROM sessions').all().map(row=>({meta:JSON.parse(row.metadata),state:JSON.parse(row.state)})).filter(s=>['claude','codex','opencode'].includes(s.meta.provider)&&s.meta.title.startsWith('Native resume '));
+let fixtures;
+try{fixtures=db.prepare('SELECT metadata,state FROM sessions').all().map(row=>({meta:JSON.parse(row.metadata),state:JSON.parse(row.state)})).filter(s=>['claude','codex','opencode'].includes(s.meta.provider)&&s.meta.title.startsWith('Native resume '));
+}finally{db.close();}
 assert.equal(fixtures.length,3,'Expected one populated native test conversation per harness');
 const base=process.env.AGENTWORKS_URL||'http://127.0.0.1:4320',headers={Origin:base,'Content-Type':'application/json'};
 async function api(path,method='GET',body){const r=await fetch(base+path,{method,headers,body:body===undefined?undefined:JSON.stringify(body)});assert.equal(r.status,200,await r.clone().text());return r.json();}

@@ -1,3 +1,4 @@
+import {removeFixture} from '../tests/support/cleanup.mjs';
 // Exercises ACP -> native stdio MCP -> private service bridge, without model calls.
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -59,4 +60,4 @@ try{
  assert.deepEqual(value(await call(a.id,'get_completion')).report,final);
  const oldRetry=value(await call(a.id,'report_completion',payload));assert.deepEqual(oldRetry.report,first.report);assert(oldRetry.duplicate);assert.deepEqual(value(await call(a.id,'get_completion')).report,final,'Old retry must not replace latest');
  console.log('PASS: completion MCP, validation, identity/project/grants, idempotency, audit/events, safe browser polling and restart persistence');
-}finally{if(server)await stop();}
+}finally{if(server)await stop();await removeFixture(dir);}

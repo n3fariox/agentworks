@@ -1,3 +1,4 @@
+import {removeFixture} from '../tests/support/cleanup.mjs';
 // Private server + deterministic demo ACP. No live service, model calls or restart.
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -41,4 +42,5 @@ try{
   console.log('PASS: targeted/stale Stop, exact durable recovery marker, completion race, retained provider history, deliberate retry and approval cancellation');
 }finally{
   if(!exited){const done=once(server,'exit');server.kill('SIGTERM');const timeout=setTimeout(()=>server.kill('SIGKILL'),5000);await done;clearTimeout(timeout);}
+  await removeFixture(dir);
 }
