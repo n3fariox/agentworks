@@ -38,6 +38,9 @@ const blocks=page=>page.locator('.message.assistant .code-block');
 test.beforeAll(async()=>{
   await mkdir('.cache',{recursive:true});fixture=await mkdtemp(resolve('.cache/display-prefs-'));
   await writeFile(join(fixture,'sample.rs'),'pub fn sample() -> u8 {\n    42 // answer\n}\n');
+  await writeFile(join(fixture,'binary.rs'),Buffer.from([0,1,2]));
+  await writeFile(join(fixture,'large.rs'),'// original\r\n'+'let x = 42;  \t\r\n'.repeat(7000));
+  await writeFile(join(fixture,'unknown.txt'),'<img src=x onerror=alert(1)>\n  exact\ttext  \n');
   await writeFile(join(fixture,'notes.md'),'# Notes\n\n```python\ndef f():\n    return "x"\n```\n');
   server=spawn(resolve('target/debug/agentworks'),[],{env:{...process.env,
     AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:'4411',AGENTWORKS_ROOTS:fixture,
@@ -247,4 +250,58 @@ test('phone: long lines wrap by default, touch targets and settings fit the view
   expect(await pre.evaluate(n=>getComputedStyle(n).whiteSpace)).toBe('pre');
   expect(await pre.evaluate(n=>n.scrollWidth>n.clientWidth)).toBe(true);
   expect(await page.evaluate(()=>document.scrollingElement.scrollWidth<=innerWidth)).toBe(true);
+});
+
+
+test('source rows, safe unknown/large fallback and exact full-file copy',async({page})=>{
+  await openSession(page);
+  await page.evaluate(()=>{window.copies=[];Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>window.copies.push(text)}});});
+  await page.locator('#nav-files').click();
+  await page.locator('.file-entry').filter({hasText:'sample.rs'}).click();
+  const detail=page.locator('#workspace-file-detail');
+  await detail.getByRole('button',{name:'Source',exact:true}).click();
+  await expect(detail.locator('.source-line')).toHaveCount(3);
+  await expect(detail.locator('.source-line').nth(1)).toHaveAttribute('data-line','2');
+  await expect(detail.locator('.tok-number')).toHaveText('42');
+  await detail.getByRole('button',{name:'Copy rs block',exact:true}).click();
+  expect(await page.evaluate(()=>window.copies.at(-1))).toBe('pub fn sample() -> u8 {\n    42 // answer\n}\n');
+  await page.locator('.file-entry').filter({hasText:'notes.md'}).click();
+  await expect(detail.locator('.tok-keyword').first()).toHaveText('def');
+  await detail.getByRole('button',{name:'Source',exact:true}).click();
+  expect(await detail.locator('pre').textContent()).toBe('# Notes\n\n```python\ndef f():\n    return "x"\n```\n');
+  await expect(detail.locator('.source-line').first()).toHaveAttribute('data-line','1');
+  await page.locator('.file-entry').filter({hasText:'binary.rs'}).click();
+  await expect(detail).toContainText('Preview is unavailable for this format');
+  await expect(detail.locator('pre, [class^=tok-]')).toHaveCount(0);
+  await page.locator('.file-entry').filter({hasText:'unknown.txt'}).click();
+  await expect(detail.locator('[class^=tok-], img')).toHaveCount(0);
+  await expect(detail.locator('pre')).toContainText('<img src=x onerror=alert(1)>');
+  await page.locator('.file-entry').filter({hasText:'large.rs'}).click();
+  await expect(detail.locator('pre')).toContainText('// original');
+  await expect(detail.locator('[class^=tok-], .source-line')).toHaveCount(0);
+  await expect(detail).toContainText('Preview shortened');
+  await detail.getByRole('button',{name:'Copy rs block',exact:true}).click();
+  expect(await page.evaluate(()=>window.copies.at(-1))).toBe('// original\r\n'+'let x = 42;  \t\r\n'.repeat(7000));
+});
+
+test('line renderer keeps multiline tokens, patch identity and bounded binary/large fallback',async({page})=>{
+  await page.goto('/');
+  const result=await page.evaluate(async()=>{
+    const {renderLines}=await import('/display-preferences.js');
+    const render=(raw,lang,options)=>{const code=document.createElement('code');renderLines(code,raw,lang,options);return {exact:code.textContent===raw,tokens:code.querySelectorAll('[class^=tok-]').length,rows:code.querySelectorAll('.source-line').length,comments:[...code.querySelectorAll('.tok-comment')].map(n=>n.textContent)};};
+    return {
+      multiline:render('/* comment\n * const hidden = 2;\n */\nconst x = 1;\n','js'),
+      unknown:render('<script>alert(1)</script>\n','unknown'),
+      prototype:render('constructor prototype\n','constructor'),
+      binary:render('const a=1;\0','js'),large:render('const a=1;'.repeat(7000),'js'),
+      many:render('x\n'.repeat(3001),'js'),
+      patch:render('diff --git a/x.js b/x.js\n--- a/x.js\n+++ b/x.js\n@@ -2,2 +2,2 @@\n-const old = 1;\n+const next = 2;\n // end\n','js',{diff:true}),
+      binaryPatch:render('Binary files a/x.js and b/x.js differ\n','js',{diff:true}),
+    };
+  });
+  for(const value of Object.values(result))expect(value.exact).toBe(true);
+  expect(result.multiline.comments.join('')).toBe('/* comment\n * const hidden = 2;\n */');
+  expect(result.patch.tokens).toBeGreaterThan(0);
+  for(const name of ['unknown','prototype','binary','large','many','binaryPatch'])expect(result[name].tokens).toBe(0);
+  for(const name of ['binary','large','many','binaryPatch'])expect(result[name].rows).toBe(0);
 });

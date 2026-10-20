@@ -125,8 +125,8 @@ export function createWorkspace(hooks){
     else if(file.loading)body.textContent='Loading file…';
     else if(file.type?.startsWith('image/')){const image=el('img','file-image');image.src=fileUrl(file);image.alt=file.path;body.append(image);}
     else if(file.type?.startsWith('text/')){
-      if(!file.source&&file.html){body.innerHTML=file.html;decorate(body,file,side);}else body.append(el('pre','workspace-source',file.line?file.text:file.text.slice(0,100000)));
-      hooks.enhanceBlocks?.(body,`workspace:${file.location.id}:${file.path}`,{language:!file.source&&file.html?'':/\.([\w+-]+)$/.exec(file.path)?.[1]||''});
+      if(!file.source&&file.html){body.innerHTML=file.html;decorate(body,file,side);}else body.append(el('pre','workspace-source',file.text.slice(0,100000)));
+      hooks.enhanceBlocks?.(body,`workspace:${file.location.id}:${file.path}`,{language:!file.source&&file.html?'':/\.([\w+-]+)$/.exec(file.path)?.[1]||'',lineNumbers:file.source||!file.html,raw:file.source||!file.html?file.text:undefined});
       if(file.line&&file.source){
         const code=body.querySelector('pre code');
         if(code){

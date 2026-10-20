@@ -297,3 +297,16 @@ dialog.image-viewer{width:96vw;max-width:96vw;height:92dvh;max-height:92dvh;padd
 .image-viewer[open]{display:flex;flex-direction:column}.image-toolbar{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:8px;flex-shrink:0}.image-toolbar button{min-width:44px;min-height:44px;border-radius:6px}.image-toolbar output{min-width:52px;text-align:center}
 .image-viewport{position:relative;flex:1;min-height:0;overflow:hidden;touch-action:none;cursor:grab;background:#101114}.image-viewport:active{cursor:grabbing}.image-viewport img{position:absolute;left:0;top:0;max-width:none;max-height:none;user-select:none;pointer-events:none}
 .referenced-line{background:color-mix(in srgb,var(--accent) 25%,transparent);outline:1px solid var(--accent)}
+
+/* Source/diff gutters are presentation only; Copy reads captured raw text. */
+.source-line{display:block;position:relative;padding-left:4.5em;min-height:1.6em}
+.source-line::before{content:attr(data-line);position:absolute;left:0;width:3.5em;text-align:right;color:#a0a8b5;user-select:none;font-style:normal;font-weight:normal;white-space:pre}
+.diff-line{padding-left:11em;min-width:max-content}
+.diff-line::before{width:9.5em}
+.diff-add{background:#18382a;color:#c6efd5}
+.diff-remove{background:#41252d;color:#ffd0d4}
+.diff-hunk{color:#b4c9ef;background:#1c283b}
+.diff-meta{color:#aab4c5}
+.diff-line .tok-comment{color:#b0bac9}
+#diff-patch .source-line{line-height:1.6}
+#diff-patch{padding:8px 0}
