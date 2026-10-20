@@ -37,8 +37,8 @@ const keywordSets={
 };
 const aliases={javascript:'js',jsx:'js',ts:'js',typescript:'js',tsx:'js',mjs:'js',cjs:'js',rs:'rust',py:'python',bash:'sh',shell:'sh',zsh:'sh',golang:'go',cpp:'c','c++':'c',h:'c',hpp:'c',cc:'c',java:'c',cs:'c',csharp:'c',kotlin:'c',kt:'c',swift:'c',toml:'conf',yaml:'conf',yml:'conf',ini:'conf'};
 export function supportedLanguage(language){
-  const id=aliases[language?.toLowerCase()]||language?.toLowerCase();
-  return keywordSets[id]||id==='conf'?id:null;
+  const name=language?.toLowerCase(),id=Object.hasOwn(aliases,name)?aliases[name]:name;
+  return Object.hasOwn(keywordSets,id)||id==='conf'?id:null;
 }
 function grammar(id){
   return {
@@ -62,17 +62,69 @@ export function tokenize(text,id){
   flush();return out;
 }
 
+// Gutters use generated content so DOM text and selections retain only original text.
+// The tokenizer never emits HTML. Bound both input and row count before decoration.
+export function renderLines(code,raw,language,{diff=false,highlight=true}={}){
+  const doc=code.ownerDocument,lines=raw.match(/[^\n]*\n|[^\n]+$/g)||[];
+  const bounded=raw.length<=HIGHLIGHT_LIMIT&&lines.length<=3000&&!raw.includes('\0')&&!(diff&&/^(?:Binary files |GIT binary patch)/m.test(raw));
+  const id=bounded&&highlight?supportedLanguage(language):null;
+  code.classList.toggle('highlighted',!!id);
+  if(!bounded){code.textContent=raw;return;}
+  const rows=lines.map(text=>({text,body:text,kind:'',old:'',next:''}));
+  if(diff){
+    let old=0,next=0,oldLeft=0,newLeft=0;
+    for(const row of rows){
+      const h=/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(row.text);
+      if(h){old=+h[1];next=+h[3];oldLeft=+(h[2]??1);newLeft=+(h[4]??1);row.kind='hunk';continue;}
+      const prefix=row.text[0];
+      if((oldLeft||newLeft)&&[' ','-','+'].includes(prefix)){
+        row.kind=prefix==='+'?'add':prefix==='-'?'remove':'context';row.body=row.text.slice(1);
+        if(prefix!=='+'&&oldLeft){row.old=old++;oldLeft--;}
+        if(prefix!=='-'&&newLeft){row.next=next++;newLeft--;}
+      }
+    }
+  }else rows.forEach((row,i)=>row.next=i+1);
+  // Tokenize each side of each hunk as a stream, retaining multiline comments/strings.
+  const decorated=new Map();
+  function decorate(group){
+    if(!id||!group.length)return;
+    const tokens=tokenize(group.map(row=>row.body).join(''),id);
+    let index=0,offset=0;
+    for(const row of group){
+      let remaining=row.body.length;const pieces=[];
+      while(remaining&&index<tokens.length){const [kind,text]=tokens[index],part=text.slice(offset,offset+remaining);pieces.push([kind,part]);remaining-=part.length;offset+=part.length;if(offset===text.length){index++;offset=0;}}
+      decorated.set(row,pieces);
+    }
+  }
+  if(diff){
+    let group=[];
+    const flush=()=>{decorate(group.filter(row=>row.kind!=='add'));decorate(group.filter(row=>row.kind!=='remove'));group=[];};
+    for(const row of rows){if(['add','remove','context'].includes(row.kind))group.push(row);else flush();}flush();
+  }else decorate(rows);
+  const fragment=doc.createDocumentFragment();
+  for(const row of rows){
+    const line=doc.createElement('span');line.className='source-line'+(diff?' diff-line diff-'+(row.kind||'meta'):'');
+    line.dataset.line=diff?String(row.old).padStart(4)+' '+String(row.next).padStart(4):String(row.next);
+    if(diff&&['add','remove','context'].includes(row.kind))line.append(row.text[0]);
+    const parts=decorated.get(row)||[['',diff&&['add','remove','context'].includes(row.kind)?row.body:row.text]];
+    for(const [kind,text]of parts){if(!kind)line.append(text);else{const span=doc.createElement('span');span.className='tok-'+kind;span.textContent=text;line.append(span);}}
+    fragment.append(line);
+  }
+  code.replaceChildren(fragment);
+}
+
 export function setupDisplayPreferences({root=document,storage=localStorage}={}){
   let preferences=loadDisplayPreferences(storage);
   const overrides=new Map();
   const apply=()=>{root.body.dataset.codeWrap=preferences.wrap;for(const block of root.querySelectorAll('.code-block'))renderBlock(block);};
 
   function renderBlock(block){
-    const {raw,language}=block.codeState,code=block.querySelector('pre > code'),toggle=block.querySelector('.code-mode');
+    const {raw,language,lines,diff}=block.codeState,code=block.querySelector('pre > code'),toggle=block.querySelector('.code-mode');
     const override=overrides.get(block.dataset.blockKey);
-    const plain=override?override==='plain':!language&&preferences.prose==='detect'&&looksLikeProse(raw);
+    const plain=!lines&&(override?override==='plain':!language&&preferences.prose==='detect'&&looksLikeProse(raw));
     block.classList.toggle('plain',plain);
     toggle.textContent=plain?'Show as code':'Show as text';toggle.setAttribute('aria-pressed',String(plain));
+    if(lines){renderLines(code,raw,language,{diff,highlight:preferences.highlight==='on'});return;}
     const id=!plain&&preferences.highlight==='on'&&raw.length<=HIGHLIGHT_LIMIT?supportedLanguage(language):null;
     block.classList.toggle('highlighted',!!id);
     if(!id){if(code.childElementCount||code.textContent!==raw)code.textContent=raw;return;}
@@ -89,27 +141,28 @@ export function setupDisplayPreferences({root=document,storage=localStorage}={})
   }
 
   // Wrap each <pre> in a labeled block; key identifies the block across Markdown re-renders.
-  function enhance(container,key='block',{language:fallbackLanguage=''}={}){
+  function enhance(container,key='block',{language:fallbackLanguage='',lineNumbers=false,diff=false,raw:copyRaw}={}){
     [...container.querySelectorAll('pre')].forEach((pre,index)=>{
       if(pre.closest('.code-block'))return;
       let code=pre.querySelector(':scope > code');
       if(!code){code=root.createElement('code');code.append(...pre.childNodes);pre.append(code);}
       const raw=code.textContent,language=/(?:^|\s)language-(\S+)/.exec(code.className)?.[1]||fallbackLanguage;
-      const block=root.createElement('figure');block.className='code-block';block.dataset.blockKey=key+':'+index;block.codeState={raw,language};
-      const bar=root.createElement('figcaption'),name=root.createElement('span');name.className='code-language';name.textContent=language||'text';
+      const block=root.createElement('figure');block.className='code-block';block.dataset.blockKey=key+':'+index;block.codeState={raw,language,lines:lineNumbers||diff,diff,copyRaw:copyRaw??raw};
+      const bar=root.createElement('figcaption'),name=root.createElement('span');name.className='code-language';name.textContent=diff?'Patch · '+(language||'text'):language||'text';
       const actions=root.createElement('span');actions.className='code-actions';
       const mode=root.createElement('button');mode.type='button';mode.className='code-mode';
+      mode.hidden=lineNumbers||diff;
       mode.onclick=()=>{overrides.set(block.dataset.blockKey,block.classList.contains('plain')?'code':'plain');renderBlock(block);};
       const copyButton=root.createElement('button');copyButton.type='button';copyButton.className='code-copy';copyButton.textContent='Copy';
       copyButton.setAttribute('aria-label',`Copy ${language||'text'} block`);
       const status=root.createElement('span');status.className='code-copy-status';status.setAttribute('role','status');
       copyButton.onclick=async()=>{
-        const ok=await copy(block.codeState.raw);clearTimeout(copyButton.timer);
+        const ok=await copy(block.codeState.copyRaw);clearTimeout(copyButton.timer);
         if(ok){status.textContent='Copied';copyButton.textContent='Copied';copyButton.timer=setTimeout(()=>{copyButton.textContent='Copy';status.textContent='';},2000);return;}
         // Visible fallback: exact raw text in a selected read-only field (DOM selections can drop the final newline).
         let field=block.querySelector('.code-copy-fallback');
         if(!field){field=root.createElement('textarea');field.className='code-copy-fallback';field.readOnly=true;field.spellcheck=false;field.setAttribute('aria-label',`Raw ${language||'text'} block for copying`);status.before(field);}
-        field.value=block.codeState.raw;field.rows=Math.min(8,block.codeState.raw.split('\n').length);field.focus();field.select();
+        field.value=block.codeState.copyRaw;field.rows=Math.min(8,block.codeState.raw.split('\n').length);field.focus();field.select();
         status.textContent='Copy unavailable here. Raw text selected below; press Ctrl+C or ⌘C.';
       };
       actions.append(mode,copyButton);bar.append(name,actions);

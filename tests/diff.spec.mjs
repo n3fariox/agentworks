@@ -18,7 +18,7 @@ const diff=(params={},id=session.id)=>api(`/api/sessions/${id}/diff?${new URLSea
 test.beforeAll(async()=>{
   fixture=await mkdtemp(join(tmpdir(),'agentworks-diff-'));repo=join(fixture,'main');linked=join(fixture,'linked');nested=join(linked,'nested');
   await mkdir(repo);git(repo,'init','-b','main');
-  for(const [name,content] of [['both.txt','initial\n'],['staged.txt','initial\n'],['large.txt','small\n'],['binary.dat',Buffer.from([0,1,2])],['literal[1].txt','old\n'],['literal1.txt','old\n'],['with space.txt','old\n'],['line\nbreak.txt','old\n'],[':(glob)*','old\n']])await writeFile(join(repo,name),content);
+  for(const [name,content] of [['sample.js','const old = 1;\n// keep\n'],['both.txt','initial\n'],['staged.txt','initial\n'],['large.txt','small\n'],['binary.dat',Buffer.from([0,1,2])],['literal[1].txt','old\n'],['literal1.txt','old\n'],['with space.txt','old\n'],['line\nbreak.txt','old\n'],[':(glob)*','old\n']])await writeFile(join(repo,name),content);
   git(repo,'add','.');git(repo,'commit','-m','Initial');initial=git(repo,'rev-parse','HEAD');
   git(repo,'worktree','add','-b','feature',linked);await mkdir(nested);
   await writeFile(join(linked,'branch.txt'),'feature only\n');git(linked,'add','.');git(linked,'commit','-m','Feature');head=git(linked,'rev-parse','HEAD');
@@ -28,6 +28,7 @@ test.beforeAll(async()=>{
   await writeFile(join(linked,'binary.dat'),Buffer.from([0,3,4]));await writeFile(join(linked,'large.txt'),'long line '.repeat(40000)+'\n');
   await writeFile(join(linked,'literal[1].txt'),'literal change\n');await writeFile(join(linked,'literal1.txt'),'other change\n');
   for(const name of ['with space.txt','line\nbreak.txt',':(glob)*'])await writeFile(join(linked,name),'special '+name+'\n');
+  await writeFile(join(linked,'sample.js'),'const next = 42;  \t\n// keep\n');
   // Repo-configured helper scripts must never run, even when attributes request them.
   const helper=join(fixture,'helper');
   await writeFile(helper,`#!/bin/sh\ntouch '${join(fixture,'HELPER_RAN')}'\nexit 1\n`,{mode:0o755});
@@ -127,4 +128,35 @@ for(const mobile of [false,true])test(`diff browser ${mobile?'mobile':'desktop'}
   if(mobile)await page.locator('#session-more').click();
   await page.getByRole('button',{name:'Diff',exact:true}).click();await expect(page.locator('#diff-context')).toContainText('<img src=x onerror=alert(1)>');expect(await page.locator('#diff-context img').count()).toBe(0);
   await page.locator('#side-close').click();await expect(page.locator('#side-panel')).not.toBeVisible();expect(errors).toEqual([]);
+});
+
+
+test('diff syntax, add/remove backgrounds, old/new gutters, raw copy and display preference',async({page})=>{
+  await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),session.id);await page.goto(base);
+  await page.evaluate(()=>{window.copied=null;Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{window.copied=text;}}});});
+  await expect(page.locator('#session-state')).toHaveText('Ready');
+  await page.getByRole('button',{name:'Diff',exact:true}).click();
+  await page.locator('#diff-files').selectOption('sample.js');
+  const patch=page.locator('#diff-patch');
+  await expect(patch.locator('.diff-add .tok-keyword')).toHaveText('const');
+  await expect(patch.locator('.diff-remove .tok-number')).toHaveText('1');
+  await expect(patch.locator('.diff-add')).toHaveAttribute('data-line','        1');
+  await expect(patch.locator('.diff-remove')).toHaveAttribute('data-line','   1     ');
+  const colors=await patch.evaluate(n=>['add','remove'].map(kind=>getComputedStyle(n.querySelector('.diff-'+kind)).backgroundColor));
+  expect(colors[0]).not.toBe(colors[1]);expect(colors).not.toContain('rgba(0, 0, 0, 0)');
+  const expected=(await diff({file:'sample.js'})).patch;
+  expect(await patch.evaluate(n=>n.textContent)).toBe(expected);
+  await page.getByRole('button',{name:'Copy js block',exact:true}).click();
+  expect(await page.evaluate(()=>window.copied)).toBe(expected);
+  await page.evaluate(()=>{navigator.clipboard.writeText=async()=>{throw Error('Unavailable');};document.execCommand=()=>false;});
+  await page.getByRole('button',{name:'Copy js block',exact:true}).click();
+  await expect(page.getByLabel('Raw js block for copying')).toHaveValue(expected);
+
+  await page.locator('#nav-settings').evaluate(n=>n.click());await page.locator('#settings-tab-display').click();
+  await page.getByLabel('Syntax highlighting').selectOption('off');await page.locator('#dismiss-settings').click();
+  await expect(patch.locator('[class^=tok-]')).toHaveCount(0);
+  await expect(patch.locator('.diff-add')).toHaveCount(1);
+  await page.locator('#diff-files').selectOption('binary.dat');
+  await expect(patch).toContainText('Binary files');await expect(patch.locator('.source-line, [class^=tok-]')).toHaveCount(0);
+  await page.locator('#diff-files').selectOption('large.txt');await expect(page.locator('#diff-patch-note')).toContainText('limit');
 });
