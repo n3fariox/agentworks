@@ -1,10 +1,10 @@
 # Tool activity, progress and compact work logs
 
-Batch 006 implements U-06 compact work logs and L-07 configurable timeouts; see the [batch record](batches/006-session-usability.md) and [timeout behavior](TIMEOUTS.md). U-05 progress normalization and parsing below remains a design. Work-log durations currently use live browser observations and are omitted after replay because stored events do not carry timestamps; unknown background process state is labelled unresolved rather than running.
+Batch 006 implements U-06 compact work logs and L-07 configurable timeouts; see the [batch record](batches/006-session-usability.md) and [timeout behavior](TIMEOUTS.md). Batch 009 implements the first U-05 slice: built-in Bazel build progress when adapters provide terminal output metadata. Work-log durations currently use live browser observations and are omitted after replay because stored events do not carry timestamps; unknown background process state is labelled unresolved rather than running.
 
 ## Current behavior and transport work
 
-The runtime persists ACP session notifications and broadcasts them to the browser. The browser merges tool updates by tool-call ID and renders one details element per call, showing the latest content/raw output as generic text/JSON. It does not normalize terminal-output metadata into an output stream. ACP initialization currently requests v1 without explicitly advertising terminal-output extensions.
+The runtime persists ACP session notifications and broadcasts them to the browser. ACP v1 initialization advertises only the supported terminal-output metadata extensions; this does not enable terminal process hosting. The browser rebuilds private per-tool derived state from persisted events, appends explicit output deltas, replaces snapshots, and deduplicates replay by event sequence. Raw ACP metadata and terminal output remain available in the expandable tool card.
 
 The installed Claude and Codex adapter sources include terminal-output metadata paths, including output deltas. Availability and actual streaming cadence must be verified per harness: an adapter's support for a metadata shape does not guarantee every command provides incremental stdout/stderr. Negotiate only capabilities we implement, preserve unknown/raw events, and provide a plain activity fallback for commands that produce output only at completion. A parser cannot manufacture live build progress from a completed result.
 
@@ -16,17 +16,17 @@ Use distinct clocks for total duration, meaningful last activity and time waitin
 
 [L-09 limit-reset continuation](LIMIT-RESUME.md), delivered first in batch 003, is the explicitly opt-in exception for recognized provider quota exhaustion: a durable timer may start a new continuation turn after the reset, retaining native context and checking current state. It does not retry arbitrary timeouts, replay a tool invocation or override a human stop. The suggested tool-display work below remains deferred.
 
-## Progress parser interface — U-05
+## Built-in Bazel progress — U-05 first slice delivered
 
-Build a host-side normalization layer keyed by session, turn, tool-call and terminal IDs. Its events distinguish start, output snapshot, output delta and exit, with stable sequence information for deduplication. Handle output arriving before its tool card, mixed content types, carriage-return updates, ANSI sequences and incomplete lines across chunks. Snapshots replace prior output; deltas append. Raw transcript events remain available and progress is derived presentation data.
+For recognized Bazel commands, derive a compact phase and reported action/test counts from available terminal metadata, output content or raw output. Parse output incrementally across split lines, ANSI/OSC control sequences, carriage-return updates and dynamic totals. Keep raw data unchanged. Progress is presentation only; command/tool status remains authoritative and no percentage is invented. When a useful stream is absent, retain the ordinary elapsed-activity display. The implementation is built into the existing tool cards and intentionally has no public parser registry or plugin system.
 
-Feed normalized events through a small versioned parser interface. A parser matches tool metadata/command and maintains per-call state, emitting structured progress such as phase, label, completed count, total count and units. The UI uses the same progress component regardless of parser or harness. Tool status/exit remains authoritative; parsed text cannot turn a failed command into success or dispatch another tool.
+Streaming cadence is adapter-dependent. An adapter advertising terminal-output support does not guarantee that every command reports incremental output; no live provider query or command is started to obtain progress. Terminal exit metadata can enrich the display but does not override the harness's tool result.
 
-Start with a built-in Bazel parser and user-configurable match/capture rules. Bazel displays should show the current phase and reported action/test counts. Totals can change, so label them as reported action progress rather than a prediction of remaining time; show indeterminate activity when no meaningful total exists.
+## Deferred extensibility
 
-Provide a documented registry so other build/test/download parsers can be added independently of the renderer. Simple rules should be configuration-only. If complex custom parsers are needed, an explicitly user-installed local helper can consume/emit versioned JSON events over stdio; bound its processing time, state and output, and let parser failures fall back to raw output without affecting execution. Tool output or repository content must not implicitly install or execute a parser.
+General cross-harness normalization, a versioned parser contract, configurable match/capture rules, and user-installed parsers remain future work. Add them only after a concrete need justifies the extra interface; any helper must be explicitly installed, bounded, isolated from tool authority, and unable to alter command outcomes.
 
-[Experiment E-01](experiments/001-starlark.md) evaluates embedded Rust Starlark as a shared extension language for these parsers and future workflow logic. It is a candidate implementation of this interface, not an adoption decision. Retain the normalized event/progress contract regardless of the experiment's outcome; evaluate it before committing to an external-helper protocol or a custom parser language.
+The optional [Experiment E-01](experiments/001-starlark.md) is deferred with the broader extension work; it is not a dependency of Bazel progress.
 
 Record deterministic sample streams for tests, including dynamic totals, failures, duplicate events, snapshots/deltas, ANSI/carriage returns, replay and harnesses without streaming. The user's existing Bazel mod can provide parsing rules and representative fixtures when available. Do not require harness-specific CLI modifications just to render progress in Agentworks; investigate an adapter extension or an opt-in build progress source if a harness does not expose live output.
 
@@ -40,8 +40,8 @@ Approvals/questions remain actionable outside the folded log. Failures and inter
 
 ## Suggested implementation order
 
-1. Normalize and test tool/terminal events against deterministic fixtures and verify each installed harness's live output capabilities.
-2. Run E-01 to evaluate the extension language, then add the progress interface and Bazel renderer with raw-output fallback using the selected approach.
+1. The Bazel first slice is delivered and covered by deterministic output fixtures and desktop/phone browser checks.
+2. If additional build/test parsers become necessary, evaluate the cross-harness interface and E-01 before introducing an extension system.
 3. Add turn work-log grouping, accessible expansion and mobile behavior.
 4. Expose timeout settings and integrate their outcomes with queued-input dispatch. This backend policy can also proceed independently once its shared session/event contract is agreed.
 

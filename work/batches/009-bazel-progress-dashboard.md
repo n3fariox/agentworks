@@ -15,4 +15,12 @@ Both workers must report an early checkpoint, commit only on their assigned bran
 
 ## U-10 review and merge
 
+Codex completed U-10 at branch commit `7f4e539eab96d54d34d0aae482f02b279ab83e92`; merged to main as `b26b327`. The coordinator independently passed `cargo fmt --check`, all 109 Rust tests, locked/offline build, three dashboard model tests, existing usage-status tests and the isolated Chromium/TLS StripPrefix browser check. The browser coverage includes empty and unavailable APIs, read-only behavior, per-session source-specific meters without aggregation, freshness labels, navigation, keyboard access and 320–1280px layouts. One pre-existing unused-`Json` warning remains in `inbox_delivery.rs`. Account identity/connectivity cannot be verified by available APIs and remains explicitly unknown. The clean owned worktree was removed on archive; its branch remains. No deployment or service restart was performed.
+
+## U-05 review and combined acceptance
+
+Codex completed U-05 at branch commit `700504baaaa4bd4ad79161d462856f0cdead21b3`; merged to main as `bc9b3b7`. The coordinator independently passed formatting, locked/offline build, all 110 combined Rust tests, 12 deterministic parser tests, three dashboard model tests, existing usage-status checks, the dashboard Chromium/TLS proxy suite, and all 14 Bazel-progress/work-log browser checks on the combined mainline. One pre-existing unused-`Json` warning remains in `inbox_delivery.rs`. The clean owned worktree was removed on archive; its branch remains. Neither feature has been deployed and the service was not restarted.
+
+## U-10 review and merge
+
 Codex completed U-10 at branch commit `7f4e539eab96d54d34d0aae482f02b279ab83e92`; merged to main as `b26b327`. The coordinator independently passed `cargo fmt --check`, all 109 Rust tests, locked/offline build, three dashboard model tests, existing usage-status tests and the isolated Chromium/TLS StripPrefix browser check. The browser coverage includes empty and unavailable APIs, read-only behavior, per-session source-specific meters without aggregation, freshness labels, navigation, keyboard access and 320–1280px layouts. One pre-existing unused-`Json` warning remains in `inbox_delivery.rs`. Account identity/connectivity cannot be verified by available APIs and remains explicitly unknown. No deployment or service restart was performed. U-05 remains active under its original assignment and deadline.
