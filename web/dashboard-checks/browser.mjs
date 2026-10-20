@@ -71,11 +71,11 @@ try {
   ];
   const now = Date.now(), secret = 'FIXTURE-CREDENTIAL-MUST-NOT-RENDER';
   const usage = data => ({kind:'acp',seq:4,data:{sessionUpdate:'usage_update',...data}});
-  const codex = percent => usage({_meta:{'_codex/subscriptionLimits':{version:1,limits:[{limitId:'codex',primary:{usedPercent:{value:percent,observedAtMs:now-700000},windowDurationMins:{value:300,observedAtMs:now}},secondary:{usedPercent:{value:80}}}]}}});
+  const codex = percent => usage({_meta:{'_codex/subscriptionLimits':{version:1,limits:[{limitId:'codex',primary:{usedPercent:{value:percent,observedAtMs:now-700000},windowDurationMins:{value:300,observedAtMs:now},resetsAt:{value:now/1000+7200,observedAtMs:now}},secondary:{usedPercent:{value:80}}}]}}});
   const snapshots = {
     'cx-one':{events:[{kind:'acp',data:{sessionUpdate:'user_message_chunk',content:{text:secret}}},codex(31)],truncated:true},
     'cx-two':{events:[codex(70)]},
-    'cl-one':{events:[usage({used:33,size:100,cost:{amount:1.5,currency:'USD'},_meta:{'_claude/rateLimit':{unifiedWindows:{five_hour:{utilization:.25}}}}})]},
+    'cl-one':{events:[usage({used:33,size:100,cost:{amount:1.5,currency:'USD'},_meta:{'_claude/rateLimit':{unifiedWindows:{five_hour:{utilization:.25,resetsAt:now/1000+3600}}}}})]},
     'no-usage':{events:[]},
   };
   let failed = new Set(), empty = false;
@@ -117,6 +117,15 @@ try {
   assert.equal(await page.locator('meter').count(),3);
   assert.equal(await page.getByLabel(/primary.*quota used: 31.0%/).getAttribute('value'),'31');
   assert.equal(await page.getByLabel(/primary.*quota used/).count(),1);
+  const primaryDetail = page.locator('.usage-meter').filter({has:page.locator('label',{hasText:/primary/})}).locator('.usage-detail');
+  assert.match(await primaryDetail.innerText(),/Resets in 2h/);
+  assert.match(await primaryDetail.innerText(),/Reset freshness: Adapter observed/);
+  assert.match(await page.locator('.usage-meter').filter({has:page.locator('label',{hasText:/secondary/})}).innerText(),/Reset unavailable/);
+  assert.match(await page.locator('.usage-meter').filter({has:page.locator('label',{hasText:/Reported 5h/})}).innerText(),/Resets in 1h/);
+  await page.getByRole('button',{name:'Refresh dashboard',exact:true}).click();
+  await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
+  assert.match(await primaryDetail.innerText(),/Resets in 2h/);
+
   assert.ok(!(await page.locator('body').innerText()).includes(secret));
   assert.equal(await page.locator('#accounts script').count(),0);
   assert.equal(await page.locator('meter').evaluateAll(nodes=>nodes.every(n=>n.labels.length>0&&n.getAttribute('aria-describedby'))),true);
@@ -139,6 +148,7 @@ try {
   assert.equal(await project.getAttribute('open'),'');
   assert.equal(await page.getByLabel(/primary.*quota used: 45.0%/).getAttribute('value'),'45');
   assert.match(await page.locator('#quota-refresh-status').innerText(),/not a live account refresh/);
+  assert.match(await primaryDetail.innerText(),/Resets in 2h/);
   assert.match(await page.locator('#accounts').innerText(),/stale/);
   assert.match(await page.locator('#accounts').innerText(),/1 unavailable · 1 truncated/);
   assert.ok(!requests.some(req=>req.url.includes('api/catalog')));

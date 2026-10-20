@@ -61,3 +61,35 @@ test('latest Codex window uses percentage observation time ahead of session crea
   const result = latestQuota(sessions,new Map([['older-session',observation(60,2000)],['newer-session',observation(30,1000)]]),'codex');
   assert.equal(Object.values(result.state.codexQuota)[0].usedPercent.value,60);
 });
+
+test('quota reset times show local timezone, countdown and independent field freshness', () => {
+  const now = Date.UTC(2026,9,20,12), reset = now + 90*60000;
+  const date = new Date(reset).toLocaleString(undefined,{timeZoneName:'short'});
+  for (const resetsAt of [reset/1000,reset]) {
+    const state = applyUsageEvent(emptyUsage(),event({_meta:{'_claude/rateLimit':{unifiedWindows:{five_hour:{utilization:.25,resetsAt}}}}}));
+    const detail = usageMeters(state,now)[0].detail;
+    assert.ok(detail.includes(date));
+    assert.match(detail,/Resets in 1h 30m/);
+    assert.match(detail,/Freshness unknown/);
+  }
+  let state = applyUsageEvent(emptyUsage(),event({_meta:{'_codex/subscriptionLimits':{version:1,limits:[{limitId:'codex',primary:{usedPercent:{value:25,observedAtMs:now-700000},resetsAt:{value:reset/1000,observedAtMs:now}}}]}}}));
+  const detail = usageMeters(state,now)[0].detail;
+  assert.ok(detail.includes(date));
+  assert.match(detail,/Resets in 1h 30m/);
+  assert.doesNotMatch(detail.split('Usage freshness:')[0],/stale/);
+  assert.match(detail.split('Usage freshness:')[1],/stale/);
+  // Replaying or refreshing after the reset cannot fabricate a fresh quota.
+  assert.match(usageMeters(state,reset)[0].detail,/Reported reset time passed.*awaiting a new provider report/);
+  assert.equal(usageMeters(state,reset)[0].percent,25);
+  state = applyUsageEvent(state,event({_meta:{'_codex/subscriptionLimits':{version:1,limits:[{limitId:'codex',primary:{resetsAt:{value:0,observedAtMs:now}}}]}}}));
+  assert.match(usageMeters(state,now)[0].detail,/Reported reset time passed/);
+});
+test('missing or invalid reset timestamps stay unavailable rather than inventing reset times', () => {
+  for (const resetsAt of [undefined,null,-1,Infinity,1e20,'tomorrow']) {
+    const state = applyUsageEvent(emptyUsage(),event({_meta:{'_claude/rateLimit':{unifiedWindows:{five_hour:{utilization:.25,resetsAt}}}}}));
+    assert.match(usageMeters(state)[0].detail,/Reset unavailable/);
+    assert.doesNotMatch(usageMeters(state)[0].detail,/Invalid Date|Resets in/);
+  }
+  const state = applyUsageEvent(emptyUsage(),event({_meta:{'_codex/subscriptionLimits':{version:1,limits:[{limitId:'codex',primary:{usedPercent:{value:25},resetsAt:{value:null}}}]}}}));
+  assert.match(usageMeters(state)[0].detail,/Reset unavailable/);
+});

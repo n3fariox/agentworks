@@ -9,6 +9,14 @@ never reads the host/project catalog or rerenders those sections. Expanded
 project details remain open. Refresh controls serialize reads to prevent an
 older dashboard request from overwriting a newer manual quota refresh.
 
+Quota meters show the provider-reported reset date/time in the browser's local
+timezone and the time remaining as of the latest dashboard or quota-only read.
+Missing or invalid timestamps display **Reset unavailable**. Past reset times
+remain labeled as passed, awaiting a new provider report; passing a reset never
+fabricates a zero-usage reading. Codex reset freshness is independent of usage
+percentage freshness. Tests cover Claude seconds/milliseconds, Codex per-field
+freshness, missing/invalid/past/zero timestamps and both refresh controls.
+
 The UI labels local read time separately from provider observation freshness.
 Replaying history never advances quota observation times. Each provider card
 shows readable, unavailable and truncated history counts; partial history can
@@ -59,7 +67,7 @@ turn lists and top-level quota improvements are included and preserved.
 
 All passed:
 
-- `node web/dashboard-checks/model.test.mjs` (6 tests)
+- `node web/dashboard-checks/model.test.mjs` (8 tests)
 - `node tests/usage-status.test.mjs`
 - `npm run test:codex-quota` (pinned adapter provenance and handler checks)
 - `PLAYWRIGHT_BROWSERS_PATH=/home/captain/projects/agentworks/.cache/browsers node node_modules/@playwright/test/cli.js test tests/codex-subscription.spec.mjs`

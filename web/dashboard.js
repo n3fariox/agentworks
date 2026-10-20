@@ -1,5 +1,5 @@
 import {appUrl} from './hosting.js';
-import {emptyUsage, applyUsageEvent, STALE_MS} from './usage-status.js';
+import {emptyUsage, applyUsageEvent, STALE_MS, countdown} from './usage-status.js';
 
 const STATES = ['running', 'waiting', 'idle', 'stopped', 'unknown'];
 const LABELS = {running:'Running', waiting:'Waiting for approval/input', idle:'Idle', stopped:'Stopped', unknown:'Unknown'};
@@ -28,6 +28,12 @@ function freshness(value, now) {
   if (value?.at == null) return 'Freshness unknown · persisted observation has no source timestamp';
   return `Adapter observed ${new Date(value.at).toLocaleString()}${now - value.at > STALE_MS ? ' · stale (over 10 minutes old)' : ''}${value.at > now ? ' · source clock is ahead' : ''}`;
 }
+function quotaReset(at, now) {
+  if (typeof at !== 'number' || !Number.isFinite(at) || at < 0 || at > 8.64e15) return 'Reset unavailable';
+  const date = new Date(at).toLocaleString(undefined, {timeZoneName:'short'});
+  const remaining = countdown(at - now);
+  return remaining ? `Resets in ${remaining} · ${date}` : `Reported reset time passed · ${date} · awaiting a new provider report`;
+}
 export function usageMeters(state, now = Date.now()) {
   const meters = [];
   if (state.context?.percent !== undefined) meters.push({
@@ -36,14 +42,14 @@ export function usageMeters(state, now = Date.now()) {
   });
   for (const [label, quota] of Object.entries(state.quota)) meters.push({
     label:`Reported ${label} quota used`, percent:quota.usedPercent,
-    detail:'Freshness unknown · persisted Claude event has no source timestamp'
+    detail:`${quotaReset(quota.resetsAt, now)} · Freshness unknown · persisted Claude event has no source timestamp`
   });
   for (const quota of Object.values(state.codexQuota)) {
     if (quota.usedPercent?.value === undefined) continue;
     const minutes = quota.windowDurationMins?.value;
     const duration = minutes === undefined ? 'window duration unknown' : `${minutes} minute window`;
     meters.push({label:`${quota.limitName || quota.limitId} · ${quota.role} · ${duration} · quota used`,
-      percent:quota.usedPercent.value, detail:freshness(quota.usedPercent, now)});
+      percent:quota.usedPercent.value, detail:`${quotaReset(quota.resetsAt?.value, now)}${quota.resetsAt?.value !== undefined ? ` · Reset freshness: ${freshness(quota.resetsAt, now)}` : ''} · Usage freshness: ${freshness(quota.usedPercent, now)}`});
   }
   return meters;
 }
