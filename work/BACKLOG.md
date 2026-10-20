@@ -22,7 +22,7 @@ This board distinguishes delivered behavior from the older architecture proposal
 | --- | --- | --- |
 | C-01 | Named external controller identity | Explicit, revocable project-scoped credentials for this conversation/external MCP clients, with attributed operations; no borrowing an existing session's identity |
 | C-04b | Worktree ownership and cleanup | Build on delivered creation/selection; show ownership and dirty state, refuse unsafe cleanup, and keep integration/merge privileges explicit |
-| C-05 | Review and merge queue | Record proposed commits, review/test results and integration state separately from agent completion claims; apply one integration at a time |
+| C-05 | Review and merge queue — implemented on worker branch; coordinator review/integration pending ([behavior](../REVIEW-QUEUE.md)) | Record proposed commits, review/test results and integration state separately from agent completion claims; apply one integration at a time |
 | C-06 | Optional inbox delivery/wake-up — implemented and verified in batch 007; bounded coordinator policy enabled after deployment | Opt-in queued delivery with stable request IDs, loop/cost bounds, cancellation and crash recovery; messages alone continue not to start work |
 
 ## Daily-use sessions

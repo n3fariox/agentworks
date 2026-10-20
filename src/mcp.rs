@@ -130,6 +130,10 @@ fn tools(a: &mail::Access) -> Value {
     if a.communicate || mail::coordinator(a) {
         tools.push(tool("get_completion", "Read the latest agent claim for yourself or a permitted same-project session. Claims are not proof of review or success.", json!({"sessionId":{"type":"string","description":"Session ID or agentworks://sessions/<id> URI, passed exactly as given in list_sessions or a prompt."}}), &[]));
     }
+    if a.manage_review_queue {
+        tools.push(tool("get_review_queue", "Read this project's independent review/integration ledger. Completion claims do not populate it.", json!({"after":{"type":"integer","minimum":0}}), &[]));
+        tools.push(tool("update_review_queue", "Record a review operation or reserve/release the single manual integration slot. Never executes Git. Requires explicit manageReviewQueue grant; inspect outcomes before finishing. Use revision and stable requestId. See REVIEW-QUEUE.md for operation contract.", json!({"requestId":{"type":"string"},"action":{"type":"string","enum":["propose","review","test","begin","finish","reject"]},"title":{"type":"string"},"branch":{"type":"string"},"commits":{"type":"array","items":{"type":"string"}},"target":{"type":"string"},"base":{"type":"string"},"id":{"type":"integer"},"revision":{"type":"integer"},"result":{"type":"string"},"note":{"type":"string"},"outcome":{"type":"string","enum":["integrated","failed","cancelled"]},"commit":{"type":"string"}}), &["requestId","action"]));
+    }
     if a.restart_service {
         tools.push(tool("get_service_status", "Read global service activity and durable restart/handoff outcomes. Requires live restartService grant.",json!({}), &[]));
         tools.push(tool(
@@ -186,6 +190,8 @@ async fn dispatch(app: &App, s: &Session, operation: &str, args: Value) -> mail:
     let a = mail::access(app, s)?;
     match operation {
         "tools/list" => Ok(tools(&a)),
+        "get_review_queue" => crate::review_queue::agent(app, s, args, false),
+        "update_review_queue" => crate::review_queue::agent(app, s, args, true),
         "get_service_status" => {
             mail::require(app, s, "restart_service")?;
             crate::service_restart::status(State(app.clone()))
@@ -414,7 +420,7 @@ pub async fn serve_bridge(app: App, listener: TcpListener) {
                 let actor=app.sessions.lock().unwrap().values().find(|s|s.mcp_token.lock().unwrap().as_str()==token).cloned();
                 let response=if let Some(s)=actor {
                     let operation=v["operation"].as_str().unwrap_or("");
-                    let mutation=!matches!(operation,"tools/list"|"read_inbox"|"list_sessions"|"list_automations"|"get_completion"|"get_service_status");
+                    let mutation=!matches!(operation,"tools/list"|"read_inbox"|"list_sessions"|"list_automations"|"get_completion"|"get_service_status"|"get_review_queue");
                     let action=operation.chars().take(80).collect::<String>();
                     let argument_target=v["arguments"]["sessionId"].as_str().or(v["arguments"]["recipient"].as_str()).or(v["arguments"]["automationId"].as_str()).unwrap_or("").chars().take(128).collect::<String>();
                     let request=v["arguments"]["requestId"].as_str().unwrap_or("").chars().take(100).collect::<String>();

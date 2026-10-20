@@ -8,6 +8,8 @@ Batch 001 additionally delivered durable self-authored completion reports and li
 
 The sections below describe the intended architecture, including later capabilities. The current implementation exposes no settings, deletion, access-grant, or harness-approval tools.
 
+The [review queue](REVIEW-QUEUE.md) adds separately opted-in `manageReviewQueue` MCP access for scoped review records and manual integration reservations. Existing Coordinator presets do not grant it; no queue tool executes Git.
+
 ## Communication role defaults
 
 Global Settings → Communication selects Off, Participant, or Coordinator for new sessions created by a human. The built-in default is Participant, enabling project messages without coordinator permissions. Project settings can select a role or inherit the global default. The session creation form shows the resolved default and allows an explicit role for that session. Existing sessions retain their saved access when defaults change; use the session’s Agents & inbox controls to change it.

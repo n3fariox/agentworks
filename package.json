@@ -33,7 +33,8 @@
     "test:service-restart": "node scripts/service-restart-smoke.mjs",
     "test:supervisor": "python3 scripts/service/supervisor-test.py",
     "prepare:coordinator": "node scripts/prepare-self-improvement.mjs",
-    "test:codex-quota": "node tests/codex-subscription.test.mjs"
+    "test:codex-quota": "node tests/codex-subscription.test.mjs",
+    "test:review-queue": "node scripts/review-queue-smoke.mjs"
   },
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "0.93.0",

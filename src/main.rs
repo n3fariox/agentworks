@@ -14,6 +14,7 @@ mod limit_resume;
 mod mcp;
 mod notifications;
 mod permission_modes;
+mod review_queue;
 mod runtime;
 mod service_restart;
 mod store;
@@ -847,6 +848,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/api/projects/{id}/archive", post(archive_project))
         .route(
+            "/api/projects/{id}/review-queue",
+            get(review_queue::get).post(review_queue::post),
+        )
+        .route(
             "/api/projects/{id}/workspace-policy",
             get(worktrees::get_policy).put(worktrees::put_policy),
         )
@@ -1467,6 +1472,7 @@ async fn delete_project(
     if !app.catalog.lock().unwrap().contains(&id) {
         return Err(fail(StatusCode::BAD_REQUEST, "Project not found"));
     }
+    review_queue::ensure_project_removable(&app.store.lock().unwrap().connection, &id)?;
     app.store
         .lock()
         .unwrap()

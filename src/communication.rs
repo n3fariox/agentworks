@@ -29,6 +29,7 @@ impl Role {
             cancel_sessions: self == Self::Coordinator,
             run_automations: self == Self::Coordinator,
             restart_service: false,
+            manage_review_queue: false,
         }
     }
 }
@@ -53,6 +54,8 @@ pub struct Access {
     pub run_automations: bool,
     #[serde(default)]
     pub restart_service: bool,
+    #[serde(default)]
+    pub manage_review_queue: bool,
 }
 impl Access {
     pub fn enabled(&self) -> bool {
@@ -62,6 +65,7 @@ impl Access {
             || self.cancel_sessions
             || self.run_automations
             || self.restart_service
+            || self.manage_review_queue
     }
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -199,6 +203,7 @@ pub fn require(app: &App, s: &Session, capability: &str) -> Result<Access> {
         "cancel_sessions" => a.cancel_sessions,
         "run_automations" => a.run_automations,
         "restart_service" => a.restart_service,
+        "manage_review_queue" => a.manage_review_queue,
         _ => false,
     };
     if !permitted {
