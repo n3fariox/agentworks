@@ -76,6 +76,7 @@ pub fn body(category: Event, data: &Value) -> String {
                 _ => "Turn finished.".into(),
             },
         },
+        Event::Approval if text("kind") == "question" => "Waiting for your answer.".into(),
         Event::Approval => "Waiting for your approval.".into(),
         Event::Error if data.get("timedOut").is_some() => body(Event::TurnEnd, data),
         Event::Error => match text("message") {

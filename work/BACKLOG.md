@@ -32,7 +32,7 @@ This board distinguishes delivered behavior from the older architecture proposal
 | ID | Task | Acceptance |
 | --- | --- | --- |
 | L-01 | Rename, archive and suspend/stop controls — implemented batch 004 | History deletion remains separate from stopping a harness; changes persist and activity state remains accurate |
-| L-02 | Questions/elicitation | Render supported harness forms, submit validated answers, and recover safely across browser disconnect/cancellation |
+| L-02 | Questions/elicitation — implemented ([behavior](QUESTIONS.md)) | Render supported harness forms, submit validated answers, and recover safely across browser disconnect/cancellation |
 | L-03 | Model attachments | Attach supported images/files to chat with explicit storage, size/type limits and harness capability checks |
 | L-04 | Usage dashboard and harness configuration | Build on verified Claude/Codex usage commands; show supported data accurately without silent model work or credential exposure; supply the compact composer statusline in U-07 |
 | L-05 | Running activity words and queued inputs — implemented and verified in batch 007; bounded coordinator policy enabled after deployment | Show an animated running/activity label and elapsed time, distinguishing running, tool activity and waiting for approval. Allow inputs to queue during a turn, with visible order, edit/remove controls and clear queued/sending/sent states. Dispatch after the current turn ends; persist request IDs, prevent duplicate sends, and define cancellation, errors and restart recovery without blindly replaying work |

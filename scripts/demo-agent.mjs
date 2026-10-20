@@ -11,6 +11,7 @@ mkdirSync(stateDir,{recursive:true});
 function save(id){const file=join(stateDir,id+'.json');writeFileSync(file+'.tmp',JSON.stringify(sessions.get(id)),{mode:0o600});renameSync(file+'.tmp',file);}
 function commands(id){update(id,{sessionUpdate:'available_commands_update',availableCommands:[{name:'status',description:'Read-only demo status'},{name:'usage',description:'Read-only demo usage'},{name:'help',description:'Show demo help'},{name:'$demo-skill',description:'Example skill entry; no model is called'}]});}
 const sessions = new Map(), approvals = new Map(), mcpConfigs = new Map();
+let elicitForm=false;
 const modelOptions=[{value:'demo/steady',name:'Steady (local demo)'},{value:'demo/quick',name:'Quick (local demo)'}];
 const modelConfig=(model,mode='default')=>[{id:'model',name:'Model',category:'model',type:'select',currentValue:model,options:modelOptions},...(process.env.AGENTWORKS_DEMO_MODES==='1'?[{id:'mode',name:'Mode',category:'mode',type:'select',currentValue:mode,options:[{value:'default',name:'Manual'},{value:'auto',name:'Auto'}]}]:[])];
 const send = value => process.stdout.write(JSON.stringify({jsonrpc:'2.0',...value})+'\n');
@@ -72,6 +73,25 @@ async function prompt(id, params) {
     update(params.sessionId,{sessionUpdate:'tool_call_update',toolCallId,status:result.isError?'failed':'completed',rawOutput:result,content:[{type:'content',content:{type:'text',text:JSON.stringify(result)}}]});
     chunk('```json\n'+JSON.stringify(result)+'\n```\n');save(params.sessionId);reply(id,{stopReason:'end_turn'});return;
   }
+  // L-02: `question`, `question url` (unsupported mode) and `question withdraw` ($/cancel_request).
+  if(/^question\b/i.test(text)) {
+    if(!elicitForm){chunk('The client did not advertise form elicitation.\n\n');save(params.sessionId);reply(id,{stopReason:'end_turn'});return;}
+    const requestId=randomUUID();
+    const outcome=new Promise(resolve=>approvals.set(requestId,{resolve,sessionId:params.sessionId,raw:true}));
+    const url=/url/i.test(text);
+    send({id:requestId,method:'elicitation/create',params:url?{mode:'url',sessionId:params.sessionId,elicitationId:randomUUID(),url:'https://example.invalid/login',message:'Sign in to the demo service'}:
+      {mode:'form',sessionId:params.sessionId,message:'How should the demo project be set up?',requestedSchema:{type:'object',properties:{
+        question_0:{type:'string',title:'Database',description:'Which database should the demo use?',oneOf:[{const:'Postgres',title:'Postgres',description:'Server database'},{const:'SQLite',title:'SQLite',description:'Single file'}]},
+        question_0_custom:{type:'string',title:'Other',description:'Type your own answer (optional).',maxLength:40},
+        features:{type:'array',title:'Features',items:{anyOf:[{const:'auth',title:'Authentication'},{const:'search',title:'Search'},{const:'billing',title:'Billing'}]},maxItems:2},
+        replicas:{type:'integer',title:'Replicas',minimum:1,maximum:5},
+        contact:{type:'string',title:'Contact email',format:'email'},
+        confirm:{type:'boolean',title:'Create sample data',default:true}},required:['question_0','replicas']}}});
+    if(/withdraw/i.test(text)){await delay(1500);send({method:'$/cancel_request',params:{requestId}});approvals.get(requestId)?.resolve({action:'cancel'});approvals.delete(requestId);}
+    const result=await outcome;
+    if(!session.cancelled)chunk(result?.action==='accept'?'You answered: `'+JSON.stringify(result.content)+'`\n\n':result?.action==='decline'?'You skipped the question.\n\n':'The question was cancelled.\n\n');
+    save(params.sessionId);reply(id,{stopReason:session.cancelled?'cancelled':'end_turn'});return;
+  }
   if(/approval/i.test(text)) {
     const toolCallId=randomUUID();
     update(params.sessionId,{sessionUpdate:'tool_call',toolCallId,title:'Show a demo tool result',kind:'other',status:'pending',rawInput:{demo:true}});
@@ -106,12 +126,12 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   let message;try{message=JSON.parse(line);}catch{return;}
   if(!message.method){
     const waiting=approvals.get(message.id);
-    if(waiting){approvals.delete(message.id);waiting.resolve(message.result?.outcome);}
+    if(waiting){approvals.delete(message.id);waiting.resolve(waiting.raw?message.result:message.result?.outcome);}
     return;
   }
   const {id,method,params={}}=message;
   switch(method){
-    case 'initialize': reply(id,{protocolVersion:1,agentInfo:{name:'agentworks-demo',version:'0.1.0'},agentCapabilities:{loadSession:true,sessionCapabilities:{resume:{},list:{}},promptCapabilities:{image:true}},authMethods:[]});break;
+    case 'initialize': elicitForm=!!params.clientCapabilities?.elicitation?.form;reply(id,{protocolVersion:1,agentInfo:{name:'agentworks-demo',version:'0.1.0'},agentCapabilities:{loadSession:true,sessionCapabilities:{resume:{},list:{}},promptCapabilities:{image:true}},authMethods:[]});break;
     case 'session/new':{
       const sessionId=randomUUID();mcpConfigs.set(sessionId,params.mcpServers||[]);sessions.set(sessionId,{cwd:params.cwd,turn:0,cancelled:false,model:'demo/steady'});
       save(sessionId);reply(id,{sessionId,configOptions:modelConfig('demo/steady')});
@@ -149,7 +169,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     case 'session/prompt':prompt(id,params).catch(error=>send({id,error:{code:-32603,message:error.message}}));break;
     case 'session/cancel':{
       const session=sessions.get(params.sessionId);if(session)session.cancelled=true;
-      for(const [key,a] of approvals){if(a.sessionId===params.sessionId){a.resolve({outcome:'cancelled'});approvals.delete(key);}}
+      for(const [key,a] of approvals){if(a.sessionId===params.sessionId){a.resolve(a.raw?{action:'cancel'}:{outcome:'cancelled'});approvals.delete(key);}}
       break;
     }
     default: if(id!==undefined)send({id,error:{code:-32601,message:'Method not supported by demo'}});

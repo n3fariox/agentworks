@@ -36,7 +36,8 @@
     "test:supervisor": "python3 scripts/service/supervisor-test.py",
     "prepare:coordinator": "node scripts/prepare-self-improvement.mjs",
     "test:codex-quota": "node tests/codex-subscription.test.mjs",
-    "test:review-queue": "node scripts/review-queue-smoke.mjs"
+    "test:review-queue": "node scripts/review-queue-smoke.mjs",
+    "test:questions": "node tests/questions.test.mjs && playwright test tests/questions.spec.mjs"
   },
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "0.93.0",

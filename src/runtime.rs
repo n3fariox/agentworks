@@ -2,7 +2,9 @@ use crate::{Approval, Session, adapter_path, opencode_path, use_api_key};
 use agent_client_protocol::schema::{
     ProtocolVersion,
     v1::{
-        AuthenticateRequest, CancelNotification, ContentBlock, ForkSessionRequest,
+        AuthenticateRequest, CancelNotification, ClientCapabilities, ContentBlock,
+        CreateElicitationRequest, CreateElicitationResponse, ElicitationAction,
+        ElicitationCapabilities, ElicitationFormCapabilities, ForkSessionRequest,
         InitializeRequest, ListSessionsRequest, LoadSessionRequest, NewSessionRequest,
         PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
         RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome,
@@ -194,7 +196,12 @@ async fn initialize(
     provider: &str,
 ) -> Result<Value, agent_client_protocol::Error> {
     let init = connection
-        .send_request(InitializeRequest::new(ProtocolVersion::V1))
+        // L-02: forms only. URL elicitations would send people to arbitrary sites.
+        .send_request(InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
+            ClientCapabilities::new().elicitation(
+                ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()),
+            ),
+        ))
         .block_task()
         .await?;
     if init.protocol_version != ProtocolVersion::V1 {
@@ -455,6 +462,7 @@ pub async fn run(
     prepare(&s.provider)?;
     let notify_s = s.clone();
     let permission_s = s.clone();
+    let question_s = s.clone();
     let replaying = Arc::new(AtomicBool::new(true));
     let notify_replaying = replaying.clone();
     let initial_claude_mode = {
@@ -500,19 +508,55 @@ pub async fn run(
                 if data.lifecycle.suspended || !data.turn_active || data.status == "cancelling" {
                     return responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
                 }
-                approvals.insert(id.clone(), Approval{request:value.clone(),answer:tx});
+                let approval=Approval{request:value,kind:"permission",unsupported:None,answer:tx};
+                let event=approval.event(&id);
+                approvals.insert(id.clone(), approval);
                 data.status = "waiting".into();
                 drop(data);
                 // Publish before cancellation can remove this approval. Otherwise a
                 // late approval event could follow approval_resolved in the browser.
-                permission_s.emit("approval",json!({"id":id,"request":value}));
+                permission_s.emit("approval",event);
                 permission_s.emit("status",json!({"status":"waiting"}));
             }
             let outcome=match rx.await {
-                Ok(Some(option))=>RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option)),
+                Ok(Some(Value::String(option)))=>RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option)),
                 _=>RequestPermissionOutcome::Cancelled,
             };
             responder.respond(RequestPermissionResponse::new(outcome))
+        },agent_client_protocol::on_receive_request!())
+        .on_receive_request(async move |request:CreateElicitationRequest,responder,cx| {
+            // L-02: register and publish inside the dispatch loop (ordering with session
+            // updates), then wait in a task so `$/cancel_request` can still be processed.
+            let id=Uuid::new_v4().to_string();
+            let value=serde_json::to_value(&request).unwrap_or(Value::Null);
+            let (tx,rx)=oneshot::channel();
+            {
+                let mut approvals = question_s.approvals.lock().unwrap();
+                let mut data = question_s.data.lock().unwrap();
+                if data.lifecycle.suspended || !data.turn_active || data.status == "cancelling" {
+                    return responder.respond(CreateElicitationResponse::new(ElicitationAction::Cancel));
+                }
+                let unsupported=crate::elicitation::unsupported(&value);
+                let approval=Approval{request:value,kind:"question",unsupported,answer:tx};
+                let event=approval.event(&id);
+                approvals.insert(id.clone(), approval);
+                data.status = "waiting".into();
+                drop(data);
+                question_s.emit("approval",event);
+                question_s.emit("status",json!({"status":"waiting"}));
+            }
+            let s=question_s.clone();
+            let cancellation=responder.cancellation();
+            cx.spawn(async move {
+                let answer=tokio::select! {
+                    answer=rx=>answer.ok().flatten(),
+                    _=cancellation.cancelled()=>{crate::elicitation::withdraw(&s,&id);None},
+                };
+                // Turn cancellation and closed sessions resolve to `cancel`, never a guess.
+                let response=answer.and_then(|v|serde_json::from_value::<CreateElicitationResponse>(v).ok())
+                    .unwrap_or_else(||CreateElicitationResponse::new(ElicitationAction::Cancel));
+                responder.respond(response)
+            })
         },agent_client_protocol::on_receive_request!())
         .connect_with(agent_for(&s.provider,host_profile),move |connection:ConnectionTo<Agent>|async move {
             let created=tokio::time::timeout(Duration::from_secs(75),open_session(&connection,&s))

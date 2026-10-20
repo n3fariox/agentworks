@@ -18,6 +18,7 @@ import {setupContextMenu} from './context-menu.js';
 import {setupTimeoutControls} from './timeout-controls.js';
 import {setupInputQueue,BUSY} from './input-queue.js';
 import {setupNotifications} from './notifications.js';
+import {setupQuestions} from './questions.js';
 import {setupMentions} from './mentions.js';
 const $ = id => document.getElementById(id);
 // randomUUID is unavailable on plain HTTP remote origins; getRandomValues is supported.
@@ -44,6 +45,7 @@ setInterval(()=>usageStatus.render(),60000);
 let timeoutControls=null;
 let transcript=[], tools=new Map(), approvals=new Map(), assistant=null, status='starting';
 // L-05 hook: activity indicator and explicit queued inputs (server-owned state).
+const questions=setupQuestions({api,uuid:()=>uuid(),storage:localStorage,getActive:()=>active,isConnected:()=>connected,agentName:()=>labels[active?.provider]||'the agent'});
 const inputQueue=setupInputQueue({$,api,uuid:()=>uuid(),getActive:()=>active,getStatus:()=>status,toolActive:()=>[...tools.values()].some(t=>['pending','in_progress'].includes(t.status))});
 let permissionModes=null;
 const mentions=setupMentions({prompt:$('prompt'),list:$('mention-list'),getActive:()=>active,getSessions:()=>sessions});
@@ -407,7 +409,7 @@ function connect(gen){
       replaying=true;try{for(const item of e.events)if(item.kind!=='session_updated')consume(item);}finally{replaying=false;}
       Object.assign(active,e.session);setTitle(active.title);
       active.continuation=e.session.continuation;
-      approvals=new Map(e.approvals.map(a=>[a.id,a.request]));status=e.session.status;modelConfig=e.models;syncModelLabel();permissionModes=e.permissionModes;if(status==='suspended'&&!e.session.explicitlySuspended)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();inputQueue.set(e.session.inputQueue);inputQueue.observe(status,{live:false});
+      approvals=new Map(e.approvals.map(a=>[a.id,a]));status=e.session.status;modelConfig=e.models;syncModelLabel();permissionModes=e.permissionModes;if(status==='suspended'&&!e.session.explicitlySuspended)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();inputQueue.set(e.session.inputQueue);inputQueue.observe(status,{live:false});
       if(e.storageError){$('session-notice').textContent=e.storageError;$('session-notice').hidden=false;}
       if(e.truncated){$('session-notice').textContent='Showing recent output. The full transcript is saved on this host.';$('session-notice').hidden=false;}
     }else consume(e,true);
@@ -445,8 +447,16 @@ function consume(e,live=false){
   else if(e.kind==='user'){assistant=null;if(d.inboxDelivery)transcript.push({id:uuid(),type:'notice',text:'Automatic inbox turn authorized by you; peer messages are untrusted context.'});else if(d.initiatedBy)transcript.push({id:uuid(),type:'notice',text:d.initiatedBy.startsWith('controller:')?'Turn started by external controller '+(d.initiatorTitle||d.initiatedBy):'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});addMessage('user',d.text).seq=e.seq;}
   else if(e.kind==='status'){
     status=d.status;if(!replaying)inputQueue.observe(status,{live});if(active){active.status=status;if(d.explicitlySuspended!==undefined)active.explicitlySuspended=d.explicitlySuspended;const s=sessions.find(s=>s.id===active.id);if(s)s.status=status;}sidebar();
-  }else if(e.kind==='approval'){approvals.set(d.id,d.request);}
-  else if(e.kind==='approval_resolved'){approvals.delete(d.id);}
+  }else if(e.kind==='approval'){approvals.set(d.id,d);}
+  else if(e.kind==='approval_resolved'){
+    const pending=approvals.get(d.id);approvals.delete(d.id);
+    if(pending?.kind==='question'){
+      // L-02: record the outcome in the transcript; drafts end with the question.
+      questions.forget(d.id);assistant=null;
+      const asked=(pending.request?.message||'Question').slice(0,120);
+      transcript.push({id:uuid(),type:'notice',text:`${asked} — ${d.action==='accept'?'answer sent':d.action==='decline'?'skipped':d.action==='cancel'?'cancelled by you':d.withdrawn?'withdrawn by the agent':'cancelled because the turn ended'}.`});
+    }
+  }
   else if(e.kind==='interrupted'){transcript.push({id:uuid(),type:'notice',text:d.message,interrupted:true});assistant=null;}
   else if(e.kind==='storage_error'){status='error';$('session-notice').textContent=d.message;$('session-notice').hidden=false;}
   else if(e.kind==='error'){transcript.push({id:uuid(),type:'error',text:d.message});assistant=null;}
@@ -495,7 +505,7 @@ function consume(e,live=false){
 async function resumeSession(id){
   try{await api(`/api/sessions/${id}/resume`,{method:'POST',body:'{}'});}catch(e){toast(e.message);}
 }
-function updateControls(){
+function updateControls(){questions.refresh();
   $('archive-session').textContent=active?.archived?'Unarchive session':'Archive session';
   $('suspend-session').disabled=!connected||status==='suspended'||status==='closed';
   $('resume-session').hidden=!['suspended','error'].includes(status);
@@ -524,7 +534,7 @@ function updateControls(){
     picker.disabled=!connected||status!=='idle';
   }
   const busy=['running','waiting','cancelling'].includes(status);
-  $('session-state').textContent=status==='waiting'?'Needs your approval':status==='idle'?'Ready':status[0]?.toUpperCase()+status.slice(1);
+  $('session-state').textContent=status==='waiting'?([...approvals.values()].some(a=>a.kind==='question')?'Needs your answer':'Needs your approval'):status==='idle'?'Ready':status[0]?.toUpperCase()+status.slice(1);
   // Busy sessions keep the composer usable so input can be queued without losing the draft.
   $('prompt').disabled=!connected||!(status==='idle'||busy);$('send').disabled=!connected||!(status==='idle'||busy);
   $('send').setAttribute('aria-label',busy?'Queue message':'Send message');$('send').textContent=busy?'＋':'↑';$('send').title=busy?'Queue to send after this turn ends':'';
@@ -601,9 +611,11 @@ function draw(){
       node.querySelector('pre').textContent=typeof content==='string'?content:JSON.stringify(content,null,2);
     }
   }
-  const pending=$('approval-area');pending.replaceChildren();
+  const pending=$('approval-area');for(const node of [...pending.children])if(!node.classList.contains('question'))node.remove();
   workLogs.apply(area,transcript,nodes,{sessionIdle:['idle','closed','suspended','error'].includes(status),scope:active.id,turnEnds});
-  for(const [id,request]of approvals){
+  questions.sync(pending,[...approvals].filter(([,a])=>a.kind==='question'));
+  for(const [id,{kind,request}]of approvals){
+    if(kind==='question')continue;
     const card=el('div','approval');card.append(el('h4','','Permission requested'),el('p','',request.toolCall?.title||'An agent needs your decision'));
     if(request.toolCall?.rawInput)card.append(el('pre','',JSON.stringify(request.toolCall.rawInput,null,2)));
     for(const option of request.options||[]){
