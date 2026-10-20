@@ -282,19 +282,48 @@ function badges(items){
   if(!running&&!waiting&&items.length)wrap.append(el('span','group-total',String(items.length)));
   return wrap;
 }
-function treeGroup(key,label,items,{host=false,projectId=null,level=0,archived=false}={}){
+function hostState(host){
+  if(host.kind!=='remote')return 'Connected';
+  return {connected:'Connected',connecting:'Connecting…',offline:'Offline'}[host.status]||host.status;
+}
+function hostTitle(host){
+  if(host.kind!=='remote')return 'Connected';
+  const w=host.worker;
+  return [hostState(host),'ssh '+host.destination,w?.hostname,w?.platform,w?.providers?.length?'providers: '+w.providers.join(', '):'',w?.version?'v'+w.version:'',host.status==='offline'?host.detail:''].filter(Boolean).join(' · ');
+}
+function hostNote(host){
+  if(host.status==='offline')return host.detail||'Offline.';
+  if(host.status==='connecting')return host.detail?'Reconnecting. Last attempt: '+host.detail:'Connecting over SSH…';
+  return 'Connected. Running sessions on remote hosts is not supported yet.';
+}
+async function hostAction(host,action){
+  if(action==='remove'&&!confirm(`Remove host ${host.name}? Its worker stops; nothing on that machine is deleted.`))return;
+  try{await api(`/api/hosts/${host.id}`+(action==='remove'?'':'/reconnect'),{method:action==='remove'?'DELETE':'POST'});await refreshSessions();}catch(e){toast(e.message);}
+}
+function treeGroup(key,label,items,{host=null,projectId=null,level=0,archived=false}={}){
   const group=el('details','tree-group level-'+level);group.dataset.group=key;
   const stateKey=sidebarView+':'+key;group.open=!collapsedGroups.has(stateKey);
   const heading=el('summary','tree-heading');if(!host&&projectId){heading.dataset.projectId=projectId;heading.setAttribute('aria-haspopup','menu');}heading.append(el('span','tree-chevron','›'));
   heading.append(el('span',host?'tree-icon host':'tree-icon',host?'▤':'◇'),el('span','tree-label',label),badges(items));
   if(archived)heading.append(el('span','group-total','Archived'));
-  if(host){const dot=el('span','connection-dot');dot.title='Connected';heading.append(dot);}
+  if(host){const dot=el('span','connection-dot '+(host.status||'connected'));dot.title=hostTitle(host);dot.setAttribute('aria-label',hostTitle(host));heading.append(dot);}
   if(!host&&projectId){
     const rename=el('button','group-action','⋯');rename.type='button';rename.setAttribute('aria-label','Edit project '+label);
     rename.onclick=event=>{event.preventDefault();event.stopPropagation();openProjectDialog(projects.find(p=>p.id===projectId));};heading.append(rename);
   }
-  const add=el('button','group-action add-session','＋');add.type='button';add.setAttribute('aria-label','New session in '+label);
-  add.onclick=event=>{event.preventDefault();event.stopPropagation();openCreate({projectId});};heading.append(add);
+  if(host?.kind==='remote'){
+    // Sessions cannot run on remote hosts yet, so offer link controls instead of a new session.
+    if(level===0){
+      const actions=[['reconnect','↻','Reconnect '+label]];if(!items.length)actions.push(['remove','×','Remove host '+label]);
+      actions.forEach(([action,text,name],index)=>{
+        const button=el('button','group-action'+(index?'':' add-session'),text);button.type='button';button.setAttribute('aria-label',name);
+        button.onclick=event=>{event.preventDefault();event.stopPropagation();hostAction(host,action);};heading.append(button);
+      });
+    }
+  }else{
+    const add=el('button','group-action add-session','＋');add.type='button';add.setAttribute('aria-label','New session in '+label);
+    add.onclick=event=>{event.preventDefault();event.stopPropagation();openCreate({projectId});};heading.append(add);
+  }
   const children=el('div','tree-children');group.append(heading,children);
   group.ontoggle=()=>{if(group.open)collapsedGroups.delete(stateKey);else collapsedGroups.add(stateKey);localStorage.setItem('agentworks-tree-collapsed',JSON.stringify([...collapsedGroups]));};
   return {group,children};
@@ -318,8 +347,10 @@ function sidebar(){
   const visibleSessions=sessions.filter(s=>filter==='all'||!!s.archived===(filter==='archived'));
   // Archived projects appear with archived sessions; active projects holding archived sessions do too.
   const visibleProjects=projects.filter(p=>filter==='all'||(filter==='archived'?p.archived||visibleSessions.some(s=>s.projectId===p.id):!p.archived));
-  $('session-count').textContent=visibleSessions.length;
+  $('section-title').textContent=sidebarView==='hosts'?'HOSTS':'SESSIONS';
+  $('session-count').textContent=sidebarView==='hosts'?hosts.length:visibleSessions.length;
   for(const view of ['hosts','projects'])$('view-'+view).setAttribute('aria-selected',String(sidebarView===view));
+  const sectionAdd=sidebarView==='hosts'?'Add host':'New project';$('new-project').setAttribute('aria-label',sectionAdd);$('new-project').title=sectionAdd;
   const area=$('sessions'),scroll=area.scrollTop;area.replaceChildren();
   const buckets=[...visibleProjects.map(p=>({id:p.id,name:p.name,archived:!!p.archived})).sort((a,b)=>a.name.localeCompare(b.name)),{id:null,name:'Ungrouped'}];
   function addSessions(container,items){
@@ -329,7 +360,11 @@ function sidebar(){
   if(sidebarView==='hosts'){
     for(const host of hosts){
       const hostItems=visibleSessions.filter(s=>s.hostId===host.id);
-      const top=treeGroup('host:'+host.id,host.name,hostItems,{host:true});
+      const top=treeGroup('host:'+host.id,host.name,hostItems,{host});
+      if(host.kind==='remote'&&!hostItems.length){
+        top.children.append(el('div','empty-group host-note '+host.status,hostNote(host)));
+        area.append(top.group);continue;
+      }
       for(const project of buckets){
         const items=hostItems.filter(s=>(s.projectId||null)===project.id);
         if(project.id===null&&!items.length&&visibleProjects.length)continue;
@@ -345,7 +380,8 @@ function sidebar(){
       const top=treeGroup('project:'+(project.id||'ungrouped'),project.name,projectItems,{projectId:project.id,archived:project.archived});
       for(const host of hosts){
         const items=projectItems.filter(s=>s.hostId===host.id);
-        const child=treeGroup(`project:${project.id||'ungrouped'}:host:${host.id}`,host.name,items,{host:true,projectId:project.id,level:1});
+        if(host.kind==='remote'&&!items.length)continue;
+        const child=treeGroup(`project:${project.id||'ungrouped'}:host:${host.id}`,host.name,items,{host,projectId:project.id,level:1});
         addSessions(child.children,items);top.children.append(child.group);
       }
       area.append(top.group);
@@ -734,7 +770,18 @@ function draw(){
 }
 $('new-session').onclick=()=>openCreate();$('welcome-new').onclick=()=>openCreate();
 $('view-hosts').onclick=()=>setSidebarView('hosts');$('view-projects').onclick=()=>setSidebarView('projects');
-$('new-project').onclick=()=>openProjectDialog();$('create-project-new').onclick=()=>openProjectDialog();
+$('new-project').onclick=()=>sidebarView==='hosts'?openHostDialog():openProjectDialog();$('create-project-new').onclick=()=>openProjectDialog();
+function openHostDialog(){
+  $('host-form').reset();$('host-error').textContent='';$('host-dialog').showModal();$('host-name').focus();
+}
+$('dismiss-host').onclick=()=>$('host-dialog').close();
+$('host-form').onsubmit=async event=>{
+  event.preventDefault();$('host-error').textContent='';$('save-host').disabled=true;
+  try{
+    await api('/api/hosts',{method:'POST',body:JSON.stringify({name:$('host-name').value,destination:$('host-destination').value,command:$('host-command').value})});
+    $('host-dialog').close();await refreshSessions();
+  }catch(error){$('host-error').textContent=error.message;}finally{$('save-host').disabled=false;}
+};
 $('dismiss-project').onclick=()=>{if(!savingProject)$('project-dialog').close();};
 $('project-dialog').addEventListener('cancel',event=>{if(savingProject)event.preventDefault();});
 $('create-project').onchange=()=>{const remembered=readStorage(localStorage,'agentworks-project-locations',{})[$('create-project').value||'ungrouped'];if(remembered)$('directory').value=remembered;worktrees.projectChanged();updateCommunicationDefault();};

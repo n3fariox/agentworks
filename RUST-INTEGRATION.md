@@ -10,7 +10,7 @@ ACP supersedes the earlier proposal to evaluate separate community Claude Rust S
 
 ## Shared protocol and adapters
 
-- [Agent Client Protocol](https://agentclientprotocol.com/get-started/introduction) standardizes client-to-coding-agent communication. Local integration uses JSON-RPC over stdio. Native remote support is still evolving; the planned SSH connection to our persistent host service remains independent of ACP.
+- [Agent Client Protocol](https://agentclientprotocol.com/get-started/introduction) standardizes client-to-coding-agent communication. Local integration uses JSON-RPC over stdio. Native remote support is still evolving. Our remote hosts are independent of it: ACP stdio is relayed over the worker link.
 - [Official ACP Rust SDK](https://github.com/agentclientprotocol/rust-sdk): `agent-client-protocol` supplies client roles, connection support, and protocol types. “Official” here means maintained by the ACP project, not a provider-specific OpenAI or Anthropic SDK.
 - [Claude adapter](https://github.com/agentclientprotocol/claude-agent-acp): wraps the official Claude Agent SDK and documents images, tool calls, and permission requests.
 - [Codex adapter](https://github.com/agentclientprotocol/codex-acp): wraps Codex app-server and documents API-key authentication, images, resource links, tool events, and permission handling.
@@ -31,7 +31,7 @@ Browser terminal (xterm.js)
         -> PTY -> actual claude / codex CLI
 ```
 
-On a future remote host, ACP clients, adapters, PTYs, credentials, and authorized file access belong to that host's persistent service. The central web service connects through SSH and proxies events and authorized file operations. Closing SSH must not terminate sessions.
+On a remote host, adapters, PTYs, credentials, and authorized file access belong to the worker that the server starts over SSH. The server keeps the ACP client role and all session state, and relays ACP stdio and file operations over a WebSocket on ssh's stdin and stdout. A dropped link ends that host's processes and is recovered like a server restart, through native ACP resume.
 
 ACP terminal-tool events are useful for displaying an agent's command activity in chat; they do not provide the full interactive CLI screen required by terminal mode.
 

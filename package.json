@@ -13,6 +13,7 @@
     "test:import-capabilities": "node scripts/import-capabilities.mjs",
     "test:workspace": "node scripts/workspace-smoke.mjs",
     "test:communication": "node scripts/communication-smoke.mjs",
+    "test:remote-hosts": "node scripts/remote-host-smoke.mjs",
     "test:mcp-wire": "node scripts/mcp-wire-smoke.mjs",
     "test:mcp-harnesses": "node scripts/mcp-harness-smoke.mjs",
     "test:completion": "node scripts/completion-smoke.mjs",

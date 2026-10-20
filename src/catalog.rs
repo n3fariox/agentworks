@@ -30,6 +30,23 @@ pub struct Location {
     pub host_id: String,
     pub path: PathBuf,
 }
+/// A remote execution host. The server reaches it over SSH and starts the
+/// Agentworks worker there; all session state stays on this server. The
+/// built-in `local` host is synthesized at read time and is never stored here.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Host {
+    pub id: String,
+    pub name: String,
+    /// Anything `ssh` accepts as a destination: `user@host`, a config alias, or
+    /// an `ssh://` URI. Keys, ports and jump hosts come from the SSH config.
+    #[serde(default)]
+    pub destination: String,
+    /// Shell command on the remote host that runs the Agentworks binary.
+    #[serde(default)]
+    pub command: String,
+}
+pub const DEFAULT_REMOTE_COMMAND: &str = "agentworks";
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -51,6 +68,8 @@ pub struct Settings {
 pub struct CatalogData {
     pub projects: Vec<Project>,
     pub locations: Vec<Location>,
+    #[serde(default)]
+    pub hosts: Vec<Host>,
     #[serde(default)]
     pub settings: Settings,
 }
@@ -216,6 +235,57 @@ impl Catalog {
         self.save(data)?;
         Ok(location)
     }
+    pub fn add_host(&mut self, name: &str, destination: &str, command: &str) -> Result<Host, String> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 80 {
+            return Err("Use a host name between 1 and 80 characters".into());
+        }
+        if name.eq_ignore_ascii_case("local") {
+            return Err("Local is reserved for this machine".into());
+        }
+        if self.data.hosts.iter().any(|h| h.name.to_lowercase() == name.to_lowercase()) {
+            return Err("A host with that name already exists".into());
+        }
+        let destination = destination.trim();
+        // Passed to ssh as an argument, so refuse anything ssh could read as an option.
+        if destination.is_empty()
+            || destination.len() > 255
+            || destination.starts_with('-')
+            || !destination
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._-@:/[]%".contains(c))
+        {
+            return Err("Use an SSH destination such as user@host, a ~/.ssh/config alias, or ssh://user@host:port".into());
+        }
+        let command = match command.trim() {
+            "" => DEFAULT_REMOTE_COMMAND,
+            c => c,
+        };
+        if command.len() > 400 || command.chars().any(char::is_control) {
+            return Err("Use a single-line remote command under 400 characters".into());
+        }
+        let host = Host {
+            id: Uuid::new_v4().to_string(),
+            name: name.into(),
+            destination: destination.into(),
+            command: command.into(),
+        };
+        let mut data = self.data.clone();
+        data.hosts.push(host.clone());
+        self.save(data).map_err(|_| "Could not save host")?;
+        Ok(host)
+    }
+    pub fn remove_host(&mut self, id: &str) -> Result<(), String> {
+        if !self.data.hosts.iter().any(|h| h.id == id) {
+            return Err("Host not found".into());
+        }
+        if self.data.locations.iter().any(|l| l.host_id == id) {
+            return Err("Host has locations; remove its sessions first".into());
+        }
+        let mut data = self.data.clone();
+        data.hosts.retain(|h| h.id != id);
+        self.save(data).map_err(|_| "Could not save host".into())
+    }
 }
 
 #[cfg(test)]
@@ -363,6 +433,29 @@ mod tests {
         assert_eq!(reopened.data.locations.len(), 2);
         reopened.remove(&project.id).unwrap();
         assert_eq!(reopened.data.locations.len(), 2);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn remote_hosts_are_validated_and_survive_reload() {
+        let path = std::env::temp_dir().join(format!("agentworks-hosts-{}.json", Uuid::new_v4()));
+        let mut catalog = Catalog::open(path.clone()).unwrap();
+        assert!(catalog.add_host("Local", "box", "").is_err());
+        assert!(catalog.add_host("box", "-oProxyCommand=sh", "").is_err());
+        assert!(catalog.add_host("box", "user@host name", "").is_err());
+        assert!(catalog.add_host("box", "box", "agentworks\nrm -rf /").is_err());
+        let host = catalog.add_host("Build box", "dev@build.lan", "").unwrap();
+        assert_eq!(host.command, DEFAULT_REMOTE_COMMAND);
+        assert!(catalog.add_host("build BOX", "other", "").is_err());
+        let custom = catalog
+            .add_host("Laptop", "ssh://me@[fe80::1]:2222", "~/agentworks/target/release/agentworks")
+            .unwrap();
+        let reopened = Catalog::open(path.clone()).unwrap();
+        assert_eq!(reopened.data.hosts.len(), 2);
+        assert_eq!(reopened.data.hosts[1].command, custom.command);
+        catalog.remove_host(&host.id).unwrap();
+        assert!(catalog.remove_host(&host.id).is_err());
+        assert_eq!(catalog.data.hosts.len(), 1);
         std::fs::remove_file(path).unwrap();
     }
 }

@@ -1,3 +1,4 @@
+mod agent;
 mod automations;
 mod browser_origin;
 mod catalog;
@@ -8,6 +9,7 @@ mod diff;
 mod fork;
 mod git_context;
 mod hosting;
+mod hosts;
 mod inbox_delivery;
 mod input_queue;
 mod lifecycle;
@@ -71,6 +73,7 @@ struct App {
     restart: Arc<service_restart::Manager>,
     /// U-02 cross-session stream of noteworthy events.
     notifications: notifications::Hub,
+    hosts: Arc<hosts::Hosts>,
 }
 
 struct Session {
@@ -509,6 +512,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.get(1).is_some_and(|a| a == "mcp") {
         return mcp::stdio().await.map_err(|e| e.to_string().into());
     }
+    if args.get(1).is_some_and(|a| a == "agent") {
+        return agent::run(&args[2..]).await.map_err(Into::into);
+    }
     if args.get(1).is_some_and(|a| a == "--probe") {
         let provider = args.get(2).map(String::as_str).unwrap_or("demo");
         if !["claude", "codex", "opencode", "demo"].contains(&provider) {
@@ -571,6 +577,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mcp_endpoint,
         restart: Arc::new(service_restart::Manager::new()),
         notifications: notifications::Hub::new(catalog),
+        hosts: hosts::Hosts::new(),
     };
     if let Some(policy) = app
         .catalog
@@ -631,6 +638,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     service_restart::initialize(&app)?;
     input_queue::initialize(&app)?;
     tokio::spawn(service_restart::scheduler(app.clone()));
+    for host in app.catalog.lock().unwrap().data.hosts.clone() {
+        app.hosts.start(host);
+    }
     let scheduler = tokio::spawn(limit_resume::scheduler(app.clone()));
     let inbox_scheduler = tokio::spawn(inbox_delivery::scheduler(app.clone()));
     let input_scheduler = tokio::spawn(input_queue::scheduler(app.clone()));
@@ -879,6 +889,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/external-sessions", post(list_external_sessions))
         .route("/api/sessions/import", post(import_session))
         .route("/api/catalog", get(get_catalog))
+        .route("/api/hosts", post(hosts::add))
+        .route("/api/hosts/{id}", axum::routing::delete(hosts::remove))
+        .route("/api/hosts/{id}/reconnect", post(hosts::reconnect))
         .route("/api/projects", post(create_project))
         .route(
             "/api/projects/{id}",
@@ -982,6 +995,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
             scheduler.abort();
+            app.hosts.stop_all();
             let _ = scheduler.await;
             input_scheduler.abort();
             let _ = input_scheduler.await;
@@ -1437,10 +1451,13 @@ async fn import_session(State(app): State<App>, Json(req): Json<ImportSession>) 
 }
 async fn get_catalog(State(app): State<App>) -> Json<Value> {
     let catalog = app.catalog.lock().unwrap();
-    Json(
-        json!({"hosts":[{"id":"local","name":"Local","status":"connected"}],
-        "projects":catalog.data.projects,"locations":catalog.data.locations}),
-    )
+    let mut hosts = vec![json!({"id":"local","name":"Local","status":"connected","kind":"local"})];
+    hosts.extend(catalog.data.hosts.iter().map(|h| hosts::view(&app.hosts, h)));
+    Json(json!({
+        "hosts": hosts,
+        "projects": catalog.data.projects,
+        "locations": catalog.data.locations,
+    }))
 }
 #[derive(Deserialize)]
 struct ProjectName {

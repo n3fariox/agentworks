@@ -2,7 +2,7 @@
 
 Status: architecture reference and execution plan, October 17, 2026. Current task status is tracked in [the execution backlog](work/BACKLOG.md).
 
-Confirmed decisions: Linux hosting for MVP; keep the architecture portable to Windows. Select chat or terminal when creating a session, with no switching. Reuse existing Claude/Codex host CLI sign-ins by default, with API keys as an optional explicit mode and the user's existing VPN for remote browser access. Add multiple execution hosts after MVP using a persistent host service connected over SSH.
+Confirmed decisions: Linux hosting for MVP; keep the architecture portable to Windows. Select chat or terminal when creating a session, with no switching. Reuse existing Claude/Codex host CLI sign-ins by default, with API keys as an optional explicit mode and the user's existing VPN for remote browser access. Add multiple execution hosts after MVP. The server starts a stateless worker over SSH and speaks WebSocket with it over ssh's stdin and stdout. All session state stays on the server.
 
 Hosting follow-up: also support the user's public Traefik HTTPS proxy with a UUID mount path and StripPrefix. Web URLs and proxy-aware origin checks must support that deployment; PWA installation is optional at hosting time, with manifest/worker scope confined to the mount. See [the hosting plan](work/HOSTING.md) and backlog R-04/R-05.
 
@@ -92,7 +92,7 @@ Local Rust/Axum web service
 ```
 
 - Serve the built UI and API from the same origin.
-- Define a host execution interface for session lifecycle, events, terminal I/O, approvals, and files. The MVP uses an in-process local implementation; a later SSH transport connects the same interface to a persistent remote service. Do not add remote deployment machinery to MVP.
+- Define a host execution interface for session lifecycle, events, terminal I/O, approvals, and files. The MVP uses an in-process local implementation. A later remote implementation drives a stateless worker started over SSH, through a WebSocket over ssh's stdio. Do not add remote deployment machinery to MVP.
 - Keep runtime ownership independent of browser connections. For the MVP, use one service process with supervised child workers; avoid multiple API workers accidentally owning the same session.
 - Browser disconnects do not stop agents. A service restart preserves history but does not promise to preserve live processes; interrupted sessions are marked accurately and resumed where supported.
 - Isolate blocking SDK or PTY operations from the API event loop. Bound output queues, preserve stream ordering, and prevent one noisy terminal from starving other sessions.
@@ -109,7 +109,7 @@ Local Rust/Axum web service
 
 **Claude chat:** use `@agentclientprotocol/claude-agent-acp`, which wraps the official Claude Agent SDK and advertises images and permission-bearing tool calls. No custom Claude Rust SDK is needed for this route. [Claude adapter](https://github.com/agentclientprotocol/claude-agent-acp).
 
-**Capability and host boundaries:** test existing host sign-in and optional API-key authentication, streaming, images, approvals, questions, cancellation, and history loading for each pinned adapter. Advertise only filesystem/terminal client capabilities that the host service implements and authorizes. Any such callbacks execute on the session's execution host. ACP does not replace our browser replay, output retention, file-preview gateway, process supervision, or post-MVP persistent-host SSH transport.
+**Capability and host boundaries:** test existing host sign-in and optional API-key authentication, streaming, images, approvals, questions, cancellation, and history loading for each pinned adapter. Advertise only filesystem/terminal client capabilities that the host service implements and authorizes. Any such callbacks execute on the session's execution host. ACP does not replace our browser replay, output retention, file-preview gateway, process supervision, or post-MVP remote worker link.
 
 **Provider authentication:** reuse the existing host CLI sign-in for Claude and Codex by default. Inherit the normal credential locations without copying tokens or forcing a new login. An explicit optional API-key mode uses isolated provider stores. Keep all credentials on the host, outside browser payloads and session events. [Claude SDK authentication guidance](https://code.claude.com/docs/en/agent-sdk/overview)
 
@@ -121,7 +121,7 @@ Local Rust/Axum web service
 
 ### Core records
 
-- `Host`: stable ID, display name, capabilities; MVP seeds a single local host. SSH connection settings are added after MVP.
+- `Host`: stable ID, display name, capabilities; MVP seeds a single local host. Remote hosts add an SSH destination and the remote command that runs Agentworks.
 - `Project`: stable ID, display name, optional description, and session defaults. A project is a logical grouping independent of any host, checkout, or repository.
 - `Location`: stable ID, host ID, canonical working-directory root, permitted extra roots, optional display label. Several locations can exist on one host, including separate worktrees. All filesystem authorization remains host/location scoped.
 - `Session`: project ID (optional for ungrouped sessions), location ID, provider, mode, provider session ID, runtime state, model, timestamps, last sequence. Location determines the execution host and working directory; project determines organization.
@@ -232,18 +232,25 @@ Exit: preview a generated Markdown file and image from chat, download a PDF, and
 
 Exit: manage sessions across two projects from desktop and phone, in both modes, with both providers; recover predictably from browser disconnect, provider crash, and service restart.
 
-### Phase 6 — Multiple hosts over SSH (post-MVP)
+### Phase 6 — Multiple hosts (post-MVP)
 
-1. Package a persistent host service as an executable; a Python implementation may bundle its runtime. Provider CLIs and credentials remain installed on each execution host. This requirement does not by itself require Rust.
-2. Register hosts with SSH destinations and remote service endpoints. Use the system SSH client/configuration and existing key or agent authentication; keep private keys outside application storage.
-3. Run the service independently of the SSH connection, for example as a Linux user service. Forward a private host endpoint through SSH; reconnecting attaches to the existing service rather than spawning duplicate agents.
-4. Add a versioned protocol handshake and capability discovery, then route lifecycle commands, events, terminal I/O, approvals, and authorized file operations through the host execution interface.
-5. Keep working directories, provider credentials, runtime ownership, event history, and file authorization on the execution host. The web service proxies authorized previews/downloads; it must not interpret a remote path as a local path.
-6. Persist host identity and event cursors, handle SSH interruptions with replay/deduplication, and show an unreachable host separately from a failed agent. Avoid retrying commands that might already have run without idempotency keys.
-7. Validate executable packaging and provider dependencies on supported Linux distributions; retain platform capability negotiation for future Windows hosts.
-8. Populate the existing Hosts/Projects trees with real remote hosts. Verify that one logical project shows sessions on multiple hosts, with distinct paths and accurate connection/activity badges.
+Decided: the server connects to each host with `ssh <destination> '<command> agent --stdio'`. The worker prints a ready line, then speaks WebSocket over ssh's stdin and stdout. This replaced an earlier `-R` reverse-forwarded Unix socket, which leaked socket files on the remote host, depended on sshd's stream-local forwarding setting, and ran into Unix socket path limits. SSH provides authentication, encryption, and launch; WebSocket carries the protocol. All session state stays on the server: metadata, transcripts, approvals, settings, and event history. The worker only owns processes and filesystem access on its machine. A dropped link is handled exactly like a server restart. The worker exits and stops its processes, sessions on that host are marked interrupted, and they resume lazily through native ACP resume once the server reconnects. The harnesses' own conversation stores and the working directories stay on the host, which is what makes that resume possible. This replaces the earlier plan of a persistent, state-owning host service.
 
-Exit: launch sessions on two hosts, disconnect SSH while work continues, reconnect without duplicate turns/processes, and view each host's files through the same browser interface.
+1. **Done:** host configuration (name, SSH destination, remote command), ssh launch, startup chatter skipped before the ready line, a versioned WebSocket hello reporting platform, version, and providers, pings, offline reasons that include ssh's output, reconnect with backoff, and browser add/reconnect/remove. Verified with `npm run test:remote-hosts`, which uses an ssh stand-in, and against a real remote host over OpenSSH: connect, worker kill and reconnect, ping keepalive, a clear authentication failure, and no worker processes left behind.
+2. **Chat sessions on remote hosts (next).** The server keeps its ACP client unchanged and connects it to a relayed byte stream (`ByteStreams`) instead of a local child process. The link multiplexes per-session channels with `spawn`, `data`, `exit`, and `kill`. The worker builds the adapter command with the same `runtime` code, using its own local paths. The server only names the provider, directory, and flags. The worker kills its children when the link closes, so a reconnect never runs beside an orphan. Agentworks advertises no ACP client file-system or terminal capabilities, so there are no ACP callbacks to relay.
+3. **Remote tool environment.** A non-interactive ssh command does not activate mise, so the worker applies `mise env --json -C <session dir>` to each process it starts. This picks up global and per-project mise tools (node, claude, codex, opencode) without shell startup files. The ACP adapters (`claude-agent-acp`, `codex-acp`) come from an Agentworks checkout on the host, with `npm ci`, so their versions match what the server is tested against. OpenCode speaks ACP natively.
+4. **Per-host working directories.** Each host has its own allowed folders in its settings. The new-session dialog offers them, and the worker checks that the chosen directory exists (`check-dir`) before a session starts. These folders are a convenience, not a security boundary: the server already has a shell on the host as that user.
+5. **Workspace features**, the first version being chat-only. Because the worker is the same binary, it runs the existing Rust code locally behind request/response operations on the link:
+   - Model discovery, importing external sessions, and `/usage`/`/status` are ACP-based, so they work over the session relay once step 2 lands.
+   - File browsing, previews, and downloads use bounded worker list/read operations within the host's folders. The server proxies them and never treats a remote path as local.
+   - Git context runs the existing `git_context` code on the worker.
+   - Worktrees run the existing `worktrees` code on the worker.
+   - Automations create sessions in a location, so they work once remote locations exist. The automation's location carries its host.
+6. **Agentworks MCP for remote sessions.** The adapter on the host launches `agentworks mcp` from the worker's own binary, which reports its path in the hello. That stdio front end connects to a loopback port the worker opens and reports in the hello. The worker tunnels each connection over the link, and the server attaches it to its existing MCP bridge. Tools and state stay on the server, and the per-session token authenticates exactly as it does locally.
+7. **Test drops:** kill the link mid-turn and confirm restart-equivalent behavior with no duplicate turns or processes. Command request IDs stay idempotent across reconnects.
+8. **Session creation and trees:** offer connected remote hosts and their folders when creating a session. Verify that one logical project shows sessions on multiple hosts, with distinct paths and accurate connection/activity badges.
+
+Exit: launch sessions on two hosts, drop and restore a link, resume without duplicate turns/processes, and view each host's files through the same browser interface.
 
 ### Later, based on actual use
 

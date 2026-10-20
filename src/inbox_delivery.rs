@@ -969,6 +969,7 @@ mod tests {
                 mcp_endpoint: "127.0.0.1:4505".parse().unwrap(),
                 restart: Arc::new(crate::service_restart::Manager::new()),
                 notifications: crate::notifications::Hub::new(catalog),
+                hosts: crate::hosts::Hosts::new(),
             };
             let make = |id: &str| {
                 let d:crate::SessionData=serde_json::from_value(json!({"status":"idle","seq":0,"requests":[],"models":null,"available_commands":[],"turn_active":false,"project_id":"project","provider_session_id":format!("native-{id}")})).unwrap();

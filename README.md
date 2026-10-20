@@ -179,13 +179,31 @@ Use the sidebar's **Hosts / Projects** toggle to browse the same sessions in eit
 - Hosts: Local → Project → Session
 - Projects: Project → Local → Session
 
-There is one Local execution host for now. Projects are logical groups, independent of host paths: several directories/worktrees can share a project, and the same model supports grouping across remote hosts later.
+Sessions run on the Local host. Other machines can be added as remote hosts (below). They appear in the list with their connection status but cannot run sessions yet. Projects are logical groups, independent of host paths: several directories/worktrees can share a project, and the same model supports grouping across remote hosts.
 
 Use **＋** beside Sessions to create a project, or create one in the new-session dialog. The project's **⋯** button opens rename/delete controls. A session's project selector moves it between groups, including **Ungrouped**, while its agent, working directory, and conversation keep running. Deleting a group moves its sessions to Ungrouped.
 
 Sidebar view and collapse state are remembered per browser. Switching views preserves the selected session, stream connection, draft, and scroll position. Drafts are remembered per session in the browser tab. Running/waiting counts appear on the parent groups.
 
 Projects, settings, and host-local location IDs are saved in `.agentworks/catalog.json`; session metadata and transcripts are saved in `.agentworks/catalog.sessions.sqlite3`. `AGENTWORKS_CATALOG_PATH` can point to another catalog file. This catalog provides organization; file access still follows the server's allowed roots.
+
+### Remote hosts
+
+In the Hosts view, **＋** beside the Hosts heading adds a remote host: a name, an SSH destination, and optionally the command that runs Agentworks there. The server then runs:
+
+```bash
+ssh -T -o BatchMode=yes … <destination> '<command> agent --stdio'
+```
+
+The remote `agentworks agent` prints a ready line and then talks to the server over WebSocket on ssh's own stdin and stdout. Anything the remote shell prints before the ready line, such as a login banner, is skipped. All session state stays on this server. The worker only runs processes on its own machine. If the link drops, the worker exits and the server reconnects with backoff, the same as a server restart. **Running sessions on a remote host is not implemented yet.** For now a connected host reports its hostname, platform, version, and detected providers.
+
+Requirements:
+
+- SSH from this server's user to the destination works non-interactively, using key or agent authentication and a host key already in `known_hosts`. Ports, users, and jump hosts come from `~/.ssh/config`. The server has no SSH settings or credentials of its own.
+- The server process can use your key. A passphrase-protected key needs an SSH agent reachable through `SSH_AUTH_SOCK` in the server's environment. Services, including the Agentworks supervisor, often start without one. Either start the server with `SSH_AUTH_SOCK` pointing at a long-lived agent, such as systemd's `ssh-agent.service` socket at `$XDG_RUNTIME_DIR/ssh-agent.socket` with your key added, or use a dedicated key without a passphrase that is authorized only on the hosts you add. If a host reports `Permission denied` while `SSH_AUTH_SOCK` is unset, the status message says so.
+- Agentworks is built on the remote host from the same version, with `npm ci --ignore-scripts` run there. The remote command defaults to `agentworks` on the remote `PATH`; set it to a full path such as `~/agentworks/target/release/agentworks` otherwise. Provider detection uses the adapter paths of the checkout the binary was built from.
+
+No ports or socket files are opened on either machine. SSH provides authentication and encryption, so there is no separate enrollment secret. Hover a host's status dot for details. When a host is offline, the reason, including ssh's last output, also appears under it. **↻** reconnects immediately, and **×** removes a host with no sessions and stops its worker. `AGENTWORKS_SSH` selects a different ssh program.
 
 ## Multiple project directories
 
@@ -263,6 +281,12 @@ With the server running:
 ```bash
 cargo test --locked
 npm run test:smoke
+```
+
+Remote host links have a separate check that starts its own server and uses `scripts/fake-ssh.sh` in place of ssh, so it needs no SSH server or keys:
+
+```bash
+cargo build --locked && npm run test:remote-hosts
 ```
 
 The smoke test uses the demo agent to exercise ACP streaming, multiple turns, disconnect survival, idempotency, approval allow/stale/invalid responses, cancellation, Markdown sanitization, and directory/origin checks. Workspace checks also cover file boundaries, manual automation runs, approval/concurrency handling, and retained run history. They make no paid model requests.
