@@ -697,6 +697,91 @@ pub async fn remove(State(app): State<App>, Path(id): Path<String>) -> ApiResult
     app.hosts.stop(&id);
     Ok(Json(json!({ "ok": true })))
 }
+/// Validates a new remote session's directory: the host is connected and has
+/// the provider, and the directory exists there inside one of the host's
+/// working directories. Returns the host's canonical path.
+pub(crate) async fn session_directory(
+    app: &App,
+    host_id: &str,
+    req: &crate::Create,
+) -> Result<std::path::PathBuf, (StatusCode, String)> {
+    let unsupported = |what: &str| {
+        Err(fail(
+            StatusCode::BAD_REQUEST,
+            format!("{what} are not available on remote hosts yet."),
+        ))
+    };
+    if req.external_id.is_some() {
+        return unsupported("Imported sessions");
+    }
+    if req.fork.is_some() {
+        return unsupported("Forks");
+    }
+    if req
+        .workspace
+        .as_ref()
+        .is_some_and(|w| w.mode != crate::worktrees::Mode::Directory)
+    {
+        return unsupported("Worktrees");
+    }
+    let (roots, requires_worktree) = {
+        let catalog = app.catalog.lock().unwrap();
+        let host = catalog
+            .data
+            .hosts
+            .iter()
+            .find(|h| h.id == host_id)
+            .ok_or_else(|| fail(StatusCode::BAD_REQUEST, "Host not found"))?;
+        let policy = req
+            .project_id
+            .as_deref()
+            .and_then(|id| catalog.data.projects.iter().find(|p| p.id == id))
+            .map(|p| p.workspace_policy.require_worktree)
+            .unwrap_or(false);
+        (host.roots.clone(), policy)
+    };
+    if requires_worktree {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "This project requires an isolated worktree, which remote hosts do not support yet.",
+        ));
+    }
+    let live = app.hosts.live(host_id).ok_or_else(|| {
+        fail(
+            StatusCode::CONFLICT,
+            "That host is not connected. Reconnect it from the Hosts list.",
+        )
+    })?;
+    if !live.has_provider(&req.provider) {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            format!("{} is not available on that host.", req.provider),
+        ));
+    }
+    if roots.is_empty() {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "Add working directories for this host before starting sessions there.",
+        ));
+    }
+    let cwd = live
+        .check_dir(&req.cwd)
+        .await
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    let cwd = std::path::PathBuf::from(cwd);
+    for root in &roots {
+        if let Ok(root) = live.check_dir(root).await {
+            if cwd.starts_with(&root) {
+                return Ok(cwd);
+            }
+        }
+    }
+    Err(fail(
+        StatusCode::FORBIDDEN,
+        "That directory is outside this host's working directories.",
+    ))
+}
+
 #[derive(Deserialize)]
 pub struct Roots {
     roots: Vec<String>,

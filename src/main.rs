@@ -1122,6 +1122,19 @@ fn effective_roots(app: &App) -> Vec<PathBuf> {
         .clone()
         .unwrap_or_else(|| app.roots.as_ref().clone())
 }
+/// Features that read the session's directory on this server's disk. A
+/// remote session's path belongs to its host, even if the same path happens to
+/// exist here.
+fn local_only(s: &Session) -> Result<(), (StatusCode, String)> {
+    if s.host_id == "local" {
+        Ok(())
+    } else {
+        Err(fail(
+            StatusCode::CONFLICT,
+            "Not available for sessions on remote hosts yet",
+        ))
+    }
+}
 fn checked_cwd(app: &App, path: &str) -> Result<PathBuf, (StatusCode, String)> {
     let cwd = std::fs::canonicalize(path).map_err(|_| {
         fail(
@@ -1768,6 +1781,8 @@ async fn fork_session(
         return session(&app, &child).map(|s| Json(s.meta()));
     }
     let parent = session(&app, &id)?;
+    // Forks carry local workspace state; remote parents are not supported yet.
+    local_only(&parent)?;
     let seed = fork::seed(
         &parent,
         req.boundary_seq,
@@ -1909,13 +1924,14 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
     if !["demo", "claude", "codex", "opencode"].contains(&req.provider.as_str()) {
         return Err(fail(StatusCode::BAD_REQUEST, "Unknown provider"));
     }
-    if use_api_key() && !key_present(&req.provider) {
+    let remote_host = req.host_id.clone().filter(|id| id != "local");
+    if remote_host.is_none() && use_api_key() && !key_present(&req.provider) {
         return Err(fail(
             StatusCode::CONFLICT,
             "Set this provider's API key in the server environment, then restart Agentworks.",
         ));
     }
-    if !installed(&req.provider) {
+    if remote_host.is_none() && !installed(&req.provider) {
         return Err(fail(
             StatusCode::CONFLICT,
             if req.provider == "opencode" {
@@ -1925,7 +1941,10 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             },
         ));
     }
-    let source = checked_cwd(app, &req.cwd)?;
+    let source = match &remote_host {
+        Some(host) => hosts::session_directory(app, host, &req).await?,
+        None => checked_cwd(app, &req.cwd)?,
+    };
     // Registered imports/resume retain their original context, even after policy changes.
     if let Some(external) = &req.external_id {
         let existing = app
@@ -1950,12 +1969,8 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             return Ok(Json(existing.meta()));
         }
     }
-    worktrees::verify_import(app, &req, &source).await?;
-    if req.host_id.as_deref().is_some_and(|id| id != "local") {
-        return Err(fail(
-            StatusCode::BAD_REQUEST,
-            "Only the Local host is available in this prototype",
-        ));
+    if remote_host.is_none() {
+        worktrees::verify_import(app, &req, &source).await?;
     }
     if app
         .sessions
@@ -1976,17 +1991,22 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             "Limit: 12 active harnesses. Suspend idle sessions first.",
         ));
     }
-    let (cwd, owned_worktree) = tokio::time::timeout(
-        std::time::Duration::from_secs(12),
-        worktrees::prepare(app, &req, source, creation_key),
-    )
-    .await
-    .map_err(|_| {
-        fail(
-            StatusCode::CONFLICT,
-            "Workspace preparation timed out; inspect retained branch and files before retrying",
+    // Remote sessions work in the checked host directory; worktrees are local only.
+    let (cwd, owned_worktree) = if remote_host.is_some() {
+        (source, None)
+    } else {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(12),
+            worktrees::prepare(app, &req, source, creation_key),
         )
-    })??;
+        .await
+        .map_err(|_| {
+            fail(
+                StatusCode::CONFLICT,
+                "Workspace preparation timed out; inspect retained branch and files before retrying",
+            )
+        })??
+    };
     let mut catalog = app.catalog.lock().unwrap();
     if req
         .project_id
@@ -1995,7 +2015,9 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
     {
         return Err(fail(StatusCode::BAD_REQUEST, "Project not found"));
     }
-    let location = catalog.location(&cwd).map_err(|_| {
+    let location = catalog
+        .location_on(remote_host.as_deref().unwrap_or("local"), &cwd)
+        .map_err(|_| {
         fail(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Could not save project location",
@@ -2202,10 +2224,22 @@ async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
             "This session's worktree was removed on archive; unarchive it to recreate the worktree",
         ));
     }
-    if !installed(&s.provider) || !s.cwd.is_dir() {
+    if s.host_id == "local" {
+        if !installed(&s.provider) || !s.cwd.is_dir() {
+            return Err(fail(
+                StatusCode::CONFLICT,
+                "Harness or working directory is unavailable on this host",
+            ));
+        }
+    } else if !app
+        .hosts
+        .live(&s.host_id)
+        .is_some_and(|live| live.has_provider(&s.provider))
+    {
+        // The worker checks the directory itself when it starts the adapter.
         return Err(fail(
             StatusCode::CONFLICT,
-            "Harness or working directory is unavailable on this host",
+            "This session's host is not connected, or no longer offers this harness",
         ));
     }
     {
@@ -2600,6 +2634,7 @@ async fn file(
     Query(req): Query<FileQuery>,
 ) -> Result<Response, (StatusCode, String)> {
     let s = session(&app, &id)?;
+    local_only(&s)?;
     // Canonicalize before checking roots: traversal and symlinks cannot escape
     // the workspace roots currently allowed for this session's host.
     checked_cwd(&app, &s.cwd.to_string_lossy())?;

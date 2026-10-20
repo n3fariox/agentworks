@@ -106,13 +106,38 @@ function openCreate(context={}) {
   $('create-agent-access').value='';updateCommunicationDefault();$('create-error').textContent='';$('directory').value=context.cwd||workspaceContext?.cwd||locations[projectId||'ungrouped']||active?.cwd||config.roots[0];$('session-title').value=context.title||'';
   if(context.provider&&$('provider').querySelector(`option[value="${context.provider}"]`))$('provider').value=context.provider;
   $('fork-boundary').replaceChildren(new Option('Latest completed turn at submission',''));$('fork-context').value='auto';$('fork-summary').value='';
-  renderForkHeader();resetCreateModels();providerNote();
+  renderForkHeader();fillCreateHosts(forkSource?'local':context.hostId||'local',context.cwd);providerNote();
   // Forking suggests its own worktree so the new session starts from this one's
   // position; the base revision is filled in from Git once the policy has loaded.
   worktrees.projectChanged(context.workspaceMode);
   $('create-dialog').showModal();
   return generation;
 }
+// Remote hosts appear once connected; sessions there use the host's own
+// working directories and the directory itself (no local worktrees).
+function fillCreateHosts(selected,cwd){
+  const select=$('create-host');select.replaceChildren(new Option('Local','local'));
+  for(const host of hosts.filter(h=>h.kind==='remote')){
+    const option=new Option(host.name+(host.status==='connected'?'':` · ${hostState(host).toLowerCase()}`),host.id);
+    option.disabled=host.status!=='connected';select.append(option);
+  }
+  select.value=[...select.options].some(o=>o.value===selected&&!o.disabled)?selected:'local';
+  select.disabled=!!forkSource;
+  createHostChanged(cwd);
+}
+function createHost(){return hosts.find(h=>h.id===$('create-host').value&&h.kind==='remote')||null;}
+function createHostChanged(cwd){
+  const host=createHost(),roots=host?host.roots||[]:config.roots;
+  $('project-roots').replaceChildren(...roots.map(root=>{const option=el('option');option.value=root;return option;}));
+  if(host){
+    $('directory').value=cwd||roots[0]||'';
+    $('roots-note').textContent=roots.length?`Working directories on ${host.name}: ${roots.join(', ')}. Remote sessions use the directory itself; worktrees, files and Git views are local only for now.`:`Add working directories to ${host.name} first (⋯ on the host).`;
+  }else{
+    $('roots-note').textContent='Allowed roots: '+config.roots.join(', ');
+  }
+  resetCreateModels();
+}
+$('create-host').onchange=()=>createHostChanged();
 function renderForkHeader(){
   const fork=forkSource;
   $('create-fork-note').hidden=!fork;$('fork-options').hidden=!fork;
@@ -157,7 +182,8 @@ function resetCreateModels(){
   const carried=forkSource?.model&&forkSource.provider===$('provider').value?forkSource.model:null;
   const defaultId=carried||config.defaultModels?.[$('provider').value];
   const option=el('option','',carried?`From “${forkSource.title}” · ${carried}`:defaultId?`Saved default · ${defaultId}`:'Harness default');option.value=defaultId||'';select.append(option);
-  $('load-models').disabled=false;$('model-note').textContent='Load available models from the agent without sending a prompt.';
+  const remote=createHost();$('load-models').disabled=!!remote;
+  $('model-note').textContent=remote?'Models load from local harnesses only. Remote sessions start with this choice or the harness default; change the model once the session starts.':'Load available models from the agent without sending a prompt.';
 }
 async function loadCreateModels(){
   const gen=++discoveryGeneration,provider=$('provider').value,cwd=$('directory').value;
@@ -294,7 +320,7 @@ function hostTitle(host){
 function hostNote(host){
   if(host.status==='offline')return host.detail||'Offline.';
   if(host.status==='connecting')return host.detail?'Reconnecting. Last attempt: '+host.detail:'Connecting over SSH…';
-  return 'Connected. Running sessions on remote hosts is not supported yet.';
+  return host.roots?.length?'Connected. No sessions yet.':'Connected. Add working directories (⋯) to start sessions here.';
 }
 async function hostAction(host,action){
   if(action==='remove'&&!confirm(`Remove host ${host.name}? Its worker stops; nothing on that machine is deleted.`))return;
@@ -314,11 +340,17 @@ function treeGroup(key,label,items,{host=null,projectId=null,level=0,archived=fa
   if(host?.kind==='remote'){
     // Sessions cannot run on remote hosts yet, so offer link controls instead of a new session.
     if(level===0){
-      const actions=[['reconnect','↻','Reconnect '+label]];if(!items.length)actions.push(['remove','×','Remove host '+label]);
+      const actions=[['roots','⋯','Working directories on '+label],['reconnect','↻','Reconnect '+label]];if(!items.length)actions.push(['remove','×','Remove host '+label]);
+      if(host.status==='connected'&&host.roots?.length)actions.unshift(['create','＋','New session in '+label]);
       actions.forEach(([action,text,name],index)=>{
         const button=el('button','group-action'+(index?'':' add-session'),text);button.type='button';button.setAttribute('aria-label',name);
-        button.onclick=event=>{event.preventDefault();event.stopPropagation();hostAction(host,action);};heading.append(button);
+        button.onclick=event=>{event.preventDefault();event.stopPropagation();
+          if(action==='create')openCreate({projectId,hostId:host.id});else if(action==='roots')openHostRoots(host);else hostAction(host,action);};
+        heading.append(button);
       });
+    }else if(host.status==='connected'&&host.roots?.length){
+      const add=el('button','group-action add-session','＋');add.type='button';add.setAttribute('aria-label','New session in '+label);
+      add.onclick=event=>{event.preventDefault();event.stopPropagation();openCreate({projectId,hostId:host.id});};heading.append(add);
     }
   }else{
     const add=el('button','group-action add-session','＋');add.type='button';add.setAttribute('aria-label','New session in '+label);
@@ -771,6 +803,20 @@ function draw(){
 $('new-session').onclick=()=>openCreate();$('welcome-new').onclick=()=>openCreate();
 $('view-hosts').onclick=()=>setSidebarView('hosts');$('view-projects').onclick=()=>setSidebarView('projects');
 $('new-project').onclick=()=>sidebarView==='hosts'?openHostDialog():openProjectDialog();$('create-project-new').onclick=()=>openProjectDialog();
+let editingHostRoots=null;
+function openHostRoots(host){
+  editingHostRoots=host.id;$('host-roots-title').textContent='Working directories on '+host.name;
+  $('host-roots').value=(host.roots||[]).join('\n');$('host-roots-error').textContent='';$('host-roots-dialog').showModal();$('host-roots').focus();
+}
+$('dismiss-host-roots').onclick=()=>$('host-roots-dialog').close();
+$('host-roots-form').onsubmit=async event=>{
+  event.preventDefault();$('host-roots-error').textContent='';$('save-host-roots').disabled=true;
+  try{
+    const roots=$('host-roots').value.split('\n').map(r=>r.trim()).filter(Boolean);
+    await api(`/api/hosts/${editingHostRoots}/roots`,{method:'PUT',body:JSON.stringify({roots})});
+    $('host-roots-dialog').close();await refreshSessions();
+  }catch(error){$('host-roots-error').textContent=error.message;}finally{$('save-host-roots').disabled=false;}
+};
 function openHostDialog(){
   $('host-form').reset();$('host-error').textContent='';$('host-dialog').showModal();$('host-name').focus();
 }
@@ -868,7 +914,7 @@ $('create-form').onsubmit=async event=>{
   event.preventDefault();if(creating||worktrees.blocked())return;creating=true;providerNote();$('create-error').textContent='';
   const fork=forkSource;
   try{
-    const payload={resumePolicy:{enabled:$('create-resume-policy').checked},provider:$('provider').value,...worktrees.submission(),title:$('session-title').value,projectId:$('create-project').value||null,hostId:$('create-host').value,model:$('create-model').value,...($('create-agent-access').value?{agentAccess:{communicate:$('create-agent-access').value!=='off',...Object.fromEntries(['startSessions','promptSessions','cancelSessions','runAutomations'].map(key=>[key,$('create-agent-access').value==='coordinator']))}}:{})};
+    const payload={resumePolicy:{enabled:$('create-resume-policy').checked},provider:$('provider').value,...worktrees.submission(),...(createHost()?{workspace:{mode:'directory'},cwd:$('directory').value}:{}),title:$('session-title').value,projectId:$('create-project').value||null,hostId:$('create-host').value,model:$('create-model').value,...($('create-agent-access').value?{agentAccess:{communicate:$('create-agent-access').value!=='off',...Object.fromEntries(['startSessions','promptSessions','cancelSessions','runAutomations'].map(key=>[key,$('create-agent-access').value==='coordinator']))}}:{})};
     if(fork)Object.assign(payload,{boundarySeq:$('fork-boundary').value?Number($('fork-boundary').value):null,context:$('fork-context').value,summary:$('fork-context').value==='summary'?$('fork-summary').value:null});
     const signature=JSON.stringify({source:fork?.id||null,payload});
     if(!pendingCreate||pendingCreate.signature!==signature)pendingCreate={signature,requestId:uuid()};

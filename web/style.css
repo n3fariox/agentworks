@@ -333,3 +333,4 @@ dialog.image-viewer{width:96vw;max-width:96vw;height:92dvh;max-height:92dvh;padd
 .tool-activity{display:block;font-size:11px;line-height:1.6;color:var(--muted);overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
 .tool-activity.has-progress{color:var(--text)}
 .tool-activity.is-running::before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--accent);margin-right:7px;vertical-align:middle;animation:pulse 1.8s infinite}
+#host-roots{width:100%;box-sizing:border-box;resize:vertical;background:#111417;color:var(--text);border:1px solid #3a3d45;border-radius:7px;padding:10px 12px;font:12px ui-monospace,monospace}

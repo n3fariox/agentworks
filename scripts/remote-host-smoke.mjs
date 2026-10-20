@@ -1,9 +1,10 @@
 // Exercises remote host links: ssh launch, WebSocket over ssh stdio,
-// handshake, failure detail, drop and reconnect, restart, and removal. Uses
+// handshake, failure detail, remote chat sessions, drop and reconnect,
+// restart, and removal. Uses
 // scripts/fake-ssh.sh in place of ssh, so no SSH server or keys are needed.
 import assert from 'node:assert/strict';
 import {spawn,execFileSync} from 'node:child_process';
-import {mkdtemp,symlink} from 'node:fs/promises';
+import {mkdtemp,mkdir,symlink,readdir,readlink} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 import {once} from 'node:events';
 const dir=await mkdtemp(resolve('.cache/remote-host-'));
@@ -22,6 +23,22 @@ async function start(){
 async function stop(){const exit=once(server,'exit');server.kill('SIGINT');await exit;server=null;}
 const host=async id=>(await api('/api/catalog')).hosts.find(h=>h.id===id);
 async function until(id,check,label){let last;for(let i=0;i<150;i++){last=await host(id);if(last&&check(last))return last;await delay(100);}throw new Error(`${label}: ${JSON.stringify(last)}`);}
+async function idle(id){for(let i=0;i<200;i++){const s=await api(`/api/sessions/${id}`);if(s.session.status==='idle')return s;assert.notEqual(s.session.status,'error',JSON.stringify(s.events.at(-1)));await delay(100);}throw new Error('Idle timed out '+id);}
+async function prompt(id,text){
+  const old=await idle(id);await api(`/api/sessions/${id}/prompt`,{text,requestId:crypto.randomUUID()});
+  await delay(300);const s=await idle(id);
+  return s.events.filter(e=>e.seq>old.seq&&e.kind==='acp'&&e.data.sessionUpdate==='agent_message_chunk').map(e=>e.data.content.text).join('');
+}
+// Demo agents started for this run: identified by their working directory.
+async function agents(cwd){
+  const found=[];
+  for(const pid of await readdir('/proc').catch(()=>[])){
+    if(!/^\d+$/.test(pid))continue;
+    try{if((await readlink(`/proc/${pid}/cwd`))===cwd&&execFileSync('cat',[`/proc/${pid}/cmdline`]).toString().includes('demo-agent'))found.push(pid);}catch{}
+  }
+  return found;
+}
+async function settled(check,label){for(let i=0;i<100;i++){if(await check())return;await delay(100);}throw new Error(label);}
 const workers=()=>{try{return execFileSync('pgrep',['-f',`${worker} agent --stdio`]).toString().trim().split('\n').filter(Boolean);}catch{return [];}};
 try{
   await start();
@@ -47,23 +64,45 @@ try{
   assert.match(absent.detail,/No such file or directory/);
   await api(`/api/hosts/${missing.id}`,undefined,'DELETE');assert.doesNotMatch(offline.detail,/ssh: ssh:/);assert.match(offline.detail,/Retrying in \d+s/);
 
-  // A dropped link is treated like a restart: the worker exits and a fresh one connects.
+  // Chat sessions run on the host: the worker starts the adapter there.
+  const work=join(dir,'work');await mkdir(work);
+  await api('/api/sessions',{provider:'demo',cwd:work,hostId:box.id},'POST',409);
+  await api(`/api/hosts/${box.id}/roots`,{roots:[work]},'PUT');
+  await api('/api/sessions',{provider:'demo',cwd:'/etc',hostId:box.id},'POST',403);
+  await api('/api/sessions',{provider:'demo',cwd:work,hostId:box.id,workspace:{mode:'newWorktree'}},'POST',400);
+  const remote=await api('/api/sessions',{provider:'demo',cwd:work,hostId:box.id,title:'Remote'});
+  assert.equal(remote.hostId,box.id);
+  assert.match(await prompt(remote.id,'hello'),/hello/);
+  assert.equal((await agents(work)).length,1);
+  // Paths on the host are never read from this server's disk.
+  await api(`/api/sessions/${remote.id}/file?path=x`,undefined,'GET',409);
+  await api(`/api/sessions/${remote.id}/workspace`,undefined,'GET',409);
+  await api(`/api/hosts/${box.id}`,undefined,'DELETE',409);
+
+  // A dropped link is treated like a restart: the worker exits, nothing it
+  // started survives, a fresh worker connects, and the session resumes.
   const [first]=workers();process.kill(Number(first),'SIGKILL');
   await until(box.id,h=>h.status!=='connected','Drop not noticed');
+  await settled(async()=>(await agents(work)).length===0,'Agent survived the dropped link');
   await until(box.id,h=>h.status==='connected','No reconnect after drop');
   assert.equal(workers().length,1);assert.notEqual(workers()[0],first);
+  const dropped=(await api(`/api/sessions/${remote.id}`)).session.status;
+  assert.ok(!['idle','running'].includes(dropped),'Session still looked live after the drop: '+dropped);
+  await api(`/api/sessions/${remote.id}/resume`,{});
+  assert.match(await prompt(remote.id,'after the drop'),/after the drop/);
 
   const before=workers()[0];await api(`/api/hosts/${box.id}/reconnect`,{});
   await until(box.id,h=>h.status==='connected'&&workers()[0]!==before,'Reconnect did not replace the worker');
   assert.equal(workers().length,1);
 
-  // Sessions still only run locally.
-  await api('/api/sessions',{provider:'demo',cwd:resolve('.'),title:'Remote',hostId:box.id},'POST',400);
-
   await stop();
   await delay(300);assert.deepEqual(workers(),[],'Workers survived server shutdown');
   await start();
   await until(box.id,h=>h.status==='connected','Box did not reconnect after server restart');
+  await api(`/api/sessions/${remote.id}/resume`,{});
+  assert.match(await prompt(remote.id,'after the restart'),/after the restart/);
+  await api(`/api/sessions/${remote.id}`,undefined,'DELETE');
+  await settled(async()=>(await agents(work)).length===0,'Agent survived session deletion');
 
   await api(`/api/hosts/${down.id}`,undefined,'DELETE');
   await api(`/api/hosts/${box.id}`,undefined,'DELETE');

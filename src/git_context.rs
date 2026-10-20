@@ -18,6 +18,7 @@ const INSPECTION_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub async fn workspace(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     let s = session(&app, &id)?;
+    crate::local_only(&s)?;
     let roots = effective_roots(&app);
     // Recheck current roots and symlinks without rejecting a removed saved directory.
     let cwd = tokio::fs::canonicalize(&s.cwd).await.ok();

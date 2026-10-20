@@ -15,6 +15,10 @@ use tokio::{
 };
 
 pub fn configuration(s: &Session) -> Vec<McpServer> {
+    // The stdio executable and loopback bridge are only available on this server.
+    if s.host_id != "local" {
+        return Vec::new();
+    }
     let server = McpServerStdio::new(
         "agentworks",
         std::env::current_exe().expect("executable path"),

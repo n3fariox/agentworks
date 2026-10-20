@@ -35,6 +35,9 @@ async function fixture(page){
     }
     const reconnect=path.match(/^\/api\/hosts\/([^/]+)\/reconnect$/);
     if(reconnect){const host=state.hosts.find(h=>h.id===reconnect[1]);Object.assign(host,{status:'connecting',detail:''});return json(host);}
+    const roots=path.match(/^\/api\/hosts\/([^/]+)\/roots$/);
+    if(roots&&method==='PUT'){const host=state.hosts.find(h=>h.id===roots[1]);host.roots=request.postDataJSON().roots;return json(host);}
+    if(path==='/api/sessions'&&method==='POST'){state.created=request.postDataJSON();return route.fulfill({status:409,body:'stop here'});}
     const host=path.match(/^\/api\/hosts\/([^/]+)$/);
     if(host&&method==='DELETE'){state.hosts=state.hosts.filter(h=>h.id!==host[1]);return json({ok:true});}
     return json({});
@@ -53,7 +56,7 @@ for(const mobile of [false,true]){
     const box=page.locator('[data-group="host:r1"]');
     await expect(box.locator('.tree-label').first()).toHaveText('build-box');
     await expect(box.locator('.connection-dot.connected')).toHaveAttribute('title','Connected · ssh dev@build-box · build-box · linux-x86_64 · providers: demo, claude · v0.1.0');
-    await expect(box).toContainText('not supported yet');
+    await expect(box).toContainText('Add working directories');
     await expect(box.getByRole('button',{name:'New session in build-box'})).toHaveCount(0);
     // The offline reason is shown inline, not only on hover.
     const old=page.locator('[data-group="host:r2"]');
@@ -88,4 +91,32 @@ test('empty remote hosts stay out of the Projects view',async({page})=>{
   await expect(page.locator('#section-title')).toHaveText('SESSIONS');await expect(page.locator('#session-count')).toHaveText('0');
   await expect(page.locator('[data-group="project:a:host:local"]')).toHaveCount(1);
   await expect(page.locator('[data-group^="project:a:host:r"]')).toHaveCount(0);
+});
+
+test('host working directories enable remote sessions in the new-session dialog',async({page})=>{
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));const s=await fixture(page);
+  await page.locator('#view-hosts').click();
+  const box=page.locator('[data-group="host:r1"]');
+  await box.getByRole('button',{name:'Working directories on build-box'}).click();
+  await page.locator('#host-roots').fill('~/projects\n\n/srv/app');
+  await page.locator('#save-host-roots').click();
+  await expect(page.locator('#host-roots-dialog')).toBeHidden();
+  expect(s.requests.at(-1)).toEqual({path:'/api/hosts/r1/roots',method:'PUT',body:{roots:['~/projects','/srv/app']}});
+  await expect(box).toContainText('No sessions yet');
+  // Offline hosts cannot take new sessions; connected ones with directories can.
+  await expect(page.locator('[data-group="host:r2"]').getByRole('button',{name:'New session in old-box'})).toHaveCount(0);
+  await box.getByRole('button',{name:'New session in build-box'}).click();
+  await expect(page.locator('#create-host')).toHaveValue('r1');
+  await expect(page.locator('#create-host option[value="r2"]')).toBeDisabled();
+  await expect(page.locator('#directory')).toHaveValue('~/projects');
+  await expect(page.locator('#load-models')).toBeDisabled();
+  await expect(page.locator('#roots-note')).toContainText('Working directories on build-box: ~/projects, /srv/app');
+  await page.locator('#create-submit').click();
+  await expect(page.locator('#create-error')).toContainText('stop here');
+  expect(s.created).toMatchObject({hostId:'r1',cwd:'~/projects',workspace:{mode:'directory'}});
+  // Switching back to Local restores local roots and model discovery.
+  await page.locator('#create-host').selectOption('local');
+  await expect(page.locator('#load-models')).toBeEnabled();
+  await expect(page.locator('#roots-note')).toContainText('Allowed roots: /repo');
+  expect(errors).toEqual([]);
 });
