@@ -638,6 +638,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     service_restart::initialize(&app)?;
     input_queue::initialize(&app)?;
     tokio::spawn(service_restart::scheduler(app.clone()));
+    app.hosts.install();
     for host in app.catalog.lock().unwrap().data.hosts.clone() {
         app.hosts.start(host);
     }
@@ -892,6 +893,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/hosts", post(hosts::add))
         .route("/api/hosts/{id}", axum::routing::delete(hosts::remove))
         .route("/api/hosts/{id}/reconnect", post(hosts::reconnect))
+        .route("/api/hosts/{id}/roots", axum::routing::put(hosts::set_roots))
         .route("/api/projects", post(create_project))
         .route(
             "/api/projects/{id}",

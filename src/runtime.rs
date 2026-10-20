@@ -44,7 +44,11 @@ impl Command {
     }
 }
 
-fn agent_config(provider: &str, api_key_mode: bool, host_profile: bool) -> AcpAgentConfig {
+pub(crate) fn agent_config(
+    provider: &str,
+    api_key_mode: bool,
+    host_profile: bool,
+) -> AcpAgentConfig {
     let config = if provider == "demo" {
         AcpAgentConfig::new("node").arg(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -107,7 +111,7 @@ fn agent_for(provider: &str, host_profile: bool) -> AcpAgent {
     AcpAgent::new(agent_config(provider, use_api_key(), host_profile))
 }
 
-fn prepare(provider: &str) -> std::io::Result<()> {
+pub(crate) fn prepare(provider: &str) -> std::io::Result<()> {
     if provider == "opencode" {
         for dir in ["data", "cache", "state", "config"] {
             std::fs::create_dir_all(

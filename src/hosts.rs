@@ -11,6 +11,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -20,17 +21,19 @@ use std::{
     process::Stdio,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
+use tokio::sync::{mpsc, oneshot};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, BufReader},
     process::Command,
 };
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Message, protocol::WebSocketConfig};
 
-pub const PROTOCOL: u64 = 1;
+pub const PROTOCOL: u64 = 2;
+const MAX_FRAME: usize = 64 * 1024 * 1024;
 /// The worker prints this line on stdout before the WebSocket starts. Anything
 /// earlier, such as output from the remote shell's startup files, is skipped.
 pub const READY: &str = "agentworks worker ready";
@@ -63,15 +66,27 @@ pub struct Hosts {
     /// over its replacement.
     tasks: Mutex<HashMap<String, (u64, tokio::task::AbortHandle)>>,
     generation: AtomicU64,
+    live: Mutex<HashMap<String, Arc<Live>>>,
     ssh: String,
 }
 
+static REGISTRY: std::sync::OnceLock<Arc<Hosts>> = std::sync::OnceLock::new();
+/// The server's hosts, for code that only has a session in hand.
+pub fn registry() -> Option<&'static Arc<Hosts>> {
+    REGISTRY.get()
+}
+
 impl Hosts {
+    /// Makes these hosts reachable through `registry()`; called once at startup.
+    pub fn install(self: &Arc<Self>) {
+        let _ = REGISTRY.set(self.clone());
+    }
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             links: Default::default(),
             tasks: Default::default(),
             generation: AtomicU64::new(0),
+            live: Default::default(),
             ssh: std::env::var("AGENTWORKS_SSH").unwrap_or_else(|_| "ssh".into()),
         })
     }
@@ -90,6 +105,9 @@ impl Hosts {
             task.abort();
         }
         self.links.lock().unwrap().remove(id);
+        if let Some(live) = self.live.lock().unwrap().remove(id) {
+            live.close("The host was disconnected.");
+        }
     }
     pub fn stop_all(&self) {
         for (_, (_, task)) in self.tasks.lock().unwrap().drain() {
@@ -115,6 +133,20 @@ impl Hosts {
                 worker,
             },
         );
+    }
+    /// The connected worker for a host, if its link is up.
+    pub fn live(&self, id: &str) -> Option<Arc<Live>> {
+        self.live.lock().unwrap().get(id).cloned()
+    }
+    fn set_live(&self, id: &str, generation: u64, live: Option<Arc<Live>>) {
+        let tasks = self.tasks.lock().unwrap();
+        if tasks.get(id).is_some_and(|(g, _)| *g == generation) {
+            let mut map = self.live.lock().unwrap();
+            match live {
+                Some(live) => map.insert(id.into(), live),
+                None => map.remove(id),
+            };
+        }
     }
     fn set(
         &self,
@@ -222,7 +254,7 @@ impl Hosts {
 
         let mut ws = match tokio::time::timeout(
             HELLO_TIMEOUT,
-            tokio_tungstenite::accept_async(stream),
+            tokio_tungstenite::accept_async_with_config(stream, Some(ws_config())),
         )
         .await
         {
@@ -257,6 +289,20 @@ impl Hosts {
         {
             return "Connection lost during the handshake.".into();
         }
+
+        // One writer owns the socket; sessions and pings queue frames for it.
+        let (mut sink, mut frames) = ws.split();
+        let (out, mut outgoing) = mpsc::channel::<Message>(256);
+        let writer = tokio::spawn(async move {
+            while let Some(message) = outgoing.recv().await {
+                if sink.send(message).await.is_err() {
+                    break;
+                }
+            }
+            let _ = sink.close().await;
+        });
+        let live = Arc::new(Live::new(out.clone(), worker.clone()));
+        self.set_live(&host.id, generation, Some(live.clone()));
         self.set(
             &host.id,
             generation,
@@ -268,30 +314,209 @@ impl Hosts {
         let mut last_heard = Instant::now();
         let mut ping = tokio::time::interval(PING_EVERY);
         ping.tick().await;
-        let reason: String = loop {
+        let ended: Result<String, io::Result<std::process::ExitStatus>> = loop {
             tokio::select! {
-                frame = ws.next() => match frame {
-                    None | Some(Ok(Message::Close(_))) => break "The worker closed the connection.".into(),
-                    Some(Err(e)) => break format!("Connection error: {e}."),
-                    // No worker-initiated messages are defined beyond the
-                    // handshake yet; any frame still counts as a sign of life.
-                    Some(Ok(_)) => last_heard = Instant::now(),
+                frame = frames.next() => match frame {
+                    None | Some(Ok(Message::Close(_))) => break Ok("The worker closed the connection.".into()),
+                    Some(Err(e)) => break Ok(format!("Connection error: {e}.")),
+                    Some(Ok(message)) => {
+                        last_heard = Instant::now();
+                        live.receive(message);
+                    }
                 },
-                status = child.wait() => return exited(status).await,
+                status = child.wait() => break Err(status),
                 _ = ping.tick() => {
                     if last_heard.elapsed() > SILENCE_LIMIT {
-                        break "The worker stopped responding.".into();
+                        break Ok("The worker stopped responding.".into());
                     }
-                    if ws.send(Message::Ping(Default::default())).await.is_err() {
-                        break "Connection lost.".into();
+                    if out.send(Message::Ping(Default::default())).await.is_err() {
+                        break Ok("Connection lost.".into());
                     }
                 }
             }
         };
-        // If ssh is exiting too, its output usually says why.
-        match tokio::time::timeout(Duration::from_millis(500), child.wait()).await {
-            Ok(status) => format!("{reason} {}", exited(status).await),
-            Err(_) => reason,
+        // Sessions on this host see their streams end, as after a server restart.
+        self.set_live(&host.id, generation, None);
+        live.close("The host disconnected.");
+        writer.abort();
+        match ended {
+            Err(status) => exited(status).await,
+            // If ssh is exiting too, its output usually says why.
+            Ok(reason) => {
+                match tokio::time::timeout(Duration::from_millis(500), child.wait()).await {
+                    Ok(status) => format!("{reason} {}", exited(status).await),
+                    Err(_) => reason,
+                }
+            }
+        }
+    }
+}
+
+/// Generous limits: one ACP line, such as a replayed transcript or an image,
+/// travels as one frame.
+pub fn ws_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(MAX_FRAME))
+        .max_frame_size(Some(MAX_FRAME))
+}
+
+/// A connected worker, as seen by the rest of the server. Each remote process
+/// gets a channel number; its ACP lines travel as binary frames prefixed with
+/// that number, and control messages travel as JSON text frames.
+pub struct Live {
+    out: mpsc::Sender<Message>,
+    channels: Mutex<HashMap<u32, UnboundedSender<io::Result<String>>>>,
+    next_channel: AtomicU32,
+    requests: Mutex<HashMap<u64, oneshot::Sender<Result<String, String>>>>,
+    next_request: AtomicU64,
+    worker: Value,
+}
+
+impl Live {
+    fn new(out: mpsc::Sender<Message>, worker: Value) -> Self {
+        Self {
+            out,
+            channels: Default::default(),
+            next_channel: AtomicU32::new(0),
+            requests: Default::default(),
+            next_request: AtomicU64::new(0),
+            worker,
+        }
+    }
+    pub fn has_provider(&self, provider: &str) -> bool {
+        self.worker["providers"]
+            .as_array()
+            .is_some_and(|p| p.iter().any(|p| p == provider))
+    }
+    fn receive(&self, message: Message) {
+        match message {
+            Message::Binary(data) if data.len() >= 4 => {
+                let channel = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                let line = String::from_utf8_lossy(&data[4..]).into_owned();
+                if let Some(tx) = self.channels.lock().unwrap().get(&channel) {
+                    let _ = tx.unbounded_send(Ok(line));
+                }
+            }
+            Message::Text(text) => {
+                let Ok(value) = serde_json::from_str::<Value>(&text) else {
+                    return;
+                };
+                match value["type"].as_str() {
+                    Some("exit") => {
+                        let channel = value["channel"].as_u64().unwrap_or(0) as u32;
+                        if let Some(tx) = self.channels.lock().unwrap().remove(&channel) {
+                            let message = value["message"].as_str().unwrap_or("");
+                            if !message.is_empty() {
+                                let _ =
+                                    tx.unbounded_send(Err(io::Error::other(message.to_string())));
+                            }
+                        }
+                    }
+                    Some("reply") => {
+                        let id = value["request"].as_u64().unwrap_or(0);
+                        if let Some(tx) = self.requests.lock().unwrap().remove(&id) {
+                            let _ = tx.send(match value["error"].as_str() {
+                                Some(error) => Err(error.to_string()),
+                                None => Ok(value["path"].as_str().unwrap_or("").to_string()),
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    fn close(&self, reason: &str) {
+        for (_, tx) in self.channels.lock().unwrap().drain() {
+            let _ = tx.unbounded_send(Err(io::Error::other(reason.to_string())));
+        }
+        for (_, tx) in self.requests.lock().unwrap().drain() {
+            let _ = tx.send(Err(reason.to_string()));
+        }
+    }
+    /// Asks the worker to resolve a directory on its machine, returning the
+    /// canonical path.
+    pub async fn check_dir(&self, path: &str) -> Result<String, String> {
+        let id = self.next_request.fetch_add(1, Ordering::Relaxed) + 1;
+        let (tx, rx) = oneshot::channel();
+        self.requests.lock().unwrap().insert(id, tx);
+        let request = json!({"type":"checkDir","request":id,"path":path}).to_string();
+        if self.out.send(Message::text(request)).await.is_err() {
+            self.requests.lock().unwrap().remove(&id);
+            return Err("The host disconnected.".into());
+        }
+        match tokio::time::timeout(Duration::from_secs(15), rx).await {
+            Ok(Ok(result)) => result,
+            _ => {
+                self.requests.lock().unwrap().remove(&id);
+                Err("The host did not answer.".into())
+            }
+        }
+    }
+    /// Starts an agent adapter on the worker. The returned transport carries
+    /// its ACP lines; dropping the guard stops the remote process.
+    pub fn spawn(
+        self: &Arc<Self>,
+        provider: &str,
+        cwd: &str,
+        host_profile: bool,
+    ) -> Result<(RemoteLines, Spawned), String> {
+        let channel = self.next_channel.fetch_add(1, Ordering::Relaxed) + 1;
+        let (incoming_tx, incoming) = unbounded();
+        self.channels.lock().unwrap().insert(channel, incoming_tx);
+        let spawn = json!({"type":"spawn","channel":channel,"provider":provider,"cwd":cwd,"hostProfile":host_profile});
+        if self.out.try_send(Message::text(spawn.to_string())).is_err() {
+            self.channels.lock().unwrap().remove(&channel);
+            return Err("The host disconnected.".into());
+        }
+        let (outgoing, mut lines) = futures::channel::mpsc::channel::<String>(64);
+        let out = self.out.clone();
+        let forward = tokio::spawn(async move {
+            while let Some(line) = lines.next().await {
+                let mut frame = Vec::with_capacity(line.len() + 4);
+                frame.extend_from_slice(&channel.to_be_bytes());
+                frame.extend_from_slice(line.as_bytes());
+                if out.send(Message::binary(frame)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let outgoing: RemoteSink = Box::pin(outgoing.sink_map_err(io::Error::other));
+        Ok((
+            agent_client_protocol::Lines::new(outgoing, incoming),
+            Spawned {
+                live: self.clone(),
+                channel,
+                forward,
+            },
+        ))
+    }
+}
+
+type RemoteSink = std::pin::Pin<Box<dyn futures::Sink<String, Error = io::Error> + Send>>;
+pub type RemoteLines =
+    agent_client_protocol::Lines<RemoteSink, UnboundedReceiver<io::Result<String>>>;
+
+/// Keeps a remote process alive; dropping it asks the worker to stop it.
+pub struct Spawned {
+    live: Arc<Live>,
+    channel: u32,
+    forward: tokio::task::JoinHandle<()>,
+}
+impl Drop for Spawned {
+    fn drop(&mut self) {
+        self.forward.abort();
+        if self
+            .live
+            .channels
+            .lock()
+            .unwrap()
+            .remove(&self.channel)
+            .is_some()
+        {
+            let kill = json!({"type":"kill","channel":self.channel}).to_string();
+            let _ = self.live.out.try_send(Message::text(kill));
         }
     }
 }
@@ -426,6 +651,7 @@ pub fn view(hosts: &Hosts, host: &Host) -> Value {
         "kind": "remote",
         "destination": host.destination,
         "command": host.command,
+        "roots": host.roots,
         "status": link.status,
         "detail": link.detail,
         "since": link.since,
@@ -451,6 +677,18 @@ pub async fn add(State(app): State<App>, Json(req): Json<NewHost>) -> ApiResult 
     Ok(Json(view(&app.hosts, &host)))
 }
 pub async fn remove(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
+    if app
+        .sessions
+        .lock()
+        .unwrap()
+        .values()
+        .any(|s| s.host_id == id)
+    {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "Delete this host's sessions before removing it",
+        ));
+    }
     app.catalog
         .lock()
         .unwrap()
@@ -458,6 +696,23 @@ pub async fn remove(State(app): State<App>, Path(id): Path<String>) -> ApiResult
         .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
     app.hosts.stop(&id);
     Ok(Json(json!({ "ok": true })))
+}
+#[derive(Deserialize)]
+pub struct Roots {
+    roots: Vec<String>,
+}
+pub async fn set_roots(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(req): Json<Roots>,
+) -> ApiResult {
+    let host = app
+        .catalog
+        .lock()
+        .unwrap()
+        .set_host_roots(&id, req.roots)
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(view(&app.hosts, &host)))
 }
 /// Drops the current link, if any, and connects again immediately.
 pub async fn reconnect(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
@@ -486,6 +741,7 @@ mod tests {
             name: "Box".into(),
             destination: "dev@box".into(),
             command: "~/bin/agentworks".into(),
+            roots: Vec::new(),
         };
         let args = ssh_args(&host);
         let dash = args.iter().position(|a| a == "--").unwrap();

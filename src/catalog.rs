@@ -45,6 +45,10 @@ pub struct Host {
     /// Shell command on the remote host that runs the Agentworks binary.
     #[serde(default)]
     pub command: String,
+    /// Working directories offered for sessions on this host. Paths are the
+    /// host's own; `~/` refers to the remote user's home.
+    #[serde(default)]
+    pub roots: Vec<String>,
 }
 pub const DEFAULT_REMOTE_COMMAND: &str = "agentworks";
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -217,17 +221,20 @@ impl Catalog {
         Ok(())
     }
     pub fn location(&mut self, path: &Path) -> io::Result<Location> {
+        self.location_on("local", path)
+    }
+    pub fn location_on(&mut self, host_id: &str, path: &Path) -> io::Result<Location> {
         if let Some(location) = self
             .data
             .locations
             .iter()
-            .find(|l| l.host_id == "local" && l.path == path)
+            .find(|l| l.host_id == host_id && l.path == path)
         {
             return Ok(location.clone());
         }
         let location = Location {
             id: Uuid::new_v4().to_string(),
-            host_id: "local".into(),
+            host_id: host_id.into(),
             path: path.into(),
         };
         let mut data = self.data.clone();
@@ -269,20 +276,59 @@ impl Catalog {
             name: name.into(),
             destination: destination.into(),
             command: command.into(),
+            roots: Vec::new(),
         };
         let mut data = self.data.clone();
         data.hosts.push(host.clone());
         self.save(data).map_err(|_| "Could not save host")?;
         Ok(host)
     }
+    pub fn set_host_roots(&mut self, id: &str, roots: Vec<String>) -> Result<Host, String> {
+        let mut cleaned: Vec<String> = Vec::new();
+        for root in roots {
+            let root = root.trim().trim_end_matches('/').to_string();
+            let root = if root.is_empty() { "/".to_string() } else { root };
+            if !(root.starts_with('/') || root == "~" || root.starts_with("~/"))
+                || root.len() > 4096
+                || root.chars().any(char::is_control)
+            {
+                return Err(format!("Use absolute paths or ~/… paths, not {root}"));
+            }
+            if !cleaned.contains(&root) {
+                cleaned.push(root);
+            }
+        }
+        if cleaned.len() > 50 {
+            return Err("Use at most 50 working directories per host".into());
+        }
+        let mut data = self.data.clone();
+        let host = data
+            .hosts
+            .iter_mut()
+            .find(|h| h.id == id)
+            .ok_or("Host not found")?;
+        host.roots = cleaned;
+        let host = host.clone();
+        self.save(data).map_err(|_| "Could not save host")?;
+        Ok(host)
+    }
+    /// Removes a host and the locations recorded on it. Callers must first
+    /// make sure no sessions remain there.
     pub fn remove_host(&mut self, id: &str) -> Result<(), String> {
         if !self.data.hosts.iter().any(|h| h.id == id) {
             return Err("Host not found".into());
         }
-        if self.data.locations.iter().any(|l| l.host_id == id) {
-            return Err("Host has locations; remove its sessions first".into());
-        }
         let mut data = self.data.clone();
+        let gone: Vec<String> = data
+            .locations
+            .iter()
+            .filter(|l| l.host_id == id)
+            .map(|l| l.id.clone())
+            .collect();
+        data.locations.retain(|l| l.host_id != id);
+        for project in &mut data.projects {
+            project.location_ids.retain(|l| !gone.contains(l));
+        }
         data.hosts.retain(|h| h.id != id);
         self.save(data).map_err(|_| "Could not save host".into())
     }
@@ -453,8 +499,19 @@ mod tests {
         let reopened = Catalog::open(path.clone()).unwrap();
         assert_eq!(reopened.data.hosts.len(), 2);
         assert_eq!(reopened.data.hosts[1].command, custom.command);
+        assert!(catalog.set_host_roots(&host.id, vec!["relative/path".into()]).is_err());
+        let rooted = catalog
+            .set_host_roots(&host.id, vec!["~/projects/".into(), "/srv/app".into(), "~/projects".into()])
+            .unwrap();
+        assert_eq!(rooted.roots, ["~/projects", "/srv/app"]);
+        let remote = catalog.location_on(&host.id, Path::new("/srv/app")).unwrap();
+        assert_ne!(remote.id, catalog.location(Path::new("/srv/app")).unwrap().id);
+        let project = catalog.project(None, "Spans hosts", None).unwrap();
+        catalog.attach_location(&project.id, &remote.id).unwrap();
         catalog.remove_host(&host.id).unwrap();
         assert!(catalog.remove_host(&host.id).is_err());
+        assert!(catalog.data.locations.iter().all(|l| l.host_id != host.id));
+        assert!(catalog.data.projects[0].location_ids.is_empty());
         assert_eq!(catalog.data.hosts.len(), 1);
         std::fs::remove_file(path).unwrap();
     }
