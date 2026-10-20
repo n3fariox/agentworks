@@ -1,5 +1,5 @@
 import {appUrl} from './hosting.js';
-import {emptyUsage, applyUsageEvent, usageView, STALE_MS} from './usage-status.js';
+import {emptyUsage, applyUsageEvent, STALE_MS, countdown} from './usage-status.js';
 
 const STATES = ['running', 'waiting', 'idle', 'stopped', 'unknown'];
 const LABELS = {running:'Running', waiting:'Waiting for approval/input', idle:'Idle', stopped:'Stopped', unknown:'Unknown'};
@@ -23,19 +23,16 @@ export function counts(sessions, activity = new Map()) {
   for (const session of sessions) result[sessionState(session, activity.get(session.id))]++;
   return result;
 }
-function stateCounts(sessions, activity, inline = false) {
-  const list = el(inline ? 'span' : 'ul', undefined, 'state-counts');
-  for (const [key, value] of Object.entries(counts(sessions, activity))) {
-    const item = el(inline ? 'span' : 'li'); item.append(el('strong', String(value)), ` ${LABELS[key]}`); list.append(item);
-  }
-  return list;
-}
-function sessionSource(session) {
-  return `${session.title || 'Untitled session'} · ${session.id}${session.archived ? ' · archived' : ''}`;
-}
+export function activelyTurning(session) { return session.turnRunning === true && session.archived !== true; }
 function freshness(value, now) {
   if (value?.at == null) return 'Freshness unknown · persisted observation has no source timestamp';
   return `Adapter observed ${new Date(value.at).toLocaleString()}${now - value.at > STALE_MS ? ' · stale (over 10 minutes old)' : ''}${value.at > now ? ' · source clock is ahead' : ''}`;
+}
+function quotaReset(at, now) {
+  if (typeof at !== 'number' || !Number.isFinite(at) || at < 0 || at > 8.64e15) return 'Reset unavailable';
+  const date = new Date(at).toLocaleString(undefined, {timeZoneName:'short'});
+  const remaining = countdown(at - now);
+  return remaining ? `Resets in ${remaining} · ${date}` : `Reported reset time passed · ${date} · awaiting a new provider report`;
 }
 export function usageMeters(state, now = Date.now()) {
   const meters = [];
@@ -45,14 +42,14 @@ export function usageMeters(state, now = Date.now()) {
   });
   for (const [label, quota] of Object.entries(state.quota)) meters.push({
     label:`Reported ${label} quota used`, percent:quota.usedPercent,
-    detail:'Freshness unknown · persisted Claude event has no source timestamp'
+    detail:`${quotaReset(quota.resetsAt, now)} · Freshness unknown · persisted Claude event has no source timestamp`
   });
   for (const quota of Object.values(state.codexQuota)) {
     if (quota.usedPercent?.value === undefined) continue;
     const minutes = quota.windowDurationMins?.value;
     const duration = minutes === undefined ? 'window duration unknown' : `${minutes} minute window`;
     meters.push({label:`${quota.limitName || quota.limitId} · ${quota.role} · ${duration} · quota used`,
-      percent:quota.usedPercent.value, detail:freshness(quota.usedPercent, now)});
+      percent:quota.usedPercent.value, detail:`${quotaReset(quota.resetsAt?.value, now)}${quota.resetsAt?.value !== undefined ? ` · Reset freshness: ${freshness(quota.resetsAt, now)}` : ''} · Usage freshness: ${freshness(quota.usedPercent, now)}`});
   }
   return meters;
 }
@@ -61,7 +58,7 @@ async function read(path) {
   if (!response.ok) throw new Error('Read failed');
   return response.json();
 }
-function renderHosts(catalog, sessions, activity) {
+function renderHosts(catalog, sessions) {
   const root = document.querySelector('#hosts'); root.replaceChildren();
   if (!catalog) { root.append(note('Host status unavailable.')); return; }
   const hosts = [...catalog.hosts];
@@ -74,15 +71,15 @@ function renderHosts(catalog, sessions, activity) {
     card.append(heading);
     if (sessions) {
       const matching = sessions.filter(s => s.hostId === host.id);
-      const count = el('p', undefined, 'count'); count.append(String(matching.length), el('small', ' sessions'));
-      card.append(count, stateCounts(matching, activity));
-    } else card.append(note('Session count unavailable.'));
+      const count = el('p', undefined, 'count'); count.append(String(matching.length), el('small', ' active turns'));
+      card.append(count);
+    } else card.append(note('Active turn count unavailable.'));
     root.append(card);
   }
 }
-function renderProjects(catalog, sessions, activity) {
+function renderProjects(catalog, sessions) {
   const root = document.querySelector('#projects'); root.replaceChildren();
-  if (!sessions) { root.append(note('Project session counts and states unavailable.')); return; }
+  if (!sessions) { root.append(note('Project active turn counts unavailable.')); return; }
   const projects = catalog ? [...catalog.projects] : [];
   for (const session of sessions) if (session.projectId && !projects.some(p => p.id === session.projectId)) projects.push({id:session.projectId, name:`Unknown project (${session.projectId})`});
   projects.push({id:null, name:'Ungrouped'});
@@ -91,7 +88,7 @@ function renderProjects(catalog, sessions, activity) {
     const matching = sessions.filter(s => (s.projectId || null) === project.id);
     const details = el('details', undefined, 'project');
     const summary = el('summary');
-    summary.append(el('strong', `${project.name}${project.archived ? ' · archived' : ''} · ${matching.length} sessions`), stateCounts(matching, activity, true));
+    summary.append(el('strong', `${project.name}${project.archived ? ' · archived' : ''} · ${matching.length} active ${matching.length === 1 ? 'turn' : 'turns'}`));
     details.append(summary);
     if (!matching.length) details.append(el('p', 'No sessions in this project.', 'session-list empty'));
     const list = el('ul', undefined, 'session-list');
@@ -99,47 +96,64 @@ function renderProjects(catalog, sessions, activity) {
       const item = el('li', undefined, 'session-row');
       const identity = el('div', session.title || 'Untitled session');
       identity.append(el('small', `${session.provider || 'Provider unknown'} · ${session.id}${session.archived ? ' · archived' : ''}`));
-      const state = sessionState(session, activity.get(session.id));
-      const status = el('div', LABELS[state], `session-state ${state}`);
-      status.append(el('small', `Reported: ${session.status || 'unknown'}${activity.get(session.id)?.pendingApprovals > 0 ? ` · ${activity.get(session.id).pendingApprovals} pending approval(s)` : ''}`));
+      const status = el('div', 'Taking a turn', 'session-state running');
       item.append(identity, status); list.append(item);
     }
     details.append(list); root.append(details);
   }
 }
-function renderUsage(session, observation) {
-  const root = el('article', undefined, 'usage-session');
-  root.append(el('h4', session.title || 'Untitled session'), note(`Source session: ${sessionSource(session)}`));
-  if (!observation) { root.append(note('Usage unavailable: session snapshot could not be read.')); return root; }
-  const {state, truncated} = observation;
-  root.append(note('Source: persisted ACP usage_update events. Session observations are not account totals.'));
-  if (truncated) root.append(note('History is truncated; older usage observations may be unavailable.'));
-  const meters = usageMeters(state);
+export function latestQuota(sessions, observations, provider) {
+  const chosen = new Map();
+  const rank = (value, session) => [value?.usedPercent?.at ?? value?.at ?? -1, session.created ?? 0];
+  const consider = (key, value, session) => {
+    const previous = chosen.get(key);
+    const [at, created] = rank(value, session);
+    const [oldAt, oldCreated] = previous ? rank(previous.value, previous.session) : [-2, -1];
+    if (!previous || at > oldAt || (at === oldAt && created > oldCreated)) chosen.set(key, {value, session});
+  };
+  for (const session of sessions.filter(s => s.provider === provider)) {
+    const state = observations.get(session.id)?.state;
+    if (!state) continue;
+    for (const [label, value] of Object.entries(state.quota)) consider(`claude:${label}`, value, session);
+    for (const [key, value] of Object.entries(state.codexQuota)) consider(`codex:${key}`, value, session);
+  }
+  const state = emptyUsage();
+  for (const [key, {value}] of chosen) {
+    if (key.startsWith('claude:')) state.quota[key.slice(7)] = value;
+    else state.codexQuota[key.slice(6)] = value;
+  }
+  return {state, sources:chosen.size};
+}
+// No retained adapter contract currently proves an account-wide unlimited plan
+// or reports account spend/limit in USD. Missing windows, enterprise plan names,
+// session cost and unlimited *credits* are deliberately not such proof.
+export function quotaAvailability(state, {readable = 0, failed = 0, truncated = 0} = {}) {
+  const reported = usageMeters(state).some(value => value.label !== 'Session context occupancy');
+  if (reported) return {label:'Reported quota windows', detail:'Percentages describe reported windows only; account spending cap and USD used / total are unavailable.'};
+  if (!readable || failed || truncated) return {label:'Quota unavailable', detail:'Subscription quota has not been reported in the readable history. Missing or incomplete observations cannot establish a cap or an unmetered plan.'};
+  return {label:'No cap reported', detail:'Subscription quota has not been reported by these retained sessions. This does not establish a no-usage-cap plan. Account spend / limit in USD is unavailable.'};
+}
+function renderQuotaMeters(root, provider, state) {
+  const meters = usageMeters(state).filter(value => value.label !== 'Session context occupancy');
+  if (!meters.length) return;
   for (const [i, value] of meters.entries()) {
     const box = el('div', undefined, 'usage-meter');
     const label = el('label', `${value.label}: ${value.percent.toFixed(1)}%`, 'meter-label');
-    const meter = el('meter'); meter.id = `usage-${session.id}-${i}`; label.htmlFor = meter.id;
+    const meter = el('meter'); meter.id = `usage-${provider}-${i}`; label.htmlFor = meter.id;
     meter.min = 0; meter.max = 100; meter.value = Math.min(100, value.percent);
     meter.textContent = `${value.percent.toFixed(1)}%`;
     const detail = el('div', value.detail, 'usage-detail'); detail.id = `${meter.id}-detail`;
     meter.setAttribute('aria-describedby', detail.id);
     box.append(label, meter, detail); root.append(box);
   }
-  if (!state.events) root.append(note('Usage unknown: no supported usage observations in retained session history.'));
-  else if (!Object.keys(state.quota).length && !Object.keys(state.codexQuota).length) root.append(note('Subscription quota unavailable: not reported by this session.'));
-  const details = el('details', undefined, 'usage-details'); details.append(el('summary', 'Reported usage details & freshness'));
-  const list = el('ul');
-  for (const text of usageView(state, {provider:session.provider}).details) list.append(el('li', text));
-  details.append(list); root.append(details);
-  return root;
 }
 function renderAccounts(status, sessions, observations) {
   const root = document.querySelector('#accounts'); root.replaceChildren();
   for (const id of ['claude','codex']) {
     const provider = status?.providers.find(p => p.id === id);
     const card = el('article', undefined, 'card');
-    const heading = el('div', undefined, 'card-heading'); heading.append(el('h3', id === 'claude' ? 'Claude' : 'Codex'), el('span', 'Connection unknown', 'badge'));
-    card.append(heading, note('Account identity unavailable · authentication not verified.'));
+    const heading = el('div', undefined, 'card-heading'); heading.append(el('h3', id === 'claude' ? 'Claude' : 'Codex'), el('span', 'Quota report', 'badge'));
+    card.append(heading);
     const config = el('p', undefined, 'account-config');
     if (!provider) config.textContent = 'Provider configuration unavailable.';
     else {
@@ -149,47 +163,71 @@ function renderAccounts(status, sessions, observations) {
       config.textContent = `Adapter: ${adapter} · Authentication mode: ${mode}${key}`;
     }
     card.append(config);
-    if (!sessions) card.append(note('Session usage unavailable.'));
+    if (!sessions) card.append(el('h4', 'Quota unavailable', 'quota-state'), note('Session list could not be read; account cap and spend are unknown.'));
     else {
       const matching = sessions.filter(s => s.provider === id);
-      card.append(note(`${matching.length} source session(s). Account-level usage total unavailable.`));
-      if (!matching.length) card.append(note('No source sessions. Usage and subscription quota unknown.'));
-      for (const session of matching) card.append(renderUsage(session, observations.get(session.id)));
+      const latest = latestQuota(sessions, observations, id);
+      card.append(note(`${matching.length} retained source session(s); latest report selected per quota window. Reports are not added together.`));
+      const readable = matching.filter(s => observations.has(s.id)).length;
+      const failed = matching.length - readable;
+      const truncated = matching.filter(s => observations.get(s.id)?.truncated).length;
+      const availability = quotaAvailability(latest.state, {readable, failed, truncated});
+      card.append(el('h4', availability.label, 'quota-state'), note(availability.detail));
+      card.append(note(`Read coverage: ${readable}/${matching.length} session histories · ${failed} unavailable · ${truncated} truncated. ${failed || truncated ? 'Latest report may be missing.' : ''}`));
+      renderQuotaMeters(card, id, latest.state);
     }
     root.append(card);
   }
 }
-async function refresh() {
-  const button = document.querySelector('#refresh'); button.disabled = true;
-  const statusLine = document.querySelector('#refresh-status'); statusLine.textContent = 'Reading workspace snapshots…';
-  const errors = document.querySelector('#errors'); errors.replaceChildren();
-  const reads = await Promise.allSettled(['api/catalog','api/sessions?archived=all','api/status','api/activity'].map(read));
-  const names = ['Host/project catalog','Session list','Provider configuration','Approval activity'];
-  reads.forEach((result, i) => { if (result.status === 'rejected') errors.append(el('p', `${names[i]} unavailable. Refresh to retry.`, 'error')); });
-  const [catalog, sessions, status, activityData] = reads.map(r => r.status === 'fulfilled' ? r.value : null);
-  const activity = new Map((activityData?.sessions || []).map(s => [s.id, s]));
-  renderHosts(catalog, sessions, activity); renderProjects(catalog, sessions, activity);
-  const observations = new Map();
-  // Read bounded session histories with four workers. Do not retain transcripts,
-  // probe account services, open event streams, or launch harness processes.
-  const queue = (sessions || []).filter(s => ['claude','codex'].includes(s.provider));
-  let next = 0;
-  await Promise.all(Array.from({length:Math.min(4,queue.length)}, async () => {
-    while (next < queue.length) {
-      const session = queue[next++];
-      try {
-        const snapshot = await read(`api/sessions/${encodeURIComponent(session.id)}`);
-        let state = emptyUsage();
-        for (const event of snapshot.events || []) state = applyUsageEvent(state, event);
-        observations.set(session.id, {state, truncated:snapshot.truncated === true});
-      } catch { /* unavailable per session, with no raw error or transcript output */ }
+let refreshing = false;
+async function refresh({quotaOnly = false} = {}) {
+  if (refreshing) return;
+  refreshing = true;
+  const buttons = ['#refresh', '#refresh-quota'].map(id => document.querySelector(id));
+  buttons.forEach(button => {button.disabled = true;});
+  const statusLine = document.querySelector(quotaOnly ? '#quota-refresh-status' : '#refresh-status');
+  statusLine.textContent = quotaOnly ? 'Rereading retained quota observations…' : 'Reading workspace snapshots…';
+  try {
+    const paths = quotaOnly ? ['api/sessions','api/status'] : ['api/catalog','api/sessions','api/status'];
+    const reads = await Promise.allSettled(paths.map(read));
+    const values = new Map(paths.map((path, i) => [path, reads[i].status === 'fulfilled' ? reads[i].value : null]));
+    const catalog = values.get('api/catalog'), allSessions = values.get('api/sessions'), status = values.get('api/status');
+    const sessions = allSessions?.filter(s => s.archived !== true) ?? null;
+    if (!quotaOnly) {
+      const errors = document.querySelector('#errors'); errors.replaceChildren();
+      const names = ['Host/project catalog','Session list','Provider configuration'];
+      reads.forEach((result, i) => { if (result.status === 'rejected') errors.append(el('p', `${names[i]} unavailable. Refresh to retry.`, 'error')); });
+      const activeSessions = sessions?.filter(activelyTurning) ?? null;
+      renderHosts(catalog, activeSessions); renderProjects(catalog, activeSessions);
     }
-  }));
-  renderAccounts(status, sessions, observations);
-  statusLine.textContent = `Snapshot read ${new Date().toLocaleString()}. Refresh to update; usage freshness is labeled separately.${reads.some(r => r.status === 'rejected') ? ' Some data is unavailable.' : ''}`;
-  button.disabled = false;
+    const observations = new Map();
+    // Read bounded session histories with four workers. Do not retain transcripts,
+    // probe account services, open event streams, or launch harness processes.
+    const queue = (sessions || []).filter(s => ['claude','codex'].includes(s.provider));
+    let next = 0;
+    await Promise.all(Array.from({length:Math.min(4,queue.length)}, async () => {
+      while (next < queue.length) {
+        const session = queue[next++];
+        try {
+          const snapshot = await read(`api/sessions/${encodeURIComponent(session.id)}`);
+          let state = emptyUsage();
+          for (const event of snapshot.events || []) state = applyUsageEvent(state, event);
+          observations.set(session.id, {state, truncated:snapshot.truncated === true});
+        } catch { /* unavailable per session, with no raw error or transcript output */ }
+      }
+    }));
+    renderAccounts(status, sessions, observations);
+    document.querySelector('#quota-refresh-status').textContent = `Retained quota observations reread ${new Date().toLocaleString()}. This is a local history read, not a live account refresh; quota source freshness is labeled separately and is not advanced by this read.${reads.some(r => r.status === 'rejected') ? ' Some reads failed; data is unavailable.' : ''}`;
+    if (!quotaOnly) statusLine.textContent = `Snapshot read ${new Date().toLocaleString()}.${reads.some(r => r.status === 'rejected') ? ' Some data is unavailable.' : ''}`;
+  } catch {
+    statusLine.textContent = 'Snapshot read failed. Refresh to retry.';
+  } finally {
+    buttons.forEach(button => {button.disabled = false;});
+    refreshing = false;
+  }
 }
 if (typeof document !== 'undefined') {
-  document.querySelector('#refresh').addEventListener('click', refresh);
+  document.querySelector('#refresh').addEventListener('click', () => refresh());
+  document.querySelector('#refresh-quota').addEventListener('click', () => refresh({quotaOnly:true}));
   refresh();
 }
