@@ -1,3 +1,4 @@
+import {localState as localStorage} from './hosting.js';
 // Drag or arrow-key a panel edge to resize it on desktop. The width is a CSS
 // variable on `target` and persists in localStorage under `key`; double-click
 // resets it. `edge` is the side of `panel` the handle sits on. Phone layouts

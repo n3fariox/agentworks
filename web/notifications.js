@@ -1,3 +1,4 @@
+import {appUrl, socketUrl, deploymentKey} from './hosting.js';
 // U-02 browser notifications.
 //
 // The server applies policy and only sends noteworthy, allowed events; this
@@ -15,7 +16,7 @@ function claimStore(){
   return async id=>{
     try{
       database??=new Promise((resolve,reject)=>{
-        const request=indexedDB.open('agentworks-notifications',1);
+        const request=indexedDB.open(deploymentKey('agentworks-notifications'),1);
         request.onupgradeneeded=()=>request.result.createObjectStore('shown',{autoIncrement:true}).createIndex('id','id',{unique:true});
         request.onsuccess=()=>resolve(request.result);
         request.onerror=()=>reject(request.error);
@@ -77,7 +78,7 @@ export function setupNotifications({getSessions,getActive,selectSession,toast}={
       notice.close();
       const session=(getSessions?.()||[]).find(s=>s.id===event.sessionId);
       if(session)selectSession(session);
-      else fetch(`/api/sessions/${encodeURIComponent(event.sessionId)}`).then(r=>r.ok?r.json():null).then(data=>{if(data?.session)selectSession(data.session);}).catch(()=>toast?.('Could not open the source session.'));
+      else fetch(appUrl(`/api/sessions/${encodeURIComponent(event.sessionId)}`)).then(r=>r.ok?r.json():null).then(data=>{if(data?.session)selectSession(data.session);}).catch(()=>toast?.('Could not open the source session.'));
     };
     return notice;
   }
@@ -86,7 +87,7 @@ export function setupNotifications({getSessions,getActive,selectSession,toast}={
     if(!support().ok)return;
     const gen=++generation;socket?.close();
     connectionStatus('Connecting to notification events…');
-    const url=`${location.protocol==='https:'?'wss':'ws'}://${location.host}/api/notifications/events`;
+    const url=socketUrl('/api/notifications/events');
     const ws=new WebSocket(url);socket=ws;
     ws.onopen=()=>{if(gen!==generation)return;delay=RECONNECT_MS;connectionStatus('Notification event stream connected.');};
     ws.onmessage=async message=>{
@@ -108,14 +109,14 @@ export function setupNotifications({getSessions,getActive,selectSession,toast}={
   }
 
   async function load(){
-    const response=await fetch('/api/notifications',{headers:{'Accept':'application/json'}});
+    const response=await fetch(appUrl('/api/notifications'),{headers:{'Accept':'application/json'}});
     if(!response.ok)throw new Error(await response.text());
     const data=await response.json();
     settings=data.settings;
     return data;
   }
   async function save(next){
-    const response=await fetch('/api/notifications',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(next)});
+    const response=await fetch(appUrl('/api/notifications'),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(next)});
     if(!response.ok)throw new Error(await response.text());
     settings=(await response.json()).settings;return settings;
   }

@@ -1,3 +1,4 @@
+import {localState as localStorage} from './hosting.js';
 // U-06 compact turn work logs: a derived presentation over the existing transcript items.
 // Raw items/events are never altered; grouping only moves already-rendered nodes into a fold.
 // Background metadata: ACP tool calls expose no process lifetime or parent/subagent link here,

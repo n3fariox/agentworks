@@ -1,38 +1,151 @@
-# Traefik subpath hosting and optional PWA
+# HTTPS subpath hosting and PWA installation
 
-Status: planned requirements; no deployment, implementation or agent batch started. Support the existing direct/VPN setup and the user's public Traefik hosting convention, for example `https://hexfall.home.oksmiths.com/a1b918dd-2b91-4fc2-8822-e6a559503040/`. Traefik terminates TLS and may strip the UUID prefix before forwarding to the local app.
+Agentworks supports direct root hosting and TLS proxies that strip a public mount,
+including `https://agents2.pve.n3far.io/a1b918dd-2b91-4fc2-8822-e6a559503040/`.
+The backend can listen on `0.0.0.0:4317`; it serves HTTP, not TLS. Keep that port
+private to the trusted proxy/VPN. Assets are compiled into the executable: rebuild
+and release the executable to apply frontend changes.
 
-U-02 supports **root-hosted** HTTPS by deriving the public origin from the
-reverse proxy's `X-Forwarded-Proto` and `X-Forwarded-Host` headers; see
-[notifications HTTPS setup](NOTIFICATIONS.md). The proxy must overwrite them and
-the backend must stay private. Subpath/mount, authentication and PWA work below
-remain unimplemented.
+## Public mount and proxy contract
 
-## Reference implementation
+The proxy owns the public mount and its trailing-slash redirect. It must strip
+that prefix exactly once before forwarding. The browser derives its canonical
+application base from the public `hosting.js` module URL; assets, imports, APIs,
+WebSockets, previews/downloads and home links resolve against that base. No HTML
+`<base>` is used (the CSP forbids it). A mount such as `/a1b918dd-.../` works without
+putting a UUID into backend API routing or trusting `X-Forwarded-Prefix`.
 
-Reviewed local xcom-game sources: `tools/web/publish.py` uses relative asset references and registers the worker relative to the public page URL; `game/branding/web/manifest.webmanifest` uses relative start URL/scope; `game/branding/web/service-worker.js` currently uses network-only navigation handling; `tools/web/app.py` reads forwarded host/prefix for deployment metadata. Adopt the mount-awareness patterns, with Agentworks-specific API, WebSocket and origin protections. Its D058 document contains a proposed offline-game design; that proposal is not Agentworks's cache policy.
+The proxy must overwrite `X-Forwarded-Proto` and `X-Forwarded-Host` with singular
+values and preserve the browser's `Origin`, including on WebSocket upgrades. The
+backend validates writes and WebSocket origins against the resulting public
+origin. It currently trusts well-formed forwarded headers without checking the
+proxy peer against an allowlist, so backend isolation and header overwriting are
+required. Origin checks and UUID paths are not authentication: retain the hosting
+layer's authentication/access control. `AGENTWORKS_AUTH_MODE` controls provider
+credentials; it does not authenticate public web clients. The internal MCP bridge
+remains private and does not use the public mount.
 
-[Traefik StripPrefix](https://doc.traefik.io/traefik/reference/routing-configuration/http/middlewares/stripprefix/) reports the removed prefix in `X-Forwarded-Prefix`. [Manifest scope](https://developer.mozilla.org/en-US/docs/Web/Progressive_web_apps/Manifest/Reference/scope) and [start URL](https://developer.mozilla.org/en-US/docs/Web/Progressive_web_apps/Manifest/Reference/start_url) must resolve inside the intended public mount.
+Example Traefik **dynamic file configuration** for the supplied host/mount:
 
-## Mount and proxy contract — R-04
+```yaml
+http:
+  routers:
+    agentworks:
+      rule: "Host(`agents2.pve.n3far.io`) && (Path(`/a1b918dd-2b91-4fc2-8822-e6a559503040`) || PathPrefix(`/a1b918dd-2b91-4fc2-8822-e6a559503040/`))"
+      entryPoints: [websecure]
+      tls: {} # use your existing certificate configuration
+      # Keep your existing authentication middleware before these middlewares.
+      middlewares: [agentworks-slash, agentworks-strip, agentworks-origin]
+      service: agentworks
+  middlewares:
+    agentworks-slash:
+      redirectRegex:
+        regex: '^(https?://[^/]+/a1b918dd-2b91-4fc2-8822-e6a559503040)(\?.*)?$'
+        replacement: '${1}/${2}'
+        permanent: true
+    agentworks-strip:
+      stripPrefix:
+        prefixes: [/a1b918dd-2b91-4fc2-8822-e6a559503040]
+    agentworks-origin:
+      headers:
+        customRequestHeaders:
+          X-Forwarded-Proto: https
+          X-Forwarded-Host: agents2.pve.n3far.io
+  services:
+    agentworks:
+      loadBalancer:
+        # Use the backend address reachable from Traefik, not 0.0.0.0.
+        servers:
+          - url: http://127.0.0.1:4317
+```
 
-- Direct root hosting remains supported. Establish one canonical external app base, using explicit deployment configuration and, when enabled, validated headers from configured trusted proxy peers. Keep public mount/URL generation distinct from the backend's stripped routing path; apply a prefix exactly once.
-- Use relative module imports/static links and a shared URL helper for all API calls, event WebSockets, file previews/images/downloads, redirects and navigation links. Preserve encoded paths and query parameters. Avoid relying on every helper accepting root-relative `/api/...` URLs. A browser URL helper can resolve against the module/app base without requiring an HTML `<base>` tag; the current CSP forbids that tag.
-- Normalize the entry trailing slash so `/<uuid>` reaches `/<uuid>/` without losing the prefix or query. Decide whether the redirect belongs to Traefik or the app and document the proxy setup. Do not add UUID assumptions to ordinary API routing.
-- Extend the root-origin host/origin validation to the mount/proxy contract. The default guard compares Origin against `http://Host`; forwarded host/proto are used for root proxy requests and the public prefix must be handled separately. Changing frontend paths alone is insufficient. Preserve direct-request protections and the private internal MCP bridge.
-- Namespace local/session storage by deployment identity/mount to prevent session selections, drafts, pending request IDs and settings colliding when multiple instances share an origin. Subpaths are deployment boundaries for routing/state, not browser origin security boundaries. Document how the existing hosting authentication layer or app credentials protect the public agent-control surface; a UUID path does not replace authentication.
-- Provide a reviewed Traefik example covering Host + mount matching, StripPrefix, TLS, HTTP/WebSocket forwarding and forwarded header handling. Reuse an existing authenticated hosting layer where configured rather than removing Origin checks to make proxying work.
+Configure the existing HTTP entry point to redirect to HTTPS. Use a reachable
+private address instead of loopback if Traefik runs in another container/host.
+Traefik forwards WebSocket upgrades without a separate WebSocket service. Use
+this as an integration example, not as a replacement for existing TLS/auth rules.
+No live proxy settings are changed by the source implementation.
 
-## Installable app — R-05
+Browser state is namespaced by the public mount: local/session storage and
+notification IndexedDB claims cannot collide between mounts. Existing root-hosted
+keys are preserved. A new mount intentionally starts with its own preferences and
+selection; root state is not copied into it. Subpaths share a browser origin and
+are not security boundaries: use separate origins for mutually untrusted apps.
 
-- A deployment-time flag enables manifest links, app/touch icons, theme metadata, standalone display and service-worker registration. Keep these optional for ordinary browser/direct hosting. Name configuration flags during implementation; none are available yet.
-- Resolve manifest `id`, `start_url`, `scope`, icons and worker URL/scope against the public UUID mount. The worker must never claim `/` or a sibling app. Serve its script directly without redirects; check CSP and service-worker headers for the selected layout.
-- Start with network-only behavior or a narrowly versioned static shell. Do not cache transcripts, settings, file previews/downloads or control API responses. Do not enqueue/replay prompts, approvals, worktree creation or other mutations through offline/background sync. Offline mode explains the missing connection and reconnects without duplicating actions; offline agent execution is not part of installation support.
-- Preserve existing turns, drafts and pending request IDs across app/browser updates. Prefer an explicit refresh opportunity over a worker forcing an active page reload. Namespace any caches by mount and version. Disabling PWA support must retire only this deployment's worker/caches, without touching another app on the origin or deleting chat state.
-- Installation support does not itself provide background WebSocket execution or push notifications. Coordinate browser notification requirements U-02 separately, including support detection and any eventual push subscription mechanism.
+## Installation support
 
-## Acceptance checks
+PWA support is **enabled by default**: manifest discovery, app/touch icons, theme
+metadata, standalone display and a service worker. No deployment flag is needed.
+Set `AGENTWORKS_PWA=0` on the backend process to opt out, then restart it through
+the normal release process. Only the value `0` disables support; leaving the
+variable unset enables it. Ordinary browser/root/mounted operation also works
+with PWA support disabled.
+There is no in-app install button: use the browser's install/Add to Home Screen UI.
 
-Use isolated data and a proxy fixture with a stripped, non-root UUID mount. Verify root and mounted entry points, trailing-slash redirects, modules/CSS, API mutations, WebSocket reconnect/cancellation/approvals, Markdown images and file downloads. Assert no accidental requests escape to origin-root app endpoints.
+The manifest uses relative `start_url`, `scope` and icon paths. Its identity is the
+resolved `start_url` (the standard fallback when `id` is absent), so each mount has
+a stable, distinct identity without deriving URLs from forwarding headers. Keep
+the mount and start URL stable across releases. A move to another mount/origin is
+a new installation. The worker script is served directly as JavaScript and its
+scope is exactly the public app directory. A mounted worker never claims `/` or
+another deployment. Same-origin worker/manifest assets work with the existing CSP.
 
-Test external HTTPS origin/host validation plus rejection of untrusted/spoofed forwarding headers. Exercise two mounts on one origin to check storage, manifest identity, worker scope and cache isolation. Verify PWA disabled/enabled, refresh after an upgrade, cleanup after disablement, offline failure/reconnect without mutation replay, and desktop/mobile standalone layouts. Record browser-specific installation limits rather than promising identical install UI everywhere. No real provider inference is required for the routing/PWA checks.
+The worker is **network-only**: it has no fetch handler, Cache Storage, push or
+background sync. Installation does not provide offline launch or agent execution.
+Transcripts, settings, file downloads, approvals and control API responses are
+not cached. Prompts and other mutations are never queued/replayed by the worker.
+An open page retains its existing connection/reconnect behavior and session drafts;
+a cold offline launch can show the browser's network error. Push delivery while
+the app is closed is separate work; see [NOTIFICATIONS.md](NOTIFICATIONS.md).
+
+Worker updates wait for the user to choose the refresh button; they never force
+an active page reload. Browser session drafts and pending request IDs survive
+refresh. Set `AGENTWORKS_PWA=0` to disable support. On the next online
+visit the page removes only the exact Agentworks worker registration for that
+mount; it leaves other workers, caches and browser state alone. Existing OS app
+icons must be removed by the user. Existing open/offline pages cannot receive a
+server-side disablement until they revisit the server.
+
+HTTPS with a trusted certificate is required outside localhost/loopback. HTTP
+LAN/VPN IPs are not secure contexts even over an encrypted VPN. Browser install
+UI and capabilities differ: Chromium supports manifest-based installation,
+Safari offers Add to Dock/Home Screen, and some browsers only create shortcuts.
+iOS/iPadOS 26 also lets users open any Home Screen site as an app. Do not interpret
+successful installation as evidence that mobile/background notifications work.
+
+## Verification
+
+`tests/hosting.spec.mjs` starts its own backend on 4423, an HTTPS StripPrefix proxy
+on 4424, and temporary catalog/database/demo state. It exercises root and two
+mounts with the PWA flag unset (the default), scoped manifest/icons/worker,
+origin-preserving mutations, WebSockets,
+encoded file downloads, query-preserving slash redirects, state isolation,
+network recovery, explicit upgrades and selective disablement. It uses demo
+sessions and no paid provider inference. `openssl` and Playwright Chromium are
+required. Its self-signed fixture certificate is ignored only by the test browser.
+
+```sh
+cargo test --locked --offline
+cargo build --locked --offline
+node node_modules/@playwright/test/cli.js test tests/hosting.spec.mjs tests/notifications.spec.mjs
+```
+
+Before release, manually install on the intended desktop/mobile browsers using
+the trusted public HTTPS origin. Check launch name/icon/start URL, standalone
+layout, keyboard/safe areas, session selection, draft preservation, proxy auth,
+previews/downloads, and reconnect/approvals. Confirm requests stay inside the
+public mount. Check two mounts' identities and worker scopes in developer tools.
+Validate proxy header overwriting and backend isolation separately. Native install
+UI, certificate trust and OS notification display are not proven by headless tests.
+
+Validation for this implementation (2026-10-19): locked offline build and all 90
+Rust tests passed. The full isolated verification on port 4495 passed its smoke
+checks, six supervisor tests, restart fixture, 121 browser tests (including eight
+hosting and 25 notification cases; one opt-in OpenCode case skipped), and graceful
+shutdown with an open WebSocket. Chromium's processed manifest confirms distinct
+mount-scoped identity, start URL and scope. Formatting, JavaScript syntax and
+whitespace checks passed. No live release, proxy settings or service data changed;
+real-device installation and the production slash redirect remain deployment checks.
+
+After switching to PWA-on-by-default, the locked offline build and all 33 hosting
+and notification browser tests passed. The hosting fixture explicitly unsets
+`AGENTWORKS_PWA` for enabled checks and sets it to `0` for opt-out/worker cleanup.

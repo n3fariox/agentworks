@@ -289,3 +289,4 @@ body[data-code-wrap=scroll] .tool-card pre,body[data-code-wrap=scroll] .approval
   #session-settings-dialog .session-settings-content{padding:0 18px 18px}
   #session-settings-dialog input[type=checkbox]{min-height:18px}
 }
+.pwa-update{position:fixed;right:max(12px,env(safe-area-inset-right));bottom:max(12px,env(safe-area-inset-bottom));z-index:1000;max-width:calc(100vw - 24px);padding:12px 16px;border:1px solid var(--border);border-radius:8px;background:var(--panel,#202428);color:var(--text);cursor:pointer}

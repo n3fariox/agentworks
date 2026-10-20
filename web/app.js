@@ -1,21 +1,22 @@
-import {setupInboxDelivery} from '/inbox-delivery.js';
-import {setupDiff} from '/diff.js';
-import {setupWorktreeControls,setupPolicyEditor} from '/worktree-controls.js';
-import {setupGitContext} from '/git-context.js';
-import {createWorkspace} from '/workspace.js';
-import {setupCommunication} from '/communication.js';
-import {setupPalettes} from '/palettes.js';
-import {setupDisplayPreferences} from '/display-preferences.js';
-import {setupWorkLogs,observeTool} from '/work-logs.js';
-import {setupUsageStatus} from '/usage-status.js';
-import {setupFlyout} from '/flyout.js';
-import {setupResize} from '/resize-handle.js';
-import {setupSidePanel} from '/side-panel.js';
-import {setupContextMenu} from '/context-menu.js';
-import {setupTimeoutControls} from '/timeout-controls.js';
-import {setupInputQueue,BUSY} from '/input-queue.js';
-import {setupNotifications} from '/notifications.js';
-import {setupMentions} from '/mentions.js';
+import {appUrl, socketUrl, localState as localStorage, sessionState as sessionStorage} from './hosting.js';
+import {setupInboxDelivery} from './inbox-delivery.js';
+import {setupDiff} from './diff.js';
+import {setupWorktreeControls,setupPolicyEditor} from './worktree-controls.js';
+import {setupGitContext} from './git-context.js';
+import {createWorkspace} from './workspace.js';
+import {setupCommunication} from './communication.js';
+import {setupPalettes} from './palettes.js';
+import {setupDisplayPreferences} from './display-preferences.js';
+import {setupWorkLogs,observeTool} from './work-logs.js';
+import {setupUsageStatus} from './usage-status.js';
+import {setupFlyout} from './flyout.js';
+import {setupResize} from './resize-handle.js';
+import {setupSidePanel} from './side-panel.js';
+import {setupContextMenu} from './context-menu.js';
+import {setupTimeoutControls} from './timeout-controls.js';
+import {setupInputQueue,BUSY} from './input-queue.js';
+import {setupNotifications} from './notifications.js';
+import {setupMentions} from './mentions.js';
 const $ = id => document.getElementById(id);
 // randomUUID is unavailable on plain HTTP remote origins; getRandomValues is supported.
 const uuid = () => globalThis.crypto.randomUUID?.() ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -62,7 +63,7 @@ workLogs=setupWorkLogs({el});workLogs.mount($('display-preferences'),()=>schedul
 const notifications=setupNotifications({getSessions:()=>sessions,getActive:()=>active,selectSession,toast});
 
 async function api(path, options={}) {
-  const response=await fetch(path,{...options,headers:{'Content-Type':'application/json',...options.headers}});
+  const response=await fetch(appUrl(path),{...options,headers:{'Content-Type':'application/json',...options.headers}});
   if(!response.ok){const error=new Error(await response.text());error.status=response.status;throw error;}
   return response.json();
 }
@@ -393,7 +394,7 @@ function selectSession(s) {
 function connect(gen){
   if(gen!==generation||!active)return;
   $('connection').textContent='Connecting';
-  const ws=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/api/sessions/${active.id}/events`);socket=ws;
+  const ws=new WebSocket(socketUrl(`/api/sessions/${active.id}/events`));socket=ws;
   ws.onopen=()=>{if(gen!==generation)return;connected=true;reconnectDelay=500;$('connection').textContent='Connected';updateControls();};
   ws.onmessage=event=>{
     if(gen!==generation)return;
@@ -529,7 +530,7 @@ function updateControls(){
   $('prompt').placeholder=status==='starting'?'Starting your agent…':status==='waiting'?'Respond to the permission request above…':busy?'Your agent is working… type to queue a follow-up':status==='error'?'Session unavailable. Use Resume session to try again.':'What would you like to work on?';
 }
 function scheduleDraw(){if(!drawTimer)drawTimer=setTimeout(()=>{drawTimer=null;draw();},70);}
-function fileUrl(path,download=false){return `/api/sessions/${active.id}/file?path=${encodeURIComponent(path)}${download?'&download=true':''}`;}
+function fileUrl(path,download=false){return appUrl(`/api/sessions/${active.id}/file?path=${encodeURIComponent(path)}${download?'&download=true':''}`);}
 function localReference(href,base=''){
   if(!href||href.startsWith('#'))return null;
   if(/^file:/i.test(href)){try{const url=new URL(href);return ['','localhost'].includes(url.hostname)?decodeURIComponent(url.pathname):null;}catch{return null;}}

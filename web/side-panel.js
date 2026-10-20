@@ -1,3 +1,4 @@
+import {localState as localStorage} from './hosting.js';
 // Right-hand panel beside the chat with Files and Diff tabs. Desktop shows it
 // as a third, resizable column; narrow layouts show it full screen in place of
 // the chat, and on phones it is a history entry so Back returns to the chat.

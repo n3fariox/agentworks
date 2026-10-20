@@ -65,7 +65,7 @@ test('DOM fold collapses on completion, respects user choice and replays stably'
   // A real origin so localStorage-backed choices behave as in the app.
   await page.route('http://work-logs.test/',r=>r.fulfill({contentType:'text/html',body:'<main id="messages"></main>'}));
   await page.goto('http://work-logs.test/');
-  await page.addScriptTag({type:'module',content:source.replace(/^export /gm,'')+`
+  await page.addScriptTag({type:'module',content:source.replace(/^import .*\n/gm,'').replace(/^export /gm,'')+`
     const el=(t,c,x)=>{const n=document.createElement(t);if(c)n.className=c;if(x!==undefined)n.textContent=x;return n;};
     window.run=(items,idle,fresh)=>{
       if(fresh||!window.wl){window.wl=setupWorkLogs({el});window.nodes=new Map();document.getElementById('messages').replaceChildren();}

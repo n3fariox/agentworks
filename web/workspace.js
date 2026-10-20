@@ -1,3 +1,4 @@
+import {appUrl, localState as localStorage, sessionState as sessionStorage} from './hosting.js';
 export function createWorkspace(hooks){
   const $=id=>document.getElementById(id),el=(tag,cls,text)=>{const node=document.createElement(tag);if(cls)node.className=cls;if(text!==undefined)node.textContent=text;return node;};
   const read=(storage,key,fallback)=>{try{return JSON.parse(storage.getItem(key))??fallback;}catch{return fallback;}};
@@ -90,7 +91,11 @@ export function createWorkspace(hooks){
   };
   // Files opened from chat links keep the session file endpoint, so forked
   // sessions still resolve references against their original directory.
-  function fileUrl(file,download=false){const query=`file?path=${encodeURIComponent(file.path)}${download?'&download=true':''}`;return file.location.sessionId?`/api/sessions/${file.location.sessionId}/${query}`:`/api/locations/${file.location.id}/${query}`;}
+  function fileUrl(file,download=false){
+    const query=`file?path=${encodeURIComponent(file.path)}${download?'&download=true':''}`;
+    const path=file.location.sessionId?`api/sessions/${file.location.sessionId}/${query}`:`api/locations/${file.location.id}/${query}`;
+    return appUrl(path);
+  }
   function localPath(href,base){
     if(!href||href.startsWith('#'))return null;
     if(/^file:/i.test(href)){try{const url=new URL(href);return ['','localhost'].includes(url.hostname)?decodeURIComponent(url.pathname):null;}catch{return null;}}

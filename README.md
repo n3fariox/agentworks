@@ -201,6 +201,15 @@ AGENTWORKS_BIND=0.0.0.0 ./target/debug/agentworks
 
 Open `http://<host-address>:4317` remotely. Network binding accepts the hostnames/IPs used to reach this listener and still requires matching browser origins for commands and WebSockets. The prototype relies on your private network for access; application login remains later work.
 
+For HTTPS at a public subpath, configure the proxy to normalize the trailing slash,
+strip the public prefix, preserve WebSocket upgrades, and overwrite forwarded
+host/protocol headers. Keep the backend private and retain hosting authentication.
+PWA support is enabled by default: install manifest, icons, standalone launch
+and a network-only service worker. Set `AGENTWORKS_PWA=0` on the backend process
+to opt out. Installation provides neither
+offline agent execution nor background/mobile push. See [hosting setup and the
+Traefik example](work/HOSTING.md).
+
 ## Prototype limits
 
 - Chat only. No PTY/terminal mode yet.

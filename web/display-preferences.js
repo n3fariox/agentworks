@@ -1,3 +1,4 @@
+import {localState as localStorage} from './hosting.js';
 // Browser-local display preferences for code/literal blocks.
 // Raw block text is captured before decoration and is the only source for Copy.
 const KEY='agentworks-display-preferences';
