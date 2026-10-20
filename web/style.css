@@ -266,28 +266,44 @@ body[data-code-wrap=scroll] .tool-card pre,body[data-code-wrap=scroll] .approval
   #settings-dialog .dialog-footer>span{font-size:11px;max-width:none}
 }
 
-/* Session overrides stay with the session, outside global defaults. */
+/* Scoped session and inbox settings follow the global Settings form. */
 #session-settings-dialog{width:720px;padding:0;overflow:hidden;max-height:90dvh}
 #session-settings-form{display:flex;flex-direction:column;max-height:90dvh}
-#session-settings-dialog .dialog-heading{padding:20px 24px;border-bottom:1px solid var(--border);flex:none}
-#session-settings-dialog h2{margin:0;font-size:22px}
-#session-settings-dialog .session-settings-content{padding:0 24px 20px;overflow-y:auto;min-height:0;overscroll-behavior:contain}
-#session-settings-dialog .field-note{font-size:12px;line-height:1.65}
-#session-settings-dialog .display-preferences{margin:0;padding:16px}
-#session-settings-dialog legend{font-size:15px;font-weight:600;color:var(--text)}
-#session-settings-dialog label{font-size:13px;line-height:1.5}
-#session-settings-dialog .workspace-check{display:flex;align-items:center;gap:10px}
-#session-settings-dialog input[type=checkbox]{width:18px;height:18px;flex:none;accent-color:var(--accent)}
-#session-settings-dialog input:disabled{opacity:.55}
-#session-settings-dialog .dialog-footer{margin:0;padding:16px 24px;border-top:1px solid var(--border);flex:none}
+#session-settings-dialog .dialog-heading{padding:22px 26px 18px;border-bottom:1px solid var(--border);flex:none}
+#session-settings-dialog h2,#agents-dialog h2{margin:0;font-size:24px}
+#session-settings-dialog .session-settings-content{padding:0 26px 24px;overflow-y:auto;min-height:0;overscroll-behavior:contain;scroll-padding:20px}
+#session-settings-dialog .settings-section,#agents-dialog .settings-section,#agent-access-form{min-width:0;margin:0;padding:16px 18px 18px;border:1px solid #373b44;border-radius:10px;background:var(--panel)}
+#session-settings-dialog legend{padding:0 7px;font-size:15px;font-weight:600;color:var(--text)}
+#session-settings-dialog label,#agents-dialog label{font-size:13px;line-height:1.5;margin:16px 0 7px}
+#session-settings-dialog input,#session-settings-dialog select,#agents-dialog input,#agents-dialog select{font-size:13px;min-height:42px;min-width:0}
+#session-settings-dialog .workspace-check,#agents-dialog label:has(input[type=checkbox]){display:flex;align-items:center;gap:10px;margin:14px 0;font-size:13px}
+#session-settings-dialog input[type=checkbox],#agents-dialog input[type=checkbox]{width:18px;height:18px;min-height:18px;flex:none;margin:0;accent-color:var(--accent)}
+#session-settings-dialog input:disabled,#agents-dialog input:disabled{opacity:.55}
+#session-settings-dialog .field-note,#agents-dialog .field-note{font-size:12px;line-height:1.65}
+#session-settings-dialog .dialog-description,#agents-dialog .dialog-description{font-size:13px;line-height:1.6}
+#session-settings-dialog .dialog-footer{margin:0;padding:16px 26px 20px;border-top:1px solid var(--border);background:#1a1c20;flex:none}
 #session-settings-dialog .dialog-footer button{margin-left:auto;flex:none;min-height:44px}
 #session-settings-dialog .error-text{margin:0;font-size:12px;max-height:80px;overflow:auto}
+#agents-dialog{padding:22px 26px 24px;overscroll-behavior:contain;scroll-padding:20px}
+#agents-dialog #agent-grants{gap:0}
+#agents-dialog .settings-section{margin-top:24px}
+#inbox-delivery-controls h3{margin:0;font-size:15px;font-weight:600}
+#inbox-delivery-controls fieldset{border:0;margin:0;padding:0;min-width:0}
+#inbox-delivery-controls .dialog-footer,#agent-access-form .dialog-footer{margin-top:18px;gap:12px;flex-wrap:wrap;justify-content:flex-end}
+#inbox-delivery-controls button,#agent-access-form button{min-height:44px}
+#inbox-delivery-status,#inbox-delivery-error{overflow-wrap:anywhere}
+#session-settings-dialog :is(input,select,button):focus-visible,#agents-dialog :is(input,select,button):focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 @media(max-width:650px){
-  #session-settings-dialog input,#session-settings-dialog select{font-size:16px;min-height:44px}
-  #session-settings-dialog .icon-button{min-width:44px;min-height:44px}
+  #session-settings-dialog,#agents-dialog{max-width:calc(100vw - 20px);max-height:94dvh}
+  #session-settings-form{max-height:94dvh}
+  #session-settings-dialog input,#session-settings-dialog select,#agents-dialog input,#agents-dialog select{font-size:16px;min-height:44px}
+  #session-settings-dialog .icon-button,#agents-dialog .icon-button{min-width:44px;min-height:44px}
   #session-settings-dialog .dialog-heading,#session-settings-dialog .dialog-footer{padding:14px 18px}
   #session-settings-dialog .session-settings-content{padding:0 18px 18px}
-  #session-settings-dialog input[type=checkbox]{min-height:18px}
+  #agents-dialog{padding:18px}
+  #inbox-delivery-controls .dialog-footer{align-items:stretch;flex-direction:column}
+  #session-settings-dialog input[type=checkbox],#agents-dialog input[type=checkbox]{min-height:18px}
+  #agents-dialog label:has(input[type=checkbox]){min-height:44px}
 }
 .pwa-update{position:fixed;right:max(12px,env(safe-area-inset-right));bottom:max(12px,env(safe-area-inset-bottom));z-index:1000;max-width:calc(100vw - 24px);padding:12px 16px;border:1px solid var(--border);border-radius:8px;background:var(--panel,#202428);color:var(--text);cursor:pointer}
 
