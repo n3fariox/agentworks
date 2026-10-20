@@ -229,6 +229,18 @@
   border-color:#43624d;
 }
 
+.operations-dashboard .host-meta,.operations-dashboard .host-detail {
+  font-size:12px;
+  line-height:1.5;
+  margin:10px 0 0;
+  color:var(--muted);
+  overflow-wrap:anywhere;
+}
+
+.operations-dashboard .host-detail {
+  color:#e4a3a8;
+}
+
 .operations-dashboard .count {
   font-size:28px;
   font-weight:600;
