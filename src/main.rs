@@ -16,9 +16,11 @@ mod notifications;
 mod permission_modes;
 mod runtime;
 mod service_restart;
+mod sha256;
 mod store;
 mod timeouts;
 mod workspace;
+mod worktree_cleanup;
 mod worktrees;
 use catalog::{Catalog, Settings};
 
@@ -143,6 +145,9 @@ struct SessionData {
     /// L-08 fork context held until the first prompt hands it to the harness.
     #[serde(default)]
     carried_context: Option<String>,
+    /// C-04b; present only when Agentworks created this session's worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worktree: Option<worktree_cleanup::Owned>,
 }
 
 struct Approval {
@@ -290,13 +295,13 @@ impl Session {
         });
         json!({"id":self.id,"provider":self.provider,"cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"model":model,
             "archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"created":self.created,"status":data.status,"turnRunning":data.turn_active,
-            "projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage})
+            "projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data)})
     }
     fn snapshot(&self) -> Value {
         let approvals = self.approvals.lock().unwrap();
         let data = self.data.lock().unwrap();
         json!({"kind":"snapshot","seq":data.seq,"session":{"id":self.id,"provider":self.provider,
-            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"inputQueue":data.input_queue},"events":data.events,
+            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"inputQueue":data.input_queue},"events":data.events,
             "truncated":data.events.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
             "permissionModes":data.permission_modes,"models":data.models,"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|json!({"id":id,"request":a.request})).collect::<Vec<_>>()})
@@ -430,6 +435,12 @@ impl Session {
     }
 }
 
+fn worktree_summary(data: &SessionData) -> Value {
+    data.worktree.as_ref().map_or(
+        Value::Null,
+        |o| json!({"owned":true,"path":o.path,"branch":o.branch,"removed":o.removed.is_some()}),
+    )
+}
 fn fail(code: StatusCode, msg: impl Into<String>) -> (StatusCode, String) {
     (code, msg.into())
 }
@@ -912,6 +923,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/{id}/events", get(events))
         .route("/api/sessions/{id}/file", get(file))
         .route("/api/sessions/{id}/workspace", get(git_context::workspace))
+        .route("/api/sessions/{id}/worktree", get(worktree_cleanup::status))
+        .route(
+            "/api/sessions/{id}/worktree/remove",
+            post(worktree_cleanup::remove),
+        )
         .route("/api/sessions/{id}/diff", get(diff::view))
         .route("/api/markdown", post(markdown))
         .route("/{name}", get(hosting::asset))
@@ -1892,7 +1908,7 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             "Limit: 12 active harnesses. Suspend idle sessions first.",
         ));
     }
-    let cwd = tokio::time::timeout(
+    let (cwd, owned_worktree) = tokio::time::timeout(
         std::time::Duration::from_secs(12),
         worktrees::prepare(app, &req, source, creation_key),
     )
@@ -2003,6 +2019,7 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             timeouts: None,
             lineage: Default::default(),
             carried_context: None,
+            worktree: owned_worktree,
         }),
         tx,
         commands: Mutex::new(None),
@@ -2109,6 +2126,18 @@ async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     let _run = app.run_lock.lock().await;
     service_restart::allow_start(&app)?;
     let s = session(&app, &id)?;
+    if s.data
+        .lock()
+        .unwrap()
+        .worktree
+        .as_ref()
+        .is_some_and(|w| w.removed.is_some())
+    {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "This session's worktree was removed on archive; unarchive it to recreate the worktree",
+        ));
+    }
     if !installed(&s.provider) || !s.cwd.is_dir() {
         return Err(fail(
             StatusCode::CONFLICT,

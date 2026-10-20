@@ -3,6 +3,7 @@ import {setupInboxDelivery} from './inbox-delivery.js';
 import {setupDiff} from './diff.js';
 import {setupWorktreeControls,setupPolicyEditor} from './worktree-controls.js';
 import {setupGitContext} from './git-context.js';
+import {setupWorktreeOwnership} from './worktree-ownership.js';
 import {createWorkspace} from './workspace.js';
 import {setupCommunication} from './communication.js';
 import {setupPalettes} from './palettes.js';
@@ -881,6 +882,7 @@ setupCommunication({api,getActive:()=>active,getSessions:()=>sessions,selectSess
 setupInboxDelivery({api,getActive:()=>active,toast,uuid});
 
 setupGitContext({api,getActive:()=>active});
+const worktreeOwnership=setupWorktreeOwnership({api,toast});
 
 // A chosen harness command only reaches the composer; nothing here submits a turn.
 function insertCommand(text) {
@@ -974,7 +976,7 @@ $('rename-form').onsubmit=async event=>{
 async function archiveSession(session){
   if(!session)return;
   const id=session.id;
-  try{const updated=await api(`/api/sessions/${id}`,{method:'PATCH',body:JSON.stringify({archived:!session.archived})});if(active?.id===id)Object.assign(active,updated);await refreshSessions();updateControls();}catch(e){toast(e.message);}
+  try{const updated=await worktreeOwnership.archive(session);if(!updated)return;if(active?.id===id)Object.assign(active,updated);await refreshSessions();updateControls();}catch(e){toast(e.message);}
 }
 $('archive-session').onclick=()=>archiveSession(active);
 $('fork-session').onclick=()=>openFork();

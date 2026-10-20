@@ -26,6 +26,12 @@ export function setupGitContext({api,getActive}) {
         status.textContent=context.status==='non_git'?'Not a Git worktree':'Workspace context unavailable';
         field('Details',context.message);
       }
+      const owner=await api(`/api/sessions/${encodeURIComponent(active.id)}/worktree`).catch(()=>null);
+      if(current!==generation||!dialog.open||!owner)return;
+      field('Ownership',owner.owned?`Created by this session (${owner.state})`:'Not created by this session; never removed by Agentworks');
+      if(owner.dirty){const d=owner.dirty,total=d.staged+d.unstaged+d.untracked;field('Changes',total?`${d.staged} staged, ${d.unstaged} unstaged, ${d.untracked} untracked`:'Clean');}
+      if(owner.owned)field('Archive cleanup',owner.cleanup.allowed?(owner.cleanup.requiresConfirmation?'Asks before deleting changes':'Removed automatically on archive; branch kept'):owner.cleanup.reason);
+      field('Integration',owner.integration.note);
     }catch(error){
       if(current!==generation||!dialog.open)return;
       status.textContent='Workspace context unavailable';field('Details',error.message);

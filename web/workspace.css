@@ -38,3 +38,5 @@
 .session-bar :is(#session-files,#session-diff)[aria-expanded=true]{color:var(--accent)}
 .markdown img.opens-preview{cursor:zoom-in}
 @media(max-width:800px){#side-panel{position:relative;inset:auto;transform:none;transition:none;z-index:auto;width:auto;min-width:0;max-width:none;border-left:0;flex:1}#workspace-session-area:has(#side-panel:not([hidden])) #workspace-chat-column{display:none}.side-panel-head{padding:6px 8px 6px 12px;min-height:52px}.side-tabs button{padding:8px 18px;font-size:13px}#side-close{min-width:44px;min-height:44px}#side-diff{padding:4px 12px 12px}}
+
+.worktree-paths{max-height:160px;overflow:auto;font:11px ui-monospace,monospace;color:#c8ccd3;padding-left:18px;overflow-wrap:anywhere}.danger-button{background:#34272b;color:#efb4ba;border:1px solid #6b3f46;border-radius:7px;padding:12px 15px;font-size:12px;font-weight:600}.danger-button:hover{background:#432d33}#worktree-archive-dialog .dialog-footer{flex-wrap:wrap;justify-content:flex-end}#worktree-archive-cancel{margin-right:auto}
