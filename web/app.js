@@ -432,8 +432,134 @@ function connect(gen){
   };
 }
 function addMessage(role,text){const message={id:uuid(),type:'message',role,text};transcript.push(message);return message;}
+// U-05 built-in Bazel activity. Private presentation state; the stored ACP events remain raw.
+// Keep this inline: adding a browser asset would require a coordinator-owned route change.
+function bazelLine(previous,line){
+  const next={...previous};
+  const phase=line.match(/^(?:INFO:\s*)?(Loading|Analyzing|Fetching|Building|Testing|Computing (?:main repo|repository) mapping):/i);
+  if(phase)next.phase=phase[1];
+  const number='((?:\\d{1,3}(?:,\\d{3})+|\\d+))';
+  const actions=line.match(new RegExp('^\\s*\\['+number+'\\s*\\/\\s*'+number+'\\]'));
+  const tests=line.match(new RegExp('(?:^|[;\\]\\s])'+number+'\\s*\\/\\s*'+number+'\\s+tests\\b','i'));
+  const counts=match=>{
+    const done=Number(match[1].replaceAll(',','')),total=Number(match[2].replaceAll(',',''));
+    return Number.isSafeInteger(done)&&Number.isSafeInteger(total)&&done>=0&&total>=done?{done,total}:null;
+  };
+  if(actions){const value=counts(actions);if(value){next.actions=value;next.phase='Executing';}}
+  if(tests){const value=counts(tests);if(value){next.tests=value;next.phase='Testing';}}
+  return next;
+}
+function feedBazel(stream,data){
+  // Parse incrementally, retaining only a bounded current line and escape-sequence state.
+  // Raw text is separate and is never stripped, rewritten or sent back to the harness.
+  for(const char of data){
+    if(stream.escape==='osc'){if(char==='\x07')stream.escape='';else if(char==='\x1b')stream.escape='osc-escape';continue;}
+    if(stream.escape==='osc-escape'){stream.escape=char==='\\'?'':'osc';continue;}
+    if(stream.escape==='csi'){if(char>='@'&&char<='~')stream.escape='';continue;}
+    if(stream.escape==='esc'){stream.escape=char==='['?'csi':char===']'?'osc':'';continue;}
+    if(char==='\x1b'){stream.escape='esc';continue;}
+    if(char==='\r'||char==='\n'){
+      if(!stream.overflow)stream.committed=bazelLine(stream.committed,stream.line);
+      stream.line='';stream.overflow=false;
+    }else if(char>=' '||char==='\t'){
+      if(stream.line.length<16384)stream.line+=char;else stream.overflow=true;
+    }
+  }
+  stream.progress=stream.overflow?stream.committed:bazelLine(stream.committed,stream.line);
+}
+function toolOutputText(content){
+  if(typeof content==='string')return content;
+  if(!Array.isArray(content))return null;
+  const texts=content.filter(c=>c?.type==='content'&&c.content?.type==='text').map(c=>c.content.text).filter(t=>typeof t==='string');
+  return texts.length?texts.join('\n'):null;
+}
+function applyToolUpdate(tool,update,seq,observedAt=null){
+  const output=tool.activityOutput??={streams:new Map(),version:0,seq:null};
+  // Persisted session sequence numbers deduplicate replay/delivery, never text equality:
+  // two identical chunks can be real output. Session snapshots rebuild all derived state.
+  if(Number.isSafeInteger(seq)&&output.seq!==null&&seq<=output.seq)return false;
+  if(Number.isSafeInteger(seq))output.seq=seq;
+  Object.assign(tool,update,{type:'tool'});
+  function write(key,data,delta){
+    if(typeof data!=='string')return;
+    let stream=output.streams.get(key);
+    if(!delta||!stream){stream={raw:'',line:'',escape:'',overflow:false,committed:{},progress:{}};output.streams.set(key,stream);}
+    stream.raw+=data;stream.version=++output.version;feedBazel(stream,data);
+  }
+  // ACP content/rawOutput updates are snapshots. Only explicit terminal_output_delta appends.
+  if(Object.hasOwn(update,'content')){
+    output.streams.delete('content');const text=toolOutputText(update.content);if(text!==null)write('content',text,false);
+  }
+  if(Object.hasOwn(update,'rawOutput')){
+    output.streams.delete('rawOutput');
+    const raw=update.rawOutput;
+    const text=typeof raw==='string'?raw:raw&&typeof raw==='object'?['stdout','stderr','output'].filter(k=>typeof raw[k]==='string').map(k=>raw[k]).join('\n'):null;
+    if(text!==null)write('rawOutput',text,false);
+  }
+  const meta=update._meta;
+  for(const [key,delta]of [['terminal_output',false],['terminal_output_delta',true]]){
+    const value=meta?.[key];
+    if(typeof value?.terminal_id==='string')write('terminal:'+value.terminal_id,value.data,delta);
+  }
+  const exit=meta?.terminal_exit;
+  if(typeof exit?.terminal_id==='string'){
+    output.exit={...exit};if(observedAt!==null)output.exitObservedAt??=observedAt;
+    const stream=output.streams.get('terminal:'+exit.terminal_id);if(stream)stream.exit={...exit};
+  }
+  return true;
+}
+function toolActivityView(tool,now=Date.now(),sessionBusy=true){
+  const output=tool.activityOutput;
+  const command=typeof tool.rawInput==='string'?tool.rawInput:tool.rawInput?.command??tool.rawInput?.cmd??tool.title??'';
+  const isBazel=typeof command==='string'&&/(?:^|[\s;&|"'])(?:[^\s;&|"']*\/)?bazel(?:isk)?(?=[\s"']|$)/.test(command);
+  const streams=output?[...output.streams.values()]:[];
+  const progress=isBazel?streams.filter(s=>s.progress.phase).sort((a,b)=>b.version-a.version)[0]?.progress:null;
+  const exit=output?.exit;
+  const stopped=!!exit||!['pending','in_progress'].includes(tool.status||'pending');
+  const unresolved=!stopped&&(!sessionBusy||output?.turnEnded);
+  const running=!stopped&&!unresolved;
+  const elapsed=tool.observedStart!==undefined?Math.max(0,Math.floor(((tool.observedEnd??output?.exitObservedAt??output?.turnEndedAt??now)-tool.observedStart)/1000)):null;
+  const elapsedLabel=elapsed===null?'':elapsed<60?`${elapsed}s`:`${Math.floor(elapsed/60)}m ${elapsed%60}s`;
+  const parts=[];
+  if(progress){
+    parts.push('Bazel · '+progress.phase);
+    if(progress.actions)parts.push(`${progress.actions.done.toLocaleString('en-US')} / ${progress.actions.total.toLocaleString('en-US')} actions reported`);
+    if(progress.tests)parts.push(`${progress.tests.done.toLocaleString('en-US')} / ${progress.tests.total.toLocaleString('en-US')} tests reported`);
+  }else if(running)parts.push('In progress');
+  else if(unresolved)parts.push('No final status');
+  if(progress&&unresolved)parts.push('No final status');
+  if(elapsedLabel)parts.push(elapsedLabel);
+  if(exit){
+    if(exit.exit_code!==null&&exit.exit_code!==undefined)parts.push('Exit '+exit.exit_code);
+    if(exit.signal)parts.push('Signal '+exit.signal);
+  }
+  return {text:parts.join(' · '),running,progress:!!progress};
+}
+function toolRawText(tool){
+  const parts=[];
+  // Preserve mixed content and raw result fields, including unrecognized metadata.
+  for(const key of ['content','rawOutput','rawInput'])if(tool[key]!==undefined&&tool[key]!==null){
+    const value=tool[key];parts.push(key+':\n'+(typeof value==='string'?value:JSON.stringify(value,null,2)));
+  }
+  if(tool._meta)parts.push('_meta:\n'+JSON.stringify(tool._meta,null,2));
+  for(const [key,stream]of tool.activityOutput?.streams||[])if(key.startsWith('terminal:'))parts.push(key+' (raw output):\n'+stream.raw);
+  return parts.join('\n\n')||'{}';
+}
+function renderToolActivity(node,tool,sessionBusy){
+  const summary=node.querySelector('summary');
+  summary.replaceChildren(el('span','tool-title',tool.title||'Tool activity'),el('span','tool-state',tool.status||'pending'));
+  let activity=node.querySelector('.tool-activity');
+  if(!activity){activity=el('span','tool-activity');summary.append(activity);}else summary.append(activity);
+  const view=toolActivityView(tool,Date.now(),sessionBusy);
+  activity.textContent=view.text;activity.hidden=!view.text;
+  activity.classList.toggle('is-running',view.running);activity.classList.toggle('has-progress',view.progress);
+  node.querySelector('pre').textContent=toolRawText(tool);
+}
+// End U-05 built-in Bazel activity.
+
 function consume(e,live=false){
   const d=e.data;
+  if(e.kind==='user'||e.kind==='turn_end')for(const tool of tools.values())if(tool.activityOutput&&!tool.activityOutput.turnEnded){tool.activityOutput.turnEnded=true;if(live&&!replaying)tool.activityOutput.turnEndedAt=Date.now();}
   usageStatus.consume(e,{live});
   if(d?.continuationState&&active)active.continuation=d.continuationState;
   {const t=timeoutControls?.notice(e.kind,d);if(t){transcript.push({id:uuid(),type:'notice',text:t});assistant=null;}}
@@ -480,11 +606,11 @@ function consume(e,live=false){
         }break;
       }
       case 'tool_call':{
-        assistant=null;let tool=tools.get(d.toolCallId);if(tool)Object.assign(tool,d,{type:'tool'});else{tool={...d,id:d.toolCallId,type:'tool'};tools.set(d.toolCallId,tool);transcript.push(tool);}observeTool(tool,{live:!replaying});break;
+        assistant=null;let tool=tools.get(d.toolCallId);if(!tool){tool={id:d.toolCallId,type:'tool'};tools.set(d.toolCallId,tool);transcript.push(tool);}if(applyToolUpdate(tool,d,e.seq,live&&!replaying?Date.now():null))observeTool(tool,{live:live&&!replaying});break;
       }
       case 'tool_call_update':{
         let tool=tools.get(d.toolCallId);
-        if(!tool){tool={id:d.toolCallId,type:'tool',title:'Tool activity'};tools.set(d.toolCallId,tool);transcript.push(tool);}Object.assign(tool,d,{type:'tool'});observeTool(tool,{live:!replaying});break;
+        if(!tool){tool={id:d.toolCallId,type:'tool',title:'Tool activity'};tools.set(d.toolCallId,tool);transcript.push(tool);}if(applyToolUpdate(tool,d,e.seq,live&&!replaying?Date.now():null))observeTool(tool,{live:live&&!replaying});break;
       }
       case 'plan':{
         const text=(d.entries||[]).map(p=>`- ${p.status==='completed'?'✓':'○'} ${p.content}`).join('\n');
@@ -580,9 +706,7 @@ function draw(){
       const body=node.querySelector('.message-body');
       if(item.role==='user')body.textContent=item.text;else updateMarkdown(item,body);
     }else if(item.type==='tool'){
-      const summary=node.querySelector('summary');summary.replaceChildren(el('span','',item.title||'Tool activity'),el('span','tool-state',item.status||'pending'));
-      const content=item.content||item.rawOutput||item.rawInput||{};
-      node.querySelector('pre').textContent=typeof content==='string'?content:JSON.stringify(content,null,2);
+      renderToolActivity(node,item,['running','waiting','cancelling'].includes(status));
     }
   }
   const pending=$('approval-area');pending.replaceChildren();
@@ -1029,3 +1153,6 @@ $('service-restart').onclick=async()=>{
 };
 $('service-cancel').onclick=async()=>{if(!servicePending)return;try{await api('/api/service/restart/cancel',{method:'POST',body:JSON.stringify({actor:servicePending.actor,requestId:servicePending.request.requestId})});await refreshService();}catch(e){$('service-error').textContent=e.message;}};
 setInterval(refreshService,1000);
+
+// Refresh observed elapsed activity without reparsing output or changing transcript state.
+setInterval(()=>{if(!active)return;for(const tool of tools.values()){const node=nodes.get(tool.id);if(node){const view=toolActivityView(tool,Date.now(),['running','waiting','cancelling'].includes(status));const activity=node.querySelector('.tool-activity');if(activity&&view.running)activity.textContent=view.text;}}},1000);
