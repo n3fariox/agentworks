@@ -1274,7 +1274,7 @@ mod tests {
                     .connection
                     .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                     .unwrap(),
-                7
+                8
             );
             assert!(store.access("retained").unwrap().communicate);
             assert_eq!(

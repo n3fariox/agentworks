@@ -25,6 +25,10 @@ pub async fn index() -> Html<String> {
 
 pub async fn asset(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
     let (mime, body): (&str, &[u8]) = match name.as_str() {
+        "review-queue.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("../web/review-queue.js"),
+        ),
         "hosting.js" => (
             "text/javascript; charset=utf-8",
             include_bytes!("../web/hosting.js"),

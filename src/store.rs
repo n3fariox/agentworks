@@ -51,7 +51,7 @@ impl Store {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
         )?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 7 {
+        if version > 8 {
             return Err("Session database was created by a newer Agentworks version".into());
         }
         connection.execute_batch("BEGIN; CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, metadata TEXT NOT NULL, state TEXT NOT NULL);
@@ -70,8 +70,9 @@ impl Store {
           CREATE TABLE IF NOT EXISTS session_creations(request_key TEXT PRIMARY KEY,payload TEXT NOT NULL,session_id TEXT,error TEXT,mutation_started INTEGER NOT NULL DEFAULT 0);
           COMMIT;")?;
         connection.execute_batch(&format!(
-            "BEGIN; {} PRAGMA user_version=7; COMMIT;",
-            crate::inbox_delivery::SCHEMA
+            "BEGIN; {} {} PRAGMA user_version=8; COMMIT;",
+            crate::inbox_delivery::SCHEMA,
+            crate::review_queue::SCHEMA
         ))?;
         Ok(Self {
             connection,
@@ -477,7 +478,7 @@ mod tests {
                     .connection
                     .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                     .unwrap(),
-                7
+                8
             );
         }
         let state:SessionData=serde_json::from_value(json!({"status":"idle","seq":0,"requests":[],"models":null,"available_commands":[],"turn_active":false,"project_id":null,"provider_session_id":null})).unwrap();
@@ -507,7 +508,7 @@ mod tests {
             assert_eq!(
                 db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                     .unwrap(),
-                7
+                8
             );
             for (sql, expected) in [
                 (

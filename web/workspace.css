@@ -38,3 +38,6 @@
 .session-bar :is(#session-files,#session-diff)[aria-expanded=true]{color:var(--accent)}
 .markdown img.opens-preview{cursor:zoom-in}
 @media(max-width:800px){#side-panel{position:relative;inset:auto;transform:none;transition:none;z-index:auto;width:auto;min-width:0;max-width:none;border-left:0;flex:1}#workspace-session-area:has(#side-panel:not([hidden])) #workspace-chat-column{display:none}.side-panel-head{padding:6px 8px 6px 12px;min-height:52px}.side-tabs button{padding:8px 18px;font-size:13px}#side-close{min-width:44px;min-height:44px}#side-diff{padding:4px 12px 12px}}
+
+#review-queue form{display:grid;gap:12px;margin:16px 0}#review-queue label{display:grid;gap:5px}#review-queue input,#review-queue select,#review-queue textarea{box-sizing:border-box;width:100%;min-width:0}#review-queue pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}#review-queue article{margin:10px 0}
+#review-queue [hidden]{display:none}

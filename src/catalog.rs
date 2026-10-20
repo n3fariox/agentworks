@@ -239,6 +239,7 @@ mod tests {
                 && !access.cancel_sessions
                 && !access.run_automations
                 && !access.restart_service
+                && !access.manage_review_queue
         );
         catalog
             .settings(Settings {

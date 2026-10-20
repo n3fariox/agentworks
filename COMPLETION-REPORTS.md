@@ -2,6 +2,8 @@
 
 Completion reports are durable **agent claims**, not proof of review, merge, or successful tests. They do not change session/turn status, submit prompts, trigger models, approve tools, merge code, or grant access. The human session completion endpoint and Agents & inbox dialog remain available independently of agent grants.
 
+The separate [review and merge queue](REVIEW-QUEUE.md) pins proposals, independent review/test evidence and manual integration reservations. Completion claims never populate or advance it.
+
 ## MCP tools
 
 `report_completion` records a report for the authenticated MCP session only. Participant (`communicate`) access is required on every call, including retries. No actor, author, recipient, or session ID can be supplied. Unknown fields and invalid types are rejected.
