@@ -43,3 +43,23 @@
 #review-queue [hidden]{display:none}
 .worktree-paths{max-height:160px;overflow:auto;font:11px ui-monospace,monospace;color:#c8ccd3;padding-left:18px;overflow-wrap:anywhere}.danger-button{background:#34272b;color:#efb4ba;border:1px solid #6b3f46;border-radius:7px;padding:12px 15px;font-size:12px;font-weight:600}.danger-button:hover{background:#432d33}#worktree-archive-dialog .dialog-footer{flex-wrap:wrap;justify-content:flex-end}#worktree-archive-cancel{margin-right:auto}
 .controller-item{display:flex;gap:10px;align-items:flex-start;justify-content:space-between;border-bottom:1px solid var(--border);padding:10px 0}.controller-item strong{display:block;font-size:13px;font-weight:550}.controller-item small{display:block;color:var(--muted);font-size:11px;margin:4px 0}.controller-item code{font-size:10px;color:#9a93ab;overflow-wrap:anywhere}#controller-config{width:100%;font:11px ui-monospace,monospace;background:#111417;color:var(--text);border-radius:7px;padding:10px}#controllers-dialog{max-height:94dvh;overflow:auto}
+
+/* Main session views share the same header and optional Files/Diff column. */
+.session-tabs{display:flex;gap:4px;padding:0 20px;border-bottom:1px solid var(--border);flex:none}
+.session-tabs button{border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;color:var(--muted);padding:10px 14px;font-size:12px}
+.session-tabs button[aria-selected=true]{color:var(--accent);border-bottom-color:var(--accent)}
+#session-chat,#session-terminal{display:flex;flex-direction:column;flex:1;min-height:0;min-width:0}
+#session-terminal{background:#101218;position:relative;padding:0 10px 10px}
+.terminal-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:36px;font-size:11px;color:var(--muted);flex:none}
+#terminal-surface{flex:1;min-height:0;min-width:0;overflow:hidden}
+#terminal-cell-measure{position:absolute;visibility:hidden;pointer-events:none;font:14px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace}
+#session-chat[hidden],#session-terminal[hidden]{display:none}
+
+/* Host terminals use the same surface as session terminals, outside chat. */
+#host-terminal-view{display:flex;flex-direction:column;flex:1;min-height:0;min-width:0;position:relative;background:#101218;padding:0 10px 10px}
+#host-terminal-view .session-bar{padding:16px 10px;justify-content:space-between}
+#host-terminal-surface{flex:1;min-height:0;min-width:0;overflow:hidden}
+#host-terminal-cell-measure{position:absolute;visibility:hidden;pointer-events:none;font:14px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace}
+body[data-workspace-view=host-terminal] .workspace-context{display:none}
+
+#terminal-surface.terminal-readonly,#host-terminal-surface.terminal-readonly{overflow:auto}

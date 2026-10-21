@@ -1,3 +1,4 @@
+import {setupTerminal} from './terminal.js';
 import {hostEnrollment} from './host-enrollment.js';
 import {appUrl, socketUrl, localState as localStorage, sessionState as sessionStorage} from './hosting.js';
 import {setupInboxDelivery} from './inbox-delivery.js';
@@ -354,6 +355,8 @@ async function hostAction(host,action){
   if(action==='remove'&&!confirm(`Remove host ${host.name}? Its worker stops; nothing on that machine is deleted.`))return;
   try{await api(`/api/hosts/${host.id}`+(action==='remove'?'':'/reconnect'),{method:action==='remove'?'DELETE':'POST'});await refreshSessions();}catch(e){toast(e.message);}
 }
+let terminalHost=null;
+function openHostTerminal(host){terminalHost=host;localStorage.setItem('agentworks-terminal-host',host.id);workspace.showView('host-terminal');sidebar();}
 function treeGroup(key,label,items,{host=null,projectId=null,level=0,archived=false}={}){
   const group=el('details','tree-group level-'+level);group.dataset.group=key;
   const stateKey=sidebarView+':'+key;group.open=!collapsedGroups.has(stateKey);
@@ -364,6 +367,11 @@ function treeGroup(key,label,items,{host=null,projectId=null,level=0,archived=fa
   if(!host&&projectId){
     const rename=el('button','group-action','⋯');rename.type='button';rename.setAttribute('aria-label','Edit project '+label);
     rename.onclick=event=>{event.preventDefault();event.stopPropagation();openProjectDialog(projects.find(p=>p.id===projectId));};heading.append(rename);
+  }
+  if(host){
+    const terminal=el('button','group-action','›_');terminal.type='button';terminal.setAttribute('aria-label','Open terminal on '+label);terminal.title='Open terminal';
+    terminal.setAttribute('aria-pressed',String(document.body.dataset.workspaceView==='host-terminal'&&terminalHost?.id===host.id));
+    terminal.onclick=event=>{event.preventDefault();event.stopPropagation();openHostTerminal(host);};heading.append(terminal);
   }
   if(host?.kind==='remote'){
     // Link controls and session creation belong to the owning host.
@@ -389,7 +397,7 @@ function treeGroup(key,label,items,{host=null,projectId=null,level=0,archived=fa
   return {group,children};
 }
 function sessionButton(s){
-  const button=el('button','session-item'+(active?.id===s.id?' selected':''));button.type='button';button.dataset.sessionId=s.id;button.title=s.cwd;
+  const button=el('button','session-item'+(active?.id===s.id&&document.body.dataset.workspaceView!=='host-terminal'?' selected':''));button.type='button';button.dataset.sessionId=s.id;button.title=s.cwd;
   button.append(el('span','session-icon',icons[s.provider]));
   const copy=el('span','session-copy');copy.append(el('strong','',s.title),el('small','',`${s.archived?'Archived · ':''}${s.automation?'Automation · ':''}${labels[s.provider]}${s.model?' · '+s.model:''}`));
   button.append(copy,el('span','status-dot '+s.status));button.onclick=()=>selectSession(s);
@@ -452,6 +460,7 @@ function sidebar(){
 async function refreshSessions(){
   const [list,catalog]=await Promise.all([api('/api/sessions?archived=all'),api('/api/catalog')]);
   sessions=list;projects=catalog.projects;hosts=catalog.hosts;
+  if(terminalHost&&!hosts.some(host=>host.id===terminalHost.id)){terminalHost=null;if(document.body.dataset.workspaceView==='host-terminal')workspace.showView('sessions');}
   if(active){const current=sessions.find(s=>s.id===active.id);if(current){active.projectId=current.projectId;active.hostId=current.hostId;active.automation=current.automation;active.archived=current.archived;}}
   sidebar();workspace?.sync(catalog,sessions);
 }
@@ -483,7 +492,7 @@ addEventListener('popstate',event=>{
 });
 function selectSession(s) {
   document.body.classList.remove('menu-open');enterChat();
-  if(active?.id===s.id){$('welcome').hidden=true;$('conversation').hidden=false;workspace?.sessionSelected(s);sidePanel?.sessionChanged();return;}
+  if(active?.id===s.id){$('welcome').hidden=true;$('conversation').hidden=false;workspace?.sessionSelected(s);sidePanel?.sessionChanged();sessionTerminal?.sessionChanged();return;}
   if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));scrollPositions.set(active.id,$('messages').scrollTop);}
   $('prompt').value=drafts[s.id]||'';restoreScroll=scrollPositions.get(s.id)??null;
   clearTimeout(retryTimer);generation++;socket?.close();socket=null;connected=false;
@@ -491,7 +500,7 @@ function selectSession(s) {
   localStorage.setItem('agentworks-session',s.id);$('welcome').hidden=true;$('conversation').hidden=false;
   setTitle(s.title);$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;
   $('session-notice').hidden=true;document.body.classList.remove('menu-open');sidebar();updateControls();connect(generation);
-  workspace?.sessionSelected(s);sidePanel?.sessionChanged();promptResize.size();
+  workspace?.sessionSelected(s);sidePanel?.sessionChanged();sessionTerminal?.sessionChanged();promptResize.size();
   if(s.status==='suspended'&&!s.explicitlySuspended)resumeSession(s.id);
 }
 function connect(gen){
@@ -667,7 +676,7 @@ function consume(e,live=false){
   if(d?.continuationState&&active)active.continuation=d.continuationState;
   {const t=timeoutControls?.notice(e.kind,d);if(t){transcript.push({id:uuid(),type:'notice',text:t});assistant=null;}}
   if(e.kind==='session_updated'){
-    Object.assign(active,d);setTitle(active.title);const row=sessions.find(s=>s.id===active.id);if(row)Object.assign(row,d);sidebar();
+    Object.assign(active,d);sessionTerminal?.sessionUpdated();setTitle(active.title);const row=sessions.find(s=>s.id===active.id);if(row)Object.assign(row,d);sidebar();
   }
   else if(e.kind==='continuation'){renderContinuation();}
   else if(e.kind==='models'){modelConfig=d;syncModelLabel();}
@@ -899,7 +908,7 @@ function describeProjectRemove(){
   $('project-remove-description').textContent=$('project-remove-ungroup').checked
     ?`${verb} the project. Its ${count} ${plural} move to Ungrouped and keep running.`
     :action==='delete'?`Deletes the project and the saved history of its ${count} ${plural}, stopping any running work. Workspace files and branches remain. This cannot be undone.`
-    :`Hides the project and archives its ${count} ${plural}. Archiving never stops running work.`;
+    :`Hides the project and archives its ${count} ${plural}. Archiving stops session terminals and keeps their saved history.`;
 }
 $('project-remove-ungroup').onchange=describeProjectRemove;
 async function archiveProject(project){
@@ -1110,11 +1119,23 @@ $('settings-form').onsubmit=async event=>{
 document.addEventListener('keydown',event=>{if(event.key==='n'&&!event.ctrlKey&&!event.metaKey&&!event.altKey&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)&&!document.querySelector('dialog[open]')){event.preventDefault();openCreate();}});
 const diffView=setupDiff({api,root:$('side-diff'),enhanceBlocks:display.enhance});
 timeoutControls=setupTimeoutControls({$,api,getActive:()=>active});
-workspace=createWorkspace({api,toast,labels,uuid,getConfig:()=>config,getActive:()=>active,selectSession,openCreate,refreshSessions,enhanceBlocks:display.enhance,openSettings,
+workspace=createWorkspace({api,toast,labels,uuid,
+  viewChanged(view){
+    if(view==='host-terminal'){
+      terminalHost=hosts.find(host=>host.id===(terminalHost?.id||localStorage.getItem('agentworks-terminal-host')));
+      if(!terminalHost){workspace.showView('sessions');return;}
+      $('header-title').textContent=terminalHost.name+' · Terminal';$('host-terminal-title').textContent=terminalHost.name+' · Terminal';
+      hostTerminal.open();document.body.classList.remove('menu-open');enterChat();
+    }else if(active)setTitle(active.title);else $('header-title').textContent='Overview';
+  },getConfig:()=>config,getActive:()=>active,selectSession,openCreate,refreshSessions,enhanceBlocks:display.enhance,openSettings,
   overview(){ $('conversation').hidden=true;$('welcome').hidden=false;localStorage.removeItem('agentworks-session'); },
   openPanel:tab=>sidePanel?.open(tab),
   appendDraft(text){if(!active)return;const current=$('prompt').value;$('prompt').value=current?current+'\n\n'+text:text;drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));promptResize.size();},
 });
+const sessionTerminal=setupTerminal({$,api,getActive:()=>active,socketUrl});
+const hostTerminal=setupTerminal({$:id=>$(id==='session-terminal'?'host-terminal-view':id.replace(/^terminal-/,'host-terminal-')),api,getActive:()=>terminalHost,socketUrl,tabs:false,endpoint:id=>`/api/hosts/${id}/terminal`});
+$('host-terminal-back').onclick=()=>{workspace.showView('sessions');sidebar();if(phone())showBrowser();};
+
 sidePanel=setupSidePanel({panel:$('side-panel'),tabs:{files:$('side-tab-files'),diff:$('side-tab-diff')},triggers:{files:$('session-files'),diff:$('session-diff')},close:$('side-close'),renderers:{files:workspace.sideFiles,diff:diffView},getActive:()=>active,phone});
 async function init(){
   config=await api('/api/status');

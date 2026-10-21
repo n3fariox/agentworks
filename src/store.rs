@@ -56,6 +56,7 @@ impl Store {
         }
         connection.execute_batch("BEGIN; CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, metadata TEXT NOT NULL, state TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS events(session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, seq INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(session_id,seq));
+          CREATE TABLE IF NOT EXISTS terminal_snapshots(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, snapshot TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS automations(id TEXT PRIMARY KEY, definition TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS automation_runs(id TEXT PRIMARY KEY,automation_id TEXT NOT NULL,request_id TEXT NOT NULL,session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,name TEXT NOT NULL,provider TEXT NOT NULL,created INTEGER NOT NULL,status TEXT NOT NULL,UNIQUE(automation_id,request_id));
           CREATE INDEX IF NOT EXISTS automation_runs_by_definition ON automation_runs(automation_id,created);
@@ -230,6 +231,29 @@ impl Store {
             )?;
         }
         tx.commit()?;
+        Ok(())
+    }
+    pub fn save_terminal(&mut self, id: &str, frame: &crate::terminal::Frame) -> Result<()> {
+        self.connection.execute("INSERT INTO terminal_snapshots(session_id,snapshot) VALUES (?1,?2) ON CONFLICT(session_id) DO UPDATE SET snapshot=excluded.snapshot",params![id,serde_json::to_string(frame)?])?;
+        Ok(())
+    }
+    pub fn terminal(&self, id: &str) -> Result<Option<crate::terminal::Frame>> {
+        use rusqlite::OptionalExtension;
+        let value: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT snapshot FROM terminal_snapshots WHERE session_id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value
+            .map(|value| serde_json::from_str(&value))
+            .transpose()?)
+    }
+    pub fn clear_terminal(&mut self, id: &str) -> Result<()> {
+        self.connection
+            .execute("DELETE FROM terminal_snapshots WHERE session_id=?1", [id])?;
         Ok(())
     }
     pub fn delete(&mut self, id: &str) -> Result<()> {

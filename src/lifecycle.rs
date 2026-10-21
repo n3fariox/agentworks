@@ -10,7 +10,7 @@ pub struct Metadata {
 }
 #[derive(Default, Deserialize)]
 pub struct Filter {
-    // active (default), archived, or all. Archiving never changes execution.
+    // active (default), archived, or all. Archiving leaves harness execution unchanged; its terminal is stopped.
     archived: Option<String>,
 }
 impl Filter {
@@ -73,7 +73,7 @@ pub async fn update(
         // A failed or occupied restore leaves the session archived.
         restored = crate::worktree_cleanup::restore(&app, &s).await?;
     }
-    let Json(mut meta) = apply(&s, title, req.archived)?;
+    let Json(mut meta) = apply(&s, title, req.archived).await?;
     if let Some(outcome) = cleanup {
         meta["worktreeCleanup"] = outcome;
     }
@@ -83,7 +83,7 @@ pub async fn update(
     Ok(Json(meta))
 }
 /// Commits title/archive metadata; callers hold the run lock.
-pub fn apply(s: &Session, title: Option<String>, archived: Option<bool>) -> ApiResult {
+pub async fn apply(s: &Session, title: Option<String>, archived: Option<bool>) -> ApiResult {
     if archived == Some(true) {
         crate::inbox_delivery::cancel(s, "Recipient archived")?;
     }
@@ -108,6 +108,9 @@ pub fn apply(s: &Session, title: Option<String>, archived: Option<bool>) -> ApiR
                 )
             })?;
         *data = next;
+    }
+    if archived == Some(true) {
+        let _ = crate::terminal::archive(s).await?;
     }
     let meta = s.meta();
     s.emit("session_updated", meta.clone());

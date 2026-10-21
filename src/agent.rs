@@ -57,6 +57,8 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         "tools": discovered_tools(&base).await,
         "workspace": true,
         "worktreeCleanup": true,
+        "terminal": true,
+        "home": home(),
     });
     ws.send(Message::text(hello.to_string()))
         .await
@@ -100,6 +102,8 @@ pub async fn run(args: &[String]) -> Result<(), String> {
     });
     let mut workspace_tasks = tokio::task::JoinSet::new();
     let workspace_lock = Arc::new(tokio::sync::Mutex::new(()));
+    let mut retiring_terminals = Vec::<crate::terminal::Handle>::new();
+    let mut terminals: HashMap<u32, crate::terminal::Handle> = HashMap::new();
     let mut processes: HashMap<u32, Process> = HashMap::new();
     let mut retiring: Vec<Process> = Vec::new();
     let mut reap = tokio::time::interval(Duration::from_secs(1));
@@ -114,6 +118,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
                 while workspace_tasks.try_join_next().is_some() {}
                 processes.retain(|_, process| !process.task.is_finished());
                 retiring.retain(|process| !process.task.is_finished());
+                retiring_terminals.retain(|handle| handle.frames.has_changed().is_ok());
                 continue;
             }
         };
@@ -136,6 +141,61 @@ pub async fn run(args: &[String]) -> Result<(), String> {
                 };
                 let channel = request["channel"].as_u64().unwrap_or(0) as u32;
                 match request["type"].as_str() {
+                    Some("terminalOpen") => {
+                        let cwd = PathBuf::from(request["cwd"].as_str().unwrap_or(""));
+                        if terminals.contains_key(&channel) {
+                            continue;
+                        }
+                        match crate::terminal::spawn(cwd) {
+                            Ok(handle) => {
+                                let mut frames = handle.frames.clone();
+                                let out = out.clone();
+                                tokio::spawn(async move {
+                                    let mut history_cursor = None;
+                                    loop {
+                                        let mut frame = frames.borrow_and_update().clone();
+                                        frame.history = frame.history.since(&mut history_cursor);
+                                        let exited = frame.exited;
+                                        if out.send(Message::text(json!({"type":"terminalFrame","channel":channel,"frame":frame}).to_string())).await.is_err() || exited {break;}
+                                        if frames.changed().await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                });
+                                terminals.insert(channel, handle);
+                            }
+                            Err(error) => {
+                                let frame = crate::terminal::Frame {
+                                    exited: true,
+                                    error: Some(error),
+                                    ..Default::default()
+                                };
+                                let _ = out.try_send(Message::text(
+                                    json!({"type":"terminalFrame","channel":channel,"frame":frame})
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                    }
+                    Some("terminalInput") => {
+                        if let Some(handle) = terminals.get(&channel) {
+                            if let Ok(input) = serde_json::from_value(request["input"].clone()) {
+                                if handle.input.try_send(input).is_err() {
+                                    handle
+                                        .stopped
+                                        .store(true, std::sync::atomic::Ordering::Release);
+                                }
+                            }
+                        }
+                    }
+                    Some("terminalClose") => {
+                        if let Some(handle) = terminals.remove(&channel) {
+                            handle
+                                .stopped
+                                .store(true, std::sync::atomic::Ordering::Release);
+                            retiring_terminals.push(handle);
+                        }
+                    }
                     Some("spawn") => {
                         if let Some(mut previous) =
                             processes.insert(channel, start(request, channel, out.clone()))
@@ -212,6 +272,14 @@ pub async fn run(args: &[String]) -> Result<(), String> {
     // Stop the socket writer first: exit reports must not block teardown on
     // a full outgoing queue after the peer has gone away.
     writer.abort();
+    for handle in terminals.values().chain(retiring_terminals.iter()) {
+        handle
+            .stopped
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+    for mut handle in terminals.into_values().chain(retiring_terminals) {
+        while handle.frames.changed().await.is_ok() {}
+    }
     // Signal every adapter before waiting, so teardown is bounded per link.
     // Killed/replaced channels still own cleanup tasks until their grace period
     // finishes. Keep the host lock through those tasks as well as active ones.
