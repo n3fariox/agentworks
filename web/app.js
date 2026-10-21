@@ -1,3 +1,4 @@
+import {hostEnrollment} from './host-enrollment.js';
 import {appUrl, socketUrl, localState as localStorage, sessionState as sessionStorage} from './hosting.js';
 import {setupInboxDelivery} from './inbox-delivery.js';
 import {setupDiff} from './diff.js';
@@ -817,17 +818,10 @@ $('host-roots-form').onsubmit=async event=>{
     $('host-roots-dialog').close();await refreshSessions();
   }catch(error){$('host-roots-error').textContent=error.message;}finally{$('save-host-roots').disabled=false;}
 };
-function openHostDialog(){
-  $('host-form').reset();$('host-error').textContent='';$('host-dialog').showModal();$('host-name').focus();
-}
-$('dismiss-host').onclick=()=>$('host-dialog').close();
-$('host-form').onsubmit=async event=>{
-  event.preventDefault();$('host-error').textContent='';$('save-host').disabled=true;
-  try{
-    await api('/api/hosts',{method:'POST',body:JSON.stringify({name:$('host-name').value,destination:$('host-destination').value,command:$('host-command').value})});
-    $('host-dialog').close();await refreshSessions();
-  }catch(error){$('host-error').textContent=error.message;}finally{$('save-host').disabled=false;}
-};
+const enrollment=hostEnrollment({$,api,refresh:refreshSessions,directories:host=>{
+  $('host-dialog').close();openHostRoots(host);
+}});
+function openHostDialog(){enrollment.open();}
 $('dismiss-project').onclick=()=>{if(!savingProject)$('project-dialog').close();};
 $('project-dialog').addEventListener('cancel',event=>{if(savingProject)event.preventDefault();});
 $('create-project').onchange=()=>{const remembered=readStorage(localStorage,'agentworks-project-locations',{})[$('create-project').value||'ungrouped'];if(remembered)$('directory').value=remembered;worktrees.projectChanged();updateCommunicationDefault();};

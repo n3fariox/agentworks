@@ -42,6 +42,10 @@ pub struct Host {
     /// an `ssh://` URI. Keys, ports and jump hosts come from the SSH config.
     #[serde(default)]
     pub destination: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_file: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_hosts_file: Option<PathBuf>,
     /// Shell command on the remote host that runs the Agentworks binary.
     #[serde(default)]
     pub command: String,
@@ -242,7 +246,42 @@ impl Catalog {
         self.save(data)?;
         Ok(location)
     }
-    pub fn add_host(&mut self, name: &str, destination: &str, command: &str) -> Result<Host, String> {
+    pub fn credentials_dir(&self) -> PathBuf {
+        self.path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("host-keys")
+    }
+    pub fn add_host(
+        &mut self,
+        name: &str,
+        destination: &str,
+        command: &str,
+    ) -> Result<Host, String> {
+        self.add_managed_host(name, destination, command, None, None)
+    }
+    pub fn add_managed_host(
+        &mut self,
+        name: &str,
+        destination: &str,
+        command: &str,
+        identity_file: Option<PathBuf>,
+        known_hosts_file: Option<PathBuf>,
+    ) -> Result<Host, String> {
+        let mut host = self.prepare_host(name, destination, command)?;
+        host.identity_file = identity_file;
+        host.known_hosts_file = known_hosts_file;
+        let mut data = self.data.clone();
+        data.hosts.push(host.clone());
+        self.save(data).map_err(|_| "Could not save host")?;
+        Ok(host)
+    }
+    pub fn prepare_host(
+        &self,
+        name: &str,
+        destination: &str,
+        command: &str,
+    ) -> Result<Host, String> {
         let name = name.trim();
         if name.is_empty() || name.chars().count() > 80 {
             return Err("Use a host name between 1 and 80 characters".into());
@@ -250,7 +289,12 @@ impl Catalog {
         if name.eq_ignore_ascii_case("local") {
             return Err("Local is reserved for this machine".into());
         }
-        if self.data.hosts.iter().any(|h| h.name.to_lowercase() == name.to_lowercase()) {
+        if self
+            .data
+            .hosts
+            .iter()
+            .any(|h| h.name.to_lowercase() == name.to_lowercase())
+        {
             return Err("A host with that name already exists".into());
         }
         let destination = destination.trim();
@@ -275,19 +319,22 @@ impl Catalog {
             id: Uuid::new_v4().to_string(),
             name: name.into(),
             destination: destination.into(),
+            identity_file: None,
+            known_hosts_file: None,
             command: command.into(),
             roots: Vec::new(),
         };
-        let mut data = self.data.clone();
-        data.hosts.push(host.clone());
-        self.save(data).map_err(|_| "Could not save host")?;
         Ok(host)
     }
     pub fn set_host_roots(&mut self, id: &str, roots: Vec<String>) -> Result<Host, String> {
         let mut cleaned: Vec<String> = Vec::new();
         for root in roots {
             let root = root.trim().trim_end_matches('/').to_string();
-            let root = if root.is_empty() { "/".to_string() } else { root };
+            let root = if root.is_empty() {
+                "/".to_string()
+            } else {
+                root
+            };
             if !(root.starts_with('/') || root == "~" || root.starts_with("~/"))
                 || root.len() > 4096
                 || root.chars().any(char::is_control)
@@ -489,23 +536,43 @@ mod tests {
         assert!(catalog.add_host("Local", "box", "").is_err());
         assert!(catalog.add_host("box", "-oProxyCommand=sh", "").is_err());
         assert!(catalog.add_host("box", "user@host name", "").is_err());
-        assert!(catalog.add_host("box", "box", "agentworks\nrm -rf /").is_err());
+        assert!(
+            catalog
+                .add_host("box", "box", "agentworks\nrm -rf /")
+                .is_err()
+        );
         let host = catalog.add_host("Build box", "dev@build.lan", "").unwrap();
         assert_eq!(host.command, DEFAULT_REMOTE_COMMAND);
         assert!(catalog.add_host("build BOX", "other", "").is_err());
         let custom = catalog
-            .add_host("Laptop", "ssh://me@[fe80::1]:2222", "~/agentworks/target/release/agentworks")
+            .add_host(
+                "Laptop",
+                "ssh://me@[fe80::1]:2222",
+                "~/agentworks/target/release/agentworks",
+            )
             .unwrap();
         let reopened = Catalog::open(path.clone()).unwrap();
         assert_eq!(reopened.data.hosts.len(), 2);
         assert_eq!(reopened.data.hosts[1].command, custom.command);
-        assert!(catalog.set_host_roots(&host.id, vec!["relative/path".into()]).is_err());
+        assert!(
+            catalog
+                .set_host_roots(&host.id, vec!["relative/path".into()])
+                .is_err()
+        );
         let rooted = catalog
-            .set_host_roots(&host.id, vec!["~/projects/".into(), "/srv/app".into(), "~/projects".into()])
+            .set_host_roots(
+                &host.id,
+                vec!["~/projects/".into(), "/srv/app".into(), "~/projects".into()],
+            )
             .unwrap();
         assert_eq!(rooted.roots, ["~/projects", "/srv/app"]);
-        let remote = catalog.location_on(&host.id, Path::new("/srv/app")).unwrap();
-        assert_ne!(remote.id, catalog.location(Path::new("/srv/app")).unwrap().id);
+        let remote = catalog
+            .location_on(&host.id, Path::new("/srv/app"))
+            .unwrap();
+        assert_ne!(
+            remote.id,
+            catalog.location(Path::new("/srv/app")).unwrap().id
+        );
         let project = catalog.project(None, "Spans hosts", None).unwrap();
         catalog.attach_location(&project.id, &remote.id).unwrap();
         catalog.remove_host(&host.id).unwrap();

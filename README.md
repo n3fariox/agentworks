@@ -189,7 +189,17 @@ Projects, settings, and host-local location IDs are saved in `.agentworks/catalo
 
 ### Remote hosts
 
-In the Hosts view, **＋** beside the Hosts heading adds a remote host: a name, an SSH destination, and optionally the command that runs Agentworks there. The server then runs:
+In the Hosts view, **＋** opens host setup. Enter a name and an SSH destination (`user@host`, an SSH config alias, or `ssh://user@host:port`). **Install worker with mise** is the default:
+
+1. A live xterm.js terminal shows SSH's host fingerprint prompt and accepts a password, key passphrase, or keyboard-interactive authentication. Existing SSH keys/agents/configuration are tried by SSH. Passwords and terminal input/output are not persisted.
+2. Agentworks generates a dedicated Ed25519 key for this host, appends its public key to `~/.ssh/authorized_keys` with `restrict`, and verifies another connection. The private key stays on this server, in a `0700` directory under `host-keys/` beside the catalog; the key file is `0600`. It is unencrypted so a restarted service can reconnect without an SSH agent. Host keys are pinned in that directory's own `known_hosts`; reconnects reject changed keys.
+3. The server copies its running binary, locked adapter package files, vendored Codex adapter, and mise configuration to a unique directory under `~/.local/share/agentworks/releases/`. The SHA-256 checksum is verified before extraction. The host must already have **mise**, `tar`, and `sha256sum` or `shasum`, and must be able to download Node and npm dependencies. Setup requires no sudo. Automatic copying currently supports a matching server/remote OS and CPU; incompatible binary loaders/libc fail during installation.
+4. Inside that installation, mise installs **Node 24** and runs `npm ci --ignore-scripts --omit=dev`. This uses a dedicated `mise.toml`, leaving the host's global Node selection alone. Adapter paths resolve against the installed bundle; adapters use its Node interpreter even when a workspace selects another Node version.
+5. The server waits for the worker handshake, shows the available providers, and offers **Choose working directories**. Provider account sign-ins still belong to the remote user; this flow does not copy provider credentials.
+
+Reconnects use the release's explicit launch path, so shell startup files and PATH changes are unnecessary. A convenience `~/.local/bin/agentworks` symlink is created if that path is unused; add `~/.local/bin` to your interactive PATH if desired. Closing setup cancels its local SSH/subprocesses. Failed/cancelled attempts remove temporary local keys, but can leave a remote installation or a public authorized-key entry labelled `agentworks:<attempt UUID>`; those can be removed manually. An installed host whose worker fails to connect remains saved with an error and can be reconnected.
+
+**Use an existing worker** keeps the manual flow: provide the destination and optionally the command to run Agentworks there. The server runs:
 
 ```bash
 ssh -T -o BatchMode=yes … <destination> '<command> agent --stdio'
@@ -201,14 +211,14 @@ The remote `agentworks agent` prints a ready line and then talks to the server o
 
 Remote sessions are chat-only for now. Worktrees, imports of existing sessions, forks, the file browser and previews, Git context and diffs, model discovery in the new-session dialog (change the model once the session starts), and Agentworks MCP tools (agent communication) are local only. Queued input, automatic continuation after limit resets, and inbox wake-up skip remote sessions. See Phase 6 in the roadmap for the plan.
 
-Requirements:
+Manual setup requirements:
 
-- SSH from this server's user to the destination works non-interactively, using key or agent authentication and a host key already in `known_hosts`. Ports, users, and jump hosts come from `~/.ssh/config`. The server has no SSH settings or credentials of its own.
+- SSH from this server's user to the destination works non-interactively, using key or agent authentication and a host key already in `known_hosts`. Ports, users, and jump hosts come from `~/.ssh/config`. The manual flow uses the server user’s SSH configuration and credentials.
 - The server process can use your key. A passphrase-protected key needs an SSH agent reachable through `SSH_AUTH_SOCK` in the server's environment. Services, including the Agentworks supervisor, often start without one. Either start the server with `SSH_AUTH_SOCK` pointing at a long-lived agent, such as systemd's `ssh-agent.service` socket at `$XDG_RUNTIME_DIR/ssh-agent.socket` with your key added, or use a dedicated key without a passphrase that is authorized only on the hosts you add. If a host reports `Permission denied` while `SSH_AUTH_SOCK` is unset, the status message says so.
 - Agentworks is built on the remote host from the same version, with `npm ci --ignore-scripts` run there. The remote command defaults to `agentworks` on the remote `PATH`; set it to a full path such as `~/agentworks/target/release/agentworks` otherwise. Provider detection uses the adapter paths of the checkout the binary was built from.
 - Tools on the host, such as node for the adapters and the `opencode`, `codex`, and `claude` CLIs, come from its PATH. A non-interactive ssh command does not run shell startup files, so tools installed with mise would be missing. The worker therefore applies `mise env` for each session's directory itself, including that project's own mise configuration, falling back to the global configuration if the project's cannot be used (for example, if it is not trusted).
 
-No ports or socket files are opened on either machine. SSH provides authentication and encryption, so there is no separate enrollment secret. Hover a host's status dot for details. When a host is offline, the reason, including ssh's last output, also appears under it. **↻** reconnects immediately, and **×** removes a host with no sessions and stops its worker. `AGENTWORKS_SSH` selects a different ssh program.
+No ports or socket files are opened on either machine. SSH provides authentication and encryption, so there is no separate enrollment secret. Hover a host's status dot for details. When a host is offline, the reason, including ssh's last output, also appears under it. **↻** reconnects immediately, and **×** removes a host with no sessions, stops its worker, and deletes its managed private key from this server. Remote files and its public authorized-key entry remain; remove them manually if desired. `AGENTWORKS_SSH` selects a different ssh program.
 
 ## Multiple project directories
 
@@ -293,6 +303,16 @@ Remote host links have a separate check that starts its own server and uses `scr
 ```bash
 cargo build --locked && npm run test:remote-hosts
 ```
+
+Guided enrollment has an isolated real-SSH check (requires `sshd`, `ssh`, and `ssh-keygen`). It creates temporary host keys, a passphrase-protected bootstrap identity, an isolated remote home and authorization file, and a loopback SSH server. By default mise/npm are deterministic fixtures, with no downloads or provider calls:
+
+```bash
+npm run test:host-enrollment
+# Also exercise real mise, Node download and locked npm installation in that temporary home:
+AGENTWORKS_ENROLL_REAL_MISE=1 npm run test:host-enrollment
+```
+
+The browser flow is covered by `npx playwright test tests/hosts.spec.mjs`, including mobile layout, terminal input, setup errors/retries, cancellation, and directory selection.
 
 The smoke test uses the demo agent to exercise ACP streaming, multiple turns, disconnect survival, idempotency, approval allow/stale/invalid responses, cancellation, Markdown sanitization, and directory/origin checks. Workspace checks also cover file boundaries, manual automation runs, approval/concurrency handling, and retained run history. They make no paid model requests.
 

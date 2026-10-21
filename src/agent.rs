@@ -287,20 +287,23 @@ async fn start(
 
 /// Which providers can actually start here, using the mise environment.
 fn available_providers(env: &HashMap<String, String>) -> Vec<&'static str> {
-    let node = resolve(Path::new("node"), env).is_some();
+    let interpreter = std::env::var_os("AGENTWORKS_NODE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| "node".into());
+    let node = resolve(&interpreter, env).is_some();
     PROVIDERS
         .into_iter()
-        .filter(|provider| {
-            let config = crate::runtime::agent_config(provider, false, false);
-            match *provider {
-                "opencode" => resolve(config.command(), env).is_some(),
-                // The demo agent and the ACP adapters are node scripts.
-                // The adapter itself, or the demo agent's script under node.
-                _ => {
-                    let script = config.arguments().first().map(Path::new);
-                    node && (config.command().is_file() || script.is_some_and(Path::is_file))
-                }
+        .filter(|provider| match *provider {
+            "opencode" => {
+                let config = crate::runtime::agent_config(provider, false, false);
+                resolve(config.command(), env).is_some()
             }
+            "demo" => {
+                node && crate::runtime_root()
+                    .join("scripts/demo-agent.mjs")
+                    .is_file()
+            }
+            _ => node && crate::adapter_path(provider).is_file(),
         })
         .collect()
 }

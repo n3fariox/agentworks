@@ -6,6 +6,7 @@ mod communication;
 mod completion;
 mod controllers;
 mod diff;
+mod enrollment;
 mod fork;
 mod git_context;
 mod hosting;
@@ -475,8 +476,13 @@ fn key_present(provider: &str) -> bool {
 fn use_api_key() -> bool {
     std::env::var("AGENTWORKS_AUTH_MODE").is_ok_and(|mode| mode == "api_key")
 }
+fn runtime_root() -> PathBuf {
+    std::env::var_os("AGENTWORKS_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+}
 fn adapter_path(provider: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    runtime_root()
         .join("node_modules/.bin")
         .join(if provider == "claude" {
             "claude-agent-acp"
@@ -891,9 +897,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/import", post(import_session))
         .route("/api/catalog", get(get_catalog))
         .route("/api/hosts", post(hosts::add))
+        .route("/api/hosts/enroll/events", get(enrollment::upgrade))
+        .route(
+            "/host-enrollment.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../web/host-enrollment.js"),
+                )
+            }),
+        )
+        .route(
+            "/vendor/xterm.mjs",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../web/vendor/xterm.mjs"),
+                )
+            }),
+        )
+        .route(
+            "/vendor/xterm.css",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+                    include_str!("../web/vendor/xterm.css"),
+                )
+            }),
+        )
+        .route(
+            "/vendor/xterm.LICENSE",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                    include_str!("../web/vendor/xterm.LICENSE"),
+                )
+            }),
+        )
         .route("/api/hosts/{id}", axum::routing::delete(hosts::remove))
         .route("/api/hosts/{id}/reconnect", post(hosts::reconnect))
-        .route("/api/hosts/{id}/roots", axum::routing::put(hosts::set_roots))
+        .route(
+            "/api/hosts/{id}/roots",
+            axum::routing::put(hosts::set_roots),
+        )
         .route("/api/projects", post(create_project))
         .route(
             "/api/projects/{id}",
@@ -1467,7 +1513,13 @@ async fn import_session(State(app): State<App>, Json(req): Json<ImportSession>) 
 async fn get_catalog(State(app): State<App>) -> Json<Value> {
     let catalog = app.catalog.lock().unwrap();
     let mut hosts = vec![json!({"id":"local","name":"Local","status":"connected","kind":"local"})];
-    hosts.extend(catalog.data.hosts.iter().map(|h| hosts::view(&app.hosts, h)));
+    hosts.extend(
+        catalog
+            .data
+            .hosts
+            .iter()
+            .map(|h| hosts::view(&app.hosts, h)),
+    );
     Json(json!({
         "hosts": hosts,
         "projects": catalog.data.projects,
@@ -2018,11 +2070,11 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
     let location = catalog
         .location_on(remote_host.as_deref().unwrap_or("local"), &cwd)
         .map_err(|_| {
-        fail(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Could not save project location",
-        )
-    })?;
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not save project location",
+            )
+        })?;
     if let Some(project) = req.project_id.as_deref() {
         catalog
             .attach_location(project, &location.id)
