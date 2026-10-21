@@ -418,8 +418,8 @@ pub async fn configure(
     let _comm = app.communication_lock.lock().await;
     let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
-    if input.enabled {
-        crate::local_only(&s)?;
+    if input.enabled && s.host_id != "local" {
+        crate::hosts::validate_session(&app, &s).await?;
     }
     let payload = serde_json::to_string(&input).map_err(error)?;
     // Retry lookup precedes time validation: an expired identical request cannot reauthorize.
@@ -652,11 +652,9 @@ fn instruction(request: &str, messages: &[Value]) -> String {
         serde_json::to_string(messages).unwrap()
     )
 }
-/// Caller holds communication_lock -> run_lock -> workspace_lock. No native resume/start.
+/// Caller holds communication_lock -> run_lock -> workspace_lock and validates
+/// remote cwd/provider before calling. No native resume/start.
 pub fn dispatch_one(app: &App, s: &Session, human_pending: bool) -> Result<()> {
-    if s.host_id != "local" {
-        return Ok(());
-    }
     let result = dispatch_inner(app, s, human_pending);
     if result.is_err() {
         fail_closed(
@@ -708,7 +706,7 @@ fn dispatch_inner(app: &App, s: &Session, human_pending: bool) -> Result<()> {
     if mail::require(app, s, "communicate").is_err() {
         return cancel(s, "Recipient communication grant revoked");
     }
-    if !crate::checked_cwd(app, &p.cwd).is_ok_and(|cwd| cwd == s.cwd) {
+    if s.host_id == "local" && !crate::checked_cwd(app, &p.cwd).is_ok_and(|cwd| cwd == s.cwd) {
         return cancel(s, "Saved cwd unavailable; human reauthorization required");
     }
     // Dispatch resumes only once the same saved native context is attached again.
@@ -819,6 +817,19 @@ pub async fn scheduler(app: App) {
         let _workspace = app.workspace_lock.lock().await;
         let sessions: Vec<_> = app.sessions.lock().unwrap().values().cloned().collect();
         for s in sessions {
+            if s.host_id != "local" {
+                let enabled =
+                    load(&app.store.lock().unwrap().connection, &s.id).is_ok_and(|p| p.enabled);
+                if !enabled {
+                    continue;
+                }
+                if crate::hosts::validate_session(&app, &s).await.is_err() {
+                    if app.hosts.live(&s.host_id).is_some() {
+                        let _ = cancel(&s, "Saved cwd unavailable; human reauthorization required");
+                    }
+                    continue;
+                }
+            }
             let _ = dispatch_one(&app, &s, explicit_input_pending(&s));
         }
     }

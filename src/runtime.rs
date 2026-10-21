@@ -206,9 +206,10 @@ pub async fn probe(provider: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-async fn initialize(
+async fn initialize_on(
     connection: &ConnectionTo<Agent>,
     provider: &str,
+    api_key: bool,
 ) -> Result<Value, agent_client_protocol::Error> {
     let init = connection
         .send_request(initialize_request())
@@ -220,7 +221,7 @@ async fn initialize(
         );
     }
     if provider == "codex"
-        && use_api_key()
+        && api_key
         && init
             .auth_methods
             .iter()
@@ -237,8 +238,9 @@ async fn new_session(
     connection: &ConnectionTo<Agent>,
     provider: &str,
     cwd: PathBuf,
+    api_key: bool,
 ) -> Result<Value, agent_client_protocol::Error> {
-    initialize(connection, provider).await?;
+    initialize_on(connection, provider, api_key).await?;
     Ok(serde_json::to_value(
         connection
             .send_request(NewSessionRequest::new(cwd))
@@ -251,7 +253,12 @@ async fn open_session(
     connection: &ConnectionTo<Agent>,
     s: &Session,
 ) -> Result<Value, agent_client_protocol::Error> {
-    let init = initialize(connection, &s.provider).await?;
+    let init = initialize_on(
+        connection,
+        &s.provider,
+        s.host_id == "local" && use_api_key(),
+    )
+    .await?;
     let saved = s.data.lock().unwrap().provider_session_id.clone();
     let Some(id) = saved else {
         let lineage = s.data.lock().unwrap().lineage.clone();
@@ -259,6 +266,11 @@ async fn open_session(
             return Err(agent_client_protocol::Error::internal_error().data("Native fork outcome is uncertain. Inspect provider history; automatic retry is disabled."));
         }
         if lineage.context == "auto"
+            && lineage.parent_host_id.as_deref().unwrap_or("local") == s.host_id
+            && lineage
+                .parent_provider
+                .as_deref()
+                .is_none_or(|p| p == s.provider)
             && lineage.source_message_id.is_some()
             && lineage.source_session_id.is_some()
             && init["agentCapabilities"]["sessionCapabilities"]["fork"].is_object()
@@ -394,11 +406,19 @@ async fn open_session(
     Ok(config)
 }
 /// Starts a temporary ACP session to ask the harness for its actual model list. No prompt/inference.
-pub async fn discover(
+pub async fn discover_on(
     provider: &str,
     cwd: PathBuf,
+    host: Option<Arc<crate::hosts::Live>>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    prepare(provider)?;
+    let api_key = host.is_none() && use_api_key();
+    let (transport, _guard): (DynConnectTo<Client>, _) = if let Some(host) = host {
+        let (lines, guard) = host.spawn(provider, &cwd.to_string_lossy(), false)?;
+        (DynConnectTo::new(lines), Some(guard))
+    } else {
+        prepare(provider)?;
+        (DynConnectTo::new(agent(provider)), None)
+    };
     let provider = provider.to_owned();
     let free_only = provider == "opencode";
     let result = tokio::time::timeout(
@@ -414,9 +434,9 @@ pub async fn discover(
                 agent_client_protocol::on_receive_request!(),
             )
             .connect_with(
-                agent(&provider),
+                transport,
                 move |connection: ConnectionTo<Agent>| async move {
-                    let created = new_session(&connection, &provider, cwd).await?;
+                    let created = new_session(&connection, &provider, cwd, api_key).await?;
                     let config = parse_model_config(
                         &serde_json::to_value(created).unwrap_or(Value::Null),
                         free_only,
@@ -432,20 +452,28 @@ pub async fn discover(
     }
 }
 
-pub async fn list_sessions(
+pub async fn list_sessions_on(
     provider: &str,
     cwd: Option<PathBuf>,
     cursor: Option<String>,
     host_profile: bool,
+    remote: Option<(Arc<crate::hosts::Live>, PathBuf)>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    prepare(provider)?;
+    let api_key = remote.is_none() && use_api_key();
+    let (transport, _guard): (DynConnectTo<Client>, _) = if let Some((host, spawn_cwd)) = remote {
+        let (lines, guard) = host.spawn(provider, &spawn_cwd.to_string_lossy(), host_profile)?;
+        (DynConnectTo::new(lines), Some(guard))
+    } else {
+        prepare(provider)?;
+        (DynConnectTo::new(agent_for(provider, host_profile)), None)
+    };
     let provider = provider.to_owned();
     let result = tokio::time::timeout(
         Duration::from_secs(45),
         Client.builder().connect_with(
-            agent_for(&provider, host_profile),
+            transport,
             move |connection: ConnectionTo<Agent>| async move {
-                let init = initialize(&connection, &provider).await?;
+                let init = initialize_on(&connection, &provider, api_key).await?;
                 if !init["agentCapabilities"]["sessionCapabilities"]["list"].is_object() {
                     return Err(agent_client_protocol::Error::internal_error()
                         .data("This harness does not advertise session listing"));
@@ -884,7 +912,12 @@ mod fork_tests {
     // Real ACP wire fixture: no provider binary, credentials or model calls.
     #[tokio::test]
     async fn native_fork_is_anchored_and_uncertain_creation_is_never_repeated() {
-        for (reject, host_id) in [(false, "local"), (true, "local"), (false, "remote")] {
+        for (reject, host_id, source_host) in [
+            (false, "local", "local"),
+            (true, "local", "local"),
+            (false, "remote", "remote"),
+            (false, "remote", "elsewhere"),
+        ] {
             let dir =
                 std::env::temp_dir().join(format!("agentworks-native-fork-{}", Uuid::new_v4()));
             std::fs::create_dir_all(&dir).unwrap();
@@ -896,7 +929,7 @@ mod fork_tests {
             ));
             let mut data: crate::SessionData = serde_json::from_value(json!({
                 "status":"starting","seq":0,"requests":[],"models":null,"available_commands":[],"turn_active":false,
-                "lineage":{"parentId":"parent","parentProvider":"codex","parentCwd":"/old","context":"auto",
+                "lineage":{"parentId":"parent","parentProvider":"codex","parentHostId":source_host,"parentCwd":"/old","context":"auto",
                     "sourceSessionId":"source-native","sourceMessageId":"answer-1","boundarySeq":42}
             })).unwrap();
             data.carried_context = Some("recorded transcript".into());
@@ -944,6 +977,8 @@ for line in sys.stdin:
   if sys.argv[1]=='reject':
    print(json.dumps({'jsonrpc':'2.0','id':r['id'],'error':{'code':-32603,'message':'ambiguous fork failure'}}),flush=True);continue
   out={'sessionId':'child-native'}
+ elif m=='session/new':
+  assert sys.argv[2]!=sys.argv[3];out={'sessionId':'fresh-native'}
  elif m=='session/resume':
   if sys.argv[2]!='local': assert p.get('mcpServers',[])==[]
   assert p['sessionId']=='child-native';out={}
@@ -955,7 +990,8 @@ for line in sys.stdin:
                     .arg("-c")
                     .arg(script)
                     .arg(if reject { "reject" } else { "success" })
-                    .arg(host_id),
+                    .arg(host_id)
+                    .arg(source_host),
             );
             let s = session.clone();
             Client
@@ -963,8 +999,14 @@ for line in sys.stdin:
                 .connect_with(agent, move |connection: ConnectionTo<Agent>| async move {
                     let first = open_session(&connection, &s).await;
                     assert_eq!(first.is_err(), reject);
-                    assert!(s.data.lock().unwrap().lineage.native_attempted);
-                    if reject {
+                    assert_eq!(
+                        s.data.lock().unwrap().lineage.native_attempted,
+                        host_id == source_host
+                    );
+                    if host_id != source_host {
+                        assert_eq!(first.unwrap()["sessionId"], "fresh-native");
+                        assert!(!s.data.lock().unwrap().lineage.native_used);
+                    } else if reject {
                         let error = open_session(&connection, &s).await.unwrap_err();
                         assert!(error.to_string().contains("uncertain"));
                         assert_eq!(
@@ -986,8 +1028,11 @@ for line in sys.stdin:
                 .await
                 .unwrap();
             let loaded = store.lock().unwrap().load().unwrap();
-            assert!(loaded[0].1.lineage.native_attempted);
-            assert_eq!(loaded[0].1.lineage.native_used, !reject);
+            assert_eq!(loaded[0].1.lineage.native_attempted, host_id == source_host);
+            assert_eq!(
+                loaded[0].1.lineage.native_used,
+                !reject && host_id == source_host
+            );
             drop(session);
             drop(store);
             std::fs::remove_dir_all(dir).unwrap();

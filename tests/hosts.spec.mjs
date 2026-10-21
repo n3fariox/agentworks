@@ -16,7 +16,7 @@ test.beforeAll(async()=>{
 });
 test.afterAll(async()=>{await new Promise(ok=>server.close(ok));});
 
-const remote=(id,name,status,extra={})=>({id,name,status,kind:'remote',destination:`dev@${name}`,command:'agentworks',detail:'',since:Date.now(),worker:status==='connected'?{hostname:name,platform:'linux-x86_64',providers:['demo','claude'],version:'0.1.0'}:null,...extra});
+const remote=(id,name,status,extra={})=>({id,name,status,kind:'remote',destination:`dev@${name}`,command:'agentworks',detail:'',since:Date.now(),worker:status==='connected'?{hostname:name,platform:'linux-x86_64',providers:['demo','claude'],tools:{codex:'/remote/bin/codex',claude:'/remote/bin/claude'},workspace:true,version:'0.1.0'}:null,...extra});
 async function fixture(page){
   const state={hosts:[{id:'local',name:'Local',status:'connected',kind:'local'},remote('r1','build-box','connected'),remote('r2','old-box','offline',{detail:'ssh exited (exit status: 255). ssh: Permission denied (publickey). Retrying in 8s.'})],requests:[]};
   await page.routeWebSocket('**/api/sessions/*/events',()=>{});
@@ -99,6 +99,9 @@ test('host working directories enable remote sessions in the new-session dialog'
   await page.locator('#view-hosts').click();
   const box=page.locator('[data-group="host:r1"]');
   await box.getByRole('button',{name:'Working directories on build-box'}).click();
+  await expect(page.locator('#host-tools')).toContainText('/remote/bin/codex');
+  await expect(page.locator('#host-tools')).toContainText('codex');
+  await expect(page.locator('#host-tools')).toContainText('dev@build-box');
   await page.locator('#host-roots').fill('~/projects\n\n/srv/app');
   await page.locator('#save-host-roots').click();
   await expect(page.locator('#host-roots-dialog')).toBeHidden();
@@ -110,7 +113,7 @@ test('host working directories enable remote sessions in the new-session dialog'
   await expect(page.locator('#create-host')).toHaveValue('r1');
   await expect(page.locator('#create-host option[value="r2"]')).toBeDisabled();
   await expect(page.locator('#directory')).toHaveValue('~/projects');
-  await expect(page.locator('#load-models')).toBeDisabled();
+  await expect(page.locator('#load-models')).toBeEnabled();
   await expect(page.locator('#roots-note')).toContainText('Working directories on build-box: ~/projects, /srv/app');
   await page.locator('#create-submit').click();
   await expect(page.locator('#create-error')).toContainText('stop here');
@@ -131,8 +134,8 @@ test('remote availability and directories are independent of local provider conf
   await page.locator('[data-group="host:r1"]').getByRole('button',{name:'New session in build-box'}).click();
   await expect(page.locator('#directory')).toHaveValue('/remote/project');
   await expect(page.locator('#create-submit')).toBeEnabled();
-  await expect(page.locator('#workspace-mode')).toBeDisabled();
-  await expect(page.locator('#create-resume-policy')).toBeDisabled();
+  await expect(page.locator('#workspace-mode')).toBeEnabled();
+  await expect(page.locator('#create-resume-policy')).toBeEnabled();
   await page.locator('#create-host').selectOption('local');
   await expect(page.locator('#directory')).toHaveValue('/repo');
   await expect(page.locator('#create-submit')).toBeDisabled();
@@ -146,8 +149,9 @@ test('remote selection respects required worktrees and restores local policy on 
   await page.locator('#view-hosts').click();
   await page.locator('[data-group="host:r1"]').getByRole('button',{name:'New session in build-box'}).click();
   await page.locator('#create-project').selectOption('a');
-  await expect(page.locator('#workspace-policy-note')).toContainText('requires worktrees');
-  await expect(page.locator('#create-submit')).toBeDisabled();
+  await expect(page.locator('#workspace-policy-note')).toContainText('Isolated worktree required');
+  await expect(page.locator('#workspace-mode')).toHaveValue('newWorktree');
+  await expect(page.locator('#create-submit')).toBeEnabled();
   await page.locator('#create-host').selectOption('local');
   await expect(page.locator('#workspace-mode')).toHaveValue('newWorktree');
   await expect(page.locator('#workspace-policy-note')).toContainText('Isolated worktree required');
@@ -178,7 +182,7 @@ for(const mobile of [false,true])test(`guided enrollment terminal ${mobile?'mobi
   await expect(page.locator('#host-terminal')).not.toContainText('test-password');
   expect(await page.locator('#host-dialog').evaluate(e=>e.scrollWidth<=e.clientWidth)).toBe(true);
   await page.locator('#host-done').click();await expect(page.locator('#host-roots-dialog')).toBeVisible();
-  await expect(page.locator('#host-roots-title')).toHaveText('Working directories on New box');
+  await expect(page.locator('#host-roots-title')).toHaveText('Settings for New box');
 });
 
 test('enrollment error allows retry and close cancels the terminal',async({page})=>{
@@ -189,4 +193,59 @@ test('enrollment error allows retry and close cancels the terminal',async({page}
  await expect(page.locator('#host-error')).toContainText('mise is required');await expect(page.locator('#save-host')).toBeEnabled();
  await page.locator('#save-host').click();await expect(page.locator('#host-stage')).toContainText('Connecting');
  closed=false;await page.locator('#dismiss-host').click();await expect.poll(()=>closed).toBe(true);await expect(page.locator('#host-dialog')).toBeHidden();
+});
+
+ test('model and worktree discovery target the selected remote host',async({page})=>{
+  const s=await fixture(page);s.hosts.find(h=>h.id==='r1').roots=['/remote/project'];
+  let modelRequest,treeRequest;
+  await page.route('**/api/models',route=>{modelRequest=route.request().postDataJSON();return route.fulfill({json:{options:[{value:'remote/model',name:'Remote model'}]}});});
+  await page.route('**/api/worktrees/list',route=>{treeRequest=route.request().postDataJSON();return route.fulfill({json:{worktrees:[{path:'/remote/project/.worktrees/one',branch:'one',isMain:false}]}});});
+  await page.locator('#view-hosts').click();
+  await page.locator('[data-group="host:r1"]').getByRole('button',{name:'New session in build-box'}).click();
+  await page.locator('#load-models').click();
+  await expect(page.locator('#create-model option[value="remote/model"]')).toHaveCount(1);
+  expect(modelRequest).toEqual({provider:'demo',cwd:'/remote/project',hostId:'r1'});
+  await page.locator('#workspace-mode').selectOption('existingWorktree');
+  await page.locator('#discover-worktrees').click();
+  await expect(page.locator('#existing-worktree option')).toHaveCount(2);
+  expect(treeRequest).toEqual({cwd:'/remote/project',hostId:'r1'});
+  await page.locator('#existing-worktree').selectOption('/remote/project/.worktrees/one');
+  await page.locator('#create-submit').click();
+  await expect(page.locator('#create-error')).toContainText('stop here');
+  expect(s.created).toMatchObject({hostId:'r1',cwd:'/remote/project/.worktrees/one',workspace:{mode:'existingWorktree'}});
+});
+
+test('remote history picker sends its host when browsing and importing',async({page})=>{
+  const s=await fixture(page);s.hosts.find(h=>h.id==='r1').roots=['/remote/project'];
+  let browse,imported;
+  await page.route('**/api/external-sessions',route=>{browse=route.request().postDataJSON();return route.fulfill({json:{sessions:[{sessionId:'native-remote',cwd:'/remote/project',title:'Remote history'}]}});});
+  await page.route('**/api/sessions/import',route=>{imported=route.request().postDataJSON();return route.fulfill({status:409,body:'import captured'});});
+  await page.locator('#view-hosts').click();
+  await page.locator('[data-group="host:r1"]').getByRole('button',{name:'New session in build-box'}).click();
+  await page.locator('#create-import').click();
+  await expect(page.locator('#import-host')).toHaveValue('r1');
+  await expect(page.locator('#external-sessions')).toContainText('Remote history');
+  expect(browse).toMatchObject({hostId:'r1',provider:'demo'});
+  await page.locator('#external-sessions input[type=radio]').first().check();
+  await page.locator('#import-submit').click();
+  await expect(page.locator('#import-error')).toHaveText('import captured');
+  expect(imported).toMatchObject({hostId:'r1',provider:'demo',providerSessionId:'native-remote',cwd:'/remote/project'});
+});
+
+test('automation editor selects a remote host for models and saved execution',async({page})=>{
+  const s=await fixture(page);s.hosts.find(h=>h.id==='r1').roots=['/remote/project'];
+  await page.route('**/api/catalog',route=>route.fulfill({json:{projects:[{id:'a',name:'Alpha',locationIds:[]}],hosts:s.hosts,locations:[]}}));
+  let models,saved;
+  await page.route('**/api/models',route=>{models=route.request().postDataJSON();return route.fulfill({json:{options:[{value:'remote/model',name:'Remote model'}]}});});
+  await page.route('**/api/automations',route=>{if(route.request().method()==='GET')return route.fulfill({json:[]});saved=route.request().postDataJSON();return route.fulfill({status:409,body:'automation captured'});});
+  await page.reload();await page.locator('#nav-automations').click();await page.locator('#new-automation').click();
+  await page.locator('#automation-host').selectOption('r1');
+  await expect(page.locator('#automation-directory')).toHaveValue('/remote/project');
+  await page.locator('#automation-provider').selectOption('demo');
+  await page.locator('#automation-load-models').click();
+  await expect(page.locator('#automation-models option')).toHaveCount(1);
+  expect(models).toMatchObject({hostId:'r1',provider:'demo',cwd:'/remote/project'});
+  await page.locator('#automation-name').fill('Remote task');await page.locator('#automation-prompt').fill('/status');
+  await page.locator('#save-automation').click();await expect(page.locator('#automation-error')).toHaveText('automation captured');
+  expect(saved).toMatchObject({hostId:'r1',provider:'demo',cwd:'/remote/project',prompt:'/status'});
 });

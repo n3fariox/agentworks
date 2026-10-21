@@ -174,10 +174,19 @@ export function createWorkspace(hooks){
     const items=config.providers.map(p=>[p.id,p.name]);options($('automation-provider'),items,$('automation-provider').value||hooks.getActive()?.provider||'claude');
     projectOptions($('automation-project'),$('automation-project').value);
   }
+  function automationHosts(selected='local'){
+    const items=[['local','Local'],...(catalog.hosts||[]).filter(h=>h.kind==='remote').map(h=>[h.id,h.name+(h.status!=='connected'?' · Offline':'')])];
+    options($('automation-host'),items,selected);
+  }
+  function automationHostChanged(){
+    editorGeneration++;const id=$('automation-host').value,active=hooks.getActive();
+    $('automation-directory').value=active?.hostId===id?active.cwd:id==='local'?directory():(catalog.hosts.find(h=>h.id===id)?.roots?.[0]||'');
+    $('automation-model').value='';$('automation-models').replaceChildren();
+  }
   function automationEditor(def=null){
-    editorGeneration++;editing=def?.id||null;automationOptions();$('automation-dialog-title').textContent=def?'Edit automation':'New automation';
+    editorGeneration++;editing=def?.id||null;automationOptions();automationHosts(def?.hostId||hooks.getActive()?.hostId||'local');$('automation-dialog-title').textContent=def?'Edit automation':'New automation';
     $('automation-name').value=def?.name||'';$('automation-provider').value=def?.provider||hooks.getActive()?.provider||'claude';$('automation-model').value=def?.model||'';
-    $('automation-project').value=def?.projectId||state.projectId||'';$('automation-directory').value=def?.cwd||directory();$('automation-prompt').value=def?.prompt||'';$('automation-enabled').checked=def?.enabled??true;
+    $('automation-project').value=def?.projectId||state.projectId||'';$('automation-directory').value=def?.cwd||(hooks.getActive()?.hostId===$('automation-host').value?hooks.getActive().cwd:$('automation-host').value==='local'?directory():catalog.hosts.find(h=>h.id===$('automation-host').value)?.roots?.[0]||'');$('automation-prompt').value=def?.prompt||'';$('automation-enabled').checked=def?.enabled??true;
     $('delete-automation').hidden=!def;$('automation-error').textContent='';$('automation-models').replaceChildren();$('automation-load-models').disabled=false;$('automation-dialog').showModal();
   }
   async function loadAutomations(){
@@ -197,7 +206,7 @@ export function createWorkspace(hooks){
     const area=$('automation-detail');area.replaceChildren();if(!def){area.append(el('div','workspace-empty','Save repeatable instructions, then start a manual run.'));return;}
     const header=el('div','automation-detail-header'),titles=el('div');titles.append(el('div','workspace-eyebrow','MANUAL AUTOMATION'),el('h1','',def.name));
     const actions=el('div','workspace-action-row'),edit=el('button','text-button','Edit'),run=el('button','primary','Run now ↗');edit.onclick=()=>automationEditor(def);run.id='run-automation';run.disabled=!def.enabled||runStarting;run.onclick=()=>runAutomation(def);actions.append(edit,run);header.append(titles,actions);area.append(header);
-    const details=el('div','automation-execution');details.append(el('p','',`${hooks.labels[def.provider]} · ${def.model||'Host default'} · Local`),el('p','field-note',def.cwd),el('span','automation-badge',def.enabled?'Manual trigger':'Paused'));area.append(details);
+    const details=el('div','automation-execution');details.append(el('p','',`${hooks.labels[def.provider]} · ${def.model||'Host default'} · ${catalog.hosts.find(h=>h.id===def.hostId)?.name||def.hostId||'Local'}`),el('p','field-note',def.cwd),el('span','automation-badge',def.enabled?'Manual trigger':'Paused'));area.append(details);
     area.append(el('h2','','Agent instructions'),el('pre','automation-instructions',def.prompt),el('h2','','Recent runs'));
     const rows=el('div');rows.id='automation-runs';rows.append(el('p','field-note','Loading runs…'));area.append(rows);
   }
@@ -244,13 +253,14 @@ export function createWorkspace(hooks){
   $('refresh-files').onclick=loadFiles;$('files-hidden').onchange=()=>{state.hidden=$('files-hidden').checked;loadFiles();};
   $('automation-source').onclick=()=>{const origin=hooks.getActive()?.automation;if(origin)openAutomation(origin.automationId);};
   $('new-automation').onclick=()=>automationEditor();$('dismiss-automation').onclick=()=>$('automation-dialog').close();
+  $('automation-host').onchange=automationHostChanged;
   $('automation-provider').onchange=()=>{editorGeneration++;$('automation-model').value='';$('automation-models').replaceChildren();};$('automation-directory').oninput=()=>{editorGeneration++;};
   $('automation-load-models').onclick=async()=>{const token=editorGeneration;const button=$('automation-load-models');button.disabled=true;$('automation-error').textContent='';
-    try{const result=await api('/api/models',{method:'POST',body:JSON.stringify({provider:$('automation-provider').value,cwd:$('automation-directory').value})});if(token!==editorGeneration)return;$('automation-models').replaceChildren();for(const model of result.options||[]){const node=el('option');node.value=model.value;node.label=model.name||model.value;$('automation-models').append(node);}}
+    try{const result=await api('/api/models',{method:'POST',body:JSON.stringify({provider:$('automation-provider').value,cwd:$('automation-directory').value,...($('automation-host').value!=='local'?{hostId:$('automation-host').value}:{})})});if(token!==editorGeneration)return;$('automation-models').replaceChildren();for(const model of result.options||[]){const node=el('option');node.value=model.value;node.label=model.name||model.value;$('automation-models').append(node);}}
     catch(error){if(token===editorGeneration)$('automation-error').textContent=error.message;}finally{button.disabled=false;}
   };
   $('automation-form').onsubmit=async event=>{event.preventDefault();$('save-automation').disabled=true;$('automation-error').textContent='';
-    try{const def=await api(editing?'/api/automations/'+editing:'/api/automations',{method:editing?'PUT':'POST',body:JSON.stringify({name:$('automation-name').value,provider:$('automation-provider').value,model:$('automation-model').value||null,projectId:$('automation-project').value||null,cwd:$('automation-directory').value,prompt:$('automation-prompt').value,enabled:$('automation-enabled').checked})});state.projectId=def.projectId;state.locationKey=def.locationId;state.automationId=def.id;await hooks.refreshSessions();$('automation-dialog').close();showView('automations');}
+    try{const def=await api(editing?'/api/automations/'+editing:'/api/automations',{method:editing?'PUT':'POST',body:JSON.stringify({name:$('automation-name').value,provider:$('automation-provider').value,model:$('automation-model').value||null,projectId:$('automation-project').value||null,...($('automation-host').value!=='local'?{hostId:$('automation-host').value}:{}),cwd:$('automation-directory').value,prompt:$('automation-prompt').value,enabled:$('automation-enabled').checked})});state.projectId=def.projectId;state.locationKey=def.locationId;state.automationId=def.id;await hooks.refreshSessions();$('automation-dialog').close();showView('automations');}
     catch(error){$('automation-error').textContent=error.message;}finally{$('save-automation').disabled=false;}
   };
   $('delete-automation').onclick=async()=>{if(!editing||!confirm('Delete this automation definition? Its run sessions and history will remain.'))return;try{await api('/api/automations/'+editing,{method:'DELETE'});$('automation-dialog').close();loadAutomations();}catch(error){$('automation-error').textContent=error.message;}};

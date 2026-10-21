@@ -454,7 +454,11 @@ impl Live {
                         if let Some(tx) = self.requests.lock().unwrap().remove(&id) {
                             let _ = tx.send(match value["error"].as_str() {
                                 Some(error) => Err(error.to_string()),
-                                None => Ok(value["path"].as_str().unwrap_or("").to_string()),
+                                None => Ok(if value.get("result").is_some() {
+                                    value["result"].to_string()
+                                } else {
+                                    value["path"].as_str().unwrap_or("").to_string()
+                                }),
                             });
                         }
                     }
@@ -476,6 +480,24 @@ impl Live {
     /// Asks the worker to resolve a directory on its machine, returning the
     /// canonical path.
     pub async fn check_dir(&self, path: &str) -> Result<String, String> {
+        self.request(json!({"type":"checkDir","path":path})).await
+    }
+    pub async fn workspace(&self, mut request: Value) -> Result<Value, String> {
+        if self.worker["workspace"] != true {
+            return Err("Update the worker on this host to enable remote worktrees.".into());
+        }
+        request["type"] = json!("workspace");
+        let result = self.request(request).await?;
+        serde_json::from_str(&result).map_err(|_| "Invalid workspace reply".into())
+    }
+    async fn request(&self, mut request: Value) -> Result<String, String> {
+        // Lifecycle operations perform several bounded Git checks plus adapter
+        // shutdown. Directory validation retains its shorter deadline.
+        let timeout = if request["type"] == "workspace" {
+            Duration::from_secs(120)
+        } else {
+            Duration::from_secs(15)
+        };
         let id = self.next_request.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = oneshot::channel();
         {
@@ -486,12 +508,13 @@ impl Live {
             requests.insert(id, tx);
         }
         let _pending = DirectoryRequest { live: self, id };
-        let request = json!({"type":"checkDir","request":id,"path":path}).to_string();
+        request["request"] = json!(id);
+        let request = request.to_string();
         if self.out.send(Message::text(request)).await.is_err() {
             self.requests.lock().unwrap().remove(&id);
             return Err("The host disconnected.".into());
         }
-        match tokio::time::timeout(Duration::from_secs(15), rx).await {
+        match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(result)) => result,
             _ => {
                 self.requests.lock().unwrap().remove(&id);
@@ -689,6 +712,9 @@ fn check_hello(hello: &Value) -> Result<Value, String> {
         "platform": text("platform", 40),
         "hostname": text("hostname", 80),
         "providers": providers,
+        "tools": hello["tools"],
+        "workspace": hello["workspace"] == true,
+        "worktreeCleanup": hello["worktreeCleanup"] == true,
     }))
 }
 
@@ -831,47 +857,7 @@ pub(crate) async fn session_directory(
     host_id: &str,
     req: &crate::Create,
 ) -> Result<std::path::PathBuf, (StatusCode, String)> {
-    let unsupported = |what: &str| {
-        Err(fail(
-            StatusCode::BAD_REQUEST,
-            format!("{what} are not available on remote hosts yet."),
-        ))
-    };
-    if req.external_id.is_some() {
-        return unsupported("Imported sessions");
-    }
-    if req.fork.is_some() {
-        return unsupported("Forks");
-    }
-    if req
-        .workspace
-        .as_ref()
-        .is_some_and(|w| w.mode != crate::worktrees::Mode::Directory)
-    {
-        return unsupported("Worktrees");
-    }
-    let (roots, requires_worktree) = {
-        let catalog = app.catalog.lock().unwrap();
-        let host = catalog
-            .data
-            .hosts
-            .iter()
-            .find(|h| h.id == host_id)
-            .ok_or_else(|| fail(StatusCode::BAD_REQUEST, "Host not found"))?;
-        let policy = req
-            .project_id
-            .as_deref()
-            .and_then(|id| catalog.data.projects.iter().find(|p| p.id == id))
-            .map(|p| p.workspace_policy.require_worktree)
-            .unwrap_or(false);
-        (host.roots.clone(), policy)
-    };
-    if requires_worktree {
-        return Err(fail(
-            StatusCode::CONFLICT,
-            "This project requires an isolated worktree, which remote hosts do not support yet.",
-        ));
-    }
+    let roots = host_roots(app, host_id)?;
     let live = app.hosts.live(host_id).ok_or_else(|| {
         fail(
             StatusCode::CONFLICT,
@@ -908,6 +894,232 @@ pub(crate) async fn session_directory(
     ))
 }
 
+/// Validate files and provider availability on the machine owning the path.
+pub(crate) async fn directory_on(
+    app: &App,
+    host: &str,
+    provider: &str,
+    cwd: &str,
+) -> Result<std::path::PathBuf, (StatusCode, String)> {
+    if host == "local" {
+        return crate::checked_cwd(app, cwd);
+    }
+    let req = crate::Create {
+        provider: provider.into(),
+        cwd: cwd.into(),
+        ..Default::default()
+    };
+    tokio::time::timeout(Duration::from_secs(12), session_directory(app, host, &req))
+        .await
+        .map_err(|_| {
+            fail(
+                StatusCode::REQUEST_TIMEOUT,
+                "Remote directory validation timed out",
+            )
+        })?
+}
+pub(crate) async fn validate_session(
+    app: &App,
+    s: &crate::Session,
+) -> Result<(), (StatusCode, String)> {
+    if s.host_id == "local" && !crate::installed(&s.provider) {
+        return Err(fail(StatusCode::CONFLICT, "Harness is unavailable"));
+    }
+    let cwd = directory_on(app, &s.host_id, &s.provider, &s.cwd.to_string_lossy()).await?;
+    if cwd != s.cwd {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "Session directory no longer resolves to its saved location",
+        ));
+    }
+    Ok(())
+}
+pub(crate) async fn list_sessions(
+    app: &App,
+    host: &str,
+    provider: &str,
+    cwd: Option<std::path::PathBuf>,
+    cursor: Option<String>,
+    profile: bool,
+) -> Result<Value, (StatusCode, String)> {
+    let remote = if host == "local" {
+        None
+    } else {
+        let path = match cwd.as_ref() {
+            Some(path) => path.to_string_lossy().into_owned(),
+            None => host_roots(app, host)?.first().cloned().ok_or_else(|| {
+                fail(
+                    StatusCode::CONFLICT,
+                    "Add working directories to this host first",
+                )
+            })?,
+        };
+        let spawn_cwd = directory_on(app, host, provider, &path).await?;
+        let live = app.hosts.live(host).ok_or_else(|| {
+            fail(
+                StatusCode::CONFLICT,
+                "Host disconnected during session discovery",
+            )
+        })?;
+        Some((live, spawn_cwd))
+    };
+    crate::runtime::list_sessions_on(provider, cwd, cursor, profile, remote)
+        .await
+        .map_err(|e| {
+            fail(
+                StatusCode::BAD_GATEWAY,
+                diagnostic(app, host, provider, &e.to_string()),
+            )
+        })
+}
+
+/// Authentication lives with the SSH user, never on the server machine.
+pub(crate) fn diagnostic(app: &App, host: &str, provider: &str, message: &str) -> String {
+    let safe = crate::runtime::safe_error(message);
+    if host == "local" || !safe.to_lowercase().contains("auth") {
+        return safe;
+    }
+    let destination = app
+        .catalog
+        .lock()
+        .unwrap()
+        .data
+        .hosts
+        .iter()
+        .find(|h| h.id == host)
+        .map(|h| h.destination.clone())
+        .unwrap_or_else(|| host.into());
+    let command = match provider {
+        "claude" => "claude auth login",
+        "codex" => "codex login",
+        "opencode" => "opencode auth login",
+        _ => return safe,
+    };
+    format!(
+        "{safe} Sign in on {destination} as the SSH user ({command}), then retry. Host settings show the discovered CLI paths."
+    )
+}
+
+fn host_roots(app: &App, host_id: &str) -> Result<Vec<String>, (StatusCode, String)> {
+    app.catalog
+        .lock()
+        .unwrap()
+        .data
+        .hosts
+        .iter()
+        .find(|h| h.id == host_id)
+        .map(|h| h.roots.clone())
+        .ok_or_else(|| fail(StatusCode::BAD_REQUEST, "Host not found"))
+}
+pub(crate) async fn workspace_list(app: &App, host: &str, cwd: &str) -> ApiResult {
+    let roots = host_roots(app, host)?;
+    let live = app
+        .hosts
+        .live(host)
+        .ok_or_else(|| fail(StatusCode::CONFLICT, "Host is not connected"))?;
+    let result = live
+        .workspace(json!({"operation":"list","cwd":cwd,"roots":roots}))
+        .await
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(result))
+}
+pub(crate) async fn worktree_operation(
+    app: &App,
+    host: &str,
+    operation: &str,
+    mut request: Value,
+) -> Result<Value, (StatusCode, String)> {
+    let roots = host_roots(app, host)?;
+    let live = app.hosts.live(host).ok_or_else(|| {
+        fail(
+            StatusCode::CONFLICT,
+            "Host is not connected; reconnect before managing its worktree",
+        )
+    })?;
+    if live.worker["worktreeCleanup"] != true {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "Update the worker on this host to enable worktree cleanup and restore",
+        ));
+    }
+    request["operation"] = json!(operation);
+    request["roots"] = json!(roots);
+    live.workspace(request)
+        .await
+        .map_err(|e| fail(StatusCode::CONFLICT, e))
+}
+
+pub(crate) async fn prepare_workspace(
+    app: &App,
+    host: &str,
+    req: &crate::Create,
+    source: std::path::PathBuf,
+    key: Option<&str>,
+) -> Result<(std::path::PathBuf, Option<crate::worktree_cleanup::Owned>), (StatusCode, String)> {
+    let roots = host_roots(app, host)?;
+    let policy = {
+        let catalog = app.catalog.lock().unwrap();
+        match req.project_id.as_deref() {
+            Some(id) => catalog
+                .data
+                .projects
+                .iter()
+                .find(|p| p.id == id)
+                .ok_or_else(|| fail(StatusCode::BAD_REQUEST, "Project not found"))?
+                .workspace_policy
+                .clone(),
+            None => crate::worktrees::Policy::default(),
+        }
+    };
+    let live = app
+        .hosts
+        .live(host)
+        .ok_or_else(|| fail(StatusCode::CONFLICT, "Host is not connected"))?;
+    let mode = if req.external_id.is_some() {
+        crate::worktrees::Mode::Directory
+    } else {
+        req.workspace
+            .as_ref()
+            .map(|w| w.mode)
+            .unwrap_or(policy.default_mode)
+    };
+    if mode == crate::worktrees::Mode::Directory && !policy.require_worktree {
+        if req
+            .workspace
+            .as_ref()
+            .is_some_and(|w| w.path.is_some() || w.branch.is_some() || w.base_ref.is_some())
+        {
+            return Err(fail(
+                StatusCode::BAD_REQUEST,
+                "Worktree options only apply to worktree modes",
+            ));
+        }
+        return Ok((source, None));
+    }
+    if live.worker["workspace"] != true {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "Update the worker on this host to enable remote worktrees.",
+        ));
+    }
+    // Reserve durably before the worker can mutate Git. Never replay a lost mutation.
+    if mode == crate::worktrees::Mode::NewWorktree {
+        crate::worktrees::arm_creation(app, key)?;
+    }
+    let result = live.workspace(json!({"operation":"prepare","cwd":source,"roots":roots,"policy":policy,"workspace":if req.external_id.is_some() { json!({"mode":"directory"}) } else { json!(req.workspace) }})).await
+        .map_err(|e| fail(StatusCode::CONFLICT, format!("{e} Inspect retained remote branches/files before retrying.")))?;
+    let path = result["cwd"]
+        .as_str()
+        .ok_or_else(|| fail(StatusCode::BAD_GATEWAY, "Missing remote workspace path"))?;
+    let owned = serde_json::from_value(result["owned"].clone()).map_err(|_| {
+        fail(
+            StatusCode::BAD_GATEWAY,
+            "Invalid remote workspace ownership",
+        )
+    })?;
+    Ok((path.into(), owned))
+}
+
 #[derive(Deserialize)]
 pub struct Roots {
     roots: Vec<String>,
@@ -917,6 +1129,8 @@ pub async fn set_roots(
     Path(id): Path<String>,
     Json(req): Json<Roots>,
 ) -> ApiResult {
+    // Serialize policy changes with session creation and scheduler admission.
+    let _workspace = app.workspace_lock.lock().await;
     let host = app
         .catalog
         .lock()
@@ -999,6 +1213,32 @@ mod tests {
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         assert!(live.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn older_workers_reject_worktrees_without_sending_an_unknown_request() {
+        let (out, mut frames) = mpsc::channel(8);
+        let live = Live::new(out, json!({"providers":["demo"]}));
+        assert!(
+            live.workspace(json!({"operation":"list"}))
+                .await
+                .unwrap_err()
+                .contains("Update the worker")
+        );
+        assert!(frames.try_recv().is_err());
+        assert!(live.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn hello_preserves_tool_paths_and_explicit_workspace_support() {
+        let worker = check_hello(&json!({"type":"hello","protocol":PROTOCOL,"providers":["codex"],"tools":{"codex":"/remote/bin/codex"},"workspace":true,"worktreeCleanup":true})).unwrap();
+        assert_eq!(worker["tools"]["codex"], "/remote/bin/codex");
+        assert_eq!(worker["workspace"], true);
+        assert_eq!(worker["worktreeCleanup"], true);
+        let old =
+            check_hello(&json!({"type":"hello","protocol":PROTOCOL,"providers":["demo"]})).unwrap();
+        assert_eq!(old["workspace"], false);
+        assert_eq!(old["worktreeCleanup"], false);
     }
 
     #[test]

@@ -484,10 +484,7 @@ pub fn record_outcome(s: &Session, mut outcome: Outcome) {
 
 /// Dispatches one queued item. Caller holds communication/run/workspace locks and
 /// passed `allow_start`. Returns true when a turn was accepted.
-fn dispatch_next(app: &App, s: &Session, deliberate: bool) -> bool {
-    if s.host_id != "local" {
-        return false;
-    }
+async fn dispatch_next(app: &App, s: &Session, deliberate: bool) -> bool {
     {
         let data = s.data.lock().unwrap();
         if !(deliberate || data.input_queue.ready) {
@@ -495,10 +492,10 @@ fn dispatch_next(app: &App, s: &Session, deliberate: bool) -> bool {
         }
     }
     // Root policy is re-validated at dispatch, like other launches.
-    if crate::checked_cwd(app, &s.cwd.to_string_lossy()).is_err() {
+    if crate::hosts::validate_session(app, s).await.is_err() {
         let mut data = s.data.lock().unwrap();
         data.input_queue
-            .block("Session directory is outside allowed roots; queue paused.");
+            .block("Session host, harness or directory is unavailable; queue paused.");
         let _ = s.store.lock().unwrap().save_state(&s.id, &data);
         drop(data);
         broadcast(s);
@@ -587,7 +584,7 @@ pub async fn scheduler(app: App) {
             continue;
         }
         for s in &ready {
-            dispatch_next(&app, s, false);
+            dispatch_next(&app, s, false).await;
         }
     }
 }
@@ -620,7 +617,6 @@ pub async fn enqueue(
 ) -> ApiResult {
     let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
-    crate::local_only(&s)?;
     validate(&req.text)?;
     if req.request_id.is_empty() || req.request_id.len() > MAX_REQUEST_ID {
         return Err(fail(
@@ -682,9 +678,8 @@ pub async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult
     let _run = app.run_lock.lock().await;
     let _workspace = app.workspace_lock.lock().await;
     let s = session(&app, &id)?;
-    crate::local_only(&s)?;
     crate::service_restart::allow_start(&app)?;
-    crate::checked_cwd(&app, &s.cwd.to_string_lossy())?;
+    crate::hosts::validate_session(&app, &s).await?;
     {
         let data = s.data.lock().unwrap();
         if data.lifecycle.suspended || data.lifecycle.archived || data.provider_session_id.is_none()
@@ -711,7 +706,7 @@ pub async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult
         q.resume();
         Ok(())
     })?;
-    let dispatched = dispatch_next(&app, &s, true);
+    let dispatched = dispatch_next(&app, &s, true).await;
     reply(&s, json!({ "dispatched": dispatched }))
 }
 

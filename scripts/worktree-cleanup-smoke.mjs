@@ -8,7 +8,9 @@ import {mkdir,mkdtemp,writeFile,readFile,access,rm} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {chromium,expect} from '@playwright/test';
-const port=Number(process.env.AGENTWORKS_CLEANUP_PORT||4521);
+const remote=process.env.AGENTWORKS_CLEANUP_REMOTE==='1';
+const port=Number(process.env.AGENTWORKS_CLEANUP_PORT||(remote?4522:4521));
+let hostId;
 assert(port>=4521&&port<=4525,'Use an isolated test port from 4521 through 4525');
 const base=`http://127.0.0.1:${port}`,headers={Origin:base,'Content-Type':'application/json'};
 await mkdir('.cache',{recursive:true});
@@ -18,9 +20,10 @@ const gitEnv=Object.fromEntries(Object.entries(process.env).filter(([k])=>!k.sta
 const git=(cwd,...args)=>execFileSync('git',['-c','core.hooksPath=/dev/null','-c','user.name=Agentworks Test','-c','user.email=test@localhost',...args],{cwd,env:gitEnv,encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
 git(repo,'init','-b','main');await writeFile(join(repo,'tracked.txt'),'committed\n');await writeFile(join(repo,'.gitignore'),'ignored/\n');git(repo,'add','.');git(repo,'commit','-m','fixture');
 const env={...process.env,AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:String(port),AGENTWORKS_ROOTS:root,AGENTWORKS_CATALOG_PATH:join(dir,'catalog.json'),AGENTWORKS_DB_PATH:join(dir,'sessions.sqlite3'),AGENTWORKS_DEMO_STATE_DIR:join(dir,'demo')};
+if(remote)Object.assign(env,{AGENTWORKS_SSH:resolve('scripts/fake-ssh.sh'),HOME:join(dir,'worker-home')});
 let server,browser;const delay=ms=>new Promise(r=>setTimeout(r,ms));
 async function until(check){for(let i=0;i<300;i++){const v=await check();if(v)return v;await delay(50);}throw new Error('Test timed out');}
-async function api(path,method='GET',body,status=200){const r=await fetch(base+path,{method,headers,body:body===undefined?undefined:JSON.stringify(body)}),text=await r.text();assert.equal(r.status,status,`${method} ${path}: ${text}`);return status===200?JSON.parse(text):text;}
+async function api(path,method='GET',body,status=200){if(remote&&path==='/api/sessions'&&method==='POST')body={hostId,...body};const r=await fetch(base+path,{method,headers,signal:AbortSignal.timeout(30000),body:body===undefined?undefined:JSON.stringify(body)}),text=await r.text();assert.equal(r.status,status,`${method} ${path}: ${text}`);return status===200?JSON.parse(text):text;}
 async function start(){server=spawn(resolve('target/debug/agentworks'),[],{env,stdio:['ignore','inherit','inherit']});await until(async()=>{assert.equal(server.exitCode,null,'Server exited');try{return(await fetch(base+'/api/status')).ok;}catch{return false;}});}
 async function stop(check=true){const ended=once(server,'exit');server.kill('SIGINT');const timer=setTimeout(()=>server.kill('SIGKILL'),8000);timer.unref();const [code]=await ended;clearTimeout(timer);server=null;if(check)assert.equal(code,0,'Server must shut down cleanly');}
 const snap=id=>api('/api/sessions/'+id);
@@ -34,6 +37,12 @@ let project;
 try{
  await start();
  project=await api('/api/projects','POST',{name:'Cleanup fixture'});
+ if(remote){
+   const host=await api('/api/hosts','POST',{name:'Cleanup remote',destination:'dev@box',command:resolve('target/debug/agentworks')});hostId=host.id;
+   await until(async()=>(await api('/api/catalog')).hosts.find(h=>h.id===hostId)?.status==='connected');
+   await api(`/api/hosts/${hostId}/roots`,'PUT',{roots:[root]});
+ }
+
 
  // Clean owned worktree: removed on archive, branch kept, recreated on restore.
  const clean=await owned('Clean owner');
@@ -42,6 +51,15 @@ try{
  assert.deepEqual([status.dirty.staged,status.dirty.unstaged,status.dirty.untracked],[0,0,0]);
  assert.equal(status.cleanup.allowed,true);assert.equal(status.cleanup.requiresConfirmation,false);assert.equal(status.integration.merge,false);
  const branch=status.branch;assert(branch.startsWith('agentworks/'));
+ if(remote){
+   const local=await api('/api/sessions','POST',{provider:'demo',cwd:clean.cwd,hostId:'local'});await idle(local.id);
+   await api(`/api/sessions/${local.id}/suspend`,'POST',{});
+   assert.equal((await tree(clean.id)).cleanup.allowed,true,'Identical paths on different hosts must not count as sharing');
+   await api(`/api/sessions/${local.id}`,'DELETE');
+   const serverRoot=join(dir,'server-only');await mkdir(serverRoot);
+   await api('/api/settings','PUT',{...(await api('/api/settings')),roots:[serverRoot]});
+ }
+
  // Ignored build output does not make a worktree dirty; it is deleted with the checkout.
  await mkdir(join(clean.cwd,'ignored'));await writeFile(join(clean.cwd,'ignored/build.log'),'x');
  let updated=await patch(clean.id,{archived:true});
@@ -52,6 +70,7 @@ try{
  assert.match(await api(`/api/sessions/${clean.id}/resume`,'POST',undefined,409),/unarchive/);
  // Removal metadata survives restart.
  await stop();await start();
+ if(remote)await until(async()=>(await api('/api/catalog')).hosts.find(h=>h.id===hostId)?.status==='connected');
  assert.equal((await tree(clean.id)).state,'removed');
  updated=await patch(clean.id,{archived:false});
  assert.equal(updated.archived,false);assert.equal(updated.worktreeRestore.outcome,'restored');
@@ -140,5 +159,15 @@ try{
  await page.locator('#worktree-archive-remove').click();
  await until(async()=>(await snap(active.id)).session.archived);assert.equal(await exists(active.cwd),false);
  assert.deepEqual(errors,[]);
- console.log(`Worktree cleanup smoke passed; fixture root: ${dir}`);
+ if(remote){
+   const restricted=await owned('Changed host roots');
+   await api(`/api/hosts/${hostId}/roots`,'PUT',{roots:[join(dir,'server-only')]});
+   assert.equal((await tree(restricted.id)).cleanup.allowed,false);
+   await patch(restricted.id,{archived:true,worktree:'remove'},409);
+   assert(await exists(join(restricted.cwd,'tracked.txt')),'Revoked host roots must prevent cleanup');
+   await api(`/api/hosts/${hostId}/roots`,'PUT',{roots:[root]});
+   assert.equal((await patch(restricted.id,{archived:true})).worktreeCleanup.outcome,'removed');
+ }
+
+ console.log(`${remote?'Remote':'Local'} worktree cleanup smoke passed; fixture root: ${dir}`);
 }finally{await browser?.close();if(server)await stop(false);await removeFixture(dir);}

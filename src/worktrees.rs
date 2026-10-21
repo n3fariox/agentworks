@@ -103,8 +103,26 @@ pub fn creation_payload(req: &Create) -> String {
     json!({"create":req,"automation":req.automation.as_ref().map(|a| (&a.automation_id,&a.request_id)),"prompt":req.queued_prompt}).to_string()
 }
 
-pub(crate) fn allowed(app: &App, path: &FsPath) -> Result<PathBuf, Error> {
-    effective_roots(app)
+/// Filesystem policy shared by the server and the remote worker.
+pub(crate) trait Context: Sync {
+    fn roots(&self) -> Vec<PathBuf>;
+    fn checked(&self, path: &str) -> Result<PathBuf, Error>;
+    fn arm(&self, key: Option<&str>) -> Result<(), Error>;
+}
+impl Context for App {
+    fn roots(&self) -> Vec<PathBuf> {
+        effective_roots(self)
+    }
+    fn checked(&self, path: &str) -> Result<PathBuf, Error> {
+        checked_cwd(self, path)
+    }
+    fn arm(&self, key: Option<&str>) -> Result<(), Error> {
+        arm_creation(self, key)
+    }
+}
+
+pub(crate) fn allowed(app: &(impl Context + ?Sized), path: &FsPath) -> Result<PathBuf, Error> {
+    app.roots()
         .into_iter()
         .filter(|r| path.starts_with(r))
         .min_by_key(|r| r.components().count())
@@ -115,7 +133,11 @@ pub(crate) fn allowed(app: &App, path: &FsPath) -> Result<PathBuf, Error> {
             )
         })
 }
-pub(crate) async fn git(app: &App, cwd: &FsPath, args: &[&str]) -> Result<String, Error> {
+pub(crate) async fn git(
+    app: &(impl Context + ?Sized),
+    cwd: &FsPath,
+    args: &[&str],
+) -> Result<String, Error> {
     let root = allowed(app, cwd)?;
     let (ok, out, err, _) = tokio::time::timeout(
         Duration::from_secs(10),
@@ -145,9 +167,12 @@ pub(crate) struct Repository {
     pub common: PathBuf,
     pub linked: bool,
 }
-pub(crate) async fn repository(app: &App, cwd: &FsPath) -> Result<Repository, Error> {
+pub(crate) async fn repository(
+    app: &(impl Context + ?Sized),
+    cwd: &FsPath,
+) -> Result<Repository, Error> {
     let top = git(app, cwd, &["rev-parse", "--show-toplevel"]).await?;
-    let top = checked_cwd(app, &top)?;
+    let top = app.checked(&top)?;
     let dir = git(app, cwd, &["rev-parse", "--absolute-git-dir"]).await?;
     let common = git(
         app,
@@ -177,11 +202,22 @@ pub(crate) async fn repository(app: &App, cwd: &FsPath) -> Result<Repository, Er
 #[derive(Deserialize)]
 pub struct List {
     cwd: String,
+    #[serde(default, rename = "hostId")]
+    host_id: Option<String>,
 }
 pub async fn list(State(app): State<App>, Json(req): Json<List>) -> ApiResult {
-    let cwd = checked_cwd(&app, &req.cwd)?;
-    repository(&app, &cwd).await?;
-    let output = git(&app, &cwd, &["worktree", "list", "--porcelain", "-z"]).await?;
+    if let Some(host) = req.host_id.as_deref().filter(|h| *h != "local") {
+        return crate::hosts::workspace_list(&app, host, &req.cwd).await;
+    }
+    let cwd = app.checked(&req.cwd)?;
+    Ok(Json(list_in(&app, &cwd).await?))
+}
+pub(crate) async fn list_in(
+    app: &(impl Context + ?Sized),
+    cwd: &FsPath,
+) -> Result<serde_json::Value, Error> {
+    repository(app, cwd).await?;
+    let output = git(app, cwd, &["worktree", "list", "--porcelain", "-z"]).await?;
     let mut worktrees = Vec::new();
     for (index, record) in output.split("\0\0").filter(|r| !r.is_empty()).enumerate() {
         let mut path = None;
@@ -204,17 +240,17 @@ pub async fn list(State(app): State<App>, Json(req): Json<List>) -> ApiResult {
         }
         if let Some(path) = path {
             // Missing/prunable paths cannot be safely canonicalized and are omitted.
-            if let Ok(path) = checked_cwd(&app, path) {
+            if let Ok(path) = app.checked(path) {
                 worktrees.push(json!({"path":path,"branch":branch,"commit":commit,"isMain":index==0,"locked":locked,"prunable":prunable}));
             }
         }
     }
-    Ok(Json(json!({"worktrees":worktrees})))
+    Ok(json!({"worktrees":worktrees}))
 }
 
 // Resolve an absent destination through existing ancestors. Reject traversal and symlinks;
 // never reuse even an empty existing destination. OS-user filesystem races remain possible.
-pub(crate) fn destination(app: &App, path: &FsPath) -> Result<PathBuf, Error> {
+pub(crate) fn destination(app: &(impl Context + ?Sized), path: &FsPath) -> Result<PathBuf, Error> {
     if !path.is_absolute()
         || path
             .components()
@@ -265,7 +301,9 @@ pub async fn verify_import(app: &App, req: &Create, source: &FsPath) -> Result<(
     let discover = async {
         let mut cursor = None;
         for _ in 0..100 {
-            let page = crate::runtime::list_sessions(
+            let page = crate::hosts::list_sessions(
+                app,
+                req.host_id.as_deref().unwrap_or("local"),
                 &req.provider,
                 Some(source.to_owned()),
                 cursor.clone(),
@@ -275,7 +313,7 @@ pub async fn verify_import(app: &App, req: &Create, source: &FsPath) -> Result<(
             .map_err(|e| {
                 bad(format!(
                     "Cannot verify original import cwd: {}",
-                    crate::runtime::safe_error(&e.to_string())
+                    crate::runtime::safe_error(&e.1)
                 ))
             })?;
             for entry in page["sessions"].as_array().into_iter().flatten() {
@@ -283,7 +321,15 @@ pub async fn verify_import(app: &App, req: &Create, source: &FsPath) -> Result<(
                     let actual = entry["cwd"]
                         .as_str()
                         .ok_or_else(|| bad("Provider did not report this history's cwd"))?;
-                    if checked_cwd(app, actual)? != source {
+                    if crate::hosts::directory_on(
+                        app,
+                        req.host_id.as_deref().unwrap_or("local"),
+                        &req.provider,
+                        actual,
+                    )
+                    .await?
+                        != source
+                    {
                         return Err(bad("Imported history must use its original provider cwd"));
                     }
                     return Ok(());
@@ -299,9 +345,16 @@ pub async fn verify_import(app: &App, req: &Create, source: &FsPath) -> Result<(
             "Cannot verify original provider cwd: history was not found in bounded session discovery",
         ))
     };
-    tokio::time::timeout(Duration::from_secs(12), discover)
-        .await
-        .map_err(|_| conflict("Import cwd verification timed out"))?
+    tokio::time::timeout(
+        Duration::from_secs(if req.host_id.as_deref().is_some_and(|h| h != "local") {
+            75
+        } else {
+            12
+        }),
+        discover,
+    )
+    .await
+    .map_err(|_| conflict("Import cwd verification timed out"))?
 }
 
 pub fn arm_creation(app: &App, key: Option<&str>) -> Result<(), Error> {
@@ -336,16 +389,31 @@ pub async fn prepare(
             None => Policy::default(),
         }
     };
+    prepare_in(
+        app,
+        req.workspace.as_ref(),
+        policy,
+        req.external_id.is_some(),
+        source,
+        creation_key,
+    )
+    .await
+}
+
+pub(crate) async fn prepare_in(
+    app: &(impl Context + ?Sized),
+    workspace: Option<&Workspace>,
+    policy: Policy,
+    external: bool,
+    source: PathBuf,
+    creation_key: Option<&str>,
+) -> Result<(PathBuf, Option<Owned>), Error> {
     // Histories are loaded in their actual supplied provider cwd, never in a new worktree.
-    let mode = if req.external_id.is_some() {
+    let mode = if external {
         Mode::Directory
     } else {
-        req.workspace
-            .as_ref()
-            .map(|w| w.mode)
-            .unwrap_or(policy.default_mode)
+        workspace.map(|w| w.mode).unwrap_or(policy.default_mode)
     };
-    let workspace = req.workspace.as_ref();
     if mode != Mode::NewWorktree
         && workspace.is_some_and(|w| w.branch.is_some() || w.base_ref.is_some())
     {
@@ -365,7 +433,7 @@ pub async fn prepare(
                 ));
             }
             if let Some(path) = workspace.and_then(|w| w.path.as_deref()) {
-                let selected = checked_cwd(app, path)?;
+                let selected = app.checked(path)?;
                 if !source.starts_with(&selected)
                     || repository(app, &selected).await?.top != repo.top
                 {
@@ -425,7 +493,7 @@ pub async fn prepare(
             let parent = path
                 .parent()
                 .ok_or_else(|| bad("Invalid worktree destination"))?;
-            arm_creation(app, creation_key)?;
+            app.arm(creation_key)?;
             std::fs::create_dir_all(parent)
                 .map_err(|_| bad("Could not create worktree parent directory"))?;
             // Recheck ancestors immediately before Git mutation, and canonical roots after it.
@@ -442,10 +510,10 @@ pub async fn prepare(
                     bad("Could not reserve worktree destination directory")
                 }
             })?;
-            checked_cwd(app, path_str)?;
+            app.checked(path_str)?;
             git(app, &repo.top, &["worktree", "add", "--no-track", "-b", &branch, "--", path_str, &commit]).await
                 .map_err(|(code, message)| (code, format!("{message}. Destination {} and any branch/files are retained; no cleanup was attempted", path.display())))?;
-            let cwd = checked_cwd(app, path_str)?;
+            let cwd = app.checked(path_str)?;
             // Only checkouts created here are owned; selected/directory worktrees never are.
             owned = Some(Owned {
                 path: cwd.clone(),
@@ -464,8 +532,7 @@ pub async fn prepare(
         ));
     }
     // Includes directory mode and imports: all launches recheck effective roots at execution.
-    let cwd = checked_cwd(
-        app,
+    let cwd = app.checked(
         cwd.to_str()
             .ok_or_else(|| bad("Working directory must be UTF-8"))?,
     )?;

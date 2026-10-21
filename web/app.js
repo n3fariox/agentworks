@@ -117,7 +117,7 @@ function openCreate(context={}) {
   $('create-agent-access').value='';updateCommunicationDefault();$('create-error').textContent='';$('directory').value=context.cwd||workspaceContext?.cwd||locations[projectId||'ungrouped']||(active?.hostId==='local'?active.cwd:null)||config.roots[0];$('session-title').value=context.title||'';
   if(context.provider&&$('provider').querySelector(`option[value="${context.provider}"]`))$('provider').value=context.provider;
   $('fork-boundary').replaceChildren(new Option('Latest completed turn at submission',''));$('fork-context').value='auto';$('fork-summary').value='';
-  renderForkHeader();fillCreateHosts(forkSource?'local':context.hostId||'local',context.cwd);providerNote();
+  renderForkHeader();fillCreateHosts(context.hostId||'local',context.cwd);providerNote();
   // Forking suggests its own worktree so the new session starts from this one's
   // position; the base revision is filled in from Git once the policy has loaded.
   worktrees.projectChanged(context.workspaceMode);
@@ -125,7 +125,7 @@ function openCreate(context={}) {
   return generation;
 }
 // Remote hosts appear once connected; sessions there use the host's own
-// working directories and the directory itself (no local worktrees).
+// working directories and workspace policy.
 function fillCreateHosts(selected,cwd){
   const select=$('create-host');select.replaceChildren(new Option('Local','local'));
   for(const host of hosts.filter(h=>h.kind==='remote')){
@@ -133,7 +133,7 @@ function fillCreateHosts(selected,cwd){
     option.disabled=host.status!=='connected';select.append(option);
   }
   select.value=[...select.options].some(o=>o.value===selected&&!o.disabled)?selected:'local';
-  select.disabled=!!forkSource;
+  select.disabled=false;
   createHostChanged(select.value===selected?(cwd||(select.value==='local'?$('directory').value:undefined)):undefined);
 }
 function createHost(){return hosts.find(h=>h.id===$('create-host').value&&h.kind==='remote')||null;}
@@ -144,12 +144,11 @@ function rememberedDirectory(){
 function createHostChanged(cwd){
   const host=createHost(),roots=host?host.roots||[]:config.roots;
   $('directory').value=cwd||rememberedDirectory()||roots[0]||'';
-  $('create-resume-policy').disabled=!!host;
-  if(host)$('create-resume-policy').checked=false;
-  worktrees.setRemote(!!host);
+  $('create-resume-policy').disabled=false;
+  worktrees.setHost(host?.id);
   $('project-roots').replaceChildren(...roots.map(root=>{const option=el('option');option.value=root;return option;}));
   if(host){
-    $('roots-note').textContent=roots.length?`Working directories on ${host.name}: ${roots.join(', ')}. Remote sessions use the directory itself; worktrees, files and Git views are local only for now.`:`Add working directories to ${host.name} first (⋯ on the host).`;
+    $('roots-note').textContent=roots.length?`Working directories on ${host.name}: ${roots.join(', ')}. Worktrees are created on this host. File and Git views are local only.`:`Add working directories to ${host.name} first (⋯ on the host).`;
   }else{
     $('roots-note').textContent='Allowed roots: '+config.roots.join(', ');
   }
@@ -178,7 +177,7 @@ async function openFork(parent=active){
   if(!parent||!config)return;
   $('lifecycle-menu').open=false;
   const generation=openCreate({fork:{id:parent.id,title:parent.title,provider:parent.provider,cwd:parent.cwd,model:(active?.id===parent.id?modelConfig?.currentValue:null)||parent.model||null,turns:0},
-    projectId:parent.projectId??null,cwd:parent.cwd,title:`${parent.title} (fork)`,provider:parent.provider,workspaceMode:'newWorktree'});
+    hostId:parent.hostId||'local',projectId:parent.projectId??null,cwd:parent.cwd,title:`${parent.title} (fork)`,provider:parent.provider,workspaceMode:'newWorktree'});
   const id=parent.id;
   try{
     // The parent's committed position becomes the fork's default base revision, but
@@ -200,15 +199,15 @@ function resetCreateModels(){
   const carried=forkSource?.model&&forkSource.provider===$('provider').value?forkSource.model:null;
   const defaultId=carried||config.defaultModels?.[$('provider').value];
   const option=el('option','',carried?`From “${forkSource.title}” · ${carried}`:defaultId?`Saved default · ${defaultId}`:'Harness default');option.value=defaultId||'';select.append(option);
-  const remote=createHost();$('load-models').disabled=!!remote;
-  $('model-note').textContent=remote?'Models load from local harnesses only. Remote sessions start with this choice or the harness default; change the model once the session starts.':'Load available models from the agent without sending a prompt.';
+  const remote=createHost();$('load-models').disabled=false;
+  $('model-note').textContent=remote?`Load available models from ${remote.name} without sending a prompt.`:'Load available models from the agent without sending a prompt.';
 }
 async function loadCreateModels(){
-  const gen=++discoveryGeneration,provider=$('provider').value,cwd=$('directory').value;
+  const gen=++discoveryGeneration,provider=$('provider').value,cwd=$('directory').value,hostId=$('create-host').value;
   modelPicked=true;
   $('load-models').disabled=true;$('model-note').textContent='Asking the harness for models…';
   try{
-    const result=await api('/api/models',{method:'POST',body:JSON.stringify({provider,cwd})});
+    const result=await api('/api/models',{method:'POST',body:JSON.stringify({provider,cwd,...(hostId!=='local'?{hostId}:{})})});
     if(gen!==discoveryGeneration)return;
     const select=$('create-model'),previous=select.value;select.replaceChildren();
     const def=el('option','','Harness default');def.value='';select.append(def);
@@ -230,12 +229,22 @@ function renderCommands(){
     button.onclick=()=>{$('prompt').value=commandText(command)+' ';commandsOpen=false;renderCommands();$('prompt').dispatchEvent(new Event('input'));$('prompt').focus();};list.append(button);
   }
 }
+function importHost(){return hosts.find(h=>h.id===$('import-host').value&&h.kind==='remote')||null;}
+function importProviders(){
+  const host=importHost(),selected=$('import-provider').value||active?.provider||'claude';
+  $('import-provider').replaceChildren();
+  for(const provider of config.providers){const option=el('option','',provider.name);option.value=provider.id;option.disabled=host?!host.worker?.providers?.includes(provider.id):!provider.installed;$('import-provider').append(option);}
+  const available=[...$('import-provider').options].filter(o=>!o.disabled);
+  $('import-provider').value=available.some(o=>o.value===selected)?selected:available[0]?.value||selected;
+}
 function openImport(){
   if(!config)return;
+  const selectedHost=$('create-dialog').open?$('create-host').value:active?.hostId||'local';
   $('create-dialog').close();updateProjectControls();
-  $('import-provider').replaceChildren();
-  for(const provider of config.providers){const option=el('option','',provider.name);option.value=provider.id;option.disabled=!provider.installed;$('import-provider').append(option);}
-  $('import-provider').value=active?.provider||'claude';$('import-project').value=active?.projectId||'';
+  $('import-host').replaceChildren(new Option('Local','local'));
+  for(const host of hosts.filter(h=>h.kind==='remote')){const option=new Option(host.name,host.id);option.disabled=host.status!=='connected'||!host.roots?.length;$('import-host').append(option);}
+  $('import-host').value=[...$('import-host').options].some(o=>o.value===selectedHost&&!o.disabled)?selectedHost:'local';
+  importProviders();$('import-project').value=active?.projectId||'';
   $('import-directory').value='';$('import-search').value='';resetExternal();$('import-dialog').showModal();browseExternal();
 }
 function resetExternal(){
@@ -248,7 +257,7 @@ function externalControls(){
   $('browse-sessions').disabled=externalLoading||externalImporting;$('browse-sessions').textContent=externalLoading?'Loading…':'Browse';
   $('more-external').hidden=!externalCursor;$('more-external').disabled=externalLoading||externalImporting;
   $('import-submit').disabled=!externalSelection||externalLoading||externalImporting;
-  for(const id of ['import-provider','import-source','import-directory','import-project','import-search'])$(id).disabled=externalImporting;
+  for(const id of ['import-host','import-provider','import-source','import-directory','import-project','import-search'])$(id).disabled=externalImporting;
 }
 function renderExternal(){
   const list=$('external-sessions');list.replaceChildren();
@@ -266,7 +275,7 @@ function renderExternal(){
   }
 }
 async function browseExternal(more=false){
-  const gen=++externalGeneration,provider=$('import-provider').value,cwd=$('import-directory').value.trim(),hostProfile=$('import-source').value==='host';
+  const gen=++externalGeneration,provider=$('import-provider').value,cwd=$('import-directory').value.trim(),hostProfile=$('import-source').value==='host',hostId=$('import-host').value;
   if(!more){externalSessions=[];externalSelection=null;externalCursor=null;}
   externalLoading=true;$('import-error').textContent='';externalControls();renderExternal();
   try{
@@ -277,7 +286,7 @@ async function browseExternal(more=false){
     let result;
     try{
       await previous;if(gen!==externalGeneration)return;
-      result=await api('/api/external-sessions',{method:'POST',body:JSON.stringify({provider,cwd:cwd||null,cursor:more?externalCursor:null,hostProfile})});
+      result=await api('/api/external-sessions',{method:'POST',body:JSON.stringify({provider,cwd:cwd||null,cursor:more?externalCursor:null,hostProfile,...(hostId!=='local'?{hostId}:{})})});
     }finally{release();}
     if(gen!==externalGeneration)return;
     const seen=new Set(externalSessions.map(s=>s.sessionId));for(const session of result.sessions||[])if(!seen.has(session.sessionId)){externalSessions.push(session);seen.add(session.sessionId);}
@@ -290,13 +299,14 @@ $('dismiss-import').onclick=()=>{$('import-dialog').close();externalGeneration++
 function changeExternalAgent(){
   $('import-search').value='';resetExternal();browseExternal();
 }
+$('import-host').onchange=()=>{importProviders();$('import-directory').value='';changeExternalAgent();};
 $('import-provider').onchange=changeExternalAgent;$('import-source').onchange=changeExternalAgent;$('import-directory').oninput=resetExternal;
 $('import-search').oninput=renderExternal;$('browse-sessions').onclick=()=>browseExternal();$('more-external').onclick=()=>browseExternal(true);
 $('import-form').onsubmit=async event=>{
   event.preventDefault();if(!externalSelection||externalImporting||externalLoading)return;
   const selection=externalSelection;externalImporting=true;externalControls();$('import-error').textContent='';
   try{
-    const created=await api('/api/sessions/import',{method:'POST',body:JSON.stringify({provider:$('import-provider').value,providerSessionId:selection.sessionId,cwd:selection.cwd,title:selection.title||'Imported session',projectId:$('import-project').value||null,hostProfile:$('import-source').value==='host'})});
+    const created=await api('/api/sessions/import',{method:'POST',body:JSON.stringify({provider:$('import-provider').value,providerSessionId:selection.sessionId,cwd:selection.cwd,title:selection.title||'Imported session',projectId:$('import-project').value||null,hostProfile:$('import-source').value==='host',...($('import-host').value!=='local'?{hostId:$('import-host').value}:{})})});
     await refreshSessions();$('import-dialog').close();selectSession(created);
     if(created.status==='error')resumeSession(created.id);
   }catch(e){$('import-error').textContent=e.message;}finally{externalImporting=false;externalControls();}
@@ -833,7 +843,15 @@ $('view-hosts').onclick=()=>setSidebarView('hosts');$('view-projects').onclick=(
 $('new-project').onclick=()=>sidebarView==='hosts'?openHostDialog():openProjectDialog();$('create-project-new').onclick=()=>openProjectDialog();
 let editingHostRoots=null;
 function openHostRoots(host){
-  editingHostRoots=host.id;$('host-roots-title').textContent='Working directories on '+host.name;
+  editingHostRoots=host.id;$('host-roots-title').textContent='Settings for '+host.name;
+  const tools=$('host-tools');tools.replaceChildren();
+  tools.append(el('p','field-note',`Tools and sign-ins belong to ${host.destination}. Sign in over SSH as that user, then retry the session.`));
+  for(const provider of ['codex','claude','opencode']){
+    const path=host.worker?.tools?.[provider];
+    const row=el('div','field-note');row.append(el('strong','',labels[provider]+': '),el('code','',path||(host.worker?.tools?'Not found by the worker':host.worker?'Update this worker to discover CLI paths':'Connect this host to discover CLI paths')));
+    if(path){const command=provider==='codex'?' login':' auth login';row.append(el('div','',`On ${host.destination}, run: `),el('code','',`'${path.replaceAll("'", "'\\''")}'${command}`));}
+    tools.append(row);
+  }
   $('host-roots').value=(host.roots||[]).join('\n');$('host-roots-error').textContent='';$('host-roots-dialog').showModal();$('host-roots').focus();
 }
 $('dismiss-host-roots').onclick=()=>$('host-roots-dialog').close();
@@ -935,7 +953,7 @@ $('create-form').onsubmit=async event=>{
   event.preventDefault();if(creating||worktrees.blocked())return;creating=true;providerNote();$('create-error').textContent='';
   const fork=forkSource;
   try{
-    const payload={resumePolicy:{enabled:$('create-resume-policy').checked},provider:$('provider').value,...worktrees.submission(),...(createHost()?{workspace:{mode:'directory'},cwd:$('directory').value}:{}),title:$('session-title').value,projectId:$('create-project').value||null,hostId:$('create-host').value,model:$('create-model').value,...($('create-agent-access').value?{agentAccess:{communicate:$('create-agent-access').value!=='off',...Object.fromEntries(['startSessions','promptSessions','cancelSessions','runAutomations'].map(key=>[key,$('create-agent-access').value==='coordinator']))}}:{})};
+    const payload={resumePolicy:{enabled:$('create-resume-policy').checked},provider:$('provider').value,...worktrees.submission(),title:$('session-title').value,projectId:$('create-project').value||null,hostId:$('create-host').value,model:$('create-model').value,...($('create-agent-access').value?{agentAccess:{communicate:$('create-agent-access').value!=='off',...Object.fromEntries(['startSessions','promptSessions','cancelSessions','runAutomations'].map(key=>[key,$('create-agent-access').value==='coordinator']))}}:{})};
     if(fork)Object.assign(payload,{boundarySeq:$('fork-boundary').value?Number($('fork-boundary').value):null,context:$('fork-context').value,summary:$('fork-context').value==='summary'?$('fork-summary').value:null});
     const signature=JSON.stringify({source:fork?.id||null,payload});
     if(!pendingCreate||pendingCreate.signature!==signature)pendingCreate={signature,requestId:uuid()};

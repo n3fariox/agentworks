@@ -1,6 +1,6 @@
 //! C-04b: ownership, dirty state, archive cleanup and restore for worktrees a session created.
 //! Branches are never deleted, merged or reset. Unowned worktrees are never removed.
-use crate::{ApiResult, App, Session, checked_cwd, fail, session, worktrees};
+use crate::{ApiResult, App, Session, fail, session, worktrees};
 use axum::{
     Json,
     extract::{Path, State},
@@ -37,7 +37,7 @@ pub enum Cleanup {
     Remove,
 }
 
-#[derive(Default, Serialize)]
+#[derive(Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Dirty {
     staged: usize,
@@ -52,9 +52,10 @@ impl Dirty {
     }
 }
 
-struct Inspection {
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Inspection {
     owned: Option<Owned>,
-    state: &'static str,
+    state: String,
     dirty: Option<Dirty>,
     fingerprint: Option<String>,
     locked: bool,
@@ -78,9 +79,9 @@ fn utf8(path: &std::path::Path) -> Result<&str, Error> {
 }
 
 /// Confirms the path is still the recorded linked checkout of the recorded repository.
-async fn verify(app: &App, o: &Owned) -> Result<(), String> {
+async fn verify(app: &(impl worktrees::Context + ?Sized), o: &Owned) -> Result<(), String> {
     let path = utf8(&o.path).map_err(|e| e.1)?;
-    if checked_cwd(app, path).map_err(|e| e.1)? != o.path {
+    if app.checked(path).map_err(|e| e.1)? != o.path {
         return Err("Worktree path no longer resolves to its recorded location".into());
     }
     let repo = worktrees::repository(app, &o.path).await.map_err(|e| e.1)?;
@@ -142,9 +143,61 @@ async fn inspect(app: &App, s: &Session) -> Inspection {
                 ),
         )
     };
+    let shared_with = owned
+        .as_ref()
+        .map(|o| {
+            app.sessions
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|other| {
+                    other.id != s.id && other.host_id == s.host_id && other.cwd.starts_with(&o.path)
+                })
+                .map(|other| json!({"id":other.id,"title":other.display_title()}))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut result = if s.host_id == "local" || owned.is_none() {
+        inspect_in(app, owned).await
+    } else {
+        match remote(app, s, "inspectWorktree", json!({}))
+            .await
+            .and_then(|value| {
+                serde_json::from_value(value)
+                    .map_err(|_| conflict("Invalid remote worktree inspection"))
+            }) {
+            Ok(result) => result,
+            Err((_, reason)) => Inspection {
+                owned,
+                state: "unavailable".into(),
+                dirty: None,
+                fingerprint: None,
+                locked: false,
+                shared_with: Vec::new(),
+                blocker: Some(reason),
+            },
+        }
+    };
+    result.shared_with = shared_with;
+    if result.blocker.is_none() && result.state == "present" {
+        result.blocker = if busy {
+            Some("Session is running; stop it before removing its worktree".into())
+        } else if !result.shared_with.is_empty() {
+            Some("Another session uses this worktree".into())
+        } else {
+            None
+        };
+    }
+    result
+}
+
+pub(crate) async fn inspect_in(
+    app: &(impl worktrees::Context + ?Sized),
+    owned: Option<Owned>,
+) -> Inspection {
     let mut result = Inspection {
         owned: owned.clone(),
-        state: "unowned",
+        state: "unowned".into(),
         dirty: None,
         fingerprint: None,
         locked: false,
@@ -155,23 +208,15 @@ async fn inspect(app: &App, s: &Session) -> Inspection {
         return result;
     };
     if o.removed.is_some() {
-        result.state = "removed";
+        result.state = "removed".into();
         return result;
     }
     if std::fs::symlink_metadata(&o.path).is_err() {
-        result.state = "missing";
+        result.state = "missing".into();
         result.blocker = Some("Worktree path is missing".into());
         return result;
     }
-    result.state = "present";
-    result.shared_with = app
-        .sessions
-        .lock()
-        .unwrap()
-        .values()
-        .filter(|other| other.id != s.id && other.cwd.starts_with(&o.path))
-        .map(|other| json!({"id":other.id,"title":other.display_title()}))
-        .collect();
+    result.state = "present".into();
     let checked = async {
         verify(app, &o).await?;
         let list = worktrees::git(app, &o.path, &["worktree", "list", "--porcelain", "-z"])
@@ -222,16 +267,8 @@ async fn inspect(app: &App, s: &Session) -> Inspection {
         }
         Err(reason) => result.blocker = Some(reason),
     }
-    if result.blocker.is_none() {
-        result.blocker = if busy {
-            Some("Session is running; stop it before removing its worktree".into())
-        } else if result.locked {
-            Some("Worktree is locked".into())
-        } else if !result.shared_with.is_empty() {
-            Some("Another session uses this worktree".into())
-        } else {
-            None
-        };
+    if result.blocker.is_none() && result.locked {
+        result.blocker = Some("Worktree is locked".into());
     }
     result
 }
@@ -252,7 +289,7 @@ fn view(s: &Session, i: &Inspection) -> Value {
         "cleanup": {
             "allowed": i.state == "present" && i.blocker.is_none(),
             "requiresConfirmation": dirty,
-            "reason": match i.state {
+            "reason": match i.state.as_str() {
                 "unowned" => Some("This session did not create its worktree; Agentworks never removes it".into()),
                 "removed" => Some("Removed on archive; unarchive to recreate it from the retained branch".into()),
                 _ => i.blocker.clone(),
@@ -294,7 +331,7 @@ pub async fn cleanup(
         }
         Ok(json!({"outcome":"retained","reason":reason,"worktree":summary}))
     };
-    match first.state {
+    match first.state.as_str() {
         "unowned" => return Ok(json!({"outcome":"none","worktree":summary})),
         "removed" => return Ok(json!({"outcome":"removed","worktree":summary})),
         _ => {}
@@ -333,14 +370,18 @@ pub async fn cleanup(
     if second.blocker.is_some() || second.fingerprint != first.fingerprint {
         return retained("Worktree changed while preparing removal; inspect it and retry");
     }
-    let path = utf8(&o.path)?;
-    let mut args = vec!["worktree", "remove"];
-    if dirty {
-        // A single --force never overrides a lock; locked worktrees were refused above.
-        args.push("--force");
-    }
-    args.extend(["--", path]);
-    if let Err((_, message)) = worktrees::git(app, &o.main_top, &args).await {
+    let removal = if s.host_id == "local" {
+        remove_in(app, &o, first.fingerprint.as_deref(), dirty).await
+    } else {
+        remote(
+            app,
+            s,
+            "removeWorktree",
+            json!({"fingerprint":first.fingerprint,"force":dirty}),
+        )
+        .await
+    };
+    if let Err((_, message)) = removal {
         return retained(&message);
     }
     if let Some(w) = s.data.lock().unwrap().worktree.as_mut() {
@@ -349,25 +390,87 @@ pub async fn cleanup(
     Ok(json!({"outcome":"removed","forced":dirty,"path":o.path,"branch":o.branch}))
 }
 
+/// Re-inspect on the filesystem owner immediately before mutation, including
+/// the confirmation fingerprint. Never force a locked or replaced checkout.
+pub(crate) async fn remove_in(
+    app: &(impl worktrees::Context + ?Sized),
+    o: &Owned,
+    expected: Option<&str>,
+    force: bool,
+) -> Result<Value, Error> {
+    let current = inspect_in(app, Some(o.clone())).await;
+    if current.state != "present" || current.blocker.is_some() {
+        return Err(conflict(
+            current
+                .blocker
+                .unwrap_or_else(|| "Worktree is not present".into()),
+        ));
+    }
+    if expected.is_none() || current.fingerprint.as_deref() != expected {
+        return Err(conflict(
+            "Worktree changed while preparing removal; inspect it and retry",
+        ));
+    }
+    let dirty = current.dirty.as_ref().is_some_and(Dirty::any);
+    if dirty && !force {
+        return Err(conflict("Worktree has uncommitted changes"));
+    }
+    let main = worktrees::repository(app, &o.main_top).await?;
+    if main.common != o.common_dir {
+        return Err(conflict(
+            "Repository no longer matches the recorded worktree",
+        ));
+    }
+    let path = utf8(&o.path)?;
+    let mut args = vec!["worktree", "remove"];
+    if dirty {
+        args.push("--force");
+    }
+    args.extend(["--", path]);
+    worktrees::git(app, &o.main_top, &args).await?;
+    Ok(json!({"outcome":"removed","forced":dirty,"path":o.path,"branch":o.branch}))
+}
+
+async fn remote(
+    app: &App,
+    s: &Session,
+    operation: &str,
+    mut request: Value,
+) -> Result<Value, Error> {
+    request["owned"] = json!(s.data.lock().unwrap().worktree);
+    crate::hosts::worktree_operation(app, &s.host_id, operation, request).await
+}
+
 /// Callers hold the run lock. Recreates a removed owned checkout from its retained branch.
 pub async fn restore(app: &App, s: &Session) -> Result<Option<Value>, Error> {
     let Some(o) = s.data.lock().unwrap().worktree.clone() else {
         return Ok(None);
     };
+    let _workspace = app.workspace_lock.lock().await;
+    let result = if s.host_id == "local" {
+        restore_in(app, &o).await?
+    } else {
+        serde_json::from_value(remote(app, s, "restoreWorktree", json!({})).await?)
+            .map_err(|_| conflict("Invalid remote restore reply"))?
+    };
+    if let Some(w) = s.data.lock().unwrap().worktree.as_mut() {
+        w.removed = None;
+    }
+    Ok(result)
+}
+
+pub(crate) async fn restore_in(
+    app: &(impl worktrees::Context + ?Sized),
+    o: &Owned,
+) -> Result<Option<Value>, Error> {
     if o.removed.is_none() && std::fs::symlink_metadata(&o.path).is_ok() {
+        verify(app, o).await.map_err(conflict)?;
         return Ok(None);
     }
-    let _workspace = app.workspace_lock.lock().await;
-    let mark_present = || {
-        if let Some(w) = s.data.lock().unwrap().worktree.as_mut() {
-            w.removed = None;
-        }
-    };
     match std::fs::symlink_metadata(&o.path) {
         Ok(_) => {
             // Adopt only the same repository's checkout of the recorded branch.
             if verify(app, &o).await.is_ok() {
-                mark_present();
                 return Ok(Some(
                     json!({"outcome":"adopted","path":o.path,"branch":o.branch}),
                 ));
@@ -432,7 +535,6 @@ pub async fn restore(app: &App, s: &Session) -> Result<Option<Value>, Error> {
         return Err(conflict(format!("Could not recreate worktree: {message}")));
     }
     verify(app, &o).await.map_err(conflict)?;
-    mark_present();
     Ok(Some(
         json!({"outcome":"restored","path":o.path,"branch":o.branch}),
     ))

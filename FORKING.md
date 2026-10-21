@@ -6,7 +6,7 @@ directory. Choose the latest completed turn at submission or a retained earlier
 completed-turn boundary. A running parent continues uninterrupted. A session without
 a completed turn cannot be forked; cancelled, timed-out and failed turns are excluded.
 
-Harness/model and workspace are independent choices. The form suggests a new
+Host, harness/model and workspace are independent choices. Forks default to the parent’s host. The form suggests a new
 worktree at the source directory's current Git commit; you can reuse the directory
 or select an existing worktree under ordinary project policy. A conversation boundary
 is not a historical filesystem snapshot. New worktrees contain committed files only;
@@ -21,7 +21,7 @@ uncommitted edits remain in the source. No merge or cleanup is implicit.
 - **Transcript** creates a fresh provider session and sends the recorded conversation
   as a separate background block with the first user message. It does not reproduce
   hidden provider state. Auto uses this method when a safe native anchor is unavailable,
-  including cross-harness forks and current Claude/OpenCode integrations.
+  including cross-host/cross-harness forks and current Claude/OpenCode integrations. Native provider IDs are never sent to a different host or provider.
 - **Summary** creates a fresh provider session with the user's supplied summary as
   background with the first message. No model is called to generate a summary.
 
@@ -54,7 +54,7 @@ a conflicting payload is rejected. Child state, retained transcript, lineage and
 creation result commit in one SQLite transaction. Existing worktree preparation
 reservations prevent blindly repeating an interrupted Git mutation.
 
-Parent ID, title/provider, source directory, boundary sequence/count, creation time,
+Parent ID, title/provider/host, source directory, boundary sequence/count, creation time,
 context method and native outcome survive restart and parent deletion. Creating a
 child never mutates the parent. Parent history is copied under its short state lock.
 
