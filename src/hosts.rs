@@ -402,6 +402,7 @@ pub struct Live {
     out: mpsc::Sender<Message>,
     channels: Mutex<HashMap<u32, UnboundedSender<io::Result<String>>>>,
     next_channel: AtomicU32,
+    terminals: Mutex<HashMap<u32, tokio::sync::watch::Sender<crate::terminal::Frame>>>,
     requests: Mutex<HashMap<u64, oneshot::Sender<Result<String, String>>>>,
     next_request: AtomicU64,
     worker: Value,
@@ -414,6 +415,7 @@ impl Live {
             out,
             channels: Default::default(),
             next_channel: AtomicU32::new(0),
+            terminals: Default::default(),
             requests: Default::default(),
             next_request: AtomicU64::new(0),
             worker,
@@ -439,6 +441,25 @@ impl Live {
                     return;
                 };
                 match value["type"].as_str() {
+                    Some("terminalFrame") => {
+                        let channel = value["channel"].as_u64().unwrap_or(0) as u32;
+                        if let Ok(mut frame) =
+                            serde_json::from_value::<crate::terminal::Frame>(value["frame"].clone())
+                        {
+                            let mut terminals = self.terminals.lock().unwrap();
+                            if let Some(tx) = terminals.get(&channel) {
+                                let Some(history) = frame.history.restore(&tx.borrow().history)
+                                else {
+                                    return;
+                                };
+                                frame.history = history;
+                                tx.send_replace(frame.clone());
+                            }
+                            if frame.exited {
+                                terminals.remove(&channel);
+                            }
+                        }
+                    }
                     Some("exit") => {
                         let channel = value["channel"].as_u64().unwrap_or(0) as u32;
                         if let Some(tx) = self.channels.lock().unwrap().remove(&channel) {
@@ -473,9 +494,91 @@ impl Live {
         for (_, tx) in self.channels.lock().unwrap().drain() {
             let _ = tx.unbounded_send(Err(io::Error::other(reason.to_string())));
         }
+        for (_, tx) in self.terminals.lock().unwrap().drain() {
+            tx.send_modify(|frame| {
+                frame.seq += 1;
+                frame.exited = true;
+                frame.error = Some(reason.to_string());
+                frame.delta.clear();
+            });
+        }
         for (_, tx) in self.requests.lock().unwrap().drain() {
             let _ = tx.send(Err(reason.to_string()));
         }
+    }
+    pub fn home_terminal(self: &Arc<Self>) -> Result<crate::terminal::Handle, String> {
+        let home = self.worker["home"]
+            .as_str()
+            .filter(|home| home.starts_with('/'))
+            .ok_or_else(|| "Update the remote worker to enable host terminals.".to_string())?;
+        self.terminal(home)
+    }
+    pub fn terminal(self: &Arc<Self>, cwd: &str) -> Result<crate::terminal::Handle, String> {
+        if self.worker["terminal"] != true {
+            return Err("Update the remote worker to enable terminals.".into());
+        }
+        let channel = self.next_channel.fetch_add(1, Ordering::Relaxed) + 1;
+        let (frames, receiver) = tokio::sync::watch::channel(crate::terminal::Frame {
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        });
+        {
+            let mut terminals = self.terminals.lock().unwrap();
+            if self.closed.load(Ordering::Acquire) {
+                return Err("The host disconnected.".into());
+            }
+            terminals.insert(channel, frames);
+        }
+        if self
+            .out
+            .try_send(Message::text(
+                json!({"type":"terminalOpen","channel":channel,"cwd":cwd}).to_string(),
+            ))
+            .is_err()
+        {
+            self.terminals.lock().unwrap().remove(&channel);
+            return Err("The host disconnected.".into());
+        }
+        let (input, mut incoming) = mpsc::channel::<crate::terminal::Input>(64);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let stop = stopped.clone();
+        let live = self.clone();
+        let mut closed = receiver.clone();
+        tokio::spawn(async move {
+            let mut check = tokio::time::interval(Duration::from_millis(100));
+            loop {
+                tokio::select! {
+                    _ = check.tick() => {if stop.load(Ordering::Acquire) || live.closed.load(Ordering::Acquire) {break;}},
+                    input = incoming.recv() => {
+                        let Some(input) = input else {break;};
+                        if live.out.try_send(Message::text(json!({"type":"terminalInput","channel":channel,"input":input}).to_string())).is_err() {break;}
+                    }
+                }
+            }
+            let _ = live.out.try_send(Message::text(
+                json!({"type":"terminalClose","channel":channel}).to_string(),
+            ));
+            // Keep the link alive until the worker confirms PTY cleanup. The
+            // timeout also covers a blocked worker before host teardown.
+            let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                while closed.changed().await.is_ok() {}
+            })
+            .await;
+            if let Some(tx) = live.terminals.lock().unwrap().remove(&channel) {
+                tx.send_modify(|frame| {
+                    frame.seq += 1;
+                    frame.exited = true;
+                    frame.error = Some("Terminal connection closed".into());
+                    frame.delta.clear();
+                });
+            }
+        });
+        Ok(crate::terminal::Handle {
+            input,
+            frames: receiver,
+            stopped,
+        })
     }
     /// Asks the worker to resolve a directory on its machine, returning the
     /// canonical path.
@@ -715,6 +818,8 @@ fn check_hello(hello: &Value) -> Result<Value, String> {
         "tools": hello["tools"],
         "workspace": hello["workspace"] == true,
         "worktreeCleanup": hello["worktreeCleanup"] == true,
+        "terminal": hello["terminal"].as_bool().unwrap_or(false),
+        "home": text("home", 4096),
     }))
 }
 
@@ -829,6 +934,7 @@ pub async fn remove(State(app): State<App>, Path(id): Path<String>) -> ApiResult
             .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
         (host, catalog.credentials_dir())
     };
+    crate::terminal::remove_host(&id).await;
     app.hosts.stop(&id);
     if let Some(key) = host.and_then(|h| h.identity_file) {
         // Only erase a generated key directory owned by this catalog.

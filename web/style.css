@@ -194,7 +194,7 @@ body[data-code-wrap=scroll] .tool-card pre,body[data-code-wrap=scroll] .approval
   .session-meta>div:first-child::after{margin-right:0}
   .session-meta #resume-session{font-size:12px;padding:0;min-height:0}
   .session-bar #model-picker{order:0;margin:0;min-width:0;max-width:100%;flex:0 1 auto;min-height:0;padding:0 2px;font-size:12px;color:#cbd0d8;background:transparent;border:0;border-bottom:1px dashed #5a5f6a;border-radius:0;text-overflow:ellipsis}
-  body:not(.menu-open):not([data-workspace-view=files]):not([data-workspace-view=automations]):has(#conversation:not([hidden])) :is(#workspace-nav,main>header){display:none}
+  body:not(.menu-open):not([data-workspace-view=files]):not([data-workspace-view=automations]):not([data-workspace-view=host-terminal]):has(#conversation:not([hidden])) :is(#workspace-nav,main>header){display:none}
   /* Session browser: ☰ turns the drawer into a full screen of workspace tabs,
      project and directory pickers, and the session list. */
   #sidebar .brand{display:none}

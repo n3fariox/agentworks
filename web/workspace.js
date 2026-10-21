@@ -41,11 +41,11 @@ export function createWorkspace(hooks){
     state.locationKey=location.id;contextControls();save();return location;
   }
   function showView(view){
-    state.view=['sessions','files','automations'].includes(view)?view:'sessions';
+    state.view=['sessions','files','automations','host-terminal'].includes(view)?view:'sessions';
     document.body.dataset.workspaceView=state.view;document.body.classList.remove('menu-open');
-    $('workspace-session-area').hidden=state.view!=='sessions';$('workspace-files').hidden=state.view!=='files';$('workspace-automations').hidden=state.view!=='automations';
-    for(const name of ['sessions','files','automations'])$('nav-'+name).setAttribute('aria-pressed',String(state.view===name));
-    if(state.view==='files')loadFiles();if(state.view==='automations')loadAutomations();save();
+    $('host-terminal-view').hidden=state.view!=='host-terminal';$('workspace-session-area').hidden=state.view!=='sessions';$('workspace-files').hidden=state.view!=='files';$('workspace-automations').hidden=state.view!=='automations';
+    for(const name of ['sessions','files','automations'])$('nav-'+name).setAttribute('aria-pressed',String(state.view===name||(name==='sessions'&&state.view==='host-terminal')));
+    if(state.view==='files')loadFiles();if(state.view==='automations')loadAutomations();hooks.viewChanged?.(state.view);save();
   }
   // Directory listing shared by the Files view and the side panel's Files tab.
   function renderListing({crumbs,list,result,go,open,selected}){

@@ -394,6 +394,7 @@ fn backup(app: &App, r: &Record) -> Result<(), String> {
     }
     for table in [
         "sessions",
+        "terminal_snapshots",
         "events",
         "agent_access",
         "agent_messages",
@@ -554,6 +555,8 @@ async fn tick(app: &App) -> Result<(), (StatusCode, String)> {
                 app.restart.blocked.store(false, Ordering::SeqCst);
                 continue;
             }
+            crate::terminal::shutdown().await;
+            app.hosts.stop_all();
             std::process::exit(75);
         }
         if r.phase == "ready" && matches!(r.handoff_phase.as_str(), "pending" | "opening") {

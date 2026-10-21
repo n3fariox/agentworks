@@ -4,7 +4,7 @@ A small, local Rust prototype for running independent Claude, Codex, OpenCode, a
 
 ## Run
 
-Requires Rust 1.89+ and Node (use a current LTS supported by the adapters).
+Requires Rust 1.90+, Zig 0.15.2 on `PATH` (for libghostty), and Node (use a current LTS supported by the adapters). The first Rust build fetches Ghostty’s pinned native sources and Zig dependencies.
 
 ```bash
 npm ci --ignore-scripts
@@ -88,6 +88,12 @@ AGENTWORKS_TEST_OPENCODE=1 npm run test:browser
 ```
 
 ## Workspace navigation and files
+
+Each session has **Chat** and **Terminal** tabs. Opening Terminal starts one interactive `$SHELL` (falling back to `/bin/sh`) in that session’s directory, on its local or remote host. It retains the host user’s paths, credentials, locale, desktop/SSH integration, and `NO_BROWSER` setting. Launcher color/CI overrides, agent session markers, forced pagers, service controls, stale terminal metadata, and inherited working-directory/Git overrides are cleared; the interactive shell then loads its own configuration. The service keeps the PTY and libghostty emulator running when you switch tabs or sessions, reload, disconnect, or suspend the agent harness. Reopening attaches to the same shell. Archiving stops the shell and releases its PTY, saving its screen and scrollback for later viewing. Unarchive the session and select **Start new terminal** to start again. Deleting the session stops its terminal and deletes its saved history. After the shell exits, **Start new terminal** creates its replacement. Service restart ends terminals; a remote worker disconnect also ends terminals on that worker. Existing remote workers must be updated to advertise terminal support.
+
+For a terminal outside any session, use **Open terminal** (`›_`) beside a host in the sidebar. Each host gets one shell, started lazily in that host user’s home directory, shared across browser views, and retained when navigating away or reloading. **Stop terminal** releases the shell, its child processes, PTY, and emulator while leaving its screen and scrollback available until service restart. **Start new terminal** replaces a stopped or exited shell. Host terminals are independent of session archive/deletion and need no session or configured working directories. Removing a host, disconnecting its worker, or restarting the service ends its live terminal. Remote host terminals require an updated worker that reports its home directory.
+
+The browser uses the locally vendored xterm.js 6. Ghostty handles output, query replies, and screen state on the shell’s host; reconnect restores up to 10,000 rows of scrollback and the current screen, followed by ordered display updates. Scroll with the mouse wheel, scrollbar, or Shift+Page Up/Down. Reading older output keeps your position when new output arrives. Full-screen applications use a separate alternate screen and do not fill the shell’s scrollback. Live history is bounded in memory; service restart or starting a replacement shell clears it. Archived terminal snapshots are stored in the database and remain viewable after service restart. Multiple browser views share the same shell, with the latest visible view’s resize taking effect.
 
 Use **Sessions**, **Files**, and **Automations** in the navigation rail (tabs across the top on mobile). The header selects the logical project and its Local host directory. **＋** beside the directory adds another location inside the allowed roots; it does not start an agent. Project/location associations persist even after their sessions are deleted.
 
@@ -255,7 +261,7 @@ Traefik example](work/HOSTING.md).
 
 ## Prototype limits
 
-- Chat only. No PTY/terminal mode yet.
+- Chat uses ACP; the Terminal tab opens an independent interactive shell, rather than attaching to the agent harness.
 - Sessions and transcripts survive browser reconnects, server restarts, and application updates. Harness processes stop with the server and are resumed when their conversation is opened. Running model/tool processes cannot continue through a server restart.
 - Maximum 12 active harnesses; saved inactive sessions do not count toward this limit. The UI loads the most recent 3,000 events / approximately 4 MB; the full event log remains in SQLite. There is no automatic transcript expiration.
 - One ACP adapter process per session. Closing a session stops that process group on Linux. Pending approval requests are cancelled on turn cancellation.
@@ -308,6 +314,7 @@ Remote host links have a separate check that starts its own server and uses `scr
 
 ```bash
 cargo build --locked && npm run test:remote-hosts
+npx playwright test tests/terminal.spec.mjs
 npm run test:remote-partitions # ~50s: silent transport and replacement ownership
 ```
 
@@ -361,7 +368,7 @@ AGENTWORKS_URL=http://127.0.0.1:4318 npm run test:import-capabilities
 
 Usage-limit continuation is opt-in per session (off for existing and new sessions). Use the new-session checkbox or the composer’s **Usage-limit continuation** controls to authorize bounded continuation, inspect reset freshness/countdown, disable a timer, or resume deliberately. Verified Claude reset events and native Codex quota errors/read-only account quota queries support durable scheduling; unavailable resets remain manual and OpenCode automatic detection is unsupported. Stop, explicit completion reports and newer accepted instructions cancel pending work. See [L-09 behavior, provider evidence, durability and APIs](work/LIMIT-RESUME.md).
 
-**Session actions** provides rename, archive, suspend and separate history deletion. Archive hides a session without stopping its work, except that removing a session-created worktree first suspends its harness; Suspend releases its harness and cancels continuation while preserving context/history. The sidebar filter finds archived sessions. See [lifecycle behavior](work/LIFECYCLE.md). **Diff** inspects unstaged changes, branch changes from a selected merge base, or a commit, without modifying the worktree; staged/untracked paths are identified separately. See [diff limits and APIs](work/DIFF.md).
+**Session actions** provides rename, archive, suspend and separate history deletion. Archive hides a session and stops its terminal while preserving its scrollback. Agent harness work continues, except that removing a session-created worktree first suspends its harness; Suspend releases its harness and cancels continuation while preserving context/history. The sidebar filter finds archived sessions. See [lifecycle behavior](work/LIFECYCLE.md). **Diff** inspects unstaged changes, branch changes from a selected merge base, or a commit, without modifying the worktree; staged/untracked paths are identified separately. See [diff limits and APIs](work/DIFF.md).
 
 **Fork session** opens the new-session dialog pre-filled from the current conversation: its name, agent, model, project and directory, with a new worktree suggested at the current commit. The agent and model can be changed to branch onto a different one, and the workspace is a separate choice from the conversation. Fork from the latest completed turn or a selected earlier boundary. Prefer an anchored native Codex fork when supported, or explicitly create a fresh session with transcript or a supplied summary; fresh context reaches the agent with your first message without claiming hidden-state equivalence. Lineage is recorded and survives restarts, the original is never interrupted, and pending approvals, queued inputs and Agentworks access are not copied. See [fork behavior, guarantees and checks](FORKING.md).
 

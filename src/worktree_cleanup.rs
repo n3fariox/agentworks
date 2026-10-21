@@ -364,6 +364,7 @@ pub async fn cleanup(
             return Err(error);
         }
     }
+    let _ = crate::terminal::archive(s).await?;
     let _workspace = app.workspace_lock.lock().await;
     // The harness may have written files before it stopped.
     let second = inspect(app, s).await;

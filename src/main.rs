@@ -24,6 +24,7 @@ mod runtime;
 mod service_restart;
 mod sha256;
 mod store;
+mod terminal;
 mod timeouts;
 mod workspace;
 mod worktree_cleanup;
@@ -994,6 +995,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/hosts/{id}", axum::routing::delete(hosts::remove))
         .route("/api/hosts/{id}/reconnect", post(hosts::reconnect))
         .route(
+            "/api/hosts/{id}/terminal",
+            post(terminal::open_host).delete(terminal::stop_host),
+        )
+        .route(
+            "/api/hosts/{id}/terminal/events",
+            get(terminal::host_events),
+        )
+        .route(
             "/api/hosts/{id}/roots",
             axum::routing::put(hosts::set_roots),
         )
@@ -1080,6 +1089,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/sessions/{id}/questions/{question}",
             post(answer_question),
         )
+        .route("/api/sessions/{id}/terminal", post(terminal::open))
+        .route("/api/sessions/{id}/terminal/events", get(terminal::events))
         .route("/api/sessions/{id}/events", get(events))
         .route("/api/sessions/{id}/file", get(file))
         .route("/api/sessions/{id}/workspace", get(git_context::workspace))
@@ -1104,6 +1115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
             scheduler.abort();
+            terminal::shutdown().await;
             app.hosts.stop_all();
             let _ = scheduler.await;
             input_scheduler.abort();
@@ -1180,10 +1192,12 @@ async fn guard(
     h.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
     h.insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
     h.insert(header::REFERRER_POLICY, "no-referrer".parse().unwrap());
+    // xterm emits scoped style sheets and per-cell true-color style attributes.
+    // Script execution remains restricted to bundled same-origin modules.
     let csp = if mermaid_frame {
         "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; font-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'none'"
     } else {
-        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
     };
     h.insert(header::CONTENT_SECURITY_POLICY, csp.parse().unwrap());
     response
@@ -1740,7 +1754,7 @@ struct ProjectArchive {
     sessions: ProjectSessions,
 }
 /// Archiving cascades to sessions (or ungroups them); unarchiving restores the
-/// project and the sessions still inside it. Archiving never stops work.
+/// project and the sessions still inside it. Archiving stops terminals.
 async fn archive_project(
     State(app): State<App>,
     Path(id): Path<String>,
@@ -1756,7 +1770,7 @@ async fn archive_project(
         ungroup_sessions(&app, &affected, "Project archived")?;
     } else {
         for s in &affected {
-            let _ = lifecycle::apply(s, None, Some(req.archived))?;
+            let _ = lifecycle::apply(s, None, Some(req.archived)).await?;
         }
     }
     let project = app
@@ -2693,6 +2707,7 @@ async fn delete_session_locked(app: &App, s: &Session) -> Result<(), (StatusCode
             "Could not delete saved session",
         )
     })?;
+    terminal::stop(&s.id, true).await;
     app.sessions.lock().unwrap().remove(&s.id);
     s.status("closed");
     Ok(())
