@@ -9,8 +9,8 @@ pub fn enabled() -> bool {
     !std::env::var("AGENTWORKS_PWA").is_ok_and(|value| value == "0")
 }
 
-pub async fn index() -> Html<String> {
-    let metadata = if enabled() {
+fn metadata() -> &'static str {
+    if enabled() {
         concat!(
             "<meta name=\"agentworks-pwa\" content=\"enabled\">",
             "<meta name=\"theme-color\" content=\"#101214\">",
@@ -19,16 +19,19 @@ pub async fn index() -> Html<String> {
         )
     } else {
         "<meta name=\"agentworks-pwa\" content=\"disabled\">"
-    };
-    Html(include_str!("../web/index.html").replace("<!-- PWA_METADATA -->", metadata))
+    }
+}
+
+pub async fn index() -> Html<String> {
+    Html(include_str!("../web/index.html").replace("<!-- PWA_METADATA -->", metadata()))
 }
 
 pub async fn asset(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
     let (mime, body): (&str, &[u8]) = match name.as_str() {
-        "dashboard" => (
-            "text/html; charset=utf-8",
-            include_bytes!("../web/dashboard.html"),
-        ),
+        "dashboard" => {
+            let page = include_str!("../web/dashboard.html");
+            return Html(page.replace("<!-- PWA_METADATA -->", metadata())).into_response();
+        }
         "dashboard.js" => (
             "text/javascript; charset=utf-8",
             include_bytes!("../web/dashboard.js"),
@@ -112,6 +115,8 @@ mod tests {
         let dashboard = include_str!("../web/dashboard.html");
         assert!(dashboard.contains("src=\"./dashboard.js\""));
         assert!(dashboard.contains("href=\"./dashboard.css\""));
+        assert!(dashboard.contains("href=\"./shell.css\""));
+        assert!(page.contains("href=\"./shell.css\""));
         assert!(!dashboard.contains("<base"));
     }
 }

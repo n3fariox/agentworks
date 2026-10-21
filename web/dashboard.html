@@ -2,20 +2,20 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="color-scheme" content="dark light"><title>Operations dashboard · Agentworks</title>
-  <link rel="stylesheet" href="./dashboard.css"><script type="module" src="./dashboard.js"></script>
+  <meta name="color-scheme" content="dark"><title>Operations dashboard · Agentworks</title>
+  <link rel="stylesheet" href="./shell.css"><link rel="stylesheet" href="./dashboard.css"><!-- PWA_METADATA --><script type="module" src="./dashboard.js"></script>
 </head>
 <body class="operations-dashboard">
   <a class="skip-link" href="#content">Skip to dashboard</a>
-  <nav id="workspace-nav" aria-label="Workspace navigation"><a class="workspace-logo" href="./" aria-label="Agentworks home">a<span>·</span></a><a id="nav-dashboard" class="workspace-nav-item" href="./dashboard" aria-current="page"><span aria-hidden="true">▦</span>Dashboard</a><a class="workspace-nav-item" href="./"><span aria-hidden="true">▱</span>Sessions</a><a class="workspace-nav-item" href="./?view=files"><span aria-hidden="true">▤</span>Files</a><a class="workspace-nav-item" href="./?view=automations"><span aria-hidden="true">⑂</span>Automations</a></nav>
+  <nav id="workspace-nav" aria-label="Workspace navigation"><a class="workspace-logo" href="./" aria-label="Agentworks home">a<span>·</span></a><a id="nav-dashboard" class="workspace-nav-item" href="./dashboard" aria-current="page"><span aria-hidden="true">▦</span>Dashboard</a><a class="workspace-nav-item" href="./?view=sessions"><span aria-hidden="true">▱</span>Sessions</a><a class="workspace-nav-item" href="./?view=files"><span aria-hidden="true">▤</span>Files</a><a class="workspace-nav-item" href="./?view=automations"><span aria-hidden="true">⑂</span>Automations</a><a class="workspace-nav-item nav-bottom" href="./?settings"><span aria-hidden="true">⚙</span>Settings</a></nav>
   <main id="content" tabindex="-1">
-    <div class="page-heading"><div><p class="eyebrow">WORKSPACE OPERATIONS</p><h1>Operations dashboard</h1><p>Hosts, projects, and reported provider usage in one place.</p></div><button id="refresh" type="button">Refresh dashboard</button></div>
+    <div class="page-heading"><div><p class="eyebrow">WORKSPACE OPERATIONS</p><h1>Operations dashboard</h1><p>Hosts, projects, and reported provider usage in one place.</p></div><button id="refresh" class="primary" type="button">Refresh dashboard</button></div>
     <p id="refresh-status" role="status" aria-live="polite">Loading dashboard…</p>
     <p class="note">Snapshot view. Refresh to update. Session counts and lists include only sessions actively taking a turn.</p>
     <div id="errors" role="alert"></div>
     <section aria-labelledby="hosts-heading"><div class="section-heading"><h2 id="hosts-heading">Hosts</h2><p>Connection state and active turns</p></div><div id="hosts" class="cards"><p>Loading hosts…</p></div></section>
     <section aria-labelledby="projects-heading"><div class="section-heading"><h2 id="projects-heading">Projects &amp; active turns</h2><p>Sessions currently taking a turn</p></div><div id="projects"><p>Loading projects…</p></div></section>
-    <section aria-labelledby="accounts-heading"><div class="section-heading"><h2 id="accounts-heading">Claude &amp; Codex quota</h2><button id="refresh-quota" type="button">Refresh quota observations</button></div><p id="quota-refresh-status" role="status" aria-live="polite">Loading retained quota observations…</p><p class="note">Account identity and authentication are not verified. Quotas are the latest available observations from non-archived sessions; freshness is shown when the provider reports it. Reports are never added together. Refresh quota observations rereads local session history only. It does not contact account services or submit prompts. Missing quota fields never imply an unlimited plan.</p><div id="accounts" class="cards accounts"><p>Loading provider status…</p></div></section>
+    <section aria-labelledby="accounts-heading"><div class="section-heading"><h2 id="accounts-heading">Claude &amp; Codex quota</h2><button id="refresh-quota" class="primary" type="button">Refresh quota observations</button></div><p id="quota-refresh-status" role="status" aria-live="polite">Loading retained quota observations…</p><p class="note">Account identity and authentication are not verified. Quotas are the latest available observations from non-archived sessions; freshness is shown when the provider reports it. Reports are never added together. Refresh quota observations rereads local session history only. It does not contact account services or submit prompts. Missing quota fields never imply an unlimited plan.</p><div id="accounts" class="cards accounts"><p>Loading provider status…</p></div></section>
     <noscript><p>This dashboard needs JavaScript to read workspace status. Enable JavaScript and reload.</p></noscript>
   </main>
 </body>
