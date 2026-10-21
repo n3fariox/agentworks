@@ -183,9 +183,6 @@ pub async fn configure(
 ) -> ApiResult {
     let _gate = app.run_lock.lock().await;
     let s = session(&app, &id)?;
-    if input.enabled {
-        crate::local_only(&s)?;
-    }
     let manual = input.manual_due_at;
     if let Some(due) = manual {
         if !input.enabled {
@@ -444,9 +441,6 @@ pub async fn scheduler(app: App) {
         }
         let sessions: Vec<Arc<Session>> = app.sessions.lock().unwrap().values().cloned().collect();
         for s in &sessions {
-            if s.host_id != "local" {
-                continue;
-            }
             let p = s.data.lock().unwrap().continuation.clone();
             if !p.limited || p.due_at.is_none() {
                 continue;
@@ -466,13 +460,18 @@ pub async fn scheduler(app: App) {
                 continue;
             }
             if p.due_at.unwrap() > now()
-                || next_provider.get(&s.provider).is_some_and(|t| *t > now())
+                || next_provider
+                    .get(&format!("{}:{}", s.host_id, s.provider))
+                    .is_some_and(|t| *t > now())
             {
                 continue;
             }
-            if crate::checked_cwd(&app, &s.cwd.to_string_lossy()).is_err()
-                || !crate::installed(&s.provider)
-            {
+            if crate::hosts::validate_session(&app, s).await.is_err() {
+                // A disconnected host is transient. Keep the authorized timer pending;
+                // reconnect alone never replays an already claimed request.
+                if s.host_id != "local" && app.hosts.live(&s.host_id).is_none() {
+                    continue;
+                }
                 s.data.lock().unwrap().continuation.due_at = None;
                 s.emit("continuation",json!({"decision":"workspace or harness unavailable; manual intervention required"}));
                 continue;
@@ -515,7 +514,7 @@ pub async fn scheduler(app: App) {
                     "continuation",
                     json!({"decision":"opening saved native context"}),
                 );
-                crate::start_worker(s);
+                crate::start_worker(&app, s);
                 continue;
             }
             if data.status != "idle" {
@@ -572,7 +571,7 @@ pub async fn scheduler(app: App) {
                 }
                 s.emit("continuation", json!({"decision":"dispatch unavailable"}));
             }
-            next_provider.insert(s.provider.clone(), now() + 30_000);
+            next_provider.insert(format!("{}:{}", s.host_id, s.provider), now() + 30_000);
             break;
         }
     }

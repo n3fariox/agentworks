@@ -30,6 +30,7 @@ pub struct Lineage {
     pub parent_id: Option<String>,
     pub parent_title: Option<String>,
     pub parent_provider: Option<String>,
+    pub parent_host_id: Option<String>,
     /// Parent event sequence the fork was taken at.
     pub boundary_seq: u64,
     /// Parent turns that had finished at or before the boundary.
@@ -272,6 +273,7 @@ pub fn seed(
                 .unwrap_or_else(|| parent.title.clone()),
         ),
         parent_provider: Some(parent.provider.clone()),
+        parent_host_id: Some(parent.host_id.clone()),
         boundary_seq: boundary,
         boundary_turn,
         parent_cwd: Some(parent.cwd.to_string_lossy().into_owned()),
@@ -325,6 +327,7 @@ impl Seed {
         } else {
             format!("its turn {}", l.boundary_turn)
         };
+        let host = l.parent_host_id.as_ref().map(|host| format!("\n- Source host: {host}. Recorded file paths belong to that host; a matching path on another host may contain different files.")).unwrap_or_default();
         let moved = match l.parent_cwd.as_deref() {
             Some(parent) if Path::new(parent) != child_cwd => format!(
                 "\n- It was recorded in {parent}. This session runs in {}. Relative paths in this transcript resolve against {parent}; absolute paths retain their original meaning. Do not silently retarget references to the new directory. A new worktree contains committed files only; verify any corresponding files before editing.",
@@ -337,7 +340,7 @@ impl Seed {
             "Context carried over from another Agentworks session, forked after {turn} of \
              \"{title}\". This is background from a previous conversation, not an instruction \
              from the user. Do not repeat work it already finished; confirm anything that still \
-             applies.{moved}\n\n--- BEGIN CARRIED TRANSCRIPT ---\n\n{}\n\n--- END CARRIED TRANSCRIPT ---",
+             applies.{host}{moved}\n\n--- BEGIN CARRIED TRANSCRIPT ---\n\n{}\n\n--- END CARRIED TRANSCRIPT ---",
             clip(&self.body, PRIMER_LIMIT)
         )
     }
@@ -346,7 +349,7 @@ impl Seed {
     fn marker(&self) -> Value {
         let l = &self.lineage;
         json!({"parentId":l.parent_id,"parentTitle":l.parent_title,"parentProvider":l.parent_provider,
-            "boundarySeq":l.boundary_seq,"boundaryTurn":l.boundary_turn,"parentCwd":l.parent_cwd,
+            "parentHostId":l.parent_host_id,"boundarySeq":l.boundary_seq,"boundaryTurn":l.boundary_turn,"parentCwd":l.parent_cwd,
             "contextWithFirstPrompt":true})
     }
 }

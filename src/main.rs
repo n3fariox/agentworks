@@ -1436,35 +1436,69 @@ fn persist_settings(
 struct ModelDiscovery {
     provider: String,
     cwd: String,
+    #[serde(default, rename = "hostId")]
+    host_id: Option<String>,
 }
 async fn discover_models(State(app): State<App>, Json(req): Json<ModelDiscovery>) -> ApiResult {
     let _workspace = app.workspace_lock.lock().await;
     service_restart::allow_start(&app)?;
+    let remote = req.host_id.as_deref().filter(|h| *h != "local");
     if !["demo", "claude", "codex", "opencode"].contains(&req.provider.as_str())
-        || !installed(&req.provider)
+        || (remote.is_none() && !installed(&req.provider))
     {
         return Err(fail(
             StatusCode::BAD_REQUEST,
             "Provider is unknown or not installed",
         ));
     }
-    if use_api_key() && !key_present(&req.provider) {
+    if remote.is_none() && use_api_key() && !key_present(&req.provider) {
         return Err(fail(StatusCode::CONFLICT, "Provider API key is missing"));
     }
-    let cwd = checked_cwd(&app, &req.cwd)?;
+    let cwd = if let Some(host) = remote {
+        let create = Create {
+            provider: req.provider.clone(),
+            cwd: req.cwd.clone(),
+            ..Default::default()
+        };
+        hosts::session_directory(&app, host, &create).await?
+    } else {
+        checked_cwd(&app, &req.cwd)?
+    };
     let _permit = app.discovery.clone().try_acquire_owned().map_err(|_| {
         fail(
             StatusCode::TOO_MANY_REQUESTS,
             "Model discovery is busy; try again shortly",
         )
     })?;
-    let models = runtime::discover(&req.provider, cwd)
+    let link = remote
+        .map(|h| {
+            app.hosts.live(h).ok_or_else(|| {
+                fail(
+                    StatusCode::CONFLICT,
+                    "Host disconnected during model discovery",
+                )
+            })
+        })
+        .transpose()?;
+    let models = runtime::discover_on(&req.provider, cwd, link)
         .await
-        .map_err(|e| fail(StatusCode::BAD_GATEWAY, runtime::safe_error(&e.to_string())))?;
+        .map_err(|e| {
+            fail(
+                StatusCode::BAD_GATEWAY,
+                hosts::diagnostic(
+                    &app,
+                    remote.unwrap_or("local"),
+                    &req.provider,
+                    &e.to_string(),
+                ),
+            )
+        })?;
     Ok(Json(models))
 }
 #[derive(Deserialize)]
 struct ExternalList {
+    #[serde(default, rename = "hostId")]
+    host_id: Option<String>,
     #[serde(default, rename = "hostProfile")]
     host_profile: bool,
     provider: String,
@@ -1475,51 +1509,47 @@ async fn list_external_sessions(
     State(app): State<App>,
     Json(req): Json<ExternalList>,
 ) -> ApiResult {
+    let host = req.host_id.as_deref().unwrap_or("local");
+    let remote = host != "local";
     if !["demo", "claude", "codex", "opencode"].contains(&req.provider.as_str())
-        || !installed(&req.provider)
+        || (!remote && !installed(&req.provider))
     {
         return Err(fail(
             StatusCode::BAD_REQUEST,
             "Provider is unknown or not installed",
         ));
     }
-    if use_api_key() && !key_present(&req.provider) {
+    if !remote && use_api_key() && !key_present(&req.provider) {
         return Err(fail(StatusCode::CONFLICT, "Provider API key is missing"));
     }
     if req.cursor.as_ref().is_some_and(|c| c.len() > 4096) {
         return Err(fail(StatusCode::BAD_REQUEST, "Invalid page cursor"));
     }
-    let cwd = req
-        .cwd
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| checked_cwd(&app, &s))
-        .transpose()?;
+    let cwd = match req.cwd.filter(|s| !s.trim().is_empty()) {
+        Some(path) => Some(hosts::directory_on(&app, host, &req.provider, &path).await?),
+        None => None,
+    };
     let _permit = app.discovery.clone().try_acquire_owned().map_err(|_| {
         fail(
             StatusCode::TOO_MANY_REQUESTS,
             "Harness discovery is busy; try again shortly",
         )
     })?;
-    let mut response = runtime::list_sessions(&req.provider, cwd, req.cursor, req.host_profile)
-        .await
-        .map_err(|e| fail(StatusCode::BAD_GATEWAY, runtime::safe_error(&e.to_string())))?;
-    let roots = effective_roots(&app);
+    let mut response =
+        hosts::list_sessions(&app, host, &req.provider, cwd, req.cursor, req.host_profile).await?;
     let mut visible = Vec::new();
-    let sessions = app.sessions.lock().unwrap();
+    let sessions: Vec<_> = app.sessions.lock().unwrap().values().cloned().collect();
     for item in response["sessions"].as_array().into_iter().flatten() {
-        let Some(path) = item["cwd"]
-            .as_str()
-            .and_then(|p| std::fs::canonicalize(p).ok())
-        else {
+        let Some(path) = item["cwd"].as_str() else {
             continue;
         };
-        if !path.is_dir() || !roots.iter().any(|r| path.starts_with(r)) {
+        let Ok(path) = hosts::directory_on(&app, host, &req.provider, path).await else {
             continue;
-        }
+        };
         let mut item = item.clone();
         item["cwd"] = json!(path);
-        if let Some(existing) = sessions.values().find(|s| {
-            if s.provider != req.provider {
+        if let Some(existing) = sessions.iter().find(|s| {
+            if s.provider != req.provider || s.host_id != host {
                 return false;
             }
             let data = s.data.lock().unwrap();
@@ -1538,6 +1568,7 @@ async fn list_external_sessions(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ImportSession {
+    host_id: Option<String>,
     #[serde(default)]
     host_profile: bool,
     provider: String,
@@ -1566,7 +1597,7 @@ async fn import_session(State(app): State<App>, Json(req): Json<ImportSession>) 
             title: req.title,
             model: Some(String::new()),
             project_id: req.project_id,
-            host_id: Some("local".into()),
+            host_id: req.host_id,
             external_id: Some(req.provider_session_id),
             external_host: req.provider == "opencode" && req.host_profile,
             automation: None,
@@ -1900,9 +1931,17 @@ async fn fork_session(
         return session(&app, &child).map(|s| Json(s.meta()));
     }
     let parent = session(&app, &id)?;
-    // Forks carry local workspace state; remote parents are not supported yet.
-    local_only(&parent)?;
-    let seed = fork::seed(
+    let target_host = req
+        .host_id
+        .clone()
+        .unwrap_or_else(|| parent.host_id.clone());
+    if target_host != parent.host_id && req.cwd.is_none() {
+        return Err(fail(
+            StatusCode::BAD_REQUEST,
+            "Choose a working directory on the target host for a cross-host fork",
+        ));
+    }
+    let mut seed = fork::seed(
         &parent,
         req.boundary_seq,
         req.context.as_deref().unwrap_or("auto"),
@@ -1912,6 +1951,12 @@ async fn fork_session(
         .provider
         .clone()
         .unwrap_or_else(|| parent.provider.clone());
+    // Native history belongs to one host/provider. Cross-host/provider forks
+    // retain the recorded transcript/summary and open a fresh native session.
+    if target_host != parent.host_id || provider != parent.provider {
+        seed.lineage.source_session_id = None;
+        seed.lineage.source_message_id = None;
+    }
     let (title, inherited_model, project_id) = {
         let data = parent.data.lock().unwrap();
         (
@@ -1953,7 +1998,7 @@ async fn fork_session(
             ),
             model: req.model.or(inherited_model),
             project_id,
-            host_id: req.host_id,
+            host_id: Some(target_host),
             external_id: None,
             external_host: false,
             automation: None,
@@ -1970,7 +2015,7 @@ async fn fork_session(
     result
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 struct Create {
     #[serde(rename = "resumePolicy")]
     resume_policy: Option<limit_resume::PolicyInput>,
@@ -2044,12 +2089,6 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
         return Err(fail(StatusCode::BAD_REQUEST, "Unknown provider"));
     }
     let remote_host = req.host_id.clone().filter(|id| id != "local");
-    if remote_host.is_some() && req.resume_policy.as_ref().is_some_and(|p| p.enabled) {
-        return Err(fail(
-            StatusCode::CONFLICT,
-            "Automatic continuation is not available on remote hosts yet",
-        ));
-    }
     if remote_host.is_none() && use_api_key() && !key_present(&req.provider) {
         return Err(fail(
             StatusCode::CONFLICT,
@@ -2089,7 +2128,8 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             .values()
             .find(|s| {
                 let d = s.data.lock().unwrap();
-                s.provider == req.provider
+                s.host_id == remote_host.as_deref().unwrap_or("local")
+                    && s.provider == req.provider
                     && d.opencode_host == req.external_host
                     && d.provider_session_id.as_ref() == Some(external)
             })
@@ -2104,9 +2144,7 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             return Ok(Json(existing.meta()));
         }
     }
-    if remote_host.is_none() {
-        worktrees::verify_import(app, &req, &source).await?;
-    }
+    worktrees::verify_import(app, &req, &source).await?;
     if app
         .sessions
         .lock()
@@ -2126,9 +2164,9 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             "Limit: 12 active harnesses. Suspend idle sessions first.",
         ));
     }
-    // Remote sessions work in the checked host directory; worktrees are local only.
-    let (cwd, owned_worktree) = if remote_host.is_some() {
-        (source, None)
+    // Prepare workspaces on the machine that owns their files.
+    let (cwd, owned_worktree) = if let Some(host) = remote_host.as_deref() {
+        hosts::prepare_workspace(app, host, &req, source, creation_key).await?
     } else {
         tokio::time::timeout(
             std::time::Duration::from_secs(12),
@@ -2252,11 +2290,17 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
         mcp_refresh_pending: std::sync::atomic::AtomicBool::new(false),
         notifications: app.notifications.clone(),
     });
+    // Event publication takes session state before the catalog. Release the
+    // catalog before reading other sessions, so turn completion can run while
+    // another session is created.
+    drop(catalog);
     {
         let mut sessions = app.sessions.lock().unwrap();
         if let Some(id) = &req.external_id {
             if let Some(existing) = sessions.values().find(|s| {
-                if s.provider != req.provider {
+                if s.provider != req.provider
+                    || s.host_id != remote_host.as_deref().unwrap_or("local")
+                {
                     return false;
                 }
                 let data = s.data.lock().unwrap();
@@ -2309,12 +2353,11 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             })?;
         sessions.insert(s.id.clone(), s.clone());
     }
-    drop(catalog);
     s.emit("status", json!({"status":"starting"}));
-    start_worker(&s);
+    start_worker(app, &s);
     Ok(Json(s.meta()))
 }
-fn start_worker(s: &Arc<Session>) {
+fn start_worker(app: &App, s: &Arc<Session>) {
     *s.mcp_token.lock().unwrap() = Uuid::new_v4().to_string();
     let mut handle = s.worker.lock().unwrap();
     if let Some(worker) = handle.take() {
@@ -2323,6 +2366,7 @@ fn start_worker(s: &Arc<Session>) {
     let (commands, rx) = mpsc::channel(8);
     *s.commands.lock().unwrap() = Some(commands);
     let worker_s = s.clone();
+    let app_for_diagnostics = app.clone();
     let worker = tokio::spawn(async move {
         if let Err(error) = runtime::run(worker_s.clone(), rx).await {
             worker_s.clear_approvals();
@@ -2332,6 +2376,16 @@ fn start_worker(s: &Arc<Session>) {
                 && hosts::registry().is_some_and(|h| h.live(&worker_s.host_id).is_none())
             {
                 let was_active = std::mem::take(&mut worker_s.data.lock().unwrap().turn_active);
+                worker_s
+                    .data
+                    .lock()
+                    .unwrap()
+                    .input_queue
+                    .block("Remote host disconnected; inspect, then resume the queue.");
+                let _ = inbox_delivery::cancel(
+                    &worker_s,
+                    "Remote host disconnected; inspect before reauthorizing inbox turns",
+                );
                 worker_s.emit("interrupted",json!({"message":if was_active {"The connection to this session's host dropped during a turn. It was not retried. Resume once the host reconnects, and check the last tool result before continuing."} else {"The connection to this session's host dropped. Resume once the host reconnects."}}));
                 worker_s.status("suspended");
                 return;
@@ -2346,7 +2400,7 @@ fn start_worker(s: &Arc<Session>) {
             }
             worker_s.emit(
                 "error",
-                json!({"message":runtime::safe_error(&error.to_string())}),
+                json!({"message":hosts::diagnostic(&app_for_diagnostics, &worker_s.host_id, &worker_s.provider, &error.to_string())}),
             );
             worker_s.status("error");
         }
@@ -2419,7 +2473,7 @@ async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     }
     lifecycle::stop_worker(&s).await;
     s.status("resuming");
-    start_worker(&s);
+    start_worker(&app, &s);
     Ok(Json(json!({"accepted":true})))
 }
 #[derive(Deserialize)]

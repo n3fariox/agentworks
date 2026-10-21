@@ -374,6 +374,7 @@ async fn bundle(dir: &Path, out: &Output) -> Result<PathBuf> {
                 "package-lock.json",
                 "vendor/codex-acp",
                 "scripts/demo-agent.mjs",
+                "scripts/discover-native-tools.mjs",
             ]),
         out,
     )

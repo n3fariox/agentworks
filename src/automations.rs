@@ -1,6 +1,6 @@
 use crate::{
-    ApiResult, App, Create, SessionData, checked_cwd, create_session, fail, installed, key_present,
-    runtime, use_api_key,
+    ApiResult, App, Create, SessionData, create_session, fail, installed, key_present, runtime,
+    use_api_key,
 };
 use axum::{
     Json,
@@ -46,6 +46,7 @@ pub struct Input {
     provider: String,
     model: Option<String>,
     cwd: String,
+    host_id: Option<String>,
     project_id: Option<String>,
     #[serde(default = "enabled")]
     enabled: bool,
@@ -60,7 +61,7 @@ fn now() -> u64 {
         .unwrap()
         .as_millis() as u64
 }
-fn definition(
+async fn definition(
     app: &App,
     id: Option<&str>,
     input: Input,
@@ -91,7 +92,8 @@ fn definition(
             "Invalid model; OpenCode supports free models only",
         ));
     }
-    let cwd = checked_cwd(app, &input.cwd)?;
+    let host = input.host_id.as_deref().unwrap_or("local");
+    let cwd = crate::hosts::directory_on(app, host, &input.provider, &input.cwd).await?;
     let mut catalog = app.catalog.lock().unwrap();
     if input
         .project_id
@@ -100,7 +102,7 @@ fn definition(
     {
         return Err(fail(StatusCode::BAD_REQUEST, "Project not found"));
     }
-    let location = catalog.location(&cwd).map_err(|_| {
+    let location = catalog.location_on(host, &cwd).map_err(|_| {
         fail(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Could not save directory",
@@ -136,7 +138,7 @@ fn definition(
         model,
         cwd: cwd.to_string_lossy().into_owned(),
         location_id: location.id,
-        host_id: "local".into(),
+        host_id: host.into(),
         project_id: input.project_id,
         prompt: input.prompt,
         enabled: input.enabled,
@@ -156,7 +158,8 @@ pub async fn list(State(app): State<App>) -> ApiResult {
     )))
 }
 pub async fn create(State(app): State<App>, Json(input): Json<Input>) -> ApiResult {
-    let def = definition(&app, None, input)?;
+    let _workspace = app.workspace_lock.lock().await;
+    let def = definition(&app, None, input).await?;
     app.store
         .lock()
         .unwrap()
@@ -171,7 +174,8 @@ pub async fn update(
 ) -> ApiResult {
     let _gate = app.communication_lock.lock().await;
     let _guard = app.run_lock.lock().await;
-    let def = definition(&app, Some(&id), input)?;
+    let _workspace = app.workspace_lock.lock().await;
+    let def = definition(&app, Some(&id), input).await?;
     app.store
         .lock()
         .unwrap()
@@ -247,7 +251,9 @@ pub async fn run(
     if !def.enabled {
         return Err(fail(StatusCode::CONFLICT, "This automation is paused"));
     }
-    if !installed(&def.provider) || (use_api_key() && !key_present(&def.provider)) {
+    if def.host_id == "local"
+        && (!installed(&def.provider) || (use_api_key() && !key_present(&def.provider)))
+    {
         return Err(fail(
             StatusCode::CONFLICT,
             "Harness or its authentication is unavailable",

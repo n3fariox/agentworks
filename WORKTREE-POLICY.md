@@ -39,7 +39,7 @@ Git subprocesses use argument arrays, null stdin, disabled hooks/fsmonitor/recur
 
 Source cwd, worktree roots and Git administrative/common directories must be within effective allowed roots. Destination paths must be absolute and cannot traverse parent components or symlinks. Ancestors are checked again and the absent destination is reserved with exclusive directory creation immediately before Git mutation; canonical cwd and current roots are checked before launch. This remains same-OS-user execution: malicious concurrent filesystem replacement by another process is not eliminated by pathname checks, and Git repository configuration and tracked content remain trusted inputs. Committed credentials, if present in repository history, are ordinary tracked content; untracked credentials are not copied.
 
-Worktrees are local only. Bare sources, non-UTF-8 Git output and unavailable provider discovery are rejected. Missing/prunable worktrees are omitted from discovery because they cannot be safely canonicalized. There is no merge, branch adoption, incomplete-checkout recovery, scheduling or paid-inference testing in this feature.
+Worktrees run on their owning host using canonical per-host roots; creation, discovery, cleanup and restore share the Local implementation. File and Git views remain local only. Bare sources, non-UTF-8 Git output and unavailable provider discovery are rejected. Missing/prunable worktrees are omitted from discovery because they cannot be safely canonicalized. There is no merge, branch adoption, incomplete-checkout recovery, scheduling or paid-inference testing in this feature.
 
 ## Validation
 

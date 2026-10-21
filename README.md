@@ -109,7 +109,7 @@ Actions call existing controls only (new/resumed session, new project, files, au
 
 ## Manual automations
 
-In **Automations**, create a named definition with a harness, optional model, project, working directory, and instructions. The initial trigger is **Manual**; GitHub polling, webhooks, and schedules are future work. A blank model uses the host’s configured default. Paused definitions cannot start new runs.
+In **Automations**, create a named definition with a harness, optional model, project, host, working directory, and instructions. The initial trigger is **Manual**; GitHub polling, webhooks, and schedules are future work. A blank model uses the host’s configured default. Paused definitions cannot start new runs.
 
 **Run now** creates an ordinary persistent chat session and submits the saved instructions once the harness is ready. Tool approvals, output, cancellation, file links, and continuing the conversation use the existing session interface. An automation badge links the session back to its definition and recent runs. Repeated requests with the same request ID return the existing run; only one run per automation can be active at a time. The browser retains an unacknowledged run request ID so retrying a dropped response does not silently start another run.
 
@@ -211,7 +211,11 @@ The remote `agentworks agent` prints a ready line and then talks to the server o
 
 **Chat sessions on a remote host.** Use **⋯** on the host to set its working directories, using the host's own paths (`~/` is the remote user's home). Then start a session with **＋** on the host, or choose the host in the new-session dialog. The worker starts the agent's adapter in that directory on the host and relays its ACP traffic. The server keeps the conversation, approvals, and history as for local sessions, and the agent uses the host's own sign-ins. If the link drops, the host's sessions are suspended with a notice and the interrupted turn is not retried. Resume them once the host reconnects.
 
-Remote sessions are chat-only for now. Worktrees, imports of existing sessions, forks, the file browser and previews, Git context and diffs, model discovery in the new-session dialog (change the model once the session starts), and Agentworks MCP tools (agent communication) are local only. Queued input, automatic continuation after limit resets, and inbox wake-up are rejected for remote sessions, and their background dispatch skips them. Local Codex account probes are also skipped for remote errors. See Phase 6 in the roadmap for the plan.
+Remote sessions support chat, model discovery in the new-session dialog, and creating/selecting Git worktrees on the host. Host settings show discovered CLI paths and where to sign in. Remote worktrees honor project isolation policies and host roots. Archiving removes clean owned worktrees, asks before deleting dirty changes, and retains branches; unarchiving restores the checkout from its retained branch. Locked, shared, running or replaced worktrees are retained. Deleting a session keeps its worktree, as on Local. Update and reconnect older workers to enable worktrees and cleanup.
+
+Remote sessions also support queued inputs, browsing/importing CLI conversations, forks, manual automations, authorized quota continuation, and authorized inbox turns. Native forks stay on the provider history’s host; cross-host forks carry transcript/summary context into a fresh native session. Dispatch rechecks the owning host’s roots and provider availability. Link loss pauses queues and revokes inbox delivery; uncertain turns are never replayed automatically. Quota continuation uses structured ACP reset evidence or a human-selected reset time.
+
+File browsing/previews/downloads, Git context/diffs, Agentworks MCP tools, remote Codex account probes, and explicit remote API-key mode remain unavailable. See Phase 6 in the roadmap for the plan.
 
 Manual setup requirements:
 

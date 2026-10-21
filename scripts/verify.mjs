@@ -14,7 +14,7 @@ const env={...process.env,AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_ROOTS:resolve('
 const server=spawn(resolve('target/debug/agentworks'),[],{env,stdio:['ignore','inherit','inherit']});
 let exited=false;server.on('exit',()=>{exited=true;});
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
-async function run(command,args){const child=spawn(command,args,{env,stdio:'inherit'});const [code]=await once(child,'exit');assert.equal(code,0,`${command} ${args.join(' ')} failed`);}
+async function run(command,args,overrides={}){const child=spawn(command,args,{env:{...env,...overrides},stdio:'inherit'});const [code]=await once(child,'exit');assert.equal(code,0,`${command} ${args.join(' ')} failed`);}
 let socket;
 try{
   let ready=false;
@@ -28,6 +28,7 @@ try{
   await run('node',['tests/codex-subscription.test.mjs']);
   await run('node',['scripts/mcp-wire-smoke.mjs']);
   await run('node',['scripts/remote-host-smoke.mjs']);
+  await run('node',['scripts/remote-plumbing-smoke.mjs']);
   await run('node',['scripts/remote-partition-smoke.mjs']);
   await run('node',['scripts/smoke.mjs']);
   await run('node',['scripts/projects-smoke.mjs']);
@@ -37,6 +38,8 @@ try{
   await run('node',['scripts/completion-smoke.mjs']);
   await run('node',['scripts/review-queue-smoke.mjs']);
   await run('node',['scripts/worktree-policy-smoke.mjs']);
+  await run('node',['scripts/worktree-cleanup-smoke.mjs']);
+  await run('node',['scripts/worktree-cleanup-smoke.mjs'],{AGENTWORKS_CLEANUP_REMOTE:'1'});
   await run('node',['scripts/limit-resume-smoke.mjs']);
   await run('node',['scripts/lifecycle-smoke.mjs']);
   await run('node',['scripts/project-lifecycle-smoke.mjs']);

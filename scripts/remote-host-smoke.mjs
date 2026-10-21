@@ -58,6 +58,8 @@ try{
   const connected=await until(box.id,h=>h.status==='connected','Box never connected');
   assert.ok(connected.worker.providers.includes('demo'));
   assert.equal(connected.worker.version,'0.1.0');
+  assert.equal(connected.worker.workspace,true);
+  assert.equal(typeof connected.worker.tools,'object');
   assert.equal(workers().length,1);
 
   const down=await api('/api/hosts',{name:'Down',destination:'unreachable.example'});
@@ -80,19 +82,44 @@ try{
   const sibling=work+'-sibling';await mkdir(sibling);
   await symlink(sibling,join(work,'escape'));
   for(const cwd of [sibling,join(work,'escape'),join(work,'..')])await api('/api/sessions',{provider:'demo',cwd,hostId:box.id},'POST',403);
-  await api('/api/sessions',{provider:'demo',cwd:work,hostId:box.id,resumePolicy:{enabled:true}},'POST',409);
   await api('/api/sessions',{provider:'demo',cwd:'/etc',hostId:box.id},'POST',403);
-  await api('/api/sessions',{provider:'demo',cwd:work,hostId:box.id,workspace:{mode:'newWorktree'}},'POST',400);
+  // Models use the remote ACP channel and the remote host's roots.
+  const models=await api('/api/models',{provider:'demo',cwd:work,hostId:box.id});
+  assert(models.options.some(m=>m.value==='demo/steady'));
+  await api('/api/models',{provider:'demo',cwd:sibling,hostId:box.id},'POST',403);
+  // All Git validation/mutation happens inside the worker.
+  execFileSync('git',['init','-q',work]);
+  await writeFile(join(work,'tracked.txt'),'remote worktree fixture\n');
+  execFileSync('git',['-C',work,'add','tracked.txt']);
+  execFileSync('git',['-C',work,'-c','user.name=Fixture','-c','user.email=fixture@example.test','commit','-qm','initial']);
+  await api('/api/worktrees/list',{cwd:sibling,hostId:box.id},'POST',400);
+  const tree=await api('/api/sessions',{provider:'demo',cwd:work,hostId:box.id,workspace:{mode:'newWorktree',branch:'remote-fixture'},requestId:'remote-worktree'});
+  assert(tree.cwd.startsWith(join(work,'.worktrees')+'/'));
+  assert.equal(tree.worktree.branch,'remote-fixture');
+  assert.match(await prompt(tree.id,'remote worktree'),/remote worktree/);
+  const trees=await api('/api/worktrees/list',{cwd:work,hostId:box.id});
+  assert(trees.worktrees.some(t=>t.path===tree.cwd&&!t.isMain));
+  await api('/api/sessions',{provider:'demo',cwd:work,hostId:box.id,workspace:{mode:'existingWorktree'}},'POST',409);
+  await api('/api/sessions',{provider:'demo',cwd:work,hostId:box.id,workspace:{mode:'newWorktree',path:join(work,'escape','new')}},'POST',409);
+  const selected=await api('/api/sessions',{provider:'demo',cwd:tree.cwd,hostId:box.id,workspace:{mode:'existingWorktree'}});
+  assert.equal(selected.cwd,tree.cwd);assert.equal(selected.worktree,null);
+  await idle(selected.id);await api(`/api/sessions/${selected.id}`,undefined,'DELETE');
+  const ownership=await api(`/api/sessions/${tree.id}/worktree`);
+  assert.equal(ownership.cleanup.allowed,true);
+  await api(`/api/sessions/${tree.id}`,undefined,'DELETE');
+  assert.equal(await readFile(join(tree.cwd,'tracked.txt'),'utf8'),'remote worktree fixture\n');
+  // A project requiring isolation can launch remotely with its default workspace.
+  const project=await api('/api/projects',{name:'Remote isolation'});
+  await api(`/api/projects/${project.id}/workspace-policy`,{defaultMode:'newWorktree',requireWorktree:true},'PUT');
+  const policyTree=await api('/api/sessions',{provider:'demo',cwd:work,hostId:box.id,projectId:project.id});
+  assert.notEqual(policyTree.cwd,work);await idle(policyTree.id);
+  await api(`/api/sessions/${policyTree.id}`,undefined,'DELETE');
+  await api('/api/sessions',{provider:'demo',cwd:work,hostId:box.id,projectId:project.id,workspace:{mode:'directory'}},'POST',409);
   const remote=await api('/api/sessions',{provider:'demo',cwd:work,hostId:box.id,title:'Remote'});
   assert.equal(remote.hostId,box.id);
   assert.match(await prompt(remote.id,'hello'),/hello/);
   assert.equal((await agents(work)).length,1);
-  await api(`/api/sessions/${remote.id}/queue`,{text:'must not run',requestId:crypto.randomUUID()},'POST',409);
-  await api(`/api/sessions/${remote.id}/queue/resume`,{},'POST',409);
-  await api(`/api/sessions/${remote.id}/continuation`,{enabled:true},'PUT',409);
-  await api(`/api/sessions/${remote.id}/inbox-delivery`,{enabled:true,requestId:crypto.randomUUID()},'PUT',409);
   await api(`/api/sessions/${remote.id}/diff`,undefined,'GET',409);
-  await api(`/api/sessions/${remote.id}/fork`,{requestId:crypto.randomUUID()},'POST',409);
   // Main's permission and question handlers must both work over the relay.
   for(const [text,kind] of [['approval','permission'],['question','question']]){
     await api(`/api/sessions/${remote.id}/prompt`,{text,requestId:crypto.randomUUID()});

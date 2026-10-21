@@ -623,7 +623,7 @@ async fn tick(app: &App) -> Result<(), (StatusCode, String)> {
                 if s.data.lock().unwrap().storage_error.is_some() {
                     return Err(db("Native handoff state could not be saved"));
                 }
-                crate::start_worker(&s);
+                crate::start_worker(app, &s);
                 continue;
             }
             if state == "error" {

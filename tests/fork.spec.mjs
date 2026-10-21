@@ -22,7 +22,8 @@ const snapshot=()=>({kind:'snapshot',seq:40,session:{...parent,fork:{}},events:[
   {seq:1,kind:'user',data:{text:'Parse the config'}},{seq:2,kind:'acp',data:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'Parsed.'}}},
   {seq:3,kind:'turn_end',data:{stopReason:'end_turn'}},{seq:4,kind:'user',data:{text:'Add tests'}},{seq:5,kind:'turn_end',data:{stopReason:'end_turn'}},
 ],permissionModes:{options:[]},models:{currentValue:'demo/steady',options:[{value:'demo/steady',name:'Steady'},{value:'demo/quick',name:'Quick'}]},commands:[],approvals:[]});
-async function fixture(page,{policies={a:ordinary,b:isolated},success=true}={}){
+async function fixture(page,{policies={a:ordinary,b:isolated},success=true,hostId='local'}={}){
+  const selectedParent={...parent,hostId};
   const state={creates:[],forks:[],policies,success};
   await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),parent.id);
   await page.routeWebSocket('**/api/sessions/*/events',()=>{});
@@ -32,11 +33,11 @@ async function fixture(page,{policies={a:ordinary,b:isolated},success=true}={}){
     const json=data=>route.fulfill({json:data});
     if(path==='/api/status')return json({roots:['/repo'],defaultModels:{demo:'saved-model',codex:'codex-default'},providers:[
       {id:'demo',name:'Demo agent',installed:true},{id:'codex',name:'Codex',installed:true}].map(p=>({...p,authMode:'existing',keyPresent:true}))});
-    if(path==='/api/catalog')return json({projects:[{id:'a',name:'Alpha',locationIds:[]},{id:'b',name:'Beta',locationIds:[]}],hosts:[{id:'local',name:'Local',status:'connected'}],locations:[]});
+    if(path==='/api/catalog')return json({projects:[{id:'a',name:'Alpha',locationIds:[]},{id:'b',name:'Beta',locationIds:[]}],hosts:[{id:'local',name:'Local',status:'connected'},{id:'r1',name:'Remote',kind:'remote',status:'connected',roots:['/repo'],worker:{providers:['demo','codex']}}],locations:[]});
     if(path==='/api/settings')return json({roots:['/repo'],defaultModels:{}});
-    if(path==='/api/sessions'&&method==='GET')return json([parent]);
+    if(path==='/api/sessions'&&method==='GET')return json([selectedParent]);
     if(path==='/api/automations')return json([]);
-    if(path===`/api/sessions/${parent.id}`)return json(snapshot());
+    if(path===`/api/sessions/${parent.id}`)return json({...snapshot(),session:{...selectedParent,fork:{}}});
     if(path===`/api/sessions/${parent.id}/workspace`)return json({cwd:parent.cwd,status:'git',branch:'feature/parser',commit:'abc1234',linkedWorktree:true});
     const policy=path.match(/^\/api\/projects\/([^/]+)\/workspace-policy$/);
     if(policy)return json(state.policies[policy[1]]||ordinary);
@@ -175,4 +176,21 @@ test('carried Markdown references retain their original directory',async({page})
   await page.route('**/api/sessions/*/file?*',route=>{filePath=new URL(route.request().url()).searchParams.get('path');return route.fulfill({body:'source file',contentType:'text/plain'});});
   await page.reload();await page.locator('#messages a').filter({hasText:'Inspect file'}).click();
   await expect.poll(()=>filePath).toBe('/repo/original/src/config.rs');
+});
+
+ test('forking a remote session preserves its host in the dialog and request',async({page})=>{
+  const s=await fixture(page,{hostId:'r1',success:false});await openFork(page);
+  await expect(page.locator('#create-host')).toHaveValue('r1');
+  await expect(page.locator('#directory')).toHaveValue(parent.cwd);
+  await page.locator('#workspace-mode').selectOption('directory');
+  await page.locator('#create-submit').click();await expect(page.locator('#create-error')).toContainText('Previous creation');
+  expect(s.forks[0].body).toMatchObject({hostId:'r1',cwd:parent.cwd,workspace:{mode:'directory'}});
+});
+
+ test('a fork can switch hosts and sends the chosen host and directory',async({page})=>{
+  const s=await fixture(page,{success:false});await openFork(page);
+  await page.locator('#create-host').selectOption('r1');
+  await page.locator('#workspace-mode').selectOption('directory');await page.locator('#directory').fill('/repo/remote');
+  await page.locator('#create-submit').click();await expect(page.locator('#create-error')).toContainText('Previous creation');
+  expect(s.forks[0].body).toMatchObject({hostId:'r1',cwd:'/repo/remote',workspace:{mode:'directory'}});
 });

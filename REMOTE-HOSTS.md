@@ -1,7 +1,7 @@
 # Remote hosts: implementation and protocol
 
 This describes the implemented **protocol 3** chat-worker link. For setup, see
-[Remote hosts in the README](README.md#remote-hosts). For planned workspace and
+[Remote hosts in the README](README.md#remote-hosts). For planned file/Git views and
 MCP support, see [the roadmap](ROADMAP.md). For integration findings and verification,
 see [the review report](work/REMOTEAGENT-INTEGRATION-REVIEW.md).
 
@@ -106,12 +106,13 @@ to one live link and are not durable session IDs or prompt idempotency keys.
 
 | Direction | Type | Fields and meaning |
 | --- | --- | --- |
-| Worker → server | `hello` | `protocol`: integer; `version`: application version string; `platform`, `hostname`: strings; `providers`: provider-name array |
+| Worker → server | `hello` | `protocol`: integer; `version`: application version string; `platform`, `hostname`: strings; `providers`: provider-name array; `tools`: discovered CLI paths; `workspace`: worker-side worktree support; `worktreeCleanup`: inspection, removal and restore support |
 | Server → worker | `welcome` | `protocol`: matching integer; `hostId`: stable catalog UUID used for ownership |
 | Worker → server | `ready` | `protocol`: matching integer; worker has acquired ownership |
 | Server → worker | `error` | `message`: handshake rejection diagnostic |
 | Server → worker | `checkDir` | `request`: request ID; `path`: remote directory, optionally beginning with `~/` |
-| Worker → server | `reply` | Same `request`; either canonical `path` or `error` string |
+| Worker → server | `reply` | Same `request`; canonical `path`, workspace `result`, or `error` string |
+| Server → worker | `workspace` | `request`, `operation` (`list`, `prepare`, `inspectWorktree`, `removeWorktree`, `restoreWorktree`), `cwd`, `roots`; preparation also includes `workspace` and project `policy`; lifecycle operations carry server-recorded `owned` metadata, with `fingerprint` and `force` for removal |
 | Server → worker | `spawn` | `channel`: channel ID; `provider`: one of `demo`, `claude`, `codex`, `opencode`; `cwd`: remote path; `hostProfile`: boolean passed to adapter configuration |
 | Server → worker | `kill` | `channel`: stop this adapter's process group |
 | Worker → server | `exit` | `channel`; `message`: startup/exit diagnostic; ends that channel |
@@ -264,6 +265,7 @@ stateDiagram-v2
 | Server heartbeat | Ping every 15 seconds; checks for more than 45 seconds of silence on ping ticks, so detection can take approximately 60 seconds |
 | Worker heartbeat | Check every second for more than 45 seconds without a server frame, then begin cleanup |
 | Reconnect | Exponential delay from 2 to 60 seconds; reset after an attempt lasts more than 60 seconds |
+| Worktree RPC | 120-second reply wait for bounded Git checks and process-group shutdown; uncertain mutations are not automatically replayed |
 | Directory RPC | 15-second reply wait; enclosing session-creation directory validation has a 12-second overall deadline |
 | mise discovery | Up to 20 seconds per attempt, with project/global fallback; cancellation kills the mise child |
 | Adapter stop | Send TERM to the process group, wait 2 seconds, send KILL before reaping its leader |
@@ -288,9 +290,13 @@ own protocol/capability exchange inside each relayed channel.
 Extra JSON fields are generally ignored. Unknown text message types and malformed
 control JSON are generally ignored after handshake; some missing fields default
 to empty/zero values. There is no formal strict message schema, version-range or
-minor-version negotiation, feature-capability negotiation, or general structured
+minor-version negotiation, general feature-capability negotiation, or structured
 unsupported-operation response. The provider array advertises installed provider
-names, not optional worker features. An unrecognized request can time out.
+names. The optional `workspace: true` hello field gates worktree requests; for older
+workers, the server rejects worktree requests with an update diagnostic.
+The optional `tools` map reports native CLI paths, including bundled Codex/Claude
+CLIs. `worktreeCleanup: true` gates inspection, removal and restore on workers that
+support the full lifecycle. An unrecognized request can time out.
 
 Protocol 2 is intentionally rejected because it does not establish the protocol-3
 ownership-ready contract. Upgrade both binaries within a coordinated maintenance
@@ -306,10 +312,34 @@ Those are recommendations, not currently implemented negotiation behavior.
 
 Remote sessions currently support chat, configuration exposed through the active
 ACP session, approvals/questions, transcript replay, suspend/delete, and native
-resume where the provider supports it. File/Git views, isolated worktrees, imports,
-forks, creation-time model discovery, Agentworks MCP, queued inputs, automatic
-quota continuation and inbox wake-up remain unavailable remotely. See the roadmap
-for planned worker-side workspace operations and MCP relay.
+resume where the provider supports it. Model discovery uses a temporary remote ACP channel without sending a prompt.
+Worktree listing, creation and selection run on the worker using the same Git/path
+validation as local worktrees, restricted to canonical host roots. Project workspace
+policy applies. Archive cleanup, dirty-change confirmation, explicit later removal and
+restore on unarchive use the same filesystem implementation as Local. The server
+checks session activity and sharing within the owning host; the worker waits for
+retiring adapter process groups and rechecks ownership, locks and the confirmation
+fingerprint immediately before removal. Branches are retained. Deleting a session
+keeps its checkout, as on Local. Pending Git operations
+finish before the worker releases host ownership after a disconnect; lost mutation
+replies are not automatically replayed.
+
+Queue storage/dispatch, history imports, forks, manual automations, quota continuation
+and inbox delivery are server-owned and use the existing ACP relay. Every dispatch
+revalidates the host’s current roots and provider availability. Import identities are
+scoped by host/provider/profile and verified against the provider-reported original
+cwd. Native forks stay within one host/provider; cross-host/provider forks use a
+fresh session with recorded transcript/summary context. Link loss pauses queues and
+revokes inbox authorization; resuming a session alone does not drain its queue.
+Quota timers may resume an authorized saved native context once the host is available,
+but claimed/uncertain requests are never automatically replayed. Reset evidence comes
+from ACP or a human-selected time; local Codex probes are never run for remote errors.
+Inbox context is injected by the server; remote agents still lack the separate MCP
+connection needed to read/send messages and invoke coordinator tools themselves.
+
+File/Git views, Agentworks MCP, remote account/quota probes and explicit remote
+API-key mode remain unavailable. See the roadmap for worker-side file/Git operations
+and MCP relay.
 
 Implementation entry points:
 
@@ -324,7 +354,14 @@ After a locked build, `npm run test:remote-hosts` checks the API/relay through a
 SSH stand-in, including paths, two hosts, slow mise, approvals/questions,
 suspend/resume and reconnect. `npm run test:remote-partitions` checks a silent
 open transport, exclusive replacement, adapter teardown, process exit, and a
-`kill` immediately followed by disconnect. Both run in `npm run verify`.
+`kill` immediately followed by disconnect. Both run in `npm run verify`. `npm run test:remote-worktree-cleanup` runs the same
+archive/restore safety and browser suite as Local through the worker relay, including
+confirmation changes, shared/locked/detached/running checkouts and occupied restore paths;
+both local and remote variants also run in `npm run verify`.
+`npm run test:remote-plumbing` exercises server-owned workflows through the relay
+with remote directories outside the server’s allowed roots: queue dispatch and pause,
+imports and host-scoped history IDs, forks, automation idempotency, quota resets,
+inbox turns, disconnects and restart. It also runs in `npm run verify`.
 Rust tests cover protocol rejection, bounded preambles, request cancellation,
 closed handles and ownership locking. [tests/hosts.spec.mjs](tests/hosts.spec.mjs)
 covers desktop/mobile controls and remote/local policy behavior. These checks do

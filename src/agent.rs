@@ -54,6 +54,9 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         "hostname": hostname().unwrap_or_default(),
         "providers": providers,
+        "tools": discovered_tools(&base).await,
+        "workspace": true,
+        "worktreeCleanup": true,
     });
     ws.send(Message::text(hello.to_string()))
         .await
@@ -95,6 +98,8 @@ pub async fn run(args: &[String]) -> Result<(), String> {
             }
         }
     });
+    let mut workspace_tasks = tokio::task::JoinSet::new();
+    let workspace_lock = Arc::new(tokio::sync::Mutex::new(()));
     let mut processes: HashMap<u32, Process> = HashMap::new();
     let mut retiring: Vec<Process> = Vec::new();
     let mut reap = tokio::time::interval(Duration::from_secs(1));
@@ -106,6 +111,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
                 if last_heard.elapsed() > Duration::from_secs(45) {
                     break Err("The server stopped responding; stopping this host's processes".into());
                 }
+                while workspace_tasks.try_join_next().is_some() {}
                 processes.retain(|_, process| !process.task.is_finished());
                 retiring.retain(|process| !process.task.is_finished());
                 continue;
@@ -144,6 +150,47 @@ pub async fn run(args: &[String]) -> Result<(), String> {
                             retiring.push(process);
                         }
                     }
+                    Some("workspace") => {
+                        let out = out.clone();
+                        let lock = workspace_lock.clone();
+                        let removing = request["operation"] == "removeWorktree";
+                        let path = request["owned"]["path"].as_str().map(PathBuf::from);
+                        let affected = |process: &&Process| {
+                            path.as_ref().is_some_and(|p| process.cwd.starts_with(p))
+                        };
+                        let active = removing
+                            && processes
+                                .values()
+                                .filter(affected)
+                                .any(|p| !p.task.is_finished());
+                        let retiring: Vec<_> = if removing {
+                            retiring
+                                .iter()
+                                .filter(affected)
+                                .map(|p| p.finished.clone())
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                        workspace_tasks.spawn(async move {
+                            let _guard = lock.lock().await;
+                            let result = async {
+                                if active { return Err("An agent is still running in this worktree; stop it and retry".into()); }
+                                // A kill request only initiates process-group shutdown. Wait for
+                                // that shutdown before inspecting or removing its directory.
+                                for mut finished in retiring {
+                                    finished.wait_for(|done| *done).await.map_err(|_| "Could not confirm agent shutdown")?;
+                                }
+                                workspace_request(&request).await
+                            }.await;
+                            let mut reply = json!({"type":"reply","request":request["request"]});
+                            match result {
+                                Ok(value) => reply["result"] = value,
+                                Err(error) => reply["error"] = json!(error),
+                            }
+                            let _ = out.send(Message::text(reply.to_string())).await;
+                        });
+                    }
                     Some("checkDir") => {
                         let out = out.clone();
                         tokio::spawn(async move {
@@ -174,6 +221,9 @@ pub async fn run(args: &[String]) -> Result<(), String> {
     for mut process in processes.into_values().chain(retiring) {
         let _ = (&mut process.task).await;
     }
+    // Keep exclusive host ownership until any Git mutation finishes. A lost reply
+    // retains its checkout; a replacement must not race the old worker.
+    while workspace_tasks.join_next().await.is_some() {}
     eprintln!("agentworks agent: the link closed");
     ended
 }
@@ -214,6 +264,8 @@ async fn ownership_at(dir: &Path, host_id: &str) -> Result<std::fs::File, String
 /// Dropping a channel asks that supervisor to stop; no stale PID is retained
 /// in this map after the child exits.
 struct Process {
+    cwd: PathBuf,
+    finished: tokio::sync::watch::Receiver<bool>,
     input: mpsc::UnboundedSender<Vec<u8>>,
     stop: Option<oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<()>,
@@ -232,6 +284,8 @@ impl Drop for Process {
 }
 
 fn start(request: Value, channel: u32, out: mpsc::Sender<Message>) -> Process {
+    let cwd = PathBuf::from(request["cwd"].as_str().unwrap_or(""));
+    let (completed, finished) = tokio::sync::watch::channel(false);
     let (input, lines) = mpsc::unbounded_channel();
     let (stop, stopped) = oneshot::channel();
     let task = tokio::spawn(async move {
@@ -239,8 +293,11 @@ fn start(request: Value, channel: u32, out: mpsc::Sender<Message>) -> Process {
             let exit = json!({"type":"exit","channel":channel,"message":message});
             let _ = out.send(Message::text(exit.to_string())).await;
         }
+        let _ = completed.send(true);
     });
     Process {
+        cwd,
+        finished,
         input,
         stop: Some(stop),
         task,
@@ -377,6 +434,134 @@ async fn run_process(
     let exit = json!({"type":"exit","channel":channel,"message":message});
     let _ = out.send(Message::text(exit.to_string())).await;
     Ok(())
+}
+
+async fn discovered_tools(env: &HashMap<String, String>) -> Value {
+    let mut tools = serde_json::Map::new();
+    for (provider, override_var) in [
+        ("codex", "CODEX_PATH"),
+        ("claude", "CLAUDE_CODE_EXECUTABLE"),
+        ("opencode", "AGENTWORKS_OPENCODE_PATH"),
+    ] {
+        let configured = env
+            .get(override_var)
+            .cloned()
+            .or_else(|| std::env::var(override_var).ok());
+        let path = resolve(Path::new(configured.as_deref().unwrap_or(provider)), env);
+        tools.insert(provider.into(), json!(path));
+    }
+    let node = std::env::var_os("AGENTWORKS_NODE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| "node".into());
+    if let Some(node) = resolve(&node, env) {
+        let output = tokio::time::timeout(
+            Duration::from_secs(5),
+            Command::new(node)
+                .arg(crate::runtime_root().join("scripts/discover-native-tools.mjs"))
+                .arg(crate::runtime_root())
+                .envs(env)
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await;
+        if let Ok(Ok(output)) = output {
+            if let Ok(bundled) = serde_json::from_slice::<HashMap<String, String>>(&output.stdout) {
+                for (provider, path) in bundled {
+                    if let Some(path) = resolve(Path::new(&path), env) {
+                        tools.insert(provider, json!(path));
+                    }
+                }
+            }
+        }
+    }
+    Value::Object(tools)
+}
+
+struct WorkspaceContext {
+    roots: Vec<PathBuf>,
+}
+impl crate::worktrees::Context for WorkspaceContext {
+    fn roots(&self) -> Vec<PathBuf> {
+        self.roots.clone()
+    }
+    fn checked(&self, path: &str) -> Result<PathBuf, (axum::http::StatusCode, String)> {
+        let path = check_dir(path)
+            .map(PathBuf::from)
+            .map_err(|e| crate::fail(axum::http::StatusCode::BAD_REQUEST, e))?;
+        crate::worktrees::allowed(self, &path)?;
+        Ok(path)
+    }
+    fn arm(&self, _key: Option<&str>) -> Result<(), (axum::http::StatusCode, String)> {
+        Ok(())
+    }
+}
+async fn workspace_request(request: &Value) -> Result<Value, String> {
+    use crate::worktrees::Context;
+    let roots = request["roots"]
+        .as_array()
+        .ok_or("Missing host roots")?
+        .iter()
+        .filter_map(Value::as_str)
+        .filter_map(|r| check_dir(r).ok())
+        .map(PathBuf::from)
+        .collect();
+    let context = WorkspaceContext { roots };
+    match request["operation"].as_str() {
+        Some("inspectWorktree" | "removeWorktree" | "restoreWorktree") => {
+            let owned: crate::worktree_cleanup::Owned =
+                serde_json::from_value(request["owned"].clone())
+                    .map_err(|_| "Invalid worktree ownership")?;
+            match request["operation"].as_str() {
+                Some("inspectWorktree") => serde_json::to_value(
+                    crate::worktree_cleanup::inspect_in(&context, Some(owned)).await,
+                )
+                .map_err(|_| "Invalid inspection".into()),
+                Some("removeWorktree") => crate::worktree_cleanup::remove_in(
+                    &context,
+                    &owned,
+                    request["fingerprint"].as_str(),
+                    request["force"].as_bool().unwrap_or(false),
+                )
+                .await
+                .map_err(|e| e.1),
+                _ => crate::worktree_cleanup::restore_in(&context, &owned)
+                    .await
+                    .map(|result| json!(result))
+                    .map_err(|e| e.1),
+            }
+        }
+        Some("list") => {
+            let cwd = context
+                .checked(request["cwd"].as_str().unwrap_or(""))
+                .map_err(|e| e.1)?;
+            crate::worktrees::list_in(&context, &cwd)
+                .await
+                .map_err(|e| e.1)
+        }
+        Some("prepare") => {
+            let cwd = context
+                .checked(request["cwd"].as_str().unwrap_or(""))
+                .map_err(|e| e.1)?;
+            let workspace: Option<crate::worktrees::Workspace> =
+                serde_json::from_value(request["workspace"].clone())
+                    .map_err(|_| "Invalid workspace")?;
+            let policy = serde_json::from_value(request["policy"].clone())
+                .map_err(|_| "Invalid workspace policy")?;
+            let (cwd, owned) = crate::worktrees::prepare_in(
+                &context,
+                workspace.as_ref(),
+                policy,
+                false,
+                cwd,
+                None,
+            )
+            .await
+            .map_err(|e| e.1)?;
+            Ok(json!({"cwd":cwd,"owned":owned}))
+        }
+        _ => Err("Unsupported workspace operation".into()),
+    }
 }
 
 /// Which providers can actually start here, using the mise environment.
