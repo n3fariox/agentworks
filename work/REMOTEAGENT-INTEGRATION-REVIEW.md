@@ -127,6 +127,21 @@ logs remain in `.cache/verify-final.log`, `.cache/cargo-test.log`,
 `.cache/node-tests.log`, `.cache/extra-checks.log` and `.cache/inbox-smoke.log`;
 the latter records the successful rerun of the initially failing inbox suite.
 
+## Documentation follow-up
+
+Tracing the teardown diagrams after merge commit `5c22a8a` exposed a further edge:
+`kill` removed a channel from the active map while its cleanup task still had a
+TERM/KILL grace period in progress. An immediate link close could release host
+ownership before that task finished. The new focused regression reproduced this
+on the committed implementation. Killed/replaced channels are now retained as
+retiring tasks, and link teardown awaits both active and retiring tasks.
+
+The focused regression failed before the fix and passed after it. The full remote
+host smoke, full silent-partition smoke (now including immediate kill/disconnect),
+all 121 Rust tests, formatting and whitespace checks also passed afterward.
+The full browser/API verification above describes the integration baseline; this
+follow-up changes only worker cleanup ownership and its regression coverage.
+
 ## Residual limits
 
 - Fresh execution checks use deterministic demo ACP and an SSH stand-in. This

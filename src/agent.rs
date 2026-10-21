@@ -96,6 +96,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         }
     });
     let mut processes: HashMap<u32, Process> = HashMap::new();
+    let mut retiring: Vec<Process> = Vec::new();
     let mut reap = tokio::time::interval(Duration::from_secs(1));
     let mut last_heard = Instant::now();
     let ended = loop {
@@ -106,6 +107,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
                     break Err("The server stopped responding; stopping this host's processes".into());
                 }
                 processes.retain(|_, process| !process.task.is_finished());
+                retiring.retain(|process| !process.task.is_finished());
                 continue;
             }
         };
@@ -129,11 +131,17 @@ pub async fn run(args: &[String]) -> Result<(), String> {
                 let channel = request["channel"].as_u64().unwrap_or(0) as u32;
                 match request["type"].as_str() {
                     Some("spawn") => {
-                        processes.insert(channel, start(request, channel, out.clone()));
+                        if let Some(mut previous) =
+                            processes.insert(channel, start(request, channel, out.clone()))
+                        {
+                            previous.stop();
+                            retiring.push(previous);
+                        }
                     }
                     Some("kill") => {
-                        if let Some(process) = processes.remove(&channel) {
-                            drop(process);
+                        if let Some(mut process) = processes.remove(&channel) {
+                            process.stop();
+                            retiring.push(process);
                         }
                     }
                     Some("checkDir") => {
@@ -158,10 +166,12 @@ pub async fn run(args: &[String]) -> Result<(), String> {
     // a full outgoing queue after the peer has gone away.
     writer.abort();
     // Signal every adapter before waiting, so teardown is bounded per link.
-    for process in processes.values_mut() {
+    // Killed/replaced channels still own cleanup tasks until their grace period
+    // finishes. Keep the host lock through those tasks as well as active ones.
+    for process in processes.values_mut().chain(retiring.iter_mut()) {
         process.stop();
     }
-    for (_, mut process) in processes {
+    for mut process in processes.into_values().chain(retiring) {
         let _ = (&mut process.task).await;
     }
     eprintln!("agentworks agent: the link closed");

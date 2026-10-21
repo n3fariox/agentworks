@@ -61,19 +61,32 @@ async function launch(){
 try{
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   const first=await launch();await deadline(first.accepted,5000,'First worker did not acquire ownership');
-  first.ws.send(JSON.stringify({type:'spawn',channel:1,provider:'demo',cwd:work}));
+  let stopping=first;
+  if(process.env.AGENTWORKS_TEST_REMOTE_KILL_ONLY!=='1'){
+    first.ws.send(JSON.stringify({type:'spawn',channel:1,provider:'demo',cwd:work}));
+    for(let i=0;i<100&&!(await agents()).length;i++)await pause(50);
+    assert.equal((await agents()).length,1,'First worker did not start its adapter');
+    const replacement=await launch();await pause(500);
+    assert.equal(replacement.isReady(),false,'Replacement became usable while old adapter was alive');
+    // Neither peer receives any more server frames. The first must detect silence,
+    // stop its process group, and release ownership before the second reports ready.
+    await deadline(replacement.accepted,55000,'Replacement never acquired ownership after heartbeat expiry');
+    assert.deepEqual(await agents(),[],'Old adapter survived exclusive ownership transfer');
+    const [code]=await deadline(first.exit,5000,'Silent worker stayed alive');
+    assert.equal(code,1);assert.match(first.log(),/server stopped responding/);
+    stopping=replacement;
+  }
+  // kill removes the channel from the active map before its grace period ends.
+  // Closing the link immediately afterward must still await that cleanup task.
+  stopping.ws.send(JSON.stringify({type:'spawn',channel:2,provider:'demo',cwd:work}));
   for(let i=0;i<100&&!(await agents()).length;i++)await pause(50);
-  assert.equal((await agents()).length,1,'First worker did not start its adapter');
-  const replacement=await launch();await pause(500);
-  assert.equal(replacement.isReady(),false,'Replacement became usable while old adapter was alive');
-  // Neither peer receives any more server frames. The first must detect silence,
-  // stop its process group, and release ownership before the second reports ready.
-  await deadline(replacement.accepted,55000,'Replacement never acquired ownership after heartbeat expiry');
-  assert.deepEqual(await agents(),[],'Old adapter survived exclusive ownership transfer');
-  const [code]=await deadline(first.exit,5000,'Silent worker stayed alive');
-  assert.equal(code,1);assert.match(first.log(),/server stopped responding/);
-  replacement.ws.close();await deadline(replacement.exit,5000,'Replacement did not close');
-  console.log('PASS remote partition: worker heartbeat expiry, adapter teardown, exclusive replacement ownership and clean exit');
+  assert.equal((await agents()).length,1,'Adapter for kill/disconnect case did not start');
+  stopping.ws.send(JSON.stringify({type:'kill',channel:2}));stopping.ws.close();
+  await pause(200);
+  assert.equal(stopping.child.exitCode,null,'Worker released ownership before killed-channel cleanup finished');
+  const [stoppedCode]=await deadline(stopping.exit,5000,'Worker did not finish killed-channel cleanup');
+  assert.equal(stoppedCode,0);assert.deepEqual(await agents(),[]);
+  console.log('PASS remote partition: worker heartbeat expiry, adapter teardown, exclusive replacement ownership, pending kill cleanup and clean exit');
 }finally{
   for(const ws of peers)ws.terminate();for(const socket of sockets)socket.destroy();
   for(const child of children)await stopChild(child,{timeout:5000});
