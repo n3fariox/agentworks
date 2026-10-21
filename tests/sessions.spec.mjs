@@ -296,7 +296,7 @@ test('resume picker loads on open and agent changes, clears old filters, and ign
     await route.fulfill({json:{sessions:[{sessionId:title,cwd:'/project',title}],nextCursor:null}});
   });
   try{
-    await page.goto('/');await page.locator('#import-session').click();
+    await page.goto('/');await page.locator('#new-session').click();await page.locator('#create-import').click();
     await expect(page.locator('.external-session')).toContainText('claude');
     await page.locator('#import-search').fill('claude');
     await page.locator('#import-provider').selectOption('codex');
@@ -328,7 +328,7 @@ test('resume picker imports external history, paginates, and opens existing entr
   try{
     for(const [index,id] of ids.entries())await writeFile(join(stateDir,id+'.json'),JSON.stringify({cwd,turn:1,cancelled:false,model:'demo/quick',title:'Browser test external '+index,updatedAt:new Date(Date.UTC(2026,0,1,0,index)).toISOString(),history:[{sessionUpdate:'user_message_chunk',content:{type:'text',text:'A question from the CLI'}},{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'An answer from before Agentworks'}}]}));
     await writeFile(join(stateDir,outside+'.json'),JSON.stringify({cwd:'/tmp',turn:0,model:'demo/steady',title:'Outside allowed roots',updatedAt:'2099-01-01T00:00:00Z'}));
-    await page.goto('/');await page.locator('#import-session').click();
+    await page.goto('/');await page.locator('#new-session').click();await page.locator('#create-import').click();
     await page.locator('#import-provider').selectOption('demo');await page.locator('#import-directory').fill(cwd);
     await page.locator('#browse-sessions').click();
     await expect(page.locator('.external-session')).toHaveCount(10);
@@ -341,14 +341,14 @@ test('resume picker imports external history, paginates, and opens existing entr
     await expect(page.locator('#model-picker')).toHaveValue('demo/quick');
     const selected=await page.evaluate(()=>localStorage.getItem('agentworks-session'));
     await page.reload();await expect(page.locator('#messages')).toContainText('An answer from before Agentworks');
-    await page.locator('#import-session').click();await page.locator('#import-provider').selectOption('demo');
+    await page.locator('#new-session').click();await page.locator('#create-import').click();await page.locator('#import-provider').selectOption('demo');
     await page.locator('#import-directory').fill(cwd);await page.locator('#browse-sessions').click();await page.locator('#more-external').click();
     await page.locator('#import-search').fill(ids[0]);await expect(page.locator('.external-session')).toContainText('Already in Agentworks');
     await page.locator('.external-session input').check();await page.locator('#import-submit').click();
     expect(await page.evaluate(()=>localStorage.getItem('agentworks-session'))).toBe(selected);
     const result=await page.evaluate(async()=>fetch('/api/external-sessions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:'demo'})}).then(r=>r.json()));
     expect(result.sessions.some(s=>s.sessionId===outside)).toBe(false);
-    await page.setViewportSize({width:390,height:844});await page.locator('#menu:visible,#session-home:visible').click();await page.locator('#import-session').click();
+    await page.setViewportSize({width:390,height:844});await page.locator('#menu:visible,#session-home:visible').click();await page.locator('#new-session').click();await page.locator('#create-import').click();
     await page.locator('#import-provider').selectOption('demo');await page.locator('#import-directory').fill(cwd);await page.locator('#browse-sessions').click();
     await expect(page.locator('.external-session')).toHaveCount(10);
     await page.screenshot({path:'.cache/prototype-import.png'});

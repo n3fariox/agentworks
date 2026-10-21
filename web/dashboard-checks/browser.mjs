@@ -184,7 +184,7 @@ try {
     await page.setViewportSize({width,height:850});
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`overflow at ${width}`);
   }
-  await page.emulateMedia({colorScheme:'light',reducedMotion:'reduce'});
+  await page.emulateMedia({reducedMotion:'reduce'});
   await page.screenshot({path:'.cache/u10-dashboard-mobile.png',fullPage:true});
   console.log('PASS HTTPS proxy mount, active turns, top-level quota, freshness, keyboard, responsive 320–1280px');
   failed = new Set(['api/catalog','api/sessions','api/status']);

@@ -1,57 +1,17 @@
-/* The only shared-page rule styles the new navigation link. */
-#nav-dashboard {
-  text-decoration:none;
-}
-
-#nav-dashboard:focus-visible {
-  outline:2px solid #c9b8ff;
-  outline-offset:2px;
-}
-
+/* Theme, base controls, navigation and primary buttons come from shell.css. */
 .operations-dashboard {
-  --bg:#111318;
-  --panel:#1a1d24;
-  --border:#343a46;
-  --text:#eef0f6;
-  --muted:#b1b9c9;
-  --accent:#cdbbff;
-  margin:0;
-  background:var(--bg);
-  color:var(--text);
-  font:15px/1.6 system-ui,-apple-system,sans-serif;
+  line-height:1.6;
   min-height:100vh;
   display:grid;
   grid-template-columns:72px minmax(0,1fr);
 }
 
-.operations-dashboard * {
-  box-sizing:border-box;
-}
-
 .operations-dashboard a {
-  color:var(--accent);
   text-underline-offset:4px;
 }
 
-.operations-dashboard button {
-  font:inherit;
-  background:#cfbfff;
-  color:#221838;
-  border:1px solid transparent;
-  border-radius:8px;
-  padding:10px 16px;
-  min-height:44px;
-  cursor:pointer;
-}
-
 .operations-dashboard button:disabled {
-  opacity:.65;
   cursor:wait;
-}
-
-.operations-dashboard :focus-visible {
-  outline:3px solid var(--accent);
-  outline-offset:4px;
 }
 
 .operations-dashboard .skip-link {
@@ -67,56 +27,15 @@
   top:12px;
 }
 
+/* Stays in place while the page scrolls, like the workspace nav. */
 .operations-dashboard #workspace-nav {
   grid-column:1;
   grid-row:1;
-  background:#15171c;
-  border-right:1px solid var(--border);
-  padding:23px 6px 16px;
-  display:flex;
-  flex-direction:column;
-  gap:9px;
-  min-width:0;
-}
-
-.operations-dashboard .workspace-logo {
-  color:var(--text);
-  text-decoration:none;
-  text-align:center;
-  font-size:29px;
-  letter-spacing:-3px;
-  margin-bottom:22px;
-}
-
-.operations-dashboard .workspace-logo span {
-  color:var(--accent);
-}
-
-.operations-dashboard .workspace-nav-item {
-  border:0;
-  border-radius:8px;
-  background:transparent;
-  color:#a1a8b7;
-  display:flex;
-  flex-direction:column;
-  align-items:center;
-  justify-content:center;
-  gap:6px;
-  min-height:58px;
-  padding:8px 1px;
-  font-size:10px;
-  text-decoration:none;
-}
-
-.operations-dashboard .workspace-nav-item>span {
-  font-size:21px;
-  line-height:1;
-}
-
-.operations-dashboard .workspace-nav-item[aria-current=page] {
-  background:#282337;
-  color:var(--text);
-  font-weight:600;
+  position:sticky;
+  top:0;
+  align-self:start;
+  height:100vh;
+  height:100dvh;
 }
 
 .operations-dashboard main {
@@ -386,27 +305,20 @@
   color:var(--muted);
 }
 
-@media(max-width:600px) {
+/* Same breakpoint as the workspace: the nav becomes a top bar (shell.css). */
+@media(max-width:800px) {
   .operations-dashboard {
     display:flex;
     flex-direction:column;
   }
   .operations-dashboard #workspace-nav {
-    flex:none;
-    flex-direction:row;
-    align-items:center;
-    justify-content:space-around;
-    border-right:0;
-    border-bottom:1px solid var(--border);
-    padding:5px;
-    gap:3px;
-    min-height:59px;
+    height:auto;
+    align-self:stretch;
+    z-index:1;
   }
-  .operations-dashboard .workspace-logo {
-    display:none;
-  }
-  .operations-dashboard .workspace-nav-item {min-height:47px;flex:1;gap:3px;padding:5px;font-size:10px}
-  .operations-dashboard .workspace-nav-item>span {font-size:19px}
+}
+
+@media(max-width:600px) {
   .operations-dashboard main {
     padding:24px 16px 48px;
   }
@@ -415,6 +327,7 @@
   }
   .operations-dashboard .page-heading button {
     width:100%;
+    justify-content:center;
   }
   .operations-dashboard .section-heading {
     gap:4px;
@@ -428,29 +341,5 @@
   }
   .operations-dashboard summary {
     padding:16px;
-  }
-}
-
-@media(prefers-color-scheme:light) {
-  .operations-dashboard {
-    --bg:#f6f7fb;
-    --panel:#fff;
-    --border:#cbd0dc;
-    --text:#252738;
-    --muted:#535c70;
-    --accent:#60418c;
-  }
-  .operations-dashboard .badge.connected {
-    color:#226037;
-    border-color:#7ba487;
-  }
-  .operations-dashboard .waiting {
-    color:#815409;
-  }
-  .operations-dashboard .running {
-    color:#60418c;
-  }
-  .operations-dashboard .error {
-    color:#8b2424;
   }
 }

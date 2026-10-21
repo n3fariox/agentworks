@@ -691,6 +691,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route(
+            "/shell.css",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+                    include_str!("../web/shell.css"),
+                )
+            }),
+        )
+        .route(
             "/style.css",
             get(|| async {
                 (
@@ -732,6 +741,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (
                     [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
                     include_str!("../web/resize-handle.js"),
+                )
+            }),
+        )
+        .route(
+            "/sidebar-pin.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../web/sidebar-pin.js"),
                 )
             }),
         )

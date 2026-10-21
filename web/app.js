@@ -18,6 +18,7 @@ import {setupWorkLogs,observeTool} from './work-logs.js';
 import {setupUsageStatus} from './usage-status.js';
 import {setupFlyout} from './flyout.js';
 import {setupResize,setupPromptResize} from './resize-handle.js';
+import {setupSidebarPin} from './sidebar-pin.js';
 import {setupSidePanel} from './side-panel.js';
 import {setupContextMenu} from './context-menu.js';
 import {setupTimeoutControls} from './timeout-controls.js';
@@ -44,6 +45,7 @@ const usageStatus=setupUsageStatus({root:$('usage-status'),getProvider:()=>activ
 const composerMenu=setupFlyout({menu:$('composer-menu'),triggers:[$('composer-more'),$('composer-info')]});
 const sessionMenu=setupFlyout({menu:$('session-menu'),triggers:[$('session-more')]});
 setupResize({handle:$('sidebar-resize'),target:document.querySelector('.layout'),panel:$('sidebar'),variable:'--sidebar-width',key:'agentworks-sidebar-width',min:200,max:560,initial:228});
+const sidebarPin=setupSidebarPin({sidebar:$('sidebar'),button:$('sidebar-pin'),trigger:$('nav-sessions')});
 setupResize({handle:$('side-panel-resize'),target:$('side-panel'),panel:$('side-panel'),variable:'--side-panel-width',key:'agentworks-side-panel-width',min:300,max:960,initial:420,edge:'left'});
 const promptResize=setupPromptResize($('prompt'));
 const promptRecovery=setupPromptRecovery({area:$('prompt'),storage:sessionStorage,getSession:()=>active?.id,onChange:()=>{$('prompt').dispatchEvent(new Event('input'));}});
@@ -295,7 +297,7 @@ async function browseExternal(more=false){
   }catch(e){if(gen===externalGeneration)$('import-error').textContent=e.message;}
   finally{if(gen===externalGeneration){externalLoading=false;renderExternal();externalControls();}}
 }
-$('import-session').onclick=openImport;$('create-import').onclick=openImport;
+$('create-import').onclick=openImport;
 $('dismiss-import').onclick=()=>{$('import-dialog').close();externalGeneration++;};
 function changeExternalAgent(){
   $('import-search').value='';resetExternal();browseExternal();
@@ -499,7 +501,7 @@ function selectSession(s) {
   active=s;currentUserSeq=null;promptRecovery.render();status=s.status;modelConfig=null;permissionModes=null;availableCommands=[];commandsOpen=false;renderCommands();mentions.close();composerMenu.close();sessionMenu.close();resetTranscript();usageStatus.reset();inputQueue.reset();
   localStorage.setItem('agentworks-session',s.id);$('welcome').hidden=true;$('conversation').hidden=false;
   setTitle(s.title);$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;
-  $('session-notice').hidden=true;document.body.classList.remove('menu-open');sidebar();updateControls();connect(generation);
+  $('session-notice').hidden=true;document.body.classList.remove('menu-open');sidebarPin.close();sidebar();updateControls();connect(generation);
   workspace?.sessionSelected(s);sidePanel?.sessionChanged();sessionTerminal?.sessionChanged();promptResize.size();
   if(s.status==='suspended'&&!s.explicitlySuspended)resumeSession(s.id);
 }
@@ -1144,6 +1146,8 @@ async function init(){
   applyRoots();
   await refreshSessions();
   const saved=sessions.find(s=>s.id===localStorage.getItem('agentworks-session'));if(saved)selectSession(saved);workspace.restoreView();
+  // The dashboard's Settings link opens the dialog here; drop the flag so a reload doesn't reopen it.
+  const params=new URLSearchParams(location.search);if(params.has('settings')){params.delete('settings');history.replaceState(history.state,'',location.pathname+(params.size?'?'+params:'')+location.hash);openSettings();}
   setInterval(()=>refreshSessions().catch(()=>{}),5000);
   notifications.start();
 }
@@ -1164,6 +1168,8 @@ function insertCommand(text) {
   $('prompt').dispatchEvent(new Event('input'));
   $('prompt').focus();
 }
+// Apple keyboards use ⌘ for the same shortcut.
+if(/Mac|iPhone|iPad/.test(navigator.platform)){$('palette-shortcut').textContent='⌘K';$('palette-open').title='Command palette (⌘K)';}
 function usageCommand(){return availableCommands.find(c=>c.name===(active?.provider==='claude'?'usage':'status'));}
 setupPalettes({
   $,labels,selectSession,

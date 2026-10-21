@@ -5,7 +5,7 @@ export function createWorkspace(hooks){
   const read=(storage,key,fallback)=>{try{return JSON.parse(storage.getItem(key))??fallback;}catch{return fallback;}};
   const initial=read(localStorage,'agentworks-workspace',{});
   const requestedView=new URLSearchParams(location.search).get('view');
-  if(['files','automations'].includes(requestedView))initial.view=requestedView;
+  if(['sessions','files','automations'].includes(requestedView))initial.view=requestedView;
   const state={view:'sessions',projectId:initial.projectId||null,locationKey:initial.locationKey||'',path:'',hidden:false,file:null,sideFile:null,automationId:initial.automationId||null};
   let catalog={projects:[],locations:[],hosts:[]},sessions=[],definitions=[],runs=[],contextGeneration=0,filesGeneration=0,automationGeneration=0,editorGeneration=0,editing=null,runStarting=false,pendingFile=null;
   const pendingRuns=read(sessionStorage,'agentworks-pending-runs',{});
