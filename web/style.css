@@ -362,3 +362,13 @@ dialog.image-viewer{width:96vw;max-width:96vw;height:92dvh;max-height:92dvh;padd
 .approval .question-actions button{min-height:44px;margin:0;padding:8px 16px;font-size:12px}
 .approval .question-actions button.primary{background:#5b4a2c;border-color:#c9a467;font-weight:600}
 .approval button:focus-visible{outline:2px solid var(--accent)}
+
+/* Shared chat and disk Markdown diagrams. Keep controls focusable while visually quiet. */
+.markdown .mermaid-block{position:relative;margin:14px 0;border:1px solid var(--border);border-radius:8px;background:#171a1e;overflow:hidden;padding-top:36px}
+.mermaid-diagram{display:block;width:100%;border:0;min-height:80px}
+.markdown .mermaid-block pre{margin:0;border:0;border-radius:0;max-height:600px}
+.mermaid-toggle{position:absolute;right:6px;top:5px;min-height:28px;padding:3px 9px;border-radius:5px;background:var(--panel);font-size:11px;opacity:0}
+.mermaid-block:hover .mermaid-toggle,.mermaid-block:focus-within .mermaid-toggle{opacity:1}
+.mermaid-status{padding:8px 14px;color:var(--muted);font-size:12px}
+.mermaid-error .mermaid-status{color:#ed9b9b}
+@media(hover:none),(pointer:coarse){.mermaid-toggle{opacity:1;min-height:36px}.markdown .mermaid-block{padding-top:44px}}

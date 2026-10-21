@@ -51,7 +51,7 @@ async function stop() {
 }
 test.beforeAll(async () => {
   fixture = await mkdtemp(join(tmpdir(), 'agentworks-hosting-'));
-  await writeFile(join(fixture, 'hello #%.md'), 'Hello from the mounted workspace.');
+  await writeFile(join(fixture, 'hello #%.md'), 'Hello from the mounted workspace.\n\n```mermaid\nsequenceDiagram\nAlice->>Bob: Hello\n```\n');
   await start(true);
   session = await api('/api/sessions', {provider: 'demo', cwd: fixture, title: 'Mounted session'});
   execFileSync('openssl', ['req','-x509','-newkey','rsa:2048','-nodes','-keyout',join(fixture,'key.pem'),
@@ -104,6 +104,7 @@ for (const mount of ['/', ...mounts]) test(`loads app, APIs, files and scoped in
   page.on('pageerror', error => errors.push(error.message));
   page.on('websocket', socket => websockets.push(socket.url()));
   await page.addInitScript(({id, mount}) => {
+    if(window!==window.top)return;
     localStorage.setItem('agentworks-session' + (mount === '/' ? '' : '@' + mount), id);
   }, {id: session.id, mount});
   await page.goto(origin + mount);
@@ -144,6 +145,13 @@ for (const mount of ['/', ...mounts]) test(`loads app, APIs, files and scoped in
   });
   expect(status).toBe(200);
   await expect.poll(() => websockets.some(url => url.endsWith(`${mount}api/sessions/${session.id}/events`))).toBe(true);
+  await page.locator('#nav-files').click();
+  await page.locator('.file-entry').filter({hasText:'hello #%.md'}).click();
+  const diagram=page.locator('#workspace-file-detail .mermaid-block');
+  await expect(diagram.locator('.mermaid-status')).toBeHidden();
+  await expect(diagram.frameLocator('iframe').locator('svg')).toContainText('Alice');
+  await expect(diagram.locator('iframe')).toHaveAttribute('src',origin+mount+'mermaid-frame.html');
+
   await page.reload();
   await expect(page.locator('#session-state')).toHaveText('Ready');
   await expect(page.locator('#connection')).toHaveText('Connected');

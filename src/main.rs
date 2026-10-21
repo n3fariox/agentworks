@@ -852,6 +852,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route(
+            "/mermaid.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../web/mermaid.js"),
+                )
+            }),
+        )
+        .route(
+            "/mermaid-frame.html",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                    include_str!("../web/mermaid-frame.html"),
+                )
+            }),
+        )
+        .route(
+            "/mermaid-frame.bundle.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../web/mermaid-frame.bundle.js"),
+                )
+            }),
+        )
+        .route(
             "/display-preferences.js",
             get(|| async {
                 (
@@ -1075,12 +1102,18 @@ async fn guard(
     if ws {
         eprintln!("WebSocket guard passed path={:?}", req.uri().path());
     }
+    let mermaid_frame = req.uri().path() == "/mermaid-frame.html";
     let mut response = next.run(req).await;
     let h = response.headers_mut();
     h.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
     h.insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
     h.insert(header::REFERRER_POLICY, "no-referrer".parse().unwrap());
-    h.insert(header::CONTENT_SECURITY_POLICY,"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'".parse().unwrap());
+    let csp = if mermaid_frame {
+        "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; font-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'none'"
+    } else {
+        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+    };
+    h.insert(header::CONTENT_SECURITY_POLICY, csp.parse().unwrap());
     response
 }
 
@@ -2693,15 +2726,27 @@ struct Markdown {
     text: String,
 }
 async fn markdown(Json(req): Json<Markdown>) -> Json<Value> {
-    Json(json!({"html":render_markdown(&req.text)}))
+    let marker = format!("awmermaid-{}", &Uuid::new_v4().simple().to_string()[..16]);
+    Json(
+        json!({"html":render_markdown_with_marker(&req.text, &marker), "mermaidClass":format!("language-{marker}")}),
+    )
 }
+#[cfg(test)]
 fn render_markdown(text: &str) -> String {
+    render_markdown_with_marker(text, "awmermaid-test")
+}
+fn render_markdown_with_marker(text: &str, marker: &str) -> String {
     let parser = pulldown_cmark::Parser::new_ext(
         text,
         pulldown_cmark::Options::ENABLE_TABLES | pulldown_cmark::Options::ENABLE_STRIKETHROUGH,
     );
     let mut out = String::new();
     let parser = parser.map(|event| match event {
+        pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(
+            pulldown_cmark::CodeBlockKind::Fenced(info),
+        )) if info.trim().eq_ignore_ascii_case("mermaid") => pulldown_cmark::Event::Start(
+            pulldown_cmark::Tag::CodeBlock(pulldown_cmark::CodeBlockKind::Fenced(marker.into())),
+        ),
         pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link {
             link_type,
             dest_url,
@@ -2822,6 +2867,19 @@ mod tests {
         assert!(html.contains(r#"href="/home/x/b.png""#));
         assert!(html.contains(r#"href="./sample.rs:42""#));
         assert!(!html.contains("javascript:"));
+    }
+    #[test]
+    fn markdown_marks_only_mermaid_fences() {
+        let html = render_markdown_with_marker(
+            "```mermaid\nflowchart LR; A-->B\n```\n<pre><code class=\"language-mermaid\">flowchart LR; X-->Y</code></pre>\n\n```js\nconst x = 1;\n```",
+            "awmermaid-0123456789abcdef",
+        );
+        assert_eq!(
+            html.matches("language-awmermaid-0123456789abcdef").count(),
+            1
+        );
+        assert!(html.contains("language-mermaid"));
+        assert!(html.contains("language-js"));
     }
     #[test]
     fn markdown_keeps_only_code_language_classes() {

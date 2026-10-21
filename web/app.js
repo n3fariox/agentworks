@@ -10,6 +10,7 @@ import {setupChatReferences} from './chat-references.js';
 import {createWorkspace} from './workspace.js';
 import {setupCommunication} from './communication.js';
 import {setupPalettes} from './palettes.js';
+import {enhanceMermaid} from './mermaid.js';
 import {setupDisplayPreferences} from './display-preferences.js';
 import {setupWorkLogs,observeTool} from './work-logs.js';
 import {setupUsageStatus} from './usage-status.js';
@@ -691,7 +692,7 @@ function updateMarkdown(message,body){
     const text=message.text;message.markdownPending=true;
     try{
       const result=await api('/api/markdown',{method:'POST',body:JSON.stringify({text})});
-      message.html=result.html;body.innerHTML=result.html;body.classList.add('markdown');decorateMarkdown(body,message.referenceCwd?message.referenceCwd.replace(/\/$/,'')+'/':'');display.enhance(body,message.id);
+      message.html=result.html;body.innerHTML=result.html;body.classList.add('markdown');decorateMarkdown(body,message.referenceCwd?message.referenceCwd.replace(/\/$/,'')+'/':'');enhanceMermaid(body,result.mermaidClass);display.enhance(body,message.id);
     }catch{body.textContent=message.text;}finally{
       message.markdownPending=false;
       if(text!==message.text){delete body.dataset.source;updateMarkdown(message,body);}
