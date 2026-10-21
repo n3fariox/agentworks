@@ -22,6 +22,7 @@ import {setupSidebarPin} from './sidebar-pin.js';
 import {setupSidePanel} from './side-panel.js';
 import {setupContextMenu} from './context-menu.js';
 import {setupTimeoutControls} from './timeout-controls.js';
+import {setupParserScripts} from './parser-scripts.js';
 import {setupInputQueue,setupPromptRecovery,BUSY} from './input-queue.js';
 import {setupNotifications} from './notifications.js';
 import {setupQuestions} from './questions.js';
@@ -52,7 +53,7 @@ const promptRecovery=setupPromptRecovery({area:$('prompt'),storage:sessionStorag
 let currentUserSeq=null;
 let sidePanel=null;
 setInterval(()=>usageStatus.render(),60000);
-let timeoutControls=null;
+let timeoutControls=null,parserScripts=null;
 let transcript=[], tools=new Map(), approvals=new Map(), assistant=null, status='starting';
 // L-05 hook: activity indicator and explicit queued inputs (server-owned state).
 const questions=setupQuestions({api,uuid:()=>uuid(),storage:localStorage,getActive:()=>active,isConnected:()=>connected,agentName:()=>labels[active?.provider]||'the agent'});
@@ -1043,9 +1044,10 @@ $('settings-form').addEventListener('invalid',event=>{
 $('add-root').onclick=()=>addRoot().focus();
 async function openSettings(){
   const timeoutsReady=timeoutControls.load();
+  parserScripts.load();
   notifications.load().then(()=>notifications.mount($('notification-controls'))).catch(error=>notifications.mount($('notification-controls'),error));
   try{
-    const settings=await api('/api/settings');$('settings-roots').replaceChildren();for(const root of settings.roots)addRoot(root);$('settings-error').textContent='';$('settings-saved').textContent='Save applies global defaults and host settings. Display and notifications save immediately.';
+    const settings=await api('/api/settings');$('settings-roots').replaceChildren();for(const root of settings.roots)addRoot(root);$('settings-error').textContent='';$('settings-saved').textContent='Save applies global defaults and host settings. Display, notifications and parsers save immediately.';
     $('default-communication-role').value=settings.defaultCommunicationRole||'participant';
     const fields=$('default-model-fields');fields.replaceChildren();
     for(const provider of config.providers.filter(p=>p.id!=='demo')){
@@ -1095,6 +1097,7 @@ $('settings-form').onsubmit=async event=>{
 document.addEventListener('keydown',event=>{if(event.key==='n'&&!event.ctrlKey&&!event.metaKey&&!event.altKey&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)&&!document.querySelector('dialog[open]')){event.preventDefault();openCreate();}});
 const diffView=setupDiff({api,root:$('side-diff'),enhanceBlocks:display.enhance});
 timeoutControls=setupTimeoutControls({$,api,getActive:()=>active});
+parserScripts=setupParserScripts({$,api,el});
 workspace=createWorkspace({api,toast,labels,uuid,
   viewChanged(view){
     if(view==='host-terminal'){

@@ -35,8 +35,14 @@ pub struct Script {
     pub source: String,
     pub hash: String,
     pub enabled: bool,
+    /// Follows the shipped source (unmodified built-in).
     pub builtin: bool,
+    /// The name of a shipped script, whether or not the user modified it.
+    pub shipped: bool,
     pub updated: i64,
+    /// Current compile/type error for an enabled script, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 pub fn valid_name(name: &str) -> bool {
@@ -95,7 +101,13 @@ pub fn list(db: &Connection) -> rusqlite::Result<Vec<Script>> {
             hash: r.get(3)?,
             enabled: r.get(4)?,
             builtin: r.get(5)?,
+            shipped: false,
             updated: r.get(6)?,
+            error: None,
+        })
+        .map(|mut s: Script| {
+            s.shipped = BUILTIN.iter().any(|(name, _)| *name == s.name);
+            s
         })
     })?
     .collect()
@@ -116,20 +128,39 @@ pub fn set_enabled(db: &Connection, name: &str, enabled: bool) -> rusqlite::Resu
     )? == 1)
 }
 
-/// Returns `None` when absent and `Some(false)` for a built-in, which cannot be deleted.
-pub fn delete(db: &Connection, name: &str) -> rusqlite::Result<Option<bool>> {
+#[derive(Debug, PartialEq, Eq)]
+pub enum Removal {
+    Missing,
+    /// An unmodified built-in: disable it instead.
+    Builtin,
+    Deleted,
+    /// A modified built-in went back to the shipped source.
+    Restored,
+}
+
+/// Delete a user script, or restore a modified built-in to its shipped source.
+pub fn delete(db: &Connection, name: &str) -> rusqlite::Result<Removal> {
     let builtin: Option<bool> = db
         .query_row("SELECT builtin FROM scripts WHERE name=?1", [name], |r| {
             r.get(0)
         })
         .optional()?;
-    match builtin {
-        Some(false) => {
-            db.execute("DELETE FROM scripts WHERE name=?1", [name])?;
-            Ok(Some(true))
+    let shipped = BUILTIN.iter().find(|(n, _)| *n == name);
+    Ok(match (builtin, shipped) {
+        (None, _) => Removal::Missing,
+        (Some(true), _) => Removal::Builtin,
+        (Some(false), Some((_, source))) => {
+            db.execute(
+                "UPDATE scripts SET source=?2,hash=?3,builtin=1,updated=?4 WHERE name=?1",
+                params![name, source, content_hash(source), now()],
+            )?;
+            Removal::Restored
         }
-        other => Ok(other.map(|_| false)),
-    }
+        (Some(false), None) => {
+            db.execute("DELETE FROM scripts WHERE name=?1", [name])?;
+            Removal::Deleted
+        }
+    })
 }
 
 type Views = Arc<Mutex<HashMap<String, HashMap<String, (u64, Value)>>>>;
@@ -355,20 +386,29 @@ fn db_error(e: rusqlite::Error) -> (axum::http::StatusCode, String) {
     )
 }
 
+/// Scripts with the current compile error of each enabled one.
+fn annotated(app: &crate::App, db: &Connection) -> crate::ApiResult {
+    let mut scripts = list(db).map_err(db_error)?;
+    for script in scripts.iter_mut().filter(|s| s.enabled) {
+        script.error = app
+            .progress
+            .check(&script.name, &script.source)
+            .err()
+            .map(|d| d.to_string());
+    }
+    Ok(axum::Json(json!({"scripts": scripts})))
+}
+
 fn reloaded(app: &crate::App, db: &Connection) -> crate::ApiResult {
-    let errors = app.progress.reload(db).map_err(db_error)?;
-    let scripts = list(db).map_err(db_error)?;
-    Ok(axum::Json(
-        json!({"scripts": scripts, "errors": errors.iter().map(|e| e.to_string()).collect::<Vec<_>>()}),
-    ))
+    app.progress.reload(db).map_err(db_error)?;
+    annotated(app, db)
 }
 
 pub async fn get_scripts(
     axum::extract::State(app): axum::extract::State<crate::App>,
 ) -> crate::ApiResult {
     let store = app.store.lock().unwrap();
-    let scripts = list(&store.connection).map_err(db_error)?;
-    Ok(axum::Json(json!({"scripts": scripts})))
+    annotated(&app, &store.connection)
 }
 
 /// Install or replace a parser script after compiling and type-checking it.
@@ -414,12 +454,12 @@ pub async fn delete_script(
     use axum::http::StatusCode;
     let store = app.store.lock().unwrap();
     match delete(&store.connection, &name).map_err(db_error)? {
-        None => Err(crate::fail(StatusCode::NOT_FOUND, "Script not found")),
-        Some(false) => Err(crate::fail(
+        Removal::Missing => Err(crate::fail(StatusCode::NOT_FOUND, "Script not found")),
+        Removal::Builtin => Err(crate::fail(
             StatusCode::CONFLICT,
             "Built-in scripts can be disabled, not deleted",
         )),
-        Some(true) => reloaded(&app, &store.connection),
+        Removal::Deleted | Removal::Restored => reloaded(&app, &store.connection),
     }
 }
 
@@ -541,16 +581,31 @@ mod tests {
         assert!(set_enabled(&db, "bazel_progress.star", false).unwrap());
         let engine = Arc::new(Engine::new().unwrap());
         assert!(compile_enabled(&engine, &db).unwrap().0.is_empty());
-        assert_eq!(delete(&db, "bazel_progress.star").unwrap(), Some(false));
+        assert_eq!(
+            delete(&db, "bazel_progress.star").unwrap(),
+            Removal::Builtin
+        );
         let edited = BUILTIN[0].1.replace("\"Bazel\"", "\"Blaze\"");
         save(&db, "bazel_progress.star", &edited).unwrap();
         seed(&db).unwrap();
         let row = list(&db).unwrap().remove(0);
         assert!(
-            !row.builtin && row.source == edited,
+            !row.builtin && row.shipped && row.source == edited,
             "a saved built-in is no longer overwritten"
         );
-        assert_eq!(delete(&db, "missing.star").unwrap(), None);
+        assert_eq!(
+            delete(&db, "bazel_progress.star").unwrap(),
+            Removal::Restored
+        );
+        let row = list(&db).unwrap().remove(0);
+        assert!(
+            row.builtin && row.source == BUILTIN[0].1,
+            "restoring returns to the shipped source"
+        );
+        save(&db, "make.star", "x").unwrap();
+        assert!(!list(&db).unwrap()[1].shipped);
+        assert_eq!(delete(&db, "make.star").unwrap(), Removal::Deleted);
+        assert_eq!(delete(&db, "missing.star").unwrap(), Removal::Missing);
         assert!(
             valid_name("make_progress.star") && !valid_name("../x.star") && !valid_name("x.py")
         );

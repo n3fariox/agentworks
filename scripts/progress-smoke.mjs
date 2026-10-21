@@ -45,9 +45,16 @@ try{
   await api(`/api/sessions/${s.id}/prompt`,'POST',{text:'bazel demo',requestId:'progress-smoke-2'});await idle(s.id);await delay(300);
   assert.equal(live.length,before,'no progress while the parser is disabled');
   await api('/api/scripts/bazel_progress.star/enabled','PUT',{enabled:true});
-  console.log('PASS: script validation, built-in protection and disable/enable');
+  // The Settings starter template must install as written.
+  const panel=await (await fetch(base+'/parser-scripts.js')).text();
+  const template=/String\.raw`([\s\S]*?)`;/.exec(panel)[1];
+  await api('/api/scripts/smoke_template.star','PUT',{source:template});
+  assert((await api('/api/scripts')).scripts.some(x=>x.name==='smoke_template.star'&&x.enabled&&!x.error));
+  await api('/api/scripts/smoke_template.star','DELETE');
+  console.log('PASS: script validation, built-in protection, disable/enable and the starter template');
 }finally{
   socket?.terminate();
   await call('/api/scripts/bazel_progress.star/enabled','PUT',{enabled:true});
+  await call('/api/scripts/smoke_template.star','DELETE');
   for(const id of ids)await call('/api/sessions/'+id,'DELETE');
 }

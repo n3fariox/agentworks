@@ -62,6 +62,7 @@
         <button id="settings-tab-display" type="button" role="tab" aria-selected="false" aria-controls="settings-panel-display" data-settings-category="display" tabindex="-1">Display</button>
         <button id="settings-tab-notifications" type="button" role="tab" aria-selected="false" aria-controls="settings-panel-notifications" data-settings-category="notifications" tabindex="-1">Notifications</button>
         <button id="settings-tab-timeouts" type="button" role="tab" aria-selected="false" aria-controls="settings-panel-timeouts" data-settings-category="timeouts" tabindex="-1">Execution timeouts</button>
+        <button id="settings-tab-parsers" type="button" role="tab" aria-selected="false" aria-controls="settings-panel-parsers" data-settings-category="parsers" tabindex="-1">Progress parsers</button>
         <button id="settings-tab-service" type="button" role="tab" aria-selected="false" aria-controls="settings-panel-service" data-settings-category="service" tabindex="-1">Service</button>
       </div>
       <div class="settings-content">
@@ -97,6 +98,9 @@
       <div id="settings-panel-timeouts" role="tabpanel" aria-labelledby="settings-tab-timeouts" tabindex="0" hidden>
       <fieldset id="timeout-controls" class="display-preferences settings-section"></fieldset>
       </div>
+      <div id="settings-panel-parsers" role="tabpanel" aria-labelledby="settings-tab-parsers" tabindex="0" hidden>
+      <fieldset id="parser-script-controls" class="display-preferences settings-section"></fieldset>
+      </div>
       <div id="settings-panel-service" role="tabpanel" aria-labelledby="settings-tab-service" tabindex="0" hidden>
       <div id="settings-service-slot"></div>
       </div>
@@ -104,7 +108,7 @@
     </div>
     <div class="settings-footer">
       <div id="settings-error" class="error-text" role="alert"></div>
-      <div class="dialog-footer"><span id="settings-saved" role="status">Save applies global defaults and host settings. Display and notifications save immediately.</span><button class="primary" id="save-settings" type="submit">Save settings</button></div>
+      <div class="dialog-footer"><span id="settings-saved" role="status">Save applies global defaults and host settings. Display, notifications and parsers save immediately.</span><button class="primary" id="save-settings" type="submit">Save settings</button></div>
     </div>
   </form>
 </dialog>

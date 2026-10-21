@@ -64,6 +64,7 @@ Limitations of the library, recorded rather than worked around:
 - The standalone `typecheck` does not evaluate, so it treats annotations that name loaded `record` types as `typing.Any`. The compile-time checker sees the real types, so the entry contract is checked against the compiled value. Giving the standalone checker a value-derived prelude `Interface` did not change how it resolves annotations.
 - Starlark has no `TypedDict`. Script-owned `ctx.state` is therefore `dict[str, typing.Any]`, and Rust validates it as JSON with size bounds. Scripts can use records internally. See [Parser state model](#parser-state-model) for why it can't be a record.
 - Static checking is gradual: some errors, such as `str + int` inside a body, surface only at runtime as attributable `runtime` diagnostics.
+- The checker validates attribute names when they are read (`ctx.stat`), but not on the left of an assignment (`ctx.stat["k"] = v`). That typo is reported only when the script runs, as a parser failure for that tool.
 
 ### Parser state model
 
@@ -153,4 +154,6 @@ Evidence:
 - **End to end.** `scripts/progress-smoke.mjs`, run with the demo agent's deterministic `bazel demo` replay, shows live progress events, the snapshot view, that history contains no stored progress, that invalid scripts are rejected with diagnostics, that built-ins can't be deleted, and that disabling a parser stops progress. A manual restart of the service rebuilt `Bazel · Testing · 4 / 9 · 3 / 5` from the stored window.
 - **Cost.** The service release binary grew from 22.0 MB to 36.4 MB (unstripped). An incremental release build of the service after the change took 77 s.
 
-Not done: a settings UI for scripts, workflow scripts in the service, and per-harness verification of live streaming cadence (unchanged from U-05).
+Settings → Progress parsers (`web/parser-scripts.js`, `tests/parser-scripts.spec.mjs`) lists, enables, edits, installs, deletes and restores scripts. It shows server diagnostics in place, including for enabled scripts that no longer compile. It is checked on desktop and at 390×844.
+
+Not done: workflow scripts in the service, and per-harness verification of live streaming cadence (unchanged from U-05).
