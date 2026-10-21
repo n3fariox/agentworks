@@ -233,7 +233,14 @@ impl Hosts {
             match status {
                 Ok(status) => {
                     let output = tail(&log);
-                    format!("ssh exited ({status}).{output}{}", auth_hint(&output))
+                    format!(
+                        "ssh exited ({status}).{output}{}",
+                        if host.identity_file.is_some() {
+                            ""
+                        } else {
+                            auth_hint(&output)
+                        }
+                    )
                 }
                 Err(e) => format!("ssh failed: {e}."),
             }
@@ -597,11 +604,44 @@ fn ssh_args(host: &Host) -> Vec<String> {
     ]
     .map(String::from)
     .into();
+    args.extend(managed_ssh_args(host));
     args.push("--".into());
     args.push(host.destination.clone());
     // ssh hands this line to the remote user's shell. The command is operator
     // configuration.
     args.push(format!("{} agent --stdio", host.command));
+    args
+}
+
+pub(crate) fn known_hosts_option(path: &std::path::Path) -> String {
+    // -o values are parsed as ssh_config syntax, even though no shell is used.
+    let path = path.to_string_lossy().replace('%', "%%");
+    format!(
+        "UserKnownHostsFile={}",
+        serde_json::to_string(&path).unwrap()
+    )
+}
+
+pub(crate) fn managed_ssh_args(host: &Host) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(identity) = &host.identity_file {
+        args.extend([
+            "-i".into(),
+            identity.to_string_lossy().into_owned(),
+            "-o".into(),
+            "IdentitiesOnly=yes".into(),
+            "-o".into(),
+            "IdentityAgent=none".into(),
+        ]);
+    }
+    if let Some(known) = &host.known_hosts_file {
+        args.extend([
+            "-o".into(),
+            known_hosts_option(known),
+            "-o".into(),
+            "StrictHostKeyChecking=yes".into(),
+        ]);
+    }
     args
 }
 
@@ -715,6 +755,7 @@ pub fn view(hosts: &Hosts, host: &Host) -> Value {
         "destination": host.destination,
         "command": host.command,
         "roots": host.roots,
+        "managed": host.identity_file.is_some(),
         "status": link.status,
         "detail": link.detail,
         "since": link.since,
@@ -754,12 +795,32 @@ pub async fn remove(State(app): State<App>, Path(id): Path<String>) -> ApiResult
             "Delete this host's sessions before removing it",
         ));
     }
-    app.catalog
-        .lock()
-        .unwrap()
-        .remove_host(&id)
-        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    let (host, credentials_dir) = {
+        let mut catalog = app.catalog.lock().unwrap();
+        let host = catalog.data.hosts.iter().find(|h| h.id == id).cloned();
+        catalog
+            .remove_host(&id)
+            .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+        (host, catalog.credentials_dir())
+    };
     app.hosts.stop(&id);
+    if let Some(key) = host.and_then(|h| h.identity_file) {
+        // Only erase a generated key directory owned by this catalog.
+        if let (Some(dir), Ok(base)) =
+            (key.parent(), tokio::fs::canonicalize(credentials_dir).await)
+        {
+            if dir.parent() == Some(base.as_path())
+                && key.file_name().is_some_and(|name| name == "id_ed25519")
+                && dir
+                    .file_name()
+                    .is_some_and(|name| uuid::Uuid::parse_str(&name.to_string_lossy()).is_ok())
+            {
+                if tokio::fs::remove_dir_all(dir).await.is_err() {
+                    eprintln!("Could not remove a deleted host's managed SSH key directory");
+                }
+            }
+        }
+    }
     Ok(Json(json!({ "ok": true })))
 }
 /// Validates a new remote session's directory: the host is connected and has
@@ -946,6 +1007,8 @@ mod tests {
             id: "h".into(),
             name: "Box".into(),
             destination: "dev@box".into(),
+            identity_file: None,
+            known_hosts_file: None,
             command: "~/bin/agentworks".into(),
             roots: Vec::new(),
         };

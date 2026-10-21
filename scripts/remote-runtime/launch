@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+runtime_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+mise_bin=$(command -v mise || true)
+if [ -z "$mise_bin" ]; then mise_bin="$HOME/.local/bin/mise"; fi
+export AGENTWORKS_RUNTIME_DIR="$runtime_dir"
+AGENTWORKS_NODE=$("$mise_bin" -C "$runtime_dir" which node)
+export AGENTWORKS_NODE
+exec "$mise_bin" -C "$runtime_dir" exec -- "$runtime_dir/agentworks" "$@"

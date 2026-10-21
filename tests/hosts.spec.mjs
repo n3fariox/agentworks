@@ -8,8 +8,8 @@ const base='http://127.0.0.1:4363';let server;
 test.beforeAll(async()=>{
   server=createServer(async(req,res)=>{
     const name=req.url==='/'?'index.html':req.url.slice(1);
-    if(!/^[\w.-]+$/.test(name)){res.writeHead(404);res.end();return;}
-    try{const data=await readFile(resolve('web',name));res.setHeader('Content-Type',({'.js':'text/javascript','.css':'text/css','.html':'text/html'})[extname(name)]||'text/plain');res.end(data);}
+    if(!/^(?:vendor\/)?[\w.-]+$/.test(name)){res.writeHead(404);res.end();return;}
+    try{const data=await readFile(resolve('web',name));res.setHeader('Content-Type',({'.js':'text/javascript','.mjs':'text/javascript','.css':'text/css','.html':'text/html'})[extname(name)]||'text/plain');res.end(data);}
     catch{res.writeHead(404);res.end();}
   });
   await new Promise((ok,fail)=>{server.once('error',fail);server.listen(4363,'127.0.0.1',ok);});
@@ -71,6 +71,7 @@ for(const mobile of [false,true]){
     await expect(box).toHaveCount(0);
 
     await page.getByRole('button',{name:'Add host'}).click();
+    await page.locator('#host-mode').selectOption('manual');
     await page.locator('#host-name').fill('laptop');await page.locator('#host-destination').fill('-oProxyCommand=sh');
     await page.locator('#save-host').click();
     await expect(page.locator('#host-error')).toContainText('SSH destination');
@@ -151,4 +152,41 @@ test('remote selection respects required worktrees and restores local policy on 
   await expect(page.locator('#workspace-mode')).toHaveValue('newWorktree');
   await expect(page.locator('#workspace-policy-note')).toContainText('Isolated worktree required');
   await expect(page.locator('#create-submit')).toBeEnabled();
+});
+
+for(const mobile of [false,true])test(`guided enrollment terminal ${mobile?'mobile':'desktop'}`,async({page})=>{
+  if(mobile)await page.setViewportSize({width:390,height:844});
+  const state=await fixture(page);let typed='';
+  await page.routeWebSocket('**/api/hosts/enroll/events',ws=>{ws.onMessage(data=>{
+    const value=JSON.parse(data);
+    if(value.destination){expect(value).toEqual({name:'New box',destination:'dev@box'});ws.send(JSON.stringify({type:'stage',message:'Enter your SSH password in the terminal'}));ws.send(new TextEncoder().encode('Password: '));}
+    if(value.type==='input')typed+=value.data;
+    if(typed==='test-password'){
+      const host=remote('enrolled','New box','connected',{managed:true});state.hosts.push(host);
+      ws.send(JSON.stringify({type:'complete',host}));
+    }
+  });});
+  if(mobile)await page.locator('#menu').click();
+  await page.locator('#view-hosts').click();await page.getByRole('button',{name:'Add host'}).click();
+  await expect(page.locator('#host-mode')).toHaveValue('enroll');await expect(page.locator('#host-manual')).toBeHidden();
+  await page.locator('#host-name').fill('New box');await page.locator('#host-destination').fill('dev@box');await page.locator('#save-host').click();
+  await expect(page.locator('#host-stage')).toContainText('SSH password');
+  await expect(page.locator('#host-name')).toBeDisabled();
+  const input=page.locator('#host-terminal .xterm-helper-textarea');await input.focus();await page.keyboard.type('test-password');
+  await expect.poll(()=>typed).toBe('test-password');
+  await expect(page.locator('#host-stage')).toContainText('Connected');
+  await expect(page.locator('#host-terminal')).not.toContainText('test-password');
+  expect(await page.locator('#host-dialog').evaluate(e=>e.scrollWidth<=e.clientWidth)).toBe(true);
+  await page.locator('#host-done').click();await expect(page.locator('#host-roots-dialog')).toBeVisible();
+  await expect(page.locator('#host-roots-title')).toHaveText('Working directories on New box');
+});
+
+test('enrollment error allows retry and close cancels the terminal',async({page})=>{
+ await fixture(page);let count=0,closed=false;
+ await page.routeWebSocket('**/api/hosts/enroll/events',ws=>{ws.onClose(()=>closed=true);ws.onMessage(data=>{if(JSON.parse(data).destination){count++;if(count===1)ws.send(JSON.stringify({type:'error',message:'mise is required on this host'}));else ws.send(JSON.stringify({type:'stage',message:'Connecting…'}));}});});
+ await page.locator('#view-hosts').click();await page.getByRole('button',{name:'Add host'}).click();
+ await page.locator('#host-name').fill('Box');await page.locator('#host-destination').fill('dev@box');await page.locator('#save-host').click();
+ await expect(page.locator('#host-error')).toContainText('mise is required');await expect(page.locator('#save-host')).toBeEnabled();
+ await page.locator('#save-host').click();await expect(page.locator('#host-stage')).toContainText('Connecting');
+ closed=false;await page.locator('#dismiss-host').click();await expect.poll(()=>closed).toBe(true);await expect(page.locator('#host-dialog')).toBeHidden();
 });

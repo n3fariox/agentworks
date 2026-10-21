@@ -373,3 +373,8 @@ dialog.image-viewer{width:96vw;max-width:96vw;height:92dvh;max-height:92dvh;padd
 .mermaid-error .mermaid-status{color:#ed9b9b}
 @media(hover:none),(pointer:coarse){.mermaid-toggle{opacity:1;min-height:36px}.markdown .mermaid-block{padding-top:44px}}
 #host-roots{width:100%;box-sizing:border-box;resize:vertical;background:#111417;color:var(--text);border:1px solid #3a3d45;border-radius:7px;padding:10px 12px;font:12px ui-monospace,monospace}
+
+#host-dialog:has(#host-terminal-wrap:not([hidden])){width:min(850px,calc(100vw - 24px));max-width:850px}
+#host-terminal{padding:10px;background:#101218;border-radius:8px;overflow:hidden;min-width:0}
+#host-stage{font-size:13px;margin:12px 0 8px;color:var(--text)}
+#host-terminal .xterm{padding:0}

@@ -7,6 +7,7 @@ mod completion;
 mod controllers;
 mod diff;
 mod elicitation;
+mod enrollment;
 mod fork;
 mod git_context;
 mod hosting;
@@ -486,8 +487,13 @@ fn key_present(provider: &str) -> bool {
 fn use_api_key() -> bool {
     std::env::var("AGENTWORKS_AUTH_MODE").is_ok_and(|mode| mode == "api_key")
 }
+fn runtime_root() -> PathBuf {
+    std::env::var_os("AGENTWORKS_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+}
 fn adapter_path(provider: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    runtime_root()
         .join("node_modules/.bin")
         .join(if provider == "claude" {
             "claude-agent-acp"
@@ -948,6 +954,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/import", post(import_session))
         .route("/api/catalog", get(get_catalog))
         .route("/api/hosts", post(hosts::add))
+        .route("/api/hosts/enroll/events", get(enrollment::upgrade))
+        .route(
+            "/host-enrollment.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../web/host-enrollment.js"),
+                )
+            }),
+        )
+        .route(
+            "/vendor/xterm.mjs",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../web/vendor/xterm.mjs"),
+                )
+            }),
+        )
+        .route(
+            "/vendor/xterm.css",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+                    include_str!("../web/vendor/xterm.css"),
+                )
+            }),
+        )
+        .route(
+            "/vendor/xterm.LICENSE",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                    include_str!("../web/vendor/xterm.LICENSE"),
+                )
+            }),
+        )
         .route("/api/hosts/{id}", axum::routing::delete(hosts::remove))
         .route("/api/hosts/{id}/reconnect", post(hosts::reconnect))
         .route(

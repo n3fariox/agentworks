@@ -52,13 +52,14 @@ pub(crate) fn agent_config(
     host_profile: bool,
 ) -> AcpAgentConfig {
     let config = if provider == "demo" {
-        AcpAgentConfig::new("node").arg(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("scripts/demo-agent.mjs")
-                .to_string_lossy(),
-        )
+        AcpAgentConfig::new(std::env::var_os("AGENTWORKS_NODE").unwrap_or_else(|| "node".into()))
+            .arg(
+                crate::runtime_root()
+                    .join("scripts/demo-agent.mjs")
+                    .to_string_lossy(),
+            )
     } else if provider == "opencode" {
-        let home = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".agentworks/opencode");
+        let home = crate::runtime_root().join(".agentworks/opencode");
         let mut config =
             AcpAgentConfig::new(opencode_path().unwrap_or_else(|| "opencode".into())).arg("acp");
         if !host_profile {
@@ -77,11 +78,14 @@ pub(crate) fn agent_config(
             .env("CODEX_API_KEY", "")
             .env("ANTHROPIC_API_KEY", "")
     } else {
-        let mut config = AcpAgentConfig::new(adapter_path(provider)).env("NO_BROWSER", "1");
+        let mut config = if let Some(node) = std::env::var_os("AGENTWORKS_NODE") {
+            AcpAgentConfig::new(node).arg(adapter_path(provider).to_string_lossy())
+        } else {
+            AcpAgentConfig::new(adapter_path(provider))
+        }
+        .env("NO_BROWSER", "1");
         if api_key_mode {
-            let home = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join(".agentworks")
-                .join(provider);
+            let home = crate::runtime_root().join(".agentworks").join(provider);
             if provider == "codex" {
                 config = config
                     .env("CODEX_HOME", home.to_string_lossy())
@@ -116,18 +120,10 @@ fn agent_for(provider: &str, host_profile: bool) -> AcpAgent {
 pub(crate) fn prepare(provider: &str) -> std::io::Result<()> {
     if provider == "opencode" {
         for dir in ["data", "cache", "state", "config"] {
-            std::fs::create_dir_all(
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join(".agentworks/opencode")
-                    .join(dir),
-            )?;
+            std::fs::create_dir_all(crate::runtime_root().join(".agentworks/opencode").join(dir))?;
         }
     } else if provider != "demo" && use_api_key() {
-        std::fs::create_dir_all(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join(".agentworks")
-                .join(provider),
-        )?;
+        std::fs::create_dir_all(crate::runtime_root().join(".agentworks").join(provider))?;
     }
     Ok(())
 }

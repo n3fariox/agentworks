@@ -42,6 +42,10 @@ pub struct Host {
     /// an `ssh://` URI. Keys, ports and jump hosts come from the SSH config.
     #[serde(default)]
     pub destination: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_file: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_hosts_file: Option<PathBuf>,
     /// Shell command on the remote host that runs the Agentworks binary.
     #[serde(default)]
     pub command: String,
@@ -242,8 +246,38 @@ impl Catalog {
         self.save(data)?;
         Ok(location)
     }
+    pub fn credentials_dir(&self) -> PathBuf {
+        self.path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("host-keys")
+    }
     pub fn add_host(
         &mut self,
+        name: &str,
+        destination: &str,
+        command: &str,
+    ) -> Result<Host, String> {
+        self.add_managed_host(name, destination, command, None, None)
+    }
+    pub fn add_managed_host(
+        &mut self,
+        name: &str,
+        destination: &str,
+        command: &str,
+        identity_file: Option<PathBuf>,
+        known_hosts_file: Option<PathBuf>,
+    ) -> Result<Host, String> {
+        let mut host = self.prepare_host(name, destination, command)?;
+        host.identity_file = identity_file;
+        host.known_hosts_file = known_hosts_file;
+        let mut data = self.data.clone();
+        data.hosts.push(host.clone());
+        self.save(data).map_err(|_| "Could not save host")?;
+        Ok(host)
+    }
+    pub fn prepare_host(
+        &self,
         name: &str,
         destination: &str,
         command: &str,
@@ -285,12 +319,11 @@ impl Catalog {
             id: Uuid::new_v4().to_string(),
             name: name.into(),
             destination: destination.into(),
+            identity_file: None,
+            known_hosts_file: None,
             command: command.into(),
             roots: Vec::new(),
         };
-        let mut data = self.data.clone();
-        data.hosts.push(host.clone());
-        self.save(data).map_err(|_| "Could not save host")?;
         Ok(host)
     }
     pub fn set_host_roots(&mut self, id: &str, roots: Vec<String>) -> Result<Host, String> {
