@@ -189,6 +189,8 @@ Projects, settings, and host-local location IDs are saved in `.agentworks/catalo
 
 ### Remote hosts
 
+See [the implementation and protocol guide](REMOTE-HOSTS.md) for Mermaid diagrams, wire messages, ownership and recovery, timers, and compatibility rules.
+
 In the Hosts view, **＋** beside the Hosts heading adds a remote host: a name, an SSH destination, and optionally the command that runs Agentworks there. The server then runs:
 
 ```bash

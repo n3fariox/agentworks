@@ -142,6 +142,11 @@ all 121 Rust tests, formatting and whitespace checks also passed afterward.
 The full browser/API verification above describes the integration baseline; this
 follow-up changes only worker cleanup ownership and its regression coverage.
 
+The [implementation guide](../REMOTE-HOSTS.md) now documents the wire messages,
+ownership, timeouts, compatibility contract and implementation entry points.
+Its five embedded Mermaid diagrams were parsed and rendered with a locally cached
+renderer; documentation links were checked. No application dependency was added.
+
 ## Residual limits
 
 - Fresh execution checks use deterministic demo ACP and an SSH stand-in. This
