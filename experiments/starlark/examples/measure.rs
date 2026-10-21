@@ -195,7 +195,7 @@ fn main() {
     // Workflow decision cost without SQLite.
     let t = Instant::now();
     for _ in 0..10_000 {
-        engine.call(&workflow, &json!({"project": "demo", "step": "check"}),
+        engine.call(&workflow, &json!({"workflow": "wf", "owner": "coordinator", "state": {"project": "demo", "step": "check"}}),
             &json!({"id": "e", "kind": "action_completed", "action_key": "check", "outcome": "failed", "data": {"summary": "x"}})).unwrap();
     }
     println!("workflow decision: {:?} per event", t.elapsed() / 10_000);

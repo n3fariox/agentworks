@@ -30,7 +30,7 @@ fn typed_samples_install_with_exact_host_signatures() {
     );
     assert_eq!(
         Capability::Workflow.signature(),
-        "def(state: dict[str, typing.Any], event: Event) -> Decision"
+        "def(ctx: WorkflowContext, event: Event) -> list[Action]"
     );
 }
 
@@ -91,14 +91,14 @@ fn values_from_untyped_json_are_checked_at_runtime() {
     // `event.data` is dict[str, typing.Any]: statically unknown, so the record
     // field annotation `prompt: str` is enforced when the action is built.
     let source = format!(
-        "{WORKFLOW_HEAD}def on_event(state: dict[str, typing.Any], event: Event) -> Decision:\n    return decide(state, actions = [start_session(\"a\", \"p\", event.data[\"n\"])])\n"
+        "{WORKFLOW_HEAD}def on_event(ctx: WorkflowContext, event: Event) -> list[Action]:\n    return [start_session(\"a\", \"p\", event.data[\"n\"])]\n"
     );
     let engine = engine();
     let script = install(&engine, "runtime.star", Capability::Workflow, &source).unwrap();
     let d = engine
         .call(
             &script,
-            &json!({}),
+            &json!({"workflow": "wf", "owner": "coordinator", "state": {}}),
             &json!({"id": "e", "kind": "start", "data": {"n": 42}}),
         )
         .unwrap_err();
@@ -134,7 +134,7 @@ fn capabilities_are_separate_and_installation_is_explicit() {
         "open(\"/etc/passwd\")",
     ] {
         let source = format!(
-            "{WORKFLOW_HEAD}def on_event(state: dict[str, typing.Any], event: Event) -> Decision:\n    {call}\n    return decide(state)\n"
+            "{WORKFLOW_HEAD}def on_event(ctx: WorkflowContext, event: Event) -> list[Action]:\n    {call}\n    return []\n"
         );
         let d = install_error(Capability::Workflow, &source);
         assert_eq!(d.kind, DiagnosticKind::Type, "{call}: {d}");

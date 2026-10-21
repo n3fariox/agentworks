@@ -1,29 +1,31 @@
 # Sample E-01 workflow: run a check session; only if it fails, run a fix session.
 # Evaluation is a pure decision. Rust waits for sessions, persists every
 # decision, authorizes actions at dispatch and owns cancellation and retries.
-load("@agentworks//workflow.star", "Decision", "Event", "decide", "start_session")
+load("@agentworks//workflow.star", "Action", "Event", "WorkflowContext", "finish", "start_session")
 
-def _finish(state: dict[str, typing.Any], outcome: str) -> Decision:
-    return decide(dict(state, step = "done"), outcome = outcome)
+def _done(ctx: WorkflowContext, outcome: str) -> list[Action]:
+    ctx.state["step"] = "done"
+    return [finish(outcome)]
 
-def on_event(state: dict[str, typing.Any], event: Event) -> Decision:
+def on_event(ctx: WorkflowContext, event: Event) -> list[Action]:
+    state = ctx.state
     if event.kind == "start":
-        project = event.data["project"]
-        check = start_session("check", project, "Run the project checks and report any failures.")
-        return decide({"project": project, "step": "check"}, actions = [check])
+        state["project"] = event.data["project"]
+        state["step"] = "check"
+        return [start_session("check", state["project"], "Run the project checks and report any failures.")]
     if event.kind == "action_denied":
-        return _finish(state, "denied")
+        return _done(ctx, "denied")
     if event.kind != "action_completed":
-        return decide(state)
+        return []
     if event.outcome in ("cancelled", "interrupted"):
         # Interrupted work is reported, never blindly retried.
-        return _finish(state, "stopped")
+        return _done(ctx, "stopped")
     if event.action_key == "check":
         if event.outcome == "succeeded":
-            return _finish(state, "passed")
+            return _done(ctx, "passed")
         summary = str(event.data.get("summary", "no summary"))[:500]
-        fix = start_session("fix", state["project"], "Fix these check failures: " + summary)
-        return decide(dict(state, step = "fix"), actions = [fix])
+        state["step"] = "fix"
+        return [start_session("fix", state["project"], "Fix these check failures: " + summary)]
     if event.action_key == "fix":
-        return _finish(state, "fixed" if event.outcome == "succeeded" else "fix_failed")
-    return decide(state)
+        return _done(ctx, "fixed" if event.outcome == "succeeded" else "fix_failed")
+    return []

@@ -2,6 +2,16 @@
 # Host-owned and loaded as "@agentworks//workflow.star". Constructors only
 # return data: Rust persists, authorizes and dispatches every proposed action.
 
+# Context for `on_event(ctx: WorkflowContext, event: Event) -> list[Action]`.
+# `state` belongs to the script and is mutated in place. It may hold only
+# plain data (str, int, float, bool, None, list, dict) and starts as {}.
+# Unlike parser state it is durable: Rust commits it with the decision.
+WorkflowContext = record(
+    workflow = str,
+    owner = str,
+    state = dict[str, typing.Any],
+)
+
 # An event delivered by the host: "start", "action_completed" or "action_denied".
 # `outcome` is "succeeded", "failed", "cancelled" or "interrupted" for completions.
 Event = record(
@@ -12,23 +22,23 @@ Event = record(
     data = dict[str, typing.Any],
 )
 
-# A proposed effect. `key` is unique within one workflow run and becomes part
-# of the stable request ID, so proposing the same key twice cannot repeat it.
-Action = record(kind = str, key = str, project = str, prompt = str)
-
-# Return value of `on_event(state: dict[str, typing.Any], event: Event) -> Decision`.
-# A non-None outcome finishes the workflow.
-Decision = record(
-    state = dict[str, typing.Any],
-    actions = list[Action],
-    outcome = str | None,
+# A proposed effect, built with the constructors below. A start_session `key`
+# is unique within one run and becomes part of the stable request ID, so
+# proposing the same key twice cannot repeat the effect.
+Action = record(
+    kind = str,
+    key = str,
+    project = field(str | None, None),
+    prompt = field(str | None, None),
+    outcome = field(str | None, None),
 )
 
 def start_session(key: str, project: str, prompt: str) -> Action:
     return Action(kind = "start_session", key = key, project = project, prompt = prompt)
 
-def decide(state: dict[str, typing.Any], actions: list[Action] = [], outcome: str | None = None) -> Decision:
-    return Decision(state = state, actions = actions, outcome = outcome)
+def finish(outcome: str) -> Action:
+    """Ends the run with `outcome`. Must be the only action returned."""
+    return Action(kind = "finish", key = "finish", outcome = outcome)
 
 def event_from_json(data: dict[str, typing.Any]) -> Event:
     """Rebuild a persisted event; used by the host before each call."""

@@ -23,7 +23,7 @@ fn worker_parses_and_reuses_its_compiled_script() {
         "[2 / 4] 1 / 3 tests; Testing //a",
     ] {
         let (value, _) = worker.call(&install, BAZEL, &state(), &json!(line)).unwrap();
-        assert!(value["progress"]["phase"].is_string(), "{value}");
+        assert!(value["result"]["phase"].is_string(), "{value}");
         assert!(
             value["state"]["phase"].is_string(),
             "committed state is returned: {value}"

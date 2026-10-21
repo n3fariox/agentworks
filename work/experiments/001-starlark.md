@@ -55,19 +55,19 @@ starlark-rust's canonical typing support is enabled at every level it offers:
 2. `AstModuleTypecheck::typecheck` lints the whole module at install time against the capability's globals and prelude interface.
 3. `Evaluator::enable_static_typechecking(true)` makes compiling the module typecheck every `def`, called or not, using real values.
 
-The host also requires the compiled entry point's type to equal the host API signature exactly: `def(ctx: LineContext, line: str) -> None | Progress` or `def(state: dict[str, typing.Any], event: Event) -> Decision`. Unannotated or mistyped entry points are rejected at install.
+The host also requires the compiled entry point's type to equal the host API signature exactly: `def(ctx: LineContext, line: str) -> None | Progress` or `def(ctx: WorkflowContext, event: Event) -> list[Action]`. Unannotated or mistyped entry points are rejected at install.
 
 These errors are caught at install time and tested: misspelled record fields, returning the wrong record type, wrong record field types, wrong argument types to host helpers, a mistyped helper that is never called, unknown globals, and a mismatched or missing entry signature. Values that arrive from JSON (`typing.Any`) are checked at runtime when they reach a typed record field.
 
 Limitations of the library, recorded rather than worked around:
 
 - The standalone `typecheck` does not evaluate, so it treats annotations that name loaded `record` types as `typing.Any`. The compile-time checker sees the real types, so the entry contract is checked against the compiled value. Giving the standalone checker a value-derived prelude `Interface` did not change how it resolves annotations.
-- Starlark has no `TypedDict`. Workflow state is therefore `dict[str, typing.Any]`, and Rust validates it as JSON with size bounds. Scripts can use records internally.
+- Starlark has no `TypedDict`. Script-owned `ctx.state` is therefore `dict[str, typing.Any]`, and Rust validates it as JSON with size bounds. Scripts can use records internally. See [Parser state model](#parser-state-model) for why it can't be a record.
 - Static checking is gradual: some errors, such as `str + int` inside a body, surface only at runtime as attributable `runtime` diagnostics.
 
 ### Parser state model
 
-Parser state is the script's own working memory, mutated in place through `ctx.state`. It is temporary: Rust keeps it in memory per output stream, never persists it, and rebuilds it after a reload by replaying the raw output. Rust copies it in as a fresh mutable dict before each call. For committed lines it copies the dict back out and enforces the 16 KiB limit. For the provisional unterminated line it discards the changes. Multi-line values, such as a target named on one line and counted on a later one, are ordinary keys. A failed call leaves the previous state untouched.
+Both hooks have the same shape: `on_line(ctx: LineContext, line: str) -> Progress | None` and `on_event(ctx: WorkflowContext, event: Event) -> list[Action]`. `ctx` carries read-only host facts plus the script-owned `state` dict, which the script mutates in place, and the return value is the hook's output. Workflow state is durable: Rust commits it with each decision. Parser state is the script's own working memory, mutated in place through `ctx.state`. It is temporary: Rust keeps it in memory per output stream, never persists it, and rebuilds it after a reload by replaying the raw output. Rust copies it in as a fresh mutable dict before each call. For committed lines it copies the dict back out and enforces the 16 KiB limit. For the provisional unterminated line it discards the changes. Multi-line values, such as a target named on one line and counted on a later one, are ordinary keys. A failed call leaves the previous state untouched.
 
 Keeping state as frozen Starlark values between calls, so that it never leaves the interpreter, was tried and rejected. `examples/probe_chain.rs` measures it. Using the previous state inside a call requires registering its frozen heap on the call's heap, so each frozen state keeps every predecessor alive. RSS grew by about 0.75 KiB per line (+225 MB after 300,000 lines), whether or not the script reused old values, and dropping the chain overflowed the stack. starlark-rust 0.14 tracks heap references per heap, keeps mutable heaps confined to a closure (`Module::with_heap` is crate-private), and makes record types private (`RecordGen::typ` is `pub(crate)`). So a safe, bounded carry-over needs a copy, and copying typed records generically is not possible through the public API. State is therefore plain data (str, int, float, bool, None, list, dict), typed `dict[str, typing.Any]` and checked at runtime. Host-provided records such as `Counts` and `Progress` remain fully typed. Typed record state would need either an upstream accessor for a record's type or an unsafe long-lived heap with manual garbage collection.
 
@@ -88,7 +88,7 @@ All 29 experiment tests pass under `cargo test --locked -p agentworks-starlark`.
 | Denial and revocation effective at dispatch | Revoking between decision and dispatch gives `denied`, and the script is told and finishes with "denied". A project that was never granted is denied without creating a session. |
 | Script version pinning and upgrade | An edited script is refused for a run pinned to the old hash (`VersionMismatch`). An explicit `upgrade` re-pins it and records a host event. |
 | Deterministic replay | Replay re-evaluates persisted applied events, reproduces the stored state, proposals and outcome, is repeatable, and dispatches nothing. |
-| Invalid return values, exceptions and excess resources | Workflow `fail()`, an invalid action key, more than four actions, and state over 64 KiB each fail the run with `script_error`, an attributable diagnostic and no pending actions. |
+| Invalid return values, exceptions and excess resources | Workflow `fail()`, an invalid action key, more than four actions, state over 64 KiB, `finish` combined with another action, `finish` twice, and non-data state each fail the run with `script_error`, an attributable diagnostic and no pending actions. |
 | Hard stops | `worker.rs`: a single string repeat allocates about 1 GiB between heap-limit checks. Under `RLIMIT_AS=256 MiB` the worker aborts (SIGABRT), the client reports `worker exited`, and the next request is served by a fresh worker. A slow evaluation is SIGKILLed at a 20 ms wall deadline. Neither affects the host process. |
 
 ### Measurements
@@ -105,7 +105,7 @@ Measured on this host (12 threads, rustc 1.98.1) with release builds, `examples/
 | Stream host end to end | 100,000 lines in 5,000 deltas: 1.30 s, i.e. 105,000 calls including the provisional parses. |
 | Memory over a long stream | RSS 15,084 KiB after 100,000 lines and after 1,000,000 lines (+0 KiB). Per-call heaps do not accumulate. |
 | Worker process | Spawn, compile and first call: 6 ms. Steady state: 36 µs per round trip, including JSON framing with the source in each request. |
-| Workflow decision | 5.3 µs per event, excluding SQLite. |
+| Workflow decision | 5.8 µs per event, excluding SQLite. |
 
 An early run measured 36 µs per line. The cause was cloning `regex::Regex`, which gives every call a cold match cache. Sharing compiled patterns through `Arc` fixed it.
 
@@ -119,7 +119,7 @@ An early run measured 36 µs per line. The cause was cloning `regex::Regex`, whi
 
 - Installation record: `{name, capability: parser | workflow, hash (blake3 of source), enabled}`. The host compiles only enabled installations whose hash matches. Repository content is never loaded implicitly.
 - Parser: `on_line(ctx: LineContext, line: str) -> Progress | None`. `LineContext = record(command: str, stream: str, provisional: bool, state: dict[str, typing.Any])`. `Counts = record(done: int, total: int, unit: str)`. `Progress = record(phase: str, label: str | None, counts: list[Counts])`. The host supplies complete or provisional lines after ANSI stripping; the only helper is `regex_match(pattern: str, text: str) -> list[str] | None`. New host facts become `ctx` fields, so the signature stays stable.
-- Workflow: `on_event(state: dict[str, typing.Any], event: Event) -> Decision`. `Event = record(id, kind, action_key, outcome, data)`, with kinds `start`, `action_completed` and `action_denied` and outcomes `succeeded`, `failed`, `cancelled` and `interrupted`. `Decision = record(state, actions: list[Action], outcome: str | None)`. The only constructor is `start_session(key, project, prompt) -> Action`.
+- Workflow: `on_event(ctx: WorkflowContext, event: Event) -> list[Action]`. `WorkflowContext = record(workflow: str, owner: str, state: dict[str, typing.Any])`. `Event = record(id, kind, action_key, outcome, data)`, with kinds `start`, `action_completed` and `action_denied` and outcomes `succeeded`, `failed`, `cancelled` and `interrupted`. The constructors are `start_session(key, project, prompt) -> Action` and `finish(outcome) -> Action`. `finish` ends the run and must be the only action returned.
 - Default limits per call: parser 20,000 ticks, 8 MiB heap, 50 ms wall, 16 KiB input/state/output. Workflow 50,000 ticks, 16 MiB heap, 200 ms wall, 64 KiB, with at most 4 actions per decision, 16 per run and 256 events per run. Call stack depth is 32.
 - Persisted with each run: script name, hash and API version, JSON state, each event with its ID and disposition, and each action with its key, request ID and status.
 

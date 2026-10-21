@@ -311,18 +311,32 @@ fn script_errors_and_invalid_decisions_fail_the_run_attributably() {
     let cases = [
         ("    fail(\"bad decision\")\n", DiagnosticKind::Runtime),
         (
-            "    return decide(state, actions = [start_session(\"bad key!\", \"demo\", \"p\")])\n",
+            "    return [start_session(\"bad key!\", \"demo\", \"p\")]\n",
             DiagnosticKind::InvalidResult,
         ),
         (
-            "    return decide(state, actions = [start_session(\"k\" + str(i), \"demo\", \"p\") for i in range(5)])\n",
+            "    return [start_session(\"k\" + str(i), \"demo\", \"p\") for i in range(5)]\n",
             DiagnosticKind::InvalidResult,
         ),
-        ("    return decide({\"blob\": \"x\" * 100000})\n", DiagnosticKind::Limit),
+        (
+            "    ctx.state[\"blob\"] = \"x\" * 100000\n    return []\n",
+            DiagnosticKind::Limit,
+        ),
+        (
+            "    return [start_session(\"a\", \"demo\", \"p\"), finish(\"done\")]\n",
+            DiagnosticKind::InvalidResult,
+        ),
+        (
+            "    return [finish(\"a\"), finish(\"b\")]\n",
+            DiagnosticKind::InvalidResult,
+        ),
+        (
+            "    ctx.state[\"f\"] = finish\n    return []\n",
+            DiagnosticKind::InvalidResult,
+        ),
     ];
     for (i, (body, kind)) in cases.into_iter().enumerate() {
-        let source =
-            format!("{WORKFLOW_HEAD}def on_event(state: dict[str, typing.Any], event: Event) -> Decision:\n{body}");
+        let source = workflow_source(body);
         let script = install(&f.engine, &format!("bad{i}.star"), Capability::Workflow, &source).unwrap();
         let mut host = f.host_with(script);
         let id = format!("bad{i}");
@@ -346,7 +360,7 @@ fn script_errors_and_invalid_decisions_fail_the_run_attributably() {
 fn proposing_an_existing_action_key_again_is_one_effect() {
     let f = Fixture::new("same-key");
     let source = format!(
-        "{WORKFLOW_HEAD}def on_event(state: dict[str, typing.Any], event: Event) -> Decision:\n    return decide(state, actions = [start_session(\"only\", \"demo\", \"p\")])\n"
+        "{WORKFLOW_HEAD}def on_event(ctx: WorkflowContext, event: Event) -> list[Action]:\n    return [start_session(\"only\", \"demo\", \"p\")]\n"
     );
     let script = install(&f.engine, "same_key.star", Capability::Workflow, &source).unwrap();
     let (grants, mut sessions) = (Grants::allow("coordinator", "demo"), f.sessions());

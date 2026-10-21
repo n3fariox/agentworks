@@ -57,13 +57,14 @@ impl Capability {
     pub fn signature(self) -> &'static str {
         match self {
             Capability::Parser => "def(ctx: LineContext, line: str) -> None | Progress",
-            Capability::Workflow => "def(state: dict[str, typing.Any], event: Event) -> Decision",
+            Capability::Workflow => "def(ctx: WorkflowContext, event: Event) -> list[Action]",
         }
     }
-    fn converter(self) -> &'static str {
+    /// Prelude record type for the hook's `ctx` argument.
+    fn context_type(self) -> &'static str {
         match self {
             Capability::Parser => "LineContext",
-            Capability::Workflow => "event_from_json",
+            Capability::Workflow => "WorkflowContext",
         }
     }
 }
@@ -248,7 +249,9 @@ struct Prelude {
     id: &'static str,
     module: FrozenModule,
     interface: Interface,
-    converter: OwnedFrozenValue,
+    context: OwnedFrozenValue,
+    /// Builds the workflow `Event` record from JSON; parsers receive a plain `str`.
+    event: Option<OwnedFrozenValue>,
 }
 
 /// A compiled, frozen script. Values are immutable and shared across calls;
@@ -258,7 +261,8 @@ pub struct Compiled {
     pub hash: String,
     pub capability: Capability,
     entry: OwnedFrozenValue,
-    converter: OwnedFrozenValue,
+    context: OwnedFrozenValue,
+    event: Option<OwnedFrozenValue>,
     pub compile_time: Duration,
 }
 
@@ -410,7 +414,8 @@ impl Engine {
             hash: install.hash.clone(),
             capability: install.capability,
             entry,
-            converter: prelude.converter.clone(),
+            context: prelude.context.clone(),
+            event: prelude.event.clone(),
             compile_time: started.elapsed(),
         });
         self.cache
@@ -420,17 +425,13 @@ impl Engine {
         Ok(compiled)
     }
 
-    /// Evaluate the entry point in a fresh heap with limits.
-    /// Parser: `first` is `{command, stream, provisional, state}`, `second` the line;
-    /// returns `{progress, state}`, with `state` null for provisional calls.
-    /// Workflow: `on_event(state, event_from_json(event))`.
+    /// Evaluate `entry(ctx, input)` in a fresh heap with limits. `first` holds the
+    /// `ctx` fields, including `state`; `second` is the line (parser) or event JSON
+    /// (workflow). Returns `{result, state}`; `state` is null for provisional calls.
     /// Never panics; all failures become attributable diagnostics.
     pub fn call(&self, script: &Compiled, first: &Json, second: &Json) -> Result<(Json, CallStats), Diagnostic> {
         let limits = Limits::for_capability(script.capability);
-        let (state, input) = match script.capability {
-            Capability::Parser => (&first["state"], second),
-            Capability::Workflow => (first, second),
-        };
+        let (state, input) = (&first["state"], second);
         let state_len = serde_json::to_string(state).map(|s| s.len()).unwrap_or(usize::MAX);
         if state_len > limits.max_state_bytes {
             return Err(script.diagnostic(
@@ -489,72 +490,66 @@ impl Engine {
             };
             // SAFETY: the call module's frozen heap now references the script's heap,
             // so these frozen values outlive every use inside this temporary module.
-            let (converter, entry) = unsafe {
+            let (context, entry, event) = unsafe {
                 (
-                    script.converter.owned_frozen_value(module.frozen_heap()).to_value(),
+                    script.context.owned_frozen_value(module.frozen_heap()).to_value(),
                     script.entry.owned_frozen_value(module.frozen_heap()).to_value(),
+                    script
+                        .event
+                        .as_ref()
+                        .map(|e| e.owned_frozen_value(module.frozen_heap()).to_value()),
                 )
             };
-            let (a, b, state) = match script.capability {
-                Capability::Parser => {
-                    // `ctx.state` is a fresh mutable copy of plain data. Nothing from a
-                    // previous call's heap is referenced, so states never chain heaps.
-                    let state = heap.alloc(first["state"].clone());
-                    let fields = [
-                        ("command", heap.alloc(first["command"].as_str().unwrap_or(""))),
-                        ("stream", heap.alloc(first["stream"].as_str().unwrap_or(""))),
-                        (
-                            "provisional",
-                            heap.alloc(first["provisional"].as_bool().unwrap_or(false)),
-                        ),
-                        ("state", state),
-                    ];
-                    let ctx = eval.eval_function(converter, &[], &fields).map_err(classify)?;
-                    (ctx, heap.alloc(second.clone()), Some(state))
+            // `ctx.state` is a fresh mutable copy of plain data. Nothing from a previous
+            // call's heap is referenced, so states never chain heaps across calls.
+            let state = heap.alloc(first["state"].clone());
+            let mut fields = vec![("state", state)];
+            for (key, value) in first.as_object().into_iter().flatten() {
+                if key != "state" {
+                    fields.push((key.as_str(), heap.alloc(value.clone())));
                 }
-                Capability::Workflow => {
-                    let event = eval
-                        .eval_function(converter, &[heap.alloc(second.clone())], &[])
-                        .map_err(classify)?;
-                    (heap.alloc(first.clone()), event, None)
-                }
+            }
+            let ctx = eval.eval_function(context, &[], &fields).map_err(classify)?;
+            let input = match event {
+                Some(event) => eval
+                    .eval_function(event, &[heap.alloc(second.clone())], &[])
+                    .map_err(classify)?,
+                None => heap.alloc(second.clone()),
             };
-            let result = eval.eval_function(entry, &[a, b], &[]).map_err(classify)?;
-            let mut json = result.to_json_value().map_err(|e| {
+            let result = eval.eval_function(entry, &[ctx, input], &[]).map_err(classify)?;
+            let result = result.to_json_value().map_err(|e| {
                 script.diagnostic(
                     DiagnosticKind::InvalidResult,
                     format!("result is not JSON-compatible: {e}"),
                 )
             })?;
-            let size = serde_json::to_string(&json).map(|s| s.len()).unwrap_or(usize::MAX);
+            let size = serde_json::to_string(&result).map(|s| s.len()).unwrap_or(usize::MAX);
             if size > limits.max_output_bytes {
                 return Err(script.diagnostic(
                     DiagnosticKind::Limit,
                     format!("result exceeds {} bytes", limits.max_output_bytes),
                 ));
             }
-            if let Some(state) = state {
-                // Provisional calls never commit, so their state is not even copied out.
-                let committed = if first["provisional"] == true {
-                    Json::Null
-                } else {
-                    let committed = state.to_json_value().map_err(|e| {
-                        script.diagnostic(
-                            DiagnosticKind::InvalidResult,
-                            format!("ctx.state must hold only plain data: {e}"),
-                        )
-                    })?;
-                    let size = serde_json::to_string(&committed).map(|s| s.len()).unwrap_or(usize::MAX);
-                    if size > limits.max_state_bytes {
-                        return Err(script.diagnostic(
-                            DiagnosticKind::Limit,
-                            format!("ctx.state exceeds {} bytes", limits.max_state_bytes),
-                        ));
-                    }
-                    committed
-                };
-                json = serde_json::json!({"progress": json, "state": committed});
-            }
+            // Provisional parser calls never commit, so their state is not even copied out.
+            let committed = if first["provisional"] == true {
+                Json::Null
+            } else {
+                let committed = state.to_json_value().map_err(|e| {
+                    script.diagnostic(
+                        DiagnosticKind::InvalidResult,
+                        format!("ctx.state must hold only plain data: {e}"),
+                    )
+                })?;
+                let size = serde_json::to_string(&committed).map(|s| s.len()).unwrap_or(usize::MAX);
+                if size > limits.max_state_bytes {
+                    return Err(script.diagnostic(
+                        DiagnosticKind::Limit,
+                        format!("ctx.state exceeds {} bytes", limits.max_state_bytes),
+                    ));
+                }
+                committed
+            };
+            let json = serde_json::json!({"result": result, "state": committed});
             Ok((
                 json,
                 CallStats {
@@ -595,7 +590,11 @@ fn prelude(capability: Capability, globals: &Globals) -> Result<Prelude, String>
             .freeze_named(FrozenHeapName::User(Box::new(id.to_owned())))
             .map_err(|e| format!("{e:?}"))
     })?;
-    let converter = module.get(capability.converter()).map_err(|e| e.to_string())?;
+    let context = module.get(capability.context_type()).map_err(|e| e.to_string())?;
+    let event = match capability {
+        Capability::Parser => None,
+        Capability::Workflow => Some(module.get("event_from_json").map_err(|e| e.to_string())?),
+    };
     // The standalone typechecker does not evaluate `record(...)`, so names bound to
     // record types would be `typing.Any`. Describe the prelude from its frozen values.
     let mut bindings: HashMap<String, Ty> = HashMap::new();
@@ -608,6 +607,7 @@ fn prelude(capability: Capability, globals: &Globals) -> Result<Prelude, String>
         id,
         module,
         interface,
-        converter,
+        context,
+        event,
     })
 }

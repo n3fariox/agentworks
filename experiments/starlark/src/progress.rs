@@ -81,7 +81,7 @@ pub struct StarlarkParser {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CallResult {
-    progress: Option<Progress>,
+    result: Option<Progress>,
     state: Option<State>,
 }
 
@@ -97,13 +97,13 @@ impl StarlarkParser {
         let (value, stats) = self.engine.call(&self.script, &input, &Json::String(line.to_owned()))?;
         let result: CallResult = serde_json::from_value(value)
             .map_err(|e| Engine::invalid(&self.script, format!("result does not match host API v1: {e}")))?;
-        if let Some(p) = &result.progress {
+        if let Some(p) = &result.result {
             p.validate().map_err(|e| Engine::invalid(&self.script, e))?;
         }
         if let Some(next) = result.state {
             *state = next;
         }
-        Ok((result.progress, stats))
+        Ok((result.result, stats))
     }
 }
 

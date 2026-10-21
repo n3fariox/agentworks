@@ -1,7 +1,8 @@
 //! Rust-owned durable workflow host for workflow scripts.
 //!
-//! A script only maps `(state, event)` to a `Decision`. This host persists the
-//! decision, its new state and proposed actions in one SQLite transaction, then
+//! A script only maps `on_event(ctx, event)` to proposed actions, mutating
+//! `ctx.state` in place. This host persists the decision (new state, proposed
+//! sessions and any `finish` outcome) in one SQLite transaction, then
 //! dispatches pending actions with stable request IDs after re-checking
 //! authorization. Restarting re-dispatches only actions that were never marked
 //! dispatched; the dispatcher deduplicates by request ID, so a crash between
@@ -30,8 +31,27 @@ pub struct Action {
     pub prompt: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// An action as returned by a script (the prelude's `Action` record).
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Proposed {
+    kind: String,
+    key: String,
+    project: Option<String>,
+    prompt: Option<String>,
+    outcome: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CallResult {
+    result: Vec<Proposed>,
+    state: serde_json::Map<String, Json>,
+}
+
+/// A validated decision: the committed state, sessions to start and whether
+/// the run finished.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Decision {
     pub state: serde_json::Map<String, Json>,
     pub actions: Vec<Action>,
@@ -39,28 +59,49 @@ pub struct Decision {
 }
 
 impl Decision {
-    fn validate(&self) -> Result<(), String> {
-        if self.actions.len() > MAX_ACTIONS_PER_DECISION {
+    fn from_result(result: CallResult) -> Result<Self, String> {
+        if result.result.len() > MAX_ACTIONS_PER_DECISION {
             return Err(format!("more than {MAX_ACTIONS_PER_DECISION} actions in one decision"));
         }
-        for a in &self.actions {
-            if a.kind != "start_session" {
-                return Err(format!("unknown action kind {:?}", a.kind));
-            }
-            let key_ok = !a.key.is_empty()
-                && a.key.len() <= 64
-                && a.key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-            if !key_ok {
-                return Err(format!("invalid action key {:?}", a.key));
-            }
-            if a.project.is_empty() || a.prompt.is_empty() || a.prompt.len() > MAX_PROMPT {
-                return Err("action project/prompt empty or prompt too long".into());
+        let mut decision = Decision {
+            state: result.state,
+            actions: Vec::new(),
+            outcome: None,
+        };
+        for a in result.result {
+            match (a.kind.as_str(), a.project, a.prompt, a.outcome) {
+                ("finish", None, None, Some(outcome)) => {
+                    if outcome.is_empty() || outcome.len() > 64 {
+                        return Err("outcome must be 1..=64 bytes".into());
+                    }
+                    if decision.outcome.replace(outcome).is_some() {
+                        return Err("finish returned more than once".into());
+                    }
+                }
+                ("start_session", Some(project), Some(prompt), None) => {
+                    let key_ok = !a.key.is_empty()
+                        && a.key.len() <= 64
+                        && a.key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+                    if !key_ok {
+                        return Err(format!("invalid action key {:?}", a.key));
+                    }
+                    if project.is_empty() || prompt.is_empty() || prompt.len() > MAX_PROMPT {
+                        return Err("action project/prompt empty or prompt too long".into());
+                    }
+                    decision.actions.push(Action {
+                        kind: a.kind,
+                        key: a.key,
+                        project,
+                        prompt,
+                    });
+                }
+                (kind, ..) => return Err(format!("invalid {kind:?} action")),
             }
         }
-        if self.outcome.as_ref().is_some_and(|o| o.is_empty() || o.len() > 64) {
-            return Err("outcome must be 1..=64 bytes".into());
+        if decision.outcome.is_some() && !decision.actions.is_empty() {
+            return Err("finish cannot be combined with other actions".into());
         }
-        Ok(())
+        Ok(decision)
     }
 }
 
@@ -284,7 +325,7 @@ impl WorkflowHost {
                 offered: self.script.hash.clone(),
             });
         }
-        let decision = match self.evaluate(&wf.state, &event) {
+        let decision = match self.evaluate(&wf, &wf.state, &event) {
             Ok(d) => d,
             Err(d) => {
                 // Attributable failure: record it, fail the run, propose nothing.
@@ -347,12 +388,12 @@ impl WorkflowHost {
         Ok(())
     }
 
-    fn evaluate(&self, state: &Json, event: &Json) -> std::result::Result<Decision, Diagnostic> {
-        let (value, _) = self.engine.call(&self.script, state, event)?;
-        let decision: Decision = serde_json::from_value(value)
+    fn evaluate(&self, wf: &Workflow, state: &Json, event: &Json) -> std::result::Result<Decision, Diagnostic> {
+        let ctx = json!({"workflow": wf.id, "owner": wf.owner, "state": state});
+        let (value, _) = self.engine.call(&self.script, &ctx, event)?;
+        let result: CallResult = serde_json::from_value(value)
             .map_err(|e| Engine::invalid(&self.script, format!("result does not match host API v1: {e}")))?;
-        decision.validate().map_err(|e| Engine::invalid(&self.script, e))?;
-        Ok(decision)
+        Decision::from_result(result).map_err(|e| Engine::invalid(&self.script, e))
     }
 
     /// Dispatch every pending action of running workflows, re-checking
@@ -420,12 +461,13 @@ impl WorkflowHost {
             )?;
             stmt.query_map([id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
         };
+        let wf = self.get(id)?;
         let mut state = json!({});
         let mut keys = Vec::new();
         let mut outcome = None;
         for e in events {
             let event: Json = serde_json::from_str(&e).map_err(|e| WorkflowError::Db(e.to_string()))?;
-            let d = self.evaluate(&state, &event).map_err(WorkflowError::Script)?;
+            let d = self.evaluate(&wf, &state, &event).map_err(WorkflowError::Script)?;
             keys.extend(d.actions.iter().map(|a| a.key.clone()));
             state = Json::Object(d.state);
             outcome = d.outcome.or(outcome);
