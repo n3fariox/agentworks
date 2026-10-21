@@ -241,7 +241,11 @@ export function createWorkspace(hooks){
     try{const location=await api('/api/locations',{method:'POST',body:JSON.stringify({cwd:$('location-path').value,projectId:state.projectId})});await hooks.refreshSessions();state.locationKey=location.id;contextControls();resetFiles();$('location-dialog').close();showView('files');}
     catch(error){$('location-error').textContent=error.message;}finally{$('save-location').disabled=false;}
   };
-  $('refresh-files').onclick=loadFiles;$('files-hidden').onchange=()=>{state.hidden=$('files-hidden').checked;loadFiles();};
+  $('refresh-files').onclick=loadFiles;
+  // Both file browsers share the hidden-files flag, so the two checkboxes stay in step.
+  const setHiddenFiles=checked=>{state.hidden=checked;$('files-hidden').checked=checked;$('side-files-hidden').checked=checked;};
+  $('files-hidden').onchange=()=>{setHiddenFiles($('files-hidden').checked);loadFiles();};
+  $('side-files-hidden').onchange=()=>{setHiddenFiles($('side-files-hidden').checked);loadSideFiles();};
   $('automation-source').onclick=()=>{const origin=hooks.getActive()?.automation;if(origin)openAutomation(origin.automationId);};
   $('new-automation').onclick=()=>automationEditor();$('dismiss-automation').onclick=()=>$('automation-dialog').close();
   $('automation-provider').onchange=()=>{editorGeneration++;$('automation-model').value='';$('automation-models').replaceChildren();};$('automation-directory').oninput=()=>{editorGeneration++;};

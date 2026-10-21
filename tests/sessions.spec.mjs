@@ -363,7 +363,7 @@ test('side panel: files and diff beside the chat, resizable on desktop, full scr
   const {mkdir,writeFile,rm}=await import('node:fs/promises'),{resolve,join}=await import('node:path'),{randomUUID}=await import('node:crypto');
   const cwd=resolve('.cache/browser-side-panel-'+randomUUID());await mkdir(join(cwd,'src'),{recursive:true});
   try{
-  await writeFile(join(cwd,'notes.md'),'# Side notes');await writeFile(join(cwd,'src/main.js'),'export const answer=42;\n');
+  await writeFile(join(cwd,'notes.md'),'# Side notes');await writeFile(join(cwd,'src/main.js'),'export const answer=42;\n');await writeFile(join(cwd,'.hidden-note.md'),'# Hidden note');
   await writeFile(join(cwd,'pic.png'),Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=','base64'));
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.setViewportSize({width:1400,height:900});
@@ -373,6 +373,10 @@ test('side panel: files and diff beside the chat, resizable on desktop, full scr
   // Files from the session bar opens a third column; the chat stays visible beside it.
   await page.locator('#session-files').click();await expect(panel).toBeVisible();await expect(page.locator('#session-files')).toHaveAttribute('aria-expanded','true');
   await expect(page.locator('#conversation')).toBeVisible();
+  // Hidden files stay invisible until the side panel's own toggle reveals them; both toggles share the flag.
+  await expect(page.locator('#side-file-entries')).not.toContainText('.hidden-note.md');
+  await page.locator('#side-files-hidden').check();await expect(page.locator('#side-file-entries')).toContainText('.hidden-note.md');await expect(page.locator('#files-hidden')).toBeChecked();
+  await page.locator('#side-files-hidden').uncheck();await expect(page.locator('#side-file-entries')).not.toContainText('.hidden-note.md');
   await page.locator('#side-file-entries .file-entry').filter({hasText:'src'}).click();await page.locator('#side-file-entries .file-entry').filter({hasText:'main.js'}).click();
   await expect(page.locator('#workspace-preview')).toContainText('answer');await expect(page.locator('#side-file-browser')).toBeHidden();
   // The toggle switches to Diff and back without losing the open file.
