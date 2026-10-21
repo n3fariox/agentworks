@@ -183,6 +183,9 @@ pub async fn configure(
 ) -> ApiResult {
     let _gate = app.run_lock.lock().await;
     let s = session(&app, &id)?;
+    if input.enabled {
+        crate::local_only(&s)?;
+    }
     let manual = input.manual_due_at;
     if let Some(due) = manual {
         if !input.enabled {
@@ -441,6 +444,9 @@ pub async fn scheduler(app: App) {
         }
         let sessions: Vec<Arc<Session>> = app.sessions.lock().unwrap().values().cloned().collect();
         for s in &sessions {
+            if s.host_id != "local" {
+                continue;
+            }
             let p = s.data.lock().unwrap().continuation.clone();
             if !p.limited || p.due_at.is_none() {
                 continue;
@@ -873,7 +879,7 @@ fn codex_reset(result: &Value) -> Option<u64> {
     if unknown { None } else { latest }
 }
 pub async fn enrich_codex(s: &Session, error: &Value) {
-    if s.provider != "codex" || error_evidence("codex", error).is_none() {
+    if s.host_id != "local" || s.provider != "codex" || error_evidence("codex", error).is_none() {
         return;
     }
     let generation = s.data.lock().unwrap().continuation.generation;

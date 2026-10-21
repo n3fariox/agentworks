@@ -24,7 +24,7 @@ Expose one Agentworks MCP server backed by application services shared with the 
 
 Start with a stdio MCP entry point in the existing executable (`agentworks mcp`). A small client bridge talks to the running service through a private local endpoint. Agent identity comes from a service-issued credential, never from a caller-supplied session ID. Use an official MCP Rust SDK after checking transport and runtime compatibility. This is separate from the existing ACP client.
 
-Later, route operations by stable host/session IDs through the planned SSH-connected host service. Remote paths remain owned by their execution host. An external MCP client can be added with its own explicitly granted identity; it must not impersonate an existing conversation.
+Later, route operations by stable host/session IDs through the remote worker link. Remote paths remain owned by their execution host. An external MCP client can be added with its own explicitly granted identity; it must not impersonate an existing conversation.
 
 References: [ACP session setup and MCP configuration](https://agentclientprotocol.com/protocol/v1/session-setup), [official MCP Rust SDK](https://github.com/modelcontextprotocol/rust-sdk), [MCP security guidance](https://modelcontextprotocol.io/docs/2025-11-25/tutorials/security/security_best_practices).
 

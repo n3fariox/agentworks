@@ -87,7 +87,7 @@ try {
     const path = url.pathname.slice(mount.length);
     if (failed.has(path)) return route.fulfill({status:503,body:'fixture failure'});
     let body;
-    if (path === 'api/catalog') body = {hosts:[{id:'local',name:'Local',status:'connected'},{id:'remote',name:'Remote',status:'disconnected'}],projects:[{id:'p1',name:'Active project'},{id:'p2',name:'Archived project',archived:true},{id:'p0',name:'Empty project'}],locations:[]};
+    if (path === 'api/catalog') body = {hosts:[{id:'local',name:'Local',status:'connected'},{id:'remote',name:'Remote',status:'disconnected',kind:'remote',destination:'dev@remote',detail:'ssh exited (exit status: 255). Last output: dev@remote: Permission denied (publickey).'},{id:'rock',name:'Rock',status:'connected',kind:'remote',destination:'captain@rock',detail:'',worker:{providers:['demo','opencode']}}],projects:[{id:'p1',name:'Active project'},{id:'p2',name:'Archived project',archived:true},{id:'p0',name:'Empty project'}],locations:[]};
     else if (path === 'api/sessions') {assert.equal(url.searchParams.has('archived'),false);body = empty?[]:sessions;}
     else if (path === 'api/status') body = {providers:[{id:'claude',installed:true,authMode:'existing',keyPresent:false},{id:'codex',installed:true,authMode:'api_key',keyPresent:true}],credentials:secret};
     else if (snapshots[decodeURIComponent(path.split('/').at(-1))]) body = snapshots[decodeURIComponent(path.split('/').at(-1))];
@@ -101,6 +101,8 @@ try {
   assert.equal(await page.title(),'Operations dashboard · Agentworks');
   const hostText = await page.locator('#hosts').innerText();
   assert.match(hostText,/connected/); assert.match(hostText,/disconnected/); assert.match(hostText,/1 active turn/);
+  assert.match(hostText,/ssh dev@remote/); assert.match(hostText,/Permission denied \(publickey\)/);
+  assert.match(hostText,/ssh captain@rock · demo, opencode/);
   const active = page.locator('details.project').filter({has:page.locator('summary',{hasText:'Active project'})});
   assert.match(await active.locator('summary').innerText(),/1 active turn/);
   await active.locator('summary').click();

@@ -87,7 +87,7 @@ try{
  // Mobile controls expose explicit authorization and visible bounded status.
  browser=await chromium.launch({headless:true});const page=await browser.newPage({viewport:{width:390,height:844}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
  await page.goto(base);await page.evaluate(id=>localStorage.setItem('agentworks-session',id),id);await page.reload();await page.locator('#session-more').click();await page.locator('#session-agents').click();await expect(page.locator('#inbox-delivery-status')).toContainText('Off');
- await expect(page.locator('#inbox-maxTurns')).toBeVisible();await page.locator('#inbox-maxTurns').fill('2');await page.locator('#inbox-delivery-controls button[type=submit]').click();await expect(page.locator('#inbox-delivery-status')).toContainText('Enabled');
+ await expect(page.locator('#inbox-maxTurns')).toBeVisible();await page.locator('#inbox-maxTurns').fill('2');await page.locator('#inbox-deadline').fill('');await page.locator('#inbox-delivery-controls button[type=submit]').click();await expect(page.locator('#inbox-delivery-status')).toContainText('Enabled');
  assert(await page.locator('#inbox-maxTurns').evaluate(n=>{const r=n.getBoundingClientRect();return r.width>0&&r.left>=0&&r.right<=innerWidth&&r.height>=44;}));
  assert(await page.locator('#inbox-unlimitedTurns').evaluate(n=>{const r=n.getBoundingClientRect();return r.width>0&&r.left>=0&&r.right<=innerWidth;}));
  await expect(page.locator('#inbox-delivery-status')).toContainText('standing');await expect(page.locator('#inbox-delivery-status')).toContainText('0/2 turns');
@@ -114,7 +114,7 @@ try{
  await api(path(id)+'/resume',{});await until(async()=>(await snap(id)).session.status==='error');await api(path(id)+'/inbox-delivery',{enabled:true,requestId:'unavailable',deadline:Date.now()+60000,maxTurns:1,cooldownSeconds:5,maxBatch:1},'PUT',409);await delay(1500);assert.equal((await policy(id)).policy.enabled,false);assert.equal(native(await snap(id)),originalNative);await writeFile(nativeFile,saved);
  // Deletion cascades policy/ledger, preserving historical peer messages.
  const doomed=await create('Deleted recipient');await authorize(doomed);await send(doomed);await api(path(doomed),undefined,'DELETE');assert.equal(sql(`SELECT count(*) FROM inbox_policies WHERE session_id='${doomed}'`)[0][0],0);assert.equal(sql(`SELECT count(*) FROM inbox_deliveries WHERE recipient='${doomed}'`)[0][0],0);
- assert.equal(sql('PRAGMA user_version')[0][0],7);
- console.log('PASS completion cancellation, accessible mobile enable/cancel, restart ambiguity/no replay, unavailable native context, deletion and schema v7');
+ assert.equal(sql('PRAGMA user_version')[0][0],8);
+ console.log('PASS completion cancellation, accessible mobile enable/cancel, restart ambiguity/no replay, unavailable native context, deletion and schema v8');
  console.log(`Fixture root: ${dir}`);
 }finally{if(browser)await browser.close();if(server)await stop();await removeFixture(dir);}
