@@ -29,7 +29,7 @@
 .side-tabs button[aria-selected=true]{background:#2b2735;color:#d2c5f2}
 #side-close{margin-left:auto;font-size:20px;padding:2px 8px}
 .side-tab-panel{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column}
-#side-file-browser{padding:10px 12px}
+#side-file-browser{padding:10px 12px}#side-file-browser .workspace-check{display:flex;align-items:center;gap:6px;margin:0 2px 7px;font-size:11px;color:#9197a3}
 #side-file-crumbs{display:flex;flex-wrap:wrap;gap:5px;align-items:center;font-size:11px;color:#9197a3;padding:4px 2px 9px;border-bottom:1px solid var(--border);margin-bottom:8px;overflow-wrap:anywhere}
 #side-file-crumbs button{font-size:11px;padding:3px;overflow-wrap:anywhere;text-align:left}
 #side-file-entries{display:flex;flex-direction:column;gap:2px}
