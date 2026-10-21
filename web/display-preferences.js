@@ -143,7 +143,7 @@ export function setupDisplayPreferences({root=document,storage=localStorage}={})
   // Wrap each <pre> in a labeled block; key identifies the block across Markdown re-renders.
   function enhance(container,key='block',{language:fallbackLanguage='',lineNumbers=false,diff=false,raw:copyRaw}={}){
     [...container.querySelectorAll('pre')].forEach((pre,index)=>{
-      if(pre.closest('.code-block'))return;
+      if(pre.closest('.code-block,.mermaid-block'))return;
       let code=pre.querySelector(':scope > code');
       if(!code){code=root.createElement('code');code.append(...pre.childNodes);pre.append(code);}
       const raw=code.textContent,language=/(?:^|\s)language-(\S+)/.exec(code.className)?.[1]||fallbackLanguage;

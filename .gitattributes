@@ -1,2 +1,4 @@
 # Preserve upstream template-literal bytes; the adapter test checks its SHA-256.
 vendor/codex-acp/dist/index.js whitespace=-blank-at-eol
+# Generated Mermaid bundle includes upstream template literals with significant whitespace.
+web/mermaid-frame.bundle.js whitespace=-blank-at-eol

@@ -1,1 +1,13 @@
-{"type":"module"}
+{
+  "type": "module",
+  "dependencies": {
+    "dompurify": "3.4.17",
+    "mermaid": "12.2.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  },
+  "scripts": {
+    "build:mermaid": "cd .. && node scripts/build-mermaid.mjs"
+  }
+}

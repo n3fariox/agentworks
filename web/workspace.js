@@ -1,3 +1,4 @@
+import {enhanceMermaid} from './mermaid.js';
 import {appUrl, localState as localStorage, sessionState as sessionStorage} from './hosting.js';
 export function createWorkspace(hooks){
   const $=id=>document.getElementById(id),el=(tag,cls,text)=>{const node=document.createElement(tag);if(cls)node.className=cls;if(text!==undefined)node.textContent=text;return node;};
@@ -127,7 +128,7 @@ export function createWorkspace(hooks){
     else if(file.loading)body.textContent='Loading file…';
     else if(file.type?.startsWith('image/')){const image=el('img','file-image');image.src=fileUrl(file);image.alt=file.path;body.append(image);}
     else if(file.type?.startsWith('text/')){
-      if(!file.source&&file.html){body.innerHTML=file.html;decorate(body,file,side);}else body.append(el('pre','workspace-source',file.text.slice(0,100000)));
+      if(!file.source&&file.html){body.innerHTML=file.html;decorate(body,file,side);enhanceMermaid(body,file.mermaidClass);}else body.append(el('pre','workspace-source',file.text.slice(0,100000)));
       hooks.enhanceBlocks?.(body,`workspace:${file.location.id}:${file.path}`,{language:!file.source&&file.html?'':/\.([\w+-]+)$/.exec(file.path)?.[1]||'',lineNumbers:file.source||!file.html,raw:file.source||!file.html?file.text:undefined});
       if(file.line&&file.source){
         const code=body.querySelector('pre code');
@@ -159,7 +160,7 @@ export function createWorkspace(hooks){
       file.type=response.headers.get('content-type')||'';
       if(file.type.startsWith('text/')){
         file.text=await response.text();
-        if(/\.md$/i.test(file.path)){const result=await api('/api/markdown',{method:'POST',body:JSON.stringify({text:file.text.slice(0,24000)})});file.html=result.html;}
+        if(/\.md$/i.test(file.path)){const result=await api('/api/markdown',{method:'POST',body:JSON.stringify({text:file.text.slice(0,24000)})});file.html=result.html;file.mermaidClass=result.mermaidClass;}
       }
     }catch(error){file.error=error.message;}finally{file.loading=false;if((side?state.sideFile:state.file)===file)renderPreview(file,side);}
   }
