@@ -217,30 +217,42 @@ fn replay_rebuilds_identical_progress() {
 #[test]
 fn parser_failure_is_isolated_and_attributable() {
     let engine = engine();
+    let ok = "    return Progress(phase = \"Loading\", label = None, counts = [])\n";
     let failing = [
         (
             "raises.star",
-            "    if \"boom\" in line:\n        fail(\"cannot parse\")\n    return ParseResult(state = state, progress = Progress(phase = \"Loading\", label = None, counts = []))\n",
+            "        fail(\"cannot parse\")\n",
             DiagnosticKind::Runtime,
         ),
         (
             "loops.star",
-            "    if \"boom\" in line:\n        for i in range(1000000000):\n            pass\n    return ParseResult(state = state, progress = Progress(phase = \"Loading\", label = None, counts = []))\n",
+            "        for i in range(1000000000):\n            pass\n",
             DiagnosticKind::Limit,
         ),
         (
             "invalid.star",
-            "    if \"boom\" in line:\n        return ParseResult(state = state, progress = Progress(phase = \"Loading\", label = None, counts = [Counts(done = 5, total = 2, unit = \"actions\")]))\n    return ParseResult(state = state, progress = Progress(phase = \"Loading\", label = None, counts = []))\n",
+            "        return Progress(phase = \"Loading\", label = None, counts = [Counts(done = 5, total = 2, unit = \"actions\")])\n",
             DiagnosticKind::InvalidResult,
         ),
         (
             "huge.star",
-            "    if \"boom\" in line:\n        return ParseResult(state = state, progress = Progress(phase = \"Loading\", label = line * 10000, counts = []))\n    return ParseResult(state = state, progress = Progress(phase = \"Loading\", label = None, counts = []))\n",
+            "        return Progress(phase = \"Loading\", label = line * 10000, counts = [])\n",
             DiagnosticKind::Limit,
         ),
+        (
+            "big_state.star",
+            "        ctx.state[\"blob\"] = line * 10000\n",
+            DiagnosticKind::Limit,
+        ),
+        (
+            "not_data.star",
+            "        ctx.state[\"f\"] = regex_match\n",
+            DiagnosticKind::InvalidResult,
+        ),
     ];
-    for (name, body, kind) in failing {
-        let script = install(&engine, name, Capability::Parser, &parser_source(body)).unwrap();
+    for (name, branch, kind) in failing {
+        let body = format!("    if \"boom\" in line:\n{branch}{ok}");
+        let script = install(&engine, name, Capability::Parser, &parser_source(&body)).unwrap();
         let parser = StarlarkParser {
             engine: Arc::clone(&engine),
             script,
@@ -262,4 +274,41 @@ fn parser_failure_is_isolated_and_attributable() {
         assert_eq!(tool.status.as_deref(), Some("failed"));
         assert_eq!(tool.view(), "Exit 2");
     }
+}
+
+/// Values computed from earlier lines live in `ctx.state`, mutated in place.
+#[test]
+fn state_spans_lines_and_provisional_changes_are_discarded() {
+    let engine = engine();
+    let body = "    state = ctx.state
+    state.setdefault(\"lines\", 0)
+    if line:
+        state[\"lines\"] += 1
+    m = regex_match(\"^Target (//\\\\S+)$\", line)
+    if m != None:
+        state[\"target\"] = m[0]
+    if \"target\" not in state:
+        return None
+    label = \"{} after {} lines{}\".format(state[\"target\"], state[\"lines\"], \" (partial)\" if ctx.provisional else \"\")
+    return Progress(phase = \"Building\", label = label, counts = [])
+";
+    let script = install(&engine, "multi_line.star", Capability::Parser, &parser_source(body)).unwrap();
+    let parser = StarlarkParser { engine, script };
+    let mut tool = build();
+    tool.apply(&parser, &delta("noise\nTarget //app:server\nmore\npart"), Some(1));
+    // Three committed lines; the provisional fourth saw lines=4 but did not keep it.
+    assert_eq!(
+        tool.progress().unwrap().label.as_deref(),
+        Some("//app:server after 4 lines (partial)")
+    );
+    tool.apply(&parser, &delta("ial\n"), Some(2));
+    assert_eq!(
+        tool.progress().unwrap().label.as_deref(),
+        Some("//app:server after 4 lines (partial)")
+    );
+    tool.apply(&parser, &delta("x"), Some(3));
+    assert_eq!(
+        tool.progress().unwrap().label.as_deref(),
+        Some("//app:server after 5 lines (partial)")
+    );
 }

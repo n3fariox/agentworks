@@ -5,19 +5,18 @@
 # Reported counts. The host rejects done > total; no percentage field exists.
 Counts = record(done = int, total = int, unit = str)
 
-# Serializable state carried between calls for one tool output stream.
-ParserState = record(phase = str | None, counts = list[Counts])
-
 # Structured progress shown to the user.
 Progress = record(phase = str, label = str | None, counts = list[Counts])
 
-# Return value of `on_line(state: ParserState, line: str) -> ParseResult`.
-ParseResult = record(state = ParserState, progress = Progress | None)
-
-def empty_state() -> ParserState:
-    return ParserState(phase = None, counts = [])
-
-def state_from_json(data: dict[str, typing.Any]) -> ParserState:
-    """Rebuild persisted state; used by the host before each call."""
-    counts = [Counts(done = c["done"], total = c["total"], unit = c["unit"]) for c in data.get("counts", [])]
-    return ParserState(phase = data.get("phase"), counts = counts)
+# Context for `on_line(ctx: LineContext, line: str) -> Progress | None`.
+# `state` belongs to the script and is mutated in place. It may hold only
+# plain data (str, int, float, bool, None, list, dict) and starts as {} for
+# each output stream. Changes are kept only for committed lines: for the
+# unterminated current line (`provisional`) they are discarded. State is
+# temporary; after a reload it is rebuilt by replaying the raw output.
+LineContext = record(
+    command = str,
+    stream = str,
+    provisional = bool,
+    state = dict[str, typing.Any],
+)

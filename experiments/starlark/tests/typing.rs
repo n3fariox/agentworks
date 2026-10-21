@@ -26,7 +26,7 @@ fn typed_samples_install_with_exact_host_signatures() {
     assert_eq!(workflow.capability, Capability::Workflow);
     assert_eq!(
         Capability::Parser.signature(),
-        "def(state: ParserState, line: str) -> ParseResult"
+        "def(ctx: LineContext, line: str) -> None | Progress"
     );
     assert_eq!(
         Capability::Workflow.signature(),
@@ -38,19 +38,19 @@ fn typed_samples_install_with_exact_host_signatures() {
 fn static_errors_are_rejected_at_install_even_in_uncalled_code() {
     let cases = [
         (
-            "    return ParseResult(state = state, progress = state.phse)\n",
-            "attribute `phse` is not available",
+            "    return ctx.stat\n",
+            "attribute `stat` is not available on the type `LineContext`",
         ),
         (
-            "    return state\n",
-            "Expected type `ParseResult` but got `ParserState`",
+            "    return ctx\n",
+            "Expected type `None | Progress` but got `LineContext`",
         ),
         (
-            "    return ParseResult(state = ParserState(phase = 3, counts = []), progress = None)\n",
-            "Expected type `None | str` but got `int`",
+            "    return Progress(phase = 3, label = None, counts = [])\n",
+            "Expected type `str` but got `int`",
         ),
         (
-            "    m = regex_match(1, line)\n    return ParseResult(state = state, progress = None)\n",
+            "    m = regex_match(1, line)\n    return None\n",
             "Expected type `str` but got `int`",
         ),
     ];
@@ -60,7 +60,7 @@ fn static_errors_are_rejected_at_install_even_in_uncalled_code() {
         assert!(d.message.contains(expected), "{expected:?} not in {d}");
     }
     let uncalled = format!(
-        "{PARSER_HEAD}def _never() -> int:\n    return \"x\"\ndef on_line(state: ParserState, line: str) -> ParseResult:\n    return ParseResult(state = state, progress = None)\n"
+        "{PARSER_HEAD}def _never() -> int:\n    return \"x\"\ndef on_line(ctx: LineContext, line: str) -> Progress | None:\n    return None\n"
     );
     let d = install_error(Capability::Parser, &uncalled);
     assert_eq!(d.kind, DiagnosticKind::Type);
@@ -69,21 +69,16 @@ fn static_errors_are_rejected_at_install_even_in_uncalled_code() {
 
 #[test]
 fn entry_point_must_match_the_typed_host_contract() {
-    let unannotated =
-        format!("{PARSER_HEAD}def on_line(state, line):\n    return ParseResult(state = state, progress = None)\n");
+    let unannotated = format!("{PARSER_HEAD}def on_line(ctx, line):\n    return None\n");
     let d = install_error(Capability::Parser, &unannotated);
     assert!(
         d.message
-            .contains("found `def(state: typing.Any, line: typing.Any) -> typing.Any`"),
+            .contains("found `def(ctx: typing.Any, line: typing.Any) -> typing.Any`"),
         "{d}"
     );
-    let wrong = format!(
-        "{PARSER_HEAD}def on_line(state: ParserState, line: int) -> ParseResult:\n    return ParseResult(state = state, progress = None)\n"
-    );
+    let wrong = format!("{PARSER_HEAD}def on_line(ctx: LineContext, line: int) -> Progress | None:\n    return None\n");
     assert_eq!(install_error(Capability::Parser, &wrong).kind, DiagnosticKind::Type);
-    let missing = format!(
-        "{PARSER_HEAD}def parse(state: ParserState, line: str) -> ParseResult:\n    return ParseResult(state = state, progress = None)\n"
-    );
+    let missing = format!("{PARSER_HEAD}def parse(ctx: LineContext, line: str) -> Progress | None:\n    return None\n");
     assert!(
         install_error(Capability::Parser, &missing)
             .message
@@ -110,10 +105,14 @@ fn values_from_untyped_json_are_checked_at_runtime() {
     assert_eq!(d.kind, DiagnosticKind::Type, "{d}");
     assert!(d.message.contains("does not match the type annotation"), "{d}");
     // Not every mistake is static: `str + int` in a body is a runtime error.
-    let source = parser_source("    x = line + 1\n    return ParseResult(state = state, progress = None)\n");
+    let source = parser_source("    x = line + 1\n    return None\n");
     let script = install(&engine, "dynamic.star", Capability::Parser, &source).unwrap();
     let d = engine
-        .call(&script, &json!({"phase": null, "counts": []}), &json!("x"))
+        .call(
+            &script,
+            &json!({"command": "bazel build", "stream": "t", "provisional": false, "state": {}}),
+            &json!("x"),
+        )
         .unwrap_err();
     assert_eq!(d.kind, DiagnosticKind::Runtime);
 }
@@ -122,7 +121,7 @@ fn values_from_untyped_json_are_checked_at_runtime() {
 fn capabilities_are_separate_and_installation_is_explicit() {
     // A parser cannot load workflow action constructors.
     let parser = "load(\"@agentworks//workflow.star\", \"start_session\")\n".to_owned()
-        + &parser_source("    return ParseResult(state = state, progress = None)\n")[PARSER_HEAD.len()..];
+        + &parser_source("    return None\n")[PARSER_HEAD.len()..];
     assert_eq!(
         install_error(Capability::Parser, &parser).kind,
         DiagnosticKind::Capability

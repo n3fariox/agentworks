@@ -56,13 +56,13 @@ impl Capability {
     /// Host API v1 entry signature, as rendered by the starlark typechecker.
     pub fn signature(self) -> &'static str {
         match self {
-            Capability::Parser => "def(state: ParserState, line: str) -> ParseResult",
+            Capability::Parser => "def(ctx: LineContext, line: str) -> None | Progress",
             Capability::Workflow => "def(state: dict[str, typing.Any], event: Event) -> Decision",
         }
     }
     fn converter(self) -> &'static str {
         match self {
-            Capability::Parser => "state_from_json",
+            Capability::Parser => "LineContext",
             Capability::Workflow => "event_from_json",
         }
     }
@@ -420,13 +420,17 @@ impl Engine {
         Ok(compiled)
     }
 
-    /// Evaluate `entry(converter(first), second)` in a fresh heap with limits.
-    /// Parser: `on_line(state_from_json(state), line)`.
+    /// Evaluate the entry point in a fresh heap with limits.
+    /// Parser: `first` is `{command, stream, provisional, state}`, `second` the line;
+    /// returns `{progress, state}`, with `state` null for provisional calls.
     /// Workflow: `on_event(state, event_from_json(event))`.
     /// Never panics; all failures become attributable diagnostics.
     pub fn call(&self, script: &Compiled, first: &Json, second: &Json) -> Result<(Json, CallStats), Diagnostic> {
         let limits = Limits::for_capability(script.capability);
-        let (state, input) = (first, second);
+        let (state, input) = match script.capability {
+            Capability::Parser => (&first["state"], second),
+            Capability::Workflow => (first, second),
+        };
         let state_len = serde_json::to_string(state).map(|s| s.len()).unwrap_or(usize::MAX);
         if state_len > limits.max_state_bytes {
             return Err(script.diagnostic(
@@ -491,22 +495,32 @@ impl Engine {
                     script.entry.owned_frozen_value(module.frozen_heap()).to_value(),
                 )
             };
-            let (a, b) = match script.capability {
+            let (a, b, state) = match script.capability {
                 Capability::Parser => {
-                    let state = eval
-                        .eval_function(converter, &[heap.alloc(first.clone())], &[])
-                        .map_err(classify)?;
-                    (state, heap.alloc(second.clone()))
+                    // `ctx.state` is a fresh mutable copy of plain data. Nothing from a
+                    // previous call's heap is referenced, so states never chain heaps.
+                    let state = heap.alloc(first["state"].clone());
+                    let fields = [
+                        ("command", heap.alloc(first["command"].as_str().unwrap_or(""))),
+                        ("stream", heap.alloc(first["stream"].as_str().unwrap_or(""))),
+                        (
+                            "provisional",
+                            heap.alloc(first["provisional"].as_bool().unwrap_or(false)),
+                        ),
+                        ("state", state),
+                    ];
+                    let ctx = eval.eval_function(converter, &[], &fields).map_err(classify)?;
+                    (ctx, heap.alloc(second.clone()), Some(state))
                 }
                 Capability::Workflow => {
                     let event = eval
                         .eval_function(converter, &[heap.alloc(second.clone())], &[])
                         .map_err(classify)?;
-                    (heap.alloc(first.clone()), event)
+                    (heap.alloc(first.clone()), event, None)
                 }
             };
             let result = eval.eval_function(entry, &[a, b], &[]).map_err(classify)?;
-            let json = result.to_json_value().map_err(|e| {
+            let mut json = result.to_json_value().map_err(|e| {
                 script.diagnostic(
                     DiagnosticKind::InvalidResult,
                     format!("result is not JSON-compatible: {e}"),
@@ -518,6 +532,28 @@ impl Engine {
                     DiagnosticKind::Limit,
                     format!("result exceeds {} bytes", limits.max_output_bytes),
                 ));
+            }
+            if let Some(state) = state {
+                // Provisional calls never commit, so their state is not even copied out.
+                let committed = if first["provisional"] == true {
+                    Json::Null
+                } else {
+                    let committed = state.to_json_value().map_err(|e| {
+                        script.diagnostic(
+                            DiagnosticKind::InvalidResult,
+                            format!("ctx.state must hold only plain data: {e}"),
+                        )
+                    })?;
+                    let size = serde_json::to_string(&committed).map(|s| s.len()).unwrap_or(usize::MAX);
+                    if size > limits.max_state_bytes {
+                        return Err(script.diagnostic(
+                            DiagnosticKind::Limit,
+                            format!("ctx.state exceeds {} bytes", limits.max_state_bytes),
+                        ));
+                    }
+                    committed
+                };
+                json = serde_json::json!({"progress": json, "state": committed});
             }
             Ok((
                 json,

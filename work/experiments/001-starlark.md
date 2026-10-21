@@ -55,7 +55,7 @@ starlark-rust's canonical typing support is enabled at every level it offers:
 2. `AstModuleTypecheck::typecheck` lints the whole module at install time against the capability's globals and prelude interface.
 3. `Evaluator::enable_static_typechecking(true)` makes compiling the module typecheck every `def`, called or not, using real values.
 
-The host also requires the compiled entry point's type to equal the host API signature exactly: `def(state: ParserState, line: str) -> ParseResult` or `def(state: dict[str, typing.Any], event: Event) -> Decision`. Unannotated or mistyped entry points are rejected at install.
+The host also requires the compiled entry point's type to equal the host API signature exactly: `def(ctx: LineContext, line: str) -> None | Progress` or `def(state: dict[str, typing.Any], event: Event) -> Decision`. Unannotated or mistyped entry points are rejected at install.
 
 These errors are caught at install time and tested: misspelled record fields, returning the wrong record type, wrong record field types, wrong argument types to host helpers, a mistyped helper that is never called, unknown globals, and a mismatched or missing entry signature. Values that arrive from JSON (`typing.Any`) are checked at runtime when they reach a typed record field.
 
@@ -65,15 +65,22 @@ Limitations of the library, recorded rather than worked around:
 - Starlark has no `TypedDict`. Workflow state is therefore `dict[str, typing.Any]`, and Rust validates it as JSON with size bounds. Scripts can use records internally.
 - Static checking is gradual: some errors, such as `str + int` inside a body, surface only at runtime as attributable `runtime` diagnostics.
 
+### Parser state model
+
+Parser state is the script's own working memory, mutated in place through `ctx.state`. It is temporary: Rust keeps it in memory per output stream, never persists it, and rebuilds it after a reload by replaying the raw output. Rust copies it in as a fresh mutable dict before each call. For committed lines it copies the dict back out and enforces the 16 KiB limit. For the provisional unterminated line it discards the changes. Multi-line values, such as a target named on one line and counted on a later one, are ordinary keys. A failed call leaves the previous state untouched.
+
+Keeping state as frozen Starlark values between calls, so that it never leaves the interpreter, was tried and rejected. `examples/probe_chain.rs` measures it. Using the previous state inside a call requires registering its frozen heap on the call's heap, so each frozen state keeps every predecessor alive. RSS grew by about 0.75 KiB per line (+225 MB after 300,000 lines), whether or not the script reused old values, and dropping the chain overflowed the stack. starlark-rust 0.14 tracks heap references per heap, keeps mutable heaps confined to a closure (`Module::with_heap` is crate-private), and makes record types private (`RecordGen::typ` is `pub(crate)`). So a safe, bounded carry-over needs a copy, and copying typed records generically is not possible through the public API. State is therefore plain data (str, int, float, bool, None, list, dict), typed `dict[str, typing.Any]` and checked at runtime. Host-provided records such as `Counts` and `Progress` remain fully typed. Typed record state would need either an upstream accessor for a record's type or an unsafe long-lived heap with manual garbage collection.
+
 ### Acceptance evidence
 
-All 28 experiment tests pass under `cargo test --locked -p agentworks-starlark`. The service's 114 Rust tests and the 12 U-05 node tests are unchanged and pass.
+All 29 experiment tests pass under `cargo test --locked -p agentworks-starlark`. The service's 114 Rust tests and the 12 U-05 node tests are unchanged and pass.
 
 | Requirement | Evidence (test) |
 | --- | --- |
 | Split lines, snapshots, deltas, duplicates, changing totals, ANSI/OSC/CR, failure | `parser.rs`: the U-05 fixture `tests/fixtures/bazel-events.json` gives the same views as U-05 at every checkpoint, and the Starlark and built-in snapshots are identical. Every chunk boundary of an ANSI/OSC/CR stream gives identical progress and byte-exact raw output. |
 | No fabricated percentage when the total is unavailable | A partial `[1 / 2` shows no progress. Invalid, unsafe and success-only lines produce no counts. There is no percentage field anywhere in the API. |
 | Output before the command is known | Output retained before the `tool_call` names the command is re-parsed once Bazel is recognized. Writing the Rust port found this case: the line `Load` + `ing:` would otherwise have been misread. |
+| Multi-line state, provisional lines | `state_spans_lines_and_provisional_changes_are_discarded`: a target named on one line labels later progress. Changes made for the unterminated line are visible in its provisional progress but are not kept, so the line count stays correct as the line completes. State that is too large or not plain data, such as a function, is an attributable `limit` or `invalid_result` failure. |
 | Parser failure isolation | Exceptions, tick/wall limits, invalid results (`done > total`) and oversized results each set an attributable `parser_failure` and remove derived progress for that tool only. The view falls back to "In progress"/elapsed. Raw output, later events, tool status and exit code remain exact. No further calls are made to the failed parser. |
 | Restart between steps continues the intended next step | `failure_runs_the_second_step_across_a_restart`: the service crashes after persisting the "fix" decision and before dispatch. After reopening, "fix" is dispatched exactly once with the failure summary. |
 | No duplicate sessions on duplicate completion or crash around dispatch | Duplicate start and completion events are `Duplicate`. Re-proposing an existing key is a single effect. If the effect commits but the service dies before marking it dispatched, the retried dispatch is deduplicated by request ID and one session exists. |
@@ -94,7 +101,7 @@ Measured on this host (12 threads, rustc 1.98.1) with release builds, `examples/
 | Cold build, separate target directory | Service alone: 75 s (release). Experiment alone: 57 s (release) and 31 s (dev). Incremental rebuild of the experiment: under 1 s. |
 | Binary size | The worker, a minimal embedder, is 14.7 MB (8.4 MB stripped) in release. For comparison, the service release binary is 22.0 MB. The service binary itself is unchanged because it does not link the interpreter. |
 | Engine and prelude setup | 2.9 ms once. Compiling and typechecking a sample script takes 0.2–0.4 ms; results are cached by hash. |
-| Parser callback latency (per line) | Starlark: 12.3 µs mean, 12.6 µs p50, 15.7 µs p99 (18 ticks per line). Built-in Rust: 0.86 µs mean, so Starlark is about 14× slower. Fixed embedding overhead (fresh heap, JSON→record, call, record→JSON, validation), measured with a no-op script: 2.3 µs. |
+| Parser callback latency (per line) | Starlark: 12.7 µs mean, 12.7 µs p50, 18.8 µs p99 (14 ticks per line). Built-in Rust, using the same plain-data state: 1.0 µs mean, so Starlark is about 12× slower. Fixed embedding overhead (fresh heap, copying `ctx.state` in and out, call, validation), measured with a no-op script: 1.5 µs. |
 | Stream host end to end | 100,000 lines in 5,000 deltas: 1.30 s, i.e. 105,000 calls including the provisional parses. |
 | Memory over a long stream | RSS 15,084 KiB after 100,000 lines and after 1,000,000 lines (+0 KiB). Per-call heaps do not accumulate. |
 | Worker process | Spawn, compile and first call: 6 ms. Steady state: 36 µs per round trip, including JSON framing with the source in each request. |
@@ -104,21 +111,21 @@ An early run measured 36 µs per line. The cause was cloning `regex::Regex`, whi
 
 ### Comparison
 
-- **Built-in Rust parser plus configuration rules.** This is 14× faster, adds no dependencies, and gives identical output on every fixture. For the single Bazel parser, Starlark adds cost without benefit. Configurable rules would cover regex-plus-capture extensions. Starlark becomes worthwhile only once parsers need control flow, such as multi-line state machines or per-tool quirks, from several authors.
+- **Built-in Rust parser plus configuration rules.** This is about 12× faster, adds no dependencies, and gives identical output on every fixture. For the single Bazel parser, Starlark adds cost without benefit. Configurable rules would cover regex-plus-capture extensions. Starlark becomes worthwhile only once parsers need control flow, such as multi-line state machines or per-tool quirks, from several authors.
 - **Local helper process.** The worker measures this shape: about 6 ms to start and about 36 µs per round trip. The process boundary is also needed to run untrusted Starlark with firm limits, so in-process Starlark is only acceptable for scripts the user installed and trusts. With either option, an out-of-process helper is the safe default for untrusted code.
 - **Architecture.** U-05 derives progress in the browser from persisted events. Moving parsing into Rust, which this experiment does, would require a server-side derived-progress channel and replay story in addition to the interpreter.
 
 ### Minimal host API proposal (v1)
 
 - Installation record: `{name, capability: parser | workflow, hash (blake3 of source), enabled}`. The host compiles only enabled installations whose hash matches. Repository content is never loaded implicitly.
-- Parser: `on_line(state: ParserState, line: str) -> ParseResult`. `ParserState = record(phase: str | None, counts: list[Counts])`, `Counts = record(done: int, total: int, unit: str)`, `Progress = record(phase: str, label: str | None, counts: list[Counts])`. The host supplies complete or provisional lines after ANSI stripping; the only helper is `regex_match(pattern: str, text: str) -> list[str] | None`.
+- Parser: `on_line(ctx: LineContext, line: str) -> Progress | None`. `LineContext = record(command: str, stream: str, provisional: bool, state: dict[str, typing.Any])`. `Counts = record(done: int, total: int, unit: str)`. `Progress = record(phase: str, label: str | None, counts: list[Counts])`. The host supplies complete or provisional lines after ANSI stripping; the only helper is `regex_match(pattern: str, text: str) -> list[str] | None`. New host facts become `ctx` fields, so the signature stays stable.
 - Workflow: `on_event(state: dict[str, typing.Any], event: Event) -> Decision`. `Event = record(id, kind, action_key, outcome, data)`, with kinds `start`, `action_completed` and `action_denied` and outcomes `succeeded`, `failed`, `cancelled` and `interrupted`. `Decision = record(state, actions: list[Action], outcome: str | None)`. The only constructor is `start_session(key, project, prompt) -> Action`.
 - Default limits per call: parser 20,000 ticks, 8 MiB heap, 50 ms wall, 16 KiB input/state/output. Workflow 50,000 ticks, 16 MiB heap, 200 ms wall, 64 KiB, with at most 4 actions per decision, 16 per run and 256 events per run. Call stack depth is 32.
 - Persisted with each run: script name, hash and API version, JSON state, each event with its ID and disposition, and each action with its key, request ID and status.
 
 ### Decision: adjust
 
-- **Do not replace U-05.** Keep the built-in parser. One parser does not justify 106 crates, about a minute of extra cold release build time and a 14× slower path. Revisit if there are several real requests for user-installed parsers. Even then, run them in the worker process unless they are user-trusted.
+- **Do not replace U-05.** Keep the built-in parser. One parser does not justify 106 crates, about a minute of extra cold release build time and a roughly 12× slower path. Revisit if there are several real requests for user-installed parsers. Even then, run them in the worker process unless they are user-trusted.
 - **Workflow decisions:** the shape worked. Pure typed decisions over durable Rust state made restart, idempotency, revocation and replay straightforward to test, and decisions are cheap. Most of that value comes from the Rust host contract, which is language-independent. Starlark is the preferred decision language if a workflow engine is approved, but it is not adopted now.
 - **Prerequisites before any production use:** prune or feature-gate starlark's unneeded dependencies upstream, or vendor-review them; wire `Authorizer` to `communication::require_actor` grants and `Dispatcher` to `control_start`; run evaluation off async threads (`spawn_blocking` or the worker); and add a server-side progress channel if parsing moves to Rust.
 

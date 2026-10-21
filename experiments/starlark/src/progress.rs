@@ -4,8 +4,9 @@
 //! activity"): ACP `content`/`rawOutput`/`terminal_output` are snapshots, only
 //! `terminal_output_delta` appends, persisted sequence numbers deduplicate replay,
 //! ANSI/OSC and CR/LF are handled here, and lines are bounded. The script sees
-//! only `(state, line)`. A parser failure disables derived progress for that tool
-//! and leaves raw output, status and exit metadata untouched.
+//! `on_line(ctx, line)` and mutates `ctx.state` in place. A parser failure
+//! disables derived progress for that tool and leaves raw output, status and
+//! exit metadata untouched.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
@@ -18,19 +19,16 @@ use crate::engine::{CallStats, Compiled, Diagnostic, Engine};
 const MAX_LINE: usize = 16 * 1024;
 const MAX_COUNT: u64 = 9_007_199_254_740_991;
 
+/// Script-owned, temporary per-stream state: plain data only. Kept in memory
+/// for the stream's lifetime and rebuilt by replay; never persisted.
+pub type State = serde_json::Map<String, Json>;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Counts {
     pub done: u64,
     pub total: u64,
     pub unit: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ParserState {
-    pub phase: Option<String>,
-    pub counts: Vec<Counts>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,46 +39,38 @@ pub struct Progress {
     pub counts: Vec<Counts>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ParseResult {
-    pub state: ParserState,
-    pub progress: Option<Progress>,
-}
-
-fn validate_counts(counts: &[Counts]) -> Result<(), String> {
-    if counts.len() > 8 {
-        return Err("more than 8 count entries".into());
-    }
-    for c in counts {
-        if c.done > c.total || c.total > MAX_COUNT || c.unit.is_empty() || c.unit.len() > 32 {
-            return Err(format!("invalid counts {} / {} {:?}", c.done, c.total, c.unit));
-        }
-    }
-    Ok(())
-}
-
-impl ParseResult {
+impl Progress {
     /// Host validation of an untrusted script result.
     pub fn validate(&self) -> Result<(), String> {
-        validate_counts(&self.state.counts)?;
-        if self.state.phase.as_ref().is_some_and(|p| p.is_empty() || p.len() > 64) {
-            return Err("phase must be 1..=64 bytes".into());
+        if self.counts.len() > 8 {
+            return Err("more than 8 count entries".into());
         }
-        if let Some(p) = &self.progress {
-            validate_counts(&p.counts)?;
-            if p.phase.is_empty() || p.phase.len() > 64 || p.label.as_ref().is_some_and(|l| l.len() > 256) {
-                return Err("progress phase/label out of bounds".into());
+        for c in &self.counts {
+            if c.done > c.total || c.total > MAX_COUNT || c.unit.is_empty() || c.unit.len() > 32 {
+                return Err(format!("invalid counts {} / {} {:?}", c.done, c.total, c.unit));
             }
+        }
+        if self.phase.is_empty() || self.phase.len() > 64 || self.label.as_ref().is_some_and(|l| l.len() > 256) {
+            return Err("progress phase/label out of bounds".into());
         }
         Ok(())
     }
 }
 
+/// Read-only host facts for one call; mirrors the prelude's `LineContext`.
+#[derive(Clone, Copy, Debug)]
+pub struct LineContext<'a> {
+    pub command: &'a str,
+    pub stream: &'a str,
+    /// The unterminated current line: state changes must not be kept.
+    pub provisional: bool,
+}
+
 /// One line interpretation step. Implemented by Starlark scripts and by the
-/// built-in Rust baseline used for comparison.
+/// built-in Rust baseline used for comparison. Implementations update `state`
+/// in place only for committed lines, and leave it untouched on error.
 pub trait LineParser {
-    fn parse(&self, state: &ParserState, line: &str) -> Result<ParseResult, Diagnostic>;
+    fn parse(&self, ctx: &LineContext, state: &mut State, line: &str) -> Result<Option<Progress>, Diagnostic>;
 }
 
 pub struct StarlarkParser {
@@ -88,22 +78,38 @@ pub struct StarlarkParser {
     pub script: Arc<Compiled>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CallResult {
+    progress: Option<Progress>,
+    state: Option<State>,
+}
+
 impl StarlarkParser {
-    pub fn parse_with_stats(&self, state: &ParserState, line: &str) -> Result<(ParseResult, CallStats), Diagnostic> {
-        let state_json = serde_json::to_value(state).expect("state serializes");
-        let (value, stats) = self
-            .engine
-            .call(&self.script, &state_json, &Json::String(line.to_owned()))?;
-        let result: ParseResult = serde_json::from_value(value)
+    pub fn parse_with_stats(
+        &self,
+        ctx: &LineContext,
+        state: &mut State,
+        line: &str,
+    ) -> Result<(Option<Progress>, CallStats), Diagnostic> {
+        let input = json!({"command": ctx.command, "stream": ctx.stream, "provisional": ctx.provisional,
+            "state": Json::Object(state.clone())});
+        let (value, stats) = self.engine.call(&self.script, &input, &Json::String(line.to_owned()))?;
+        let result: CallResult = serde_json::from_value(value)
             .map_err(|e| Engine::invalid(&self.script, format!("result does not match host API v1: {e}")))?;
-        result.validate().map_err(|e| Engine::invalid(&self.script, e))?;
-        Ok((result, stats))
+        if let Some(p) = &result.progress {
+            p.validate().map_err(|e| Engine::invalid(&self.script, e))?;
+        }
+        if let Some(next) = result.state {
+            *state = next;
+        }
+        Ok((result.progress, stats))
     }
 }
 
 impl LineParser for StarlarkParser {
-    fn parse(&self, state: &ParserState, line: &str) -> Result<ParseResult, Diagnostic> {
-        self.parse_with_stats(state, line).map(|(r, _)| r)
+    fn parse(&self, ctx: &LineContext, state: &mut State, line: &str) -> Result<Option<Progress>, Diagnostic> {
+        self.parse_with_stats(ctx, state, line).map(|(p, _)| p)
     }
 }
 
@@ -132,46 +138,57 @@ fn builtin_patterns() -> &'static BuiltinPatterns {
 }
 
 impl LineParser for BuiltinBazel {
-    fn parse(&self, state: &ParserState, line: &str) -> Result<ParseResult, Diagnostic> {
+    fn parse(&self, ctx: &LineContext, state: &mut State, line: &str) -> Result<Option<Progress>, Diagnostic> {
         let p = builtin_patterns();
-        let mut next = state.clone();
+        let mut scratch;
+        let state = if ctx.provisional {
+            scratch = state.clone();
+            &mut scratch
+        } else {
+            state
+        };
         let mut label = None;
-        let counts = |d: &str, t: &str, unit: &str| {
+        let counts = |d: &str, t: &str| {
             let d: u64 = d.replace(',', "").parse().ok()?;
             let t: u64 = t.replace(',', "").parse().ok()?;
-            (d <= t && t <= MAX_COUNT).then(|| Counts {
-                done: d,
-                total: t,
-                unit: unit.into(),
-            })
-        };
-        let set = |next: &mut ParserState, c: Counts| {
-            next.counts.retain(|x| x.unit != c.unit);
-            next.counts.push(c);
+            (d <= t && t <= MAX_COUNT).then(|| json!({"done": d, "total": t}))
         };
         if let Some(m) = p.phase.captures(line) {
-            next.phase = Some(m[1].to_owned());
+            state.insert("phase".into(), json!(&m[1]));
         }
         if let Some(m) = p.actions.captures(line)
-            && let Some(c) = counts(&m[1], &m[2], "actions")
+            && let Some(c) = counts(&m[1], &m[2])
         {
-            set(&mut next, c);
-            next.phase = Some("Executing".into());
+            state.insert("actions".into(), c);
+            state.insert("phase".into(), json!("Executing"));
             let l: String = m[3].trim().chars().take(200).collect();
             label = (!l.is_empty()).then_some(l);
         }
         if let Some(m) = p.tests.captures(line)
-            && let Some(c) = counts(&m[1], &m[2], "tests")
+            && let Some(c) = counts(&m[1], &m[2])
         {
-            set(&mut next, c);
-            next.phase = Some("Testing".into());
+            state.insert("tests".into(), c);
+            state.insert("phase".into(), json!("Testing"));
         }
-        let progress = next.phase.clone().map(|phase| Progress {
-            phase,
+        let Some(phase) = state.get("phase").and_then(Json::as_str) else {
+            return Ok(None);
+        };
+        let counts = ["actions", "tests"]
+            .iter()
+            .filter_map(|u| {
+                let c = state.get(*u)?;
+                Some(Counts {
+                    done: c["done"].as_u64()?,
+                    total: c["total"].as_u64()?,
+                    unit: (*u).into(),
+                })
+            })
+            .collect();
+        Ok(Some(Progress {
+            phase: phase.into(),
             label,
-            counts: next.counts.clone(),
-        });
-        Ok(ParseResult { state: next, progress })
+            counts,
+        }))
     }
 }
 
@@ -193,7 +210,7 @@ pub struct Stream {
     line: String,
     escape: Escape,
     overflow: bool,
-    committed: ParserState,
+    committed: State,
     pub progress: Option<Progress>,
     version: u64,
 }
@@ -317,7 +334,7 @@ impl ToolProgress {
                 version: old.version,
                 ..Stream::default()
             };
-            let result = self.feed(parser, &mut stream, &old.raw);
+            let result = self.feed(parser, &key, &mut stream, &old.raw);
             self.streams.insert(key, stream);
             if let Err(d) = result {
                 for s in self.streams.values_mut() {
@@ -344,7 +361,7 @@ impl ToolProgress {
         stream.raw.push_str(data);
         stream.version = version;
         let mut failure = None;
-        if parsing && let Err(d) = self.feed(parser, &mut stream, data) {
+        if parsing && let Err(d) = self.feed(parser, key, &mut stream, data) {
             failure = Some(d);
         }
         self.streams.insert(key.to_owned(), stream);
@@ -357,7 +374,13 @@ impl ToolProgress {
         }
     }
 
-    fn feed(&mut self, parser: &dyn LineParser, stream: &mut Stream, data: &str) -> Result<(), Diagnostic> {
+    fn feed(&mut self, parser: &dyn LineParser, key: &str, stream: &mut Stream, data: &str) -> Result<(), Diagnostic> {
+        let command = self.command.clone().unwrap_or_default();
+        let ctx = |provisional| LineContext {
+            command: &command,
+            stream: key,
+            provisional,
+        };
         for c in data.chars() {
             match stream.escape {
                 Escape::Osc => {
@@ -393,8 +416,7 @@ impl ToolProgress {
                 '\r' | '\n' => {
                     if !stream.overflow {
                         self.calls += 1;
-                        let result = parser.parse(&stream.committed, &stream.line)?;
-                        stream.committed = result.state;
+                        parser.parse(&ctx(false), &mut stream.committed, &stream.line)?;
                     }
                     stream.line.clear();
                     stream.overflow = false;
@@ -412,8 +434,7 @@ impl ToolProgress {
         // Provisional progress includes the unterminated line without committing it.
         self.calls += 1;
         let line = if stream.overflow { "" } else { stream.line.as_str() };
-        let provisional = parser.parse(&stream.committed, line)?;
-        stream.progress = provisional.progress;
+        stream.progress = parser.parse(&ctx(true), &mut stream.committed, line)?;
         Ok(())
     }
 

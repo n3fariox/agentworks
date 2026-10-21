@@ -4,7 +4,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use agentworks_starlark::engine::{Capability, Engine, Installation};
-use agentworks_starlark::progress::{BuiltinBazel, LineParser, ParserState, StarlarkParser, ToolProgress};
+use agentworks_starlark::progress::{BuiltinBazel, LineContext, LineParser, StarlarkParser, State, ToolProgress};
+
+const CTX: LineContext = LineContext {
+    command: "bazel build //...",
+    stream: "t",
+    provisional: false,
+};
 use agentworks_starlark::worker::{WorkerClient, WorkerLimits};
 use serde_json::json;
 
@@ -46,13 +52,13 @@ fn percentile(sorted: &[Duration], p: f64) -> Duration {
 }
 
 fn bench(name: &str, parser: &dyn LineParser, n: usize) {
-    let mut state = ParserState::default();
+    let mut state = State::new();
     let mut samples = Vec::with_capacity(n);
     let started = Instant::now();
     for i in 0..n {
         let l = line(i);
         let t = Instant::now();
-        state = parser.parse(&state, &l).unwrap().state;
+        parser.parse(&CTX, &mut state, &l).unwrap();
         samples.push(t.elapsed());
     }
     let total = started.elapsed();
@@ -94,7 +100,7 @@ fn main() {
     bench("builtin Rust", &BuiltinBazel, 200_000);
     bench("starlark", &starlark, 200_000);
     // Fixed embedding cost: fresh heap, JSON->record state, call, record->JSON, validation.
-    let noop_src = "load(\"@agentworks//progress.star\", \"ParseResult\", \"ParserState\")\ndef on_line(state: ParserState, line: str) -> ParseResult:\n    return ParseResult(state = state, progress = None)\n";
+    let noop_src = "load(\"@agentworks//progress.star\", \"LineContext\", \"Progress\")\ndef on_line(ctx: LineContext, line: str) -> Progress | None:\n    return None\n";
     let noop = engine
         .compile(&Installation::of("noop.star", Capability::Parser, noop_src), noop_src)
         .unwrap();
@@ -108,14 +114,14 @@ fn main() {
     );
 
     // Ticks per call for limit calibration.
-    let (_, stats) = starlark.parse_with_stats(&ParserState::default(), &line(1)).unwrap();
+    let (_, stats) = starlark.parse_with_stats(&CTX, &mut State::new(), &line(1)).unwrap();
     println!("starlark ticks for one test-count line: {}", stats.ticks);
 
     // Interpreter memory over a long stream: per-call heaps must not accumulate.
-    let mut state = ParserState::default();
+    let mut state = State::new();
     let base = rss_kib();
     for i in 0..1_000_000 {
-        state = starlark.parse(&state, &line(i)).unwrap().state;
+        starlark.parse(&CTX, &mut state, &line(i)).unwrap();
         if i == 99_999 || i == 999_999 {
             println!(
                 "RSS after {} lines: {} KiB (+{} KiB from start)",
@@ -162,13 +168,23 @@ fn main() {
     let mut worker = WorkerClient::new(&program, WorkerLimits::default());
     let t = Instant::now();
     worker
-        .call(&install, BAZEL, &json!({"phase": null, "counts": []}), &json!(line(0)))
+        .call(
+            &install,
+            BAZEL,
+            &json!({"command": "bazel build", "stream": "t", "provisional": false, "state": {}}),
+            &json!(line(0)),
+        )
         .unwrap();
     println!("worker spawn + compile + first call: {:?}", t.elapsed());
     let t = Instant::now();
     for i in 0..1000 {
         worker
-            .call(&install, BAZEL, &json!({"phase": null, "counts": []}), &json!(line(i)))
+            .call(
+                &install,
+                BAZEL,
+                &json!({"command": "bazel build", "stream": "t", "provisional": false, "state": {}}),
+                &json!(line(i)),
+            )
             .unwrap();
     }
     println!(
