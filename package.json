@@ -2,7 +2,8 @@
   "name": "agentworks-adapters",
   "private": true,
   "scripts": {
-    "start": "cargo run --locked",
+    "build": "scripts/mise-cargo.sh build --locked",
+    "start": "scripts/mise-cargo.sh run --locked",
     "test:smoke": "node scripts/smoke.mjs",
     "test:browser": "playwright test",
     "verify": "node scripts/verify.mjs",

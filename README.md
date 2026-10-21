@@ -4,12 +4,23 @@ A small, local Rust prototype for running independent Claude, Codex, OpenCode, a
 
 ## Run
 
-Requires Rust 1.90+, Zig 0.15.2 on `PATH` (for libghostty), and Node (use a current LTS supported by the adapters). The first Rust build fetches Ghostty’s pinned native sources and Zig dependencies.
+Requires Rust 1.90+, [mise](https://mise.jdx.dev/) and Node (use a current LTS supported by the adapters). The repository pins Zig 0.15.2 in `mise.toml`; the build and start commands install/select it through mise so Zig does not have to be added to your shell `PATH` manually. The first Rust build fetches Ghostty’s pinned native sources and Zig dependencies.
 
 ```bash
+mise trust mise.toml # once per checkout, if mise asks
 npm ci --ignore-scripts
-cargo run --locked
+npm run build
+npm start
 ```
+
+For direct Cargo commands, use mise to select the pinned Zig version:
+
+```bash
+mise install
+mise exec -- cargo run --locked
+```
+
+Or pass Cargo build options through the project wrapper, for example `npm run build -- --release`.
 
 Open **http://127.0.0.1:4317** and create a **Demo agent** session. Try `hello`, `approval`, `slow`, or `image`. The demo is a real local ACP subprocess, not a simulated browser response, and never calls a model or edits project files. Its own session state is saved locally for restart tests.
 
@@ -24,7 +35,7 @@ If a sign-in has expired, refresh it through `codex login` or Claude's `/login` 
 API keys are optional. To explicitly use them instead, provide `ANTHROPIC_API_KEY` for Claude or `CODEX_API_KEY` / `OPENAI_API_KEY` for Codex and start with:
 
 ```bash
-AGENTWORKS_AUTH_MODE=api_key cargo run --locked
+AGENTWORKS_AUTH_MODE=api_key mise exec -- cargo run --locked
 ```
 
 Only this explicit API-key mode isolates provider configuration/authentication under `.agentworks/claude` and `.agentworks/codex`, keeping it separate from the host CLI login store.
@@ -36,9 +47,9 @@ Codex uses the tracked local `2.2.2-agentworks.1` fork in `vendor/codex-acp` to 
 To check the ACP handshake without making an inference request:
 
 ```bash
-cargo run --locked -- --probe demo
-cargo run --locked -- --probe claude
-cargo run --locked -- --probe codex
+mise exec -- cargo run --locked -- --probe demo
+mise exec -- cargo run --locked -- --probe claude
+mise exec -- cargo run --locked -- --probe codex
 ```
 
 Probes report negotiated capabilities/authentication methods only. A successful probe does not prove inference access or complete provider behavior. Actual prompts consume provider usage.
@@ -237,7 +248,7 @@ No ports or socket files are opened on either machine. SSH provides authenticati
 By default, sessions can select the current directory or its subdirectories. Use **Settings** to edit allowed roots, or supply initial defaults when starting the server:
 
 ```bash
-AGENTWORKS_ROOTS="$HOME/projects/agentworks:$HOME/projects/morsh" cargo run --locked
+AGENTWORKS_ROOTS="$HOME/projects/agentworks:$HOME/projects/morsh" mise exec -- cargo run --locked
 ```
 
 Enter the full project path in the new-session dialog. Paths are canonicalized and checked against the allowed roots. File preview/download routes are restricted to that session's project directory, with a 10 MB limit. Markdown and raster images can be previewed; PDFs and other binary files can be downloaded. This file gateway restriction does not sandbox agent commands; provider permissions still govern agent execution.
