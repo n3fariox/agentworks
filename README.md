@@ -176,16 +176,41 @@ Parallel development uses real Codex sessions in separate branches/worktrees, wi
 
 Use the sidebar's **Hosts / Projects** toggle to browse the same sessions in either order:
 
-- Hosts: Local → Project → Session
-- Projects: Project → Local → Session
+- Hosts: Host → Project → Session
+- Projects: Project → Host → Session
 
-There is one Local execution host for now. Projects are logical groups, independent of host paths: several directories/worktrees can share a project, and the same model supports grouping across remote hosts later.
+Sessions run on the Local host. Other machines can be added as remote hosts (below). They appear in the list with their connection status and can run chat sessions. Projects are logical groups, independent of host paths: several directories/worktrees can share a project, and the same model supports grouping across remote hosts.
 
 Use **＋** beside Sessions to create a project, or create one in the new-session dialog. The project's **⋯** button opens rename/delete controls. A session's project selector moves it between groups, including **Ungrouped**, while its agent, working directory, and conversation keep running. Deleting a group moves its sessions to Ungrouped.
 
 Sidebar view and collapse state are remembered per browser. Switching views preserves the selected session, stream connection, draft, and scroll position. Drafts are remembered per session in the browser tab. Running/waiting counts appear on the parent groups.
 
 Projects, settings, and host-local location IDs are saved in `.agentworks/catalog.json`; session metadata and transcripts are saved in `.agentworks/catalog.sessions.sqlite3`. `AGENTWORKS_CATALOG_PATH` can point to another catalog file. This catalog provides organization; file access still follows the server's allowed roots.
+
+### Remote hosts
+
+See [the implementation and protocol guide](REMOTE-HOSTS.md) for Mermaid diagrams, wire messages, ownership and recovery, timers, and compatibility rules.
+
+In the Hosts view, **＋** beside the Hosts heading adds a remote host: a name, an SSH destination, and optionally the command that runs Agentworks there. The server then runs:
+
+```bash
+ssh -T -o BatchMode=yes … <destination> '<command> agent --stdio'
+```
+
+The remote `agentworks agent` prints a ready line and then talks to the server over WebSocket on ssh's own stdin and stdout. Anything the remote shell prints before the ready line, such as a login banner, is skipped. All session state stays on this server. The worker only runs processes on its own machine. If the link drops, the worker stops the process groups it started and exits, and the server reconnects with backoff, the same as a server restart. A connected host reports its hostname, platform, version, and the providers that can actually start there. The worker also stops its process groups after 45 seconds without server frames, so a half-open SSH connection does not keep them running indefinitely. Protocol 3 requires the worker to hold an exclusive per-host lock before reporting ready; replacements wait until the old worker has finished cleanup. Zero-byte lock files live under `~/.cache/agentworks/workers/` and stay in place after exit; they store no session state.
+
+**Chat sessions on a remote host.** Use **⋯** on the host to set its working directories, using the host's own paths (`~/` is the remote user's home). Then start a session with **＋** on the host, or choose the host in the new-session dialog. The worker starts the agent's adapter in that directory on the host and relays its ACP traffic. The server keeps the conversation, approvals, and history as for local sessions, and the agent uses the host's own sign-ins. If the link drops, the host's sessions are suspended with a notice and the interrupted turn is not retried. Resume them once the host reconnects.
+
+Remote sessions are chat-only for now. Worktrees, imports of existing sessions, forks, the file browser and previews, Git context and diffs, model discovery in the new-session dialog (change the model once the session starts), and Agentworks MCP tools (agent communication) are local only. Queued input, automatic continuation after limit resets, and inbox wake-up are rejected for remote sessions, and their background dispatch skips them. Local Codex account probes are also skipped for remote errors. See Phase 6 in the roadmap for the plan.
+
+Requirements:
+
+- SSH from this server's user to the destination works non-interactively, using key or agent authentication and a host key already in `known_hosts`. Ports, users, and jump hosts come from `~/.ssh/config`. The server has no SSH settings or credentials of its own.
+- The server process can use your key. A passphrase-protected key needs an SSH agent reachable through `SSH_AUTH_SOCK` in the server's environment. Services, including the Agentworks supervisor, often start without one. Either start the server with `SSH_AUTH_SOCK` pointing at a long-lived agent, such as systemd's `ssh-agent.service` socket at `$XDG_RUNTIME_DIR/ssh-agent.socket` with your key added, or use a dedicated key without a passphrase that is authorized only on the hosts you add. If a host reports `Permission denied` while `SSH_AUTH_SOCK` is unset, the status message says so.
+- Agentworks is built on the remote host from the same version, with `npm ci --ignore-scripts` run there. The remote command defaults to `agentworks` on the remote `PATH`; set it to a full path such as `~/agentworks/target/release/agentworks` otherwise. Provider detection uses the adapter paths of the checkout the binary was built from.
+- Tools on the host, such as node for the adapters and the `opencode`, `codex`, and `claude` CLIs, come from its PATH. A non-interactive ssh command does not run shell startup files, so tools installed with mise would be missing. The worker therefore applies `mise env` for each session's directory itself, including that project's own mise configuration, falling back to the global configuration if the project's cannot be used (for example, if it is not trusted).
+
+The worker opens no listening ports or socket files for this link. SSH provides authentication and encryption, so there is no separate enrollment secret. Hover a host's status dot for details. When a host is offline, the reason, including ssh's last output, also appears under it. **↻** reconnects immediately, and **×** removes a host with no sessions and stops its worker. `AGENTWORKS_SSH` selects a different ssh program.
 
 ## Multiple project directories
 
@@ -265,6 +290,13 @@ cargo test --locked
 npm run test:smoke
 ```
 
+Remote host links have a separate check that starts its own server and uses `scripts/fake-ssh.sh` in place of ssh, so it needs no SSH server or keys:
+
+```bash
+cargo build --locked && npm run test:remote-hosts
+npm run test:remote-partitions # ~50s: silent transport and replacement ownership
+```
+
 The smoke test uses the demo agent to exercise ACP streaming, multiple turns, disconnect survival, idempotency, approval allow/stale/invalid responses, cancellation, Markdown sanitization, and directory/origin checks. Workspace checks also cover file boundaries, manual automation runs, approval/concurrency handling, and retained run history. They make no paid model requests.
 
 For browser checks:
@@ -276,7 +308,7 @@ npx playwright test
 
 Browser checks cover desktop/mobile layout, session switching, permission requests across reload, cancellation, images, and Markdown file preview.
 
-After `cargo build --locked`, `npm run verify` starts an isolated server on port 4318, runs the API, project, settings/model, import, workspace/automation, completion-report, worktree-policy, Git-context and browser suites, checks shutdown with an open browser connection, and stops its server. Use `AGENTWORKS_VERIFY_PORT` to change the main test port; worktree policy owns a separate server on port 4351.
+After `cargo build --locked`, `npm run verify` starts an isolated server on port 4318, runs the API, remote-host relay, project, settings/model, import, workspace/automation, completion-report, worktree-policy, Git-context and browser suites, checks shutdown with an open browser connection, and stops its server. Use `AGENTWORKS_VERIFY_PORT` to change the main test port; worktree policy owns a separate server on port 4351.
 
 Architecture and follow-up work: [ROADMAP.md](ROADMAP.md), [Rust/ACP assessment](RUST-INTEGRATION.md), and [morsh reuse notes](MORSH-REUSE.md).
 

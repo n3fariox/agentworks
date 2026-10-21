@@ -32,4 +32,4 @@ Use morsh's PTY implementation as the starting reference for Agentworks' termina
 3. Test fresh browser attachment: full redraw of current screen, correct cursor and input modes, ordered later display updates, resize, and continued operation while disconnected. Keep historical scrollback restoration outside MVP.
 4. Carry forward the Windows-specific findings behind platform boundaries, with actual Windows validation deferred until that platform is added.
 
-No need to port morsh's network protocol: Agentworks already uses browser WebSockets and later SSH access to persistent host services.
+No need to port morsh's network protocol: Agentworks already uses browser WebSockets, and remote hosts use an SSH-launched worker linked over WebSocket.

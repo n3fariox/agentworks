@@ -27,6 +27,8 @@ try{
   await run('node',['--test','tests/fixture-cleanup.test.mjs']);
   await run('node',['tests/codex-subscription.test.mjs']);
   await run('node',['scripts/mcp-wire-smoke.mjs']);
+  await run('node',['scripts/remote-host-smoke.mjs']);
+  await run('node',['scripts/remote-partition-smoke.mjs']);
   await run('node',['scripts/smoke.mjs']);
   await run('node',['scripts/projects-smoke.mjs']);
   await run('node',['scripts/settings-smoke.mjs']);

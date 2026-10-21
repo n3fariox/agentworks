@@ -87,6 +87,13 @@ function el(tag,className,text) {const node=document.createElement(tag);if(class
 function basename(path) {return path.replaceAll('\\','/').split('/').filter(Boolean).at(-1)||path;}
 function providerNote() {
   const p=config.providers.find(p=>p.id===$('provider').value);
+  const remote=createHost();
+  if(remote){
+    const available=remote.status==='connected'&&remote.worker?.providers?.includes(p.id);
+    $('provider-note').textContent=available?`Uses ${labels[p.id]} and sign-ins on ${remote.name}.`:`${labels[p.id]} is unavailable on ${remote.name}.`;
+    $('create-submit').disabled=!available||!remote.roots?.length||creating||worktrees.blocked();
+    return;
+  }
   $('provider-note').textContent=p.id==='demo'?'Local test agent. No model calls, API key, or file changes.':p.id==='opencode'?(p.installed?'Native ACP. Choose an advertised free model. Availability and limits may change.':'Install OpenCode on this host or set AGENTWORKS_OPENCODE_PATH.'):!p.installed?'Adapter not installed. Run npm ci --ignore-scripts.':p.authMode==='existing'?'Uses the existing agent sign-in on this host. If it has expired, sign in with the CLI and try again.':!p.keyPresent?`Set ${p.id==='claude'?'ANTHROPIC_API_KEY':'OPENAI_API_KEY or CODEX_API_KEY'} before starting the server.`:'API key available on the host. Messages use your provider account.';
   $('create-submit').disabled=!p.installed||(p.authMode==='api_key'&&!p.keyPresent)||creating||worktrees.blocked();
 }
@@ -106,16 +113,48 @@ function openCreate(context={}) {
   $('create-project').value=projectId||'';
   const locations=readStorage(localStorage,'agentworks-project-locations',{});
   $('create-resume-policy').checked=false;
-  $('create-agent-access').value='';updateCommunicationDefault();$('create-error').textContent='';$('directory').value=context.cwd||workspaceContext?.cwd||locations[projectId||'ungrouped']||active?.cwd||config.roots[0];$('session-title').value=context.title||'';
+  $('create-agent-access').value='';updateCommunicationDefault();$('create-error').textContent='';$('directory').value=context.cwd||workspaceContext?.cwd||locations[projectId||'ungrouped']||(active?.hostId==='local'?active.cwd:null)||config.roots[0];$('session-title').value=context.title||'';
   if(context.provider&&$('provider').querySelector(`option[value="${context.provider}"]`))$('provider').value=context.provider;
   $('fork-boundary').replaceChildren(new Option('Latest completed turn at submission',''));$('fork-context').value='auto';$('fork-summary').value='';
-  renderForkHeader();resetCreateModels();providerNote();
+  renderForkHeader();fillCreateHosts(forkSource?'local':context.hostId||'local',context.cwd);providerNote();
   // Forking suggests its own worktree so the new session starts from this one's
   // position; the base revision is filled in from Git once the policy has loaded.
   worktrees.projectChanged(context.workspaceMode);
   $('create-dialog').showModal();
   return generation;
 }
+// Remote hosts appear once connected; sessions there use the host's own
+// working directories and the directory itself (no local worktrees).
+function fillCreateHosts(selected,cwd){
+  const select=$('create-host');select.replaceChildren(new Option('Local','local'));
+  for(const host of hosts.filter(h=>h.kind==='remote')){
+    const option=new Option(host.name+(host.status==='connected'?'':` · ${hostState(host).toLowerCase()}`),host.id);
+    option.disabled=host.status!=='connected';select.append(option);
+  }
+  select.value=[...select.options].some(o=>o.value===selected&&!o.disabled)?selected:'local';
+  select.disabled=!!forkSource;
+  createHostChanged(select.value===selected?(cwd||(select.value==='local'?$('directory').value:undefined)):undefined);
+}
+function createHost(){return hosts.find(h=>h.id===$('create-host').value&&h.kind==='remote')||null;}
+function rememberedDirectory(){
+  const host=$('create-host').value||'local',project=$('create-project').value||'ungrouped';
+  return readStorage(localStorage,'agentworks-project-locations',{})[host==='local'?project:host+':'+project];
+}
+function createHostChanged(cwd){
+  const host=createHost(),roots=host?host.roots||[]:config.roots;
+  $('directory').value=cwd||rememberedDirectory()||roots[0]||'';
+  $('create-resume-policy').disabled=!!host;
+  if(host)$('create-resume-policy').checked=false;
+  worktrees.setRemote(!!host);
+  $('project-roots').replaceChildren(...roots.map(root=>{const option=el('option');option.value=root;return option;}));
+  if(host){
+    $('roots-note').textContent=roots.length?`Working directories on ${host.name}: ${roots.join(', ')}. Remote sessions use the directory itself; worktrees, files and Git views are local only for now.`:`Add working directories to ${host.name} first (⋯ on the host).`;
+  }else{
+    $('roots-note').textContent='Allowed roots: '+config.roots.join(', ');
+  }
+  resetCreateModels();providerNote();
+}
+$('create-host').onchange=()=>createHostChanged();
 function renderForkHeader(){
   const fork=forkSource;
   $('create-fork-note').hidden=!fork;$('fork-options').hidden=!fork;
@@ -160,7 +199,8 @@ function resetCreateModels(){
   const carried=forkSource?.model&&forkSource.provider===$('provider').value?forkSource.model:null;
   const defaultId=carried||config.defaultModels?.[$('provider').value];
   const option=el('option','',carried?`From “${forkSource.title}” · ${carried}`:defaultId?`Saved default · ${defaultId}`:'Harness default');option.value=defaultId||'';select.append(option);
-  $('load-models').disabled=false;$('model-note').textContent='Load available models from the agent without sending a prompt.';
+  const remote=createHost();$('load-models').disabled=!!remote;
+  $('model-note').textContent=remote?'Models load from local harnesses only. Remote sessions start with this choice or the harness default; change the model once the session starts.':'Load available models from the agent without sending a prompt.';
 }
 async function loadCreateModels(){
   const gen=++discoveryGeneration,provider=$('provider').value,cwd=$('directory').value;
@@ -285,19 +325,54 @@ function badges(items){
   if(!running&&!waiting&&items.length)wrap.append(el('span','group-total',String(items.length)));
   return wrap;
 }
-function treeGroup(key,label,items,{host=false,projectId=null,level=0,archived=false}={}){
+function hostState(host){
+  if(host.kind!=='remote')return 'Connected';
+  return {connected:'Connected',connecting:'Connecting…',offline:'Offline'}[host.status]||host.status;
+}
+function hostTitle(host){
+  if(host.kind!=='remote')return 'Connected';
+  const w=host.worker;
+  return [hostState(host),'ssh '+host.destination,w?.hostname,w?.platform,w?.providers?.length?'providers: '+w.providers.join(', '):'',w?.version?'v'+w.version:'',host.status==='offline'?host.detail:''].filter(Boolean).join(' · ');
+}
+function hostNote(host){
+  if(host.status==='offline')return host.detail||'Offline.';
+  if(host.status==='connecting')return host.detail?'Reconnecting. Last attempt: '+host.detail:'Connecting over SSH…';
+  return host.roots?.length?'Connected. No sessions yet.':'Connected. Add working directories (⋯) to start sessions here.';
+}
+async function hostAction(host,action){
+  if(action==='remove'&&!confirm(`Remove host ${host.name}? Its worker stops; nothing on that machine is deleted.`))return;
+  try{await api(`/api/hosts/${host.id}`+(action==='remove'?'':'/reconnect'),{method:action==='remove'?'DELETE':'POST'});await refreshSessions();}catch(e){toast(e.message);}
+}
+function treeGroup(key,label,items,{host=null,projectId=null,level=0,archived=false}={}){
   const group=el('details','tree-group level-'+level);group.dataset.group=key;
   const stateKey=sidebarView+':'+key;group.open=!collapsedGroups.has(stateKey);
   const heading=el('summary','tree-heading');if(!host&&projectId){heading.dataset.projectId=projectId;heading.setAttribute('aria-haspopup','menu');}heading.append(el('span','tree-chevron','›'));
   heading.append(el('span',host?'tree-icon host':'tree-icon',host?'▤':'◇'),el('span','tree-label',label),badges(items));
   if(archived)heading.append(el('span','group-total','Archived'));
-  if(host){const dot=el('span','connection-dot');dot.title='Connected';heading.append(dot);}
+  if(host){const dot=el('span','connection-dot '+(host.status||'connected'));dot.title=hostTitle(host);dot.setAttribute('aria-label',hostTitle(host));heading.append(dot);}
   if(!host&&projectId){
     const rename=el('button','group-action','⋯');rename.type='button';rename.setAttribute('aria-label','Edit project '+label);
     rename.onclick=event=>{event.preventDefault();event.stopPropagation();openProjectDialog(projects.find(p=>p.id===projectId));};heading.append(rename);
   }
-  const add=el('button','group-action add-session','＋');add.type='button';add.setAttribute('aria-label','New session in '+label);
-  add.onclick=event=>{event.preventDefault();event.stopPropagation();openCreate({projectId});};heading.append(add);
+  if(host?.kind==='remote'){
+    // Link controls and session creation belong to the owning host.
+    if(level===0){
+      const actions=[['roots','⋯','Working directories on '+label],['reconnect','↻','Reconnect '+label]];if(!items.length)actions.push(['remove','×','Remove host '+label]);
+      if(host.status==='connected'&&host.roots?.length)actions.unshift(['create','＋','New session in '+label]);
+      actions.forEach(([action,text,name],index)=>{
+        const button=el('button','group-action'+(index?'':' add-session'),text);button.type='button';button.setAttribute('aria-label',name);
+        button.onclick=event=>{event.preventDefault();event.stopPropagation();
+          if(action==='create')openCreate({projectId,hostId:host.id});else if(action==='roots')openHostRoots(host);else hostAction(host,action);};
+        heading.append(button);
+      });
+    }else if(host.status==='connected'&&host.roots?.length){
+      const add=el('button','group-action add-session','＋');add.type='button';add.setAttribute('aria-label','New session in '+label);
+      add.onclick=event=>{event.preventDefault();event.stopPropagation();openCreate({projectId,hostId:host.id});};heading.append(add);
+    }
+  }else{
+    const add=el('button','group-action add-session','＋');add.type='button';add.setAttribute('aria-label','New session in '+label);
+    add.onclick=event=>{event.preventDefault();event.stopPropagation();openCreate({projectId});};heading.append(add);
+  }
   const children=el('div','tree-children');group.append(heading,children);
   group.ontoggle=()=>{if(group.open)collapsedGroups.delete(stateKey);else collapsedGroups.add(stateKey);localStorage.setItem('agentworks-tree-collapsed',JSON.stringify([...collapsedGroups]));};
   return {group,children};
@@ -321,8 +396,10 @@ function sidebar(){
   const visibleSessions=sessions.filter(s=>filter==='all'||!!s.archived===(filter==='archived'));
   // Archived projects appear with archived sessions; active projects holding archived sessions do too.
   const visibleProjects=projects.filter(p=>filter==='all'||(filter==='archived'?p.archived||visibleSessions.some(s=>s.projectId===p.id):!p.archived));
-  $('session-count').textContent=visibleSessions.length;
+  $('section-title').textContent=sidebarView==='hosts'?'HOSTS':'SESSIONS';
+  $('session-count').textContent=sidebarView==='hosts'?hosts.length:visibleSessions.length;
   for(const view of ['hosts','projects'])$('view-'+view).setAttribute('aria-selected',String(sidebarView===view));
+  const sectionAdd=sidebarView==='hosts'?'Add host':'New project';$('new-project').setAttribute('aria-label',sectionAdd);$('new-project').title=sectionAdd;
   const area=$('sessions'),scroll=area.scrollTop;area.replaceChildren();
   const buckets=[...visibleProjects.map(p=>({id:p.id,name:p.name,archived:!!p.archived})).sort((a,b)=>a.name.localeCompare(b.name)),{id:null,name:'Ungrouped'}];
   function addSessions(container,items){
@@ -332,7 +409,11 @@ function sidebar(){
   if(sidebarView==='hosts'){
     for(const host of hosts){
       const hostItems=visibleSessions.filter(s=>s.hostId===host.id);
-      const top=treeGroup('host:'+host.id,host.name,hostItems,{host:true});
+      const top=treeGroup('host:'+host.id,host.name,hostItems,{host});
+      if(host.kind==='remote'&&!hostItems.length){
+        top.children.append(el('div','empty-group host-note '+host.status,hostNote(host)));
+        area.append(top.group);continue;
+      }
       for(const project of buckets){
         const items=hostItems.filter(s=>(s.projectId||null)===project.id);
         if(project.id===null&&!items.length&&visibleProjects.length)continue;
@@ -348,7 +429,8 @@ function sidebar(){
       const top=treeGroup('project:'+(project.id||'ungrouped'),project.name,projectItems,{projectId:project.id,archived:project.archived});
       for(const host of hosts){
         const items=projectItems.filter(s=>s.hostId===host.id);
-        const child=treeGroup(`project:${project.id||'ungrouped'}:host:${host.id}`,host.name,items,{host:true,projectId:project.id,level:1});
+        if(host.kind==='remote'&&!items.length)continue;
+        const child=treeGroup(`project:${project.id||'ungrouped'}:host:${host.id}`,host.name,items,{host,projectId:project.id,level:1});
         addSessions(child.children,items);top.children.append(child.group);
       }
       area.append(top.group);
@@ -747,10 +829,35 @@ function draw(){
 }
 $('new-session').onclick=()=>openCreate();$('welcome-new').onclick=()=>openCreate();
 $('view-hosts').onclick=()=>setSidebarView('hosts');$('view-projects').onclick=()=>setSidebarView('projects');
-$('new-project').onclick=()=>openProjectDialog();$('create-project-new').onclick=()=>openProjectDialog();
+$('new-project').onclick=()=>sidebarView==='hosts'?openHostDialog():openProjectDialog();$('create-project-new').onclick=()=>openProjectDialog();
+let editingHostRoots=null;
+function openHostRoots(host){
+  editingHostRoots=host.id;$('host-roots-title').textContent='Working directories on '+host.name;
+  $('host-roots').value=(host.roots||[]).join('\n');$('host-roots-error').textContent='';$('host-roots-dialog').showModal();$('host-roots').focus();
+}
+$('dismiss-host-roots').onclick=()=>$('host-roots-dialog').close();
+$('host-roots-form').onsubmit=async event=>{
+  event.preventDefault();$('host-roots-error').textContent='';$('save-host-roots').disabled=true;
+  try{
+    const roots=$('host-roots').value.split('\n').map(r=>r.trim()).filter(Boolean);
+    await api(`/api/hosts/${editingHostRoots}/roots`,{method:'PUT',body:JSON.stringify({roots})});
+    $('host-roots-dialog').close();await refreshSessions();
+  }catch(error){$('host-roots-error').textContent=error.message;}finally{$('save-host-roots').disabled=false;}
+};
+function openHostDialog(){
+  $('host-form').reset();$('host-error').textContent='';$('host-dialog').showModal();$('host-name').focus();
+}
+$('dismiss-host').onclick=()=>$('host-dialog').close();
+$('host-form').onsubmit=async event=>{
+  event.preventDefault();$('host-error').textContent='';$('save-host').disabled=true;
+  try{
+    await api('/api/hosts',{method:'POST',body:JSON.stringify({name:$('host-name').value,destination:$('host-destination').value,command:$('host-command').value})});
+    $('host-dialog').close();await refreshSessions();
+  }catch(error){$('host-error').textContent=error.message;}finally{$('save-host').disabled=false;}
+};
 $('dismiss-project').onclick=()=>{if(!savingProject)$('project-dialog').close();};
 $('project-dialog').addEventListener('cancel',event=>{if(savingProject)event.preventDefault();});
-$('create-project').onchange=()=>{const remembered=readStorage(localStorage,'agentworks-project-locations',{})[$('create-project').value||'ungrouped'];if(remembered)$('directory').value=remembered;worktrees.projectChanged();updateCommunicationDefault();};
+$('create-project').onchange=()=>{const remembered=rememberedDirectory();if(remembered)$('directory').value=remembered;worktrees.projectChanged();updateCommunicationDefault();};
 $('project-form').onsubmit=async event=>{
   event.preventDefault();if(savingProject)return;savingProject=true;
   for(const id of ['save-project','project-name','project-default-mode','project-require-worktree','project-communication-role','archive-project','delete-project','dismiss-project'])$(id).disabled=true;
@@ -834,7 +941,7 @@ $('create-form').onsubmit=async event=>{
   event.preventDefault();if(creating||worktrees.blocked())return;creating=true;providerNote();$('create-error').textContent='';
   const fork=forkSource;
   try{
-    const payload={resumePolicy:{enabled:$('create-resume-policy').checked},provider:$('provider').value,...worktrees.submission(),title:$('session-title').value,projectId:$('create-project').value||null,hostId:$('create-host').value,model:$('create-model').value,...($('create-agent-access').value?{agentAccess:{communicate:$('create-agent-access').value!=='off',...Object.fromEntries(['startSessions','promptSessions','cancelSessions','runAutomations'].map(key=>[key,$('create-agent-access').value==='coordinator']))}}:{})};
+    const payload={resumePolicy:{enabled:$('create-resume-policy').checked},provider:$('provider').value,...worktrees.submission(),...(createHost()?{workspace:{mode:'directory'},cwd:$('directory').value}:{}),title:$('session-title').value,projectId:$('create-project').value||null,hostId:$('create-host').value,model:$('create-model').value,...($('create-agent-access').value?{agentAccess:{communicate:$('create-agent-access').value!=='off',...Object.fromEntries(['startSessions','promptSessions','cancelSessions','runAutomations'].map(key=>[key,$('create-agent-access').value==='coordinator']))}}:{})};
     if(fork)Object.assign(payload,{boundarySeq:$('fork-boundary').value?Number($('fork-boundary').value):null,context:$('fork-context').value,summary:$('fork-context').value==='summary'?$('fork-summary').value:null});
     const signature=JSON.stringify({source:fork?.id||null,payload});
     if(!pendingCreate||pendingCreate.signature!==signature)pendingCreate={signature,requestId:uuid()};
@@ -842,7 +949,7 @@ $('create-form').onsubmit=async event=>{
     const path=fork?`/api/sessions/${fork.id}/fork`:'/api/sessions';
     const created=await api(path,{method:'POST',body:JSON.stringify({...payload,requestId:pendingCreate.requestId})});
     pendingCreate=null;sessionStorage.removeItem('agentworks-pending-create');
-    const locations=readStorage(localStorage,'agentworks-project-locations',{});locations[created.projectId||'ungrouped']=created.cwd;localStorage.setItem('agentworks-project-locations',JSON.stringify(locations));
+    const locations=readStorage(localStorage,'agentworks-project-locations',{});locations[created.hostId&&created.hostId!=='local'?created.hostId+':'+(created.projectId||'ungrouped'):created.projectId||'ungrouped']=created.cwd;localStorage.setItem('agentworks-project-locations',JSON.stringify(locations));
     sessions.unshift(created);$('create-dialog').close();selectSession(created);
     if(fork)toast(`Forked from “${fork.title}”. Its recorded history and lineage are preserved; the selected context handoff is applied.`,'success');
   }catch(e){$('create-error').textContent=e.message;}finally{creating=false;providerNote();}

@@ -11,7 +11,7 @@ use agent_client_protocol::schema::{
         SessionConfigOptionValue, SessionNotification, SetSessionConfigOptionRequest, TextContent,
     },
 };
-use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo};
+use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo, DynConnectTo};
 use serde_json::{Value, json};
 use std::{
     path::PathBuf,
@@ -46,7 +46,11 @@ impl Command {
     }
 }
 
-fn agent_config(provider: &str, api_key_mode: bool, host_profile: bool) -> AcpAgentConfig {
+pub(crate) fn agent_config(
+    provider: &str,
+    api_key_mode: bool,
+    host_profile: bool,
+) -> AcpAgentConfig {
     let config = if provider == "demo" {
         AcpAgentConfig::new("node").arg(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -109,7 +113,7 @@ fn agent_for(provider: &str, host_profile: bool) -> AcpAgent {
     AcpAgent::new(agent_config(provider, use_api_key(), host_profile))
 }
 
-fn prepare(provider: &str) -> std::io::Result<()> {
+pub(crate) fn prepare(provider: &str) -> std::io::Result<()> {
     if provider == "opencode" {
         for dir in ["data", "cache", "state", "config"] {
             std::fs::create_dir_all(
@@ -469,7 +473,9 @@ pub async fn run(
     s: Arc<Session>,
     mut commands: mpsc::Receiver<Command>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    prepare(&s.provider)?;
+    if s.host_id == "local" {
+        prepare(&s.provider)?;
+    }
     let notify_s = s.clone();
     let permission_s = s.clone();
     let question_s = s.clone();
@@ -486,6 +492,19 @@ pub async fn run(
     let saved_permission_modes = s.data.lock().unwrap().permission_modes.clone();
     let import_pending = s.data.lock().unwrap().import_pending;
     let host_profile = s.data.lock().unwrap().opencode_host;
+    let (transport, _spawn_guard): (DynConnectTo<Client>, _) = if s.host_id == "local" {
+        (
+            DynConnectTo::new(agent_for(&s.provider, host_profile)),
+            None,
+        )
+    } else {
+        let live = crate::hosts::registry()
+            .and_then(|hosts| hosts.live(&s.host_id))
+            .ok_or("The remote host is not connected.")?;
+        let (lines, guard) = live.spawn(&s.provider, &s.cwd.to_string_lossy(), host_profile)?;
+        // Keep the worker process alive until this runtime returns or is cancelled.
+        (DynConnectTo::new(lines), Some(guard))
+    };
     let history = Arc::new(std::sync::Mutex::new((Vec::<Value>::new(), 0usize, false)));
     let notify_history = history.clone();
     Client.builder()
@@ -568,7 +587,7 @@ pub async fn run(
                 responder.respond(response)
             })
         },agent_client_protocol::on_receive_request!())
-        .connect_with(agent_for(&s.provider,host_profile),move |connection:ConnectionTo<Agent>|async move {
+        .connect_with(transport,move |connection:ConnectionTo<Agent>|async move {
             let created=tokio::time::timeout(Duration::from_secs(75),open_session(&connection,&s))
                 .await.map_err(|_|agent_client_protocol::Error::internal_error().data("Session initialization timed out"))??;
             if import_pending && s.provider=="opencode" {
@@ -869,7 +888,7 @@ mod fork_tests {
     // Real ACP wire fixture: no provider binary, credentials or model calls.
     #[tokio::test]
     async fn native_fork_is_anchored_and_uncertain_creation_is_never_repeated() {
-        for reject in [false, true] {
+        for (reject, host_id) in [(false, "local"), (true, "local"), (false, "remote")] {
             let dir =
                 std::env::temp_dir().join(format!("agentworks-native-fork-{}", Uuid::new_v4()));
             std::fs::create_dir_all(&dir).unwrap();
@@ -893,7 +912,7 @@ mod fork_tests {
                 title: "Child".into(),
                 initial_model: None,
                 created: 1,
-                host_id: "local".into(),
+                host_id: host_id.into(),
                 location_id: "local".into(),
                 data: Mutex::new(data),
                 tx,
@@ -924,11 +943,13 @@ for line in sys.stdin:
  elif m=='session/fork':
   assert p['sessionId']=='source-native'
   assert p['_meta']['jetbrains']['air']['fork']['messageId']=='answer-1'
-  assert p['mcpServers'][0]['env'][1]['value']=='child-token'
+  if sys.argv[2]=='local': assert p['mcpServers'][0]['env'][1]['value']=='child-token'
+  else: assert p.get('mcpServers',[])==[]
   if sys.argv[1]=='reject':
    print(json.dumps({'jsonrpc':'2.0','id':r['id'],'error':{'code':-32603,'message':'ambiguous fork failure'}}),flush=True);continue
   out={'sessionId':'child-native'}
  elif m=='session/resume':
+  if sys.argv[2]!='local': assert p.get('mcpServers',[])==[]
   assert p['sessionId']=='child-native';out={}
  else: raise Exception('Unexpected method '+str(m))
  print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':out}),flush=True)
@@ -937,7 +958,8 @@ for line in sys.stdin:
                 AcpAgentConfig::new("python3")
                     .arg("-c")
                     .arg(script)
-                    .arg(if reject { "reject" } else { "success" }),
+                    .arg(if reject { "reject" } else { "success" })
+                    .arg(host_id),
             );
             let s = session.clone();
             Client

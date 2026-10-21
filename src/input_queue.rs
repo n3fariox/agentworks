@@ -485,6 +485,9 @@ pub fn record_outcome(s: &Session, mut outcome: Outcome) {
 /// Dispatches one queued item. Caller holds communication/run/workspace locks and
 /// passed `allow_start`. Returns true when a turn was accepted.
 fn dispatch_next(app: &App, s: &Session, deliberate: bool) -> bool {
+    if s.host_id != "local" {
+        return false;
+    }
     {
         let data = s.data.lock().unwrap();
         if !(deliberate || data.input_queue.ready) {
@@ -617,6 +620,7 @@ pub async fn enqueue(
 ) -> ApiResult {
     let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
+    crate::local_only(&s)?;
     validate(&req.text)?;
     if req.request_id.is_empty() || req.request_id.len() > MAX_REQUEST_ID {
         return Err(fail(
@@ -678,6 +682,7 @@ pub async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult
     let _run = app.run_lock.lock().await;
     let _workspace = app.workspace_lock.lock().await;
     let s = session(&app, &id)?;
+    crate::local_only(&s)?;
     crate::service_restart::allow_start(&app)?;
     crate::checked_cwd(&app, &s.cwd.to_string_lossy())?;
     {

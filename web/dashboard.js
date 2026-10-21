@@ -69,6 +69,12 @@ function renderHosts(catalog, sessions) {
     const heading = el('div', undefined, 'card-heading');
     heading.append(el('h3', host.name || host.id || 'Unknown host'), el('span', host.status || 'unknown', `badge ${host.status === 'connected' ? 'connected' : ''}`));
     card.append(heading);
+    // Remote hosts say how they are reached and, when down, why.
+    if (host.kind === 'remote') {
+      const facts = [host.destination && `ssh ${host.destination}`, host.worker?.providers?.length && host.worker.providers.join(', ')].filter(Boolean).join(' · ');
+      if (facts) card.append(el('p', facts, 'host-meta'));
+      if (host.status !== 'connected' && host.detail) card.append(el('p', host.detail, 'host-detail'));
+    }
     if (sessions) {
       const matching = sessions.filter(s => s.hostId === host.id);
       const count = el('p', undefined, 'count'); count.append(String(matching.length), el('small', ' active turns'));

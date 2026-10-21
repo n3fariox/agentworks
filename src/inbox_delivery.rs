@@ -418,6 +418,9 @@ pub async fn configure(
     let _comm = app.communication_lock.lock().await;
     let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
+    if input.enabled {
+        crate::local_only(&s)?;
+    }
     let payload = serde_json::to_string(&input).map_err(error)?;
     // Retry lookup precedes time validation: an expired identical request cannot reauthorize.
     let prior: Option<String> = app
@@ -651,6 +654,9 @@ fn instruction(request: &str, messages: &[Value]) -> String {
 }
 /// Caller holds communication_lock -> run_lock -> workspace_lock. No native resume/start.
 pub fn dispatch_one(app: &App, s: &Session, human_pending: bool) -> Result<()> {
+    if s.host_id != "local" {
+        return Ok(());
+    }
     let result = dispatch_inner(app, s, human_pending);
     if result.is_err() {
         fail_closed(
@@ -969,6 +975,7 @@ mod tests {
                 mcp_endpoint: "127.0.0.1:4505".parse().unwrap(),
                 restart: Arc::new(crate::service_restart::Manager::new()),
                 notifications: crate::notifications::Hub::new(catalog),
+                hosts: crate::hosts::Hosts::new(),
             };
             let make = |id: &str| {
                 let d:crate::SessionData=serde_json::from_value(json!({"status":"idle","seq":0,"requests":[],"models":null,"available_commands":[],"turn_active":false,"project_id":"project","provider_session_id":format!("native-{id}")})).unwrap();

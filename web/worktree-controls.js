@@ -2,14 +2,17 @@
 export function setupWorktreeControls({$,api,onChange}) {
   const defaults={defaultMode:'directory',requireWorktree:false};
   const names={directory:'Use project directory',newWorktree:'Create new worktree',existingWorktree:'Use existing worktree'};
+  let remote=false;
   let policy={...defaults},policyGeneration=0,listGeneration=0,ready=true,loading=false,policyLoad=Promise.resolve();
   function render(){
+    if(remote)$('workspace-mode').value='directory';
     const mode=$('workspace-mode').value;
     document.querySelector('label[for=directory]').textContent=mode==='directory'?'Working directory':'Source directory';
     $('workspace-new-fields').hidden=mode!=='newWorktree';
     $('workspace-existing-fields').hidden=mode!=='existingWorktree';
-    $('workspace-mode').querySelector('[value="directory"]').disabled=policy.requireWorktree;
-    $('workspace-mode').disabled=!ready;
+    $('workspace-mode').querySelector('[value="directory"]').disabled=!remote&&policy.requireWorktree;
+    $('workspace-mode').disabled=remote||!ready;
+    if(remote)$('workspace-policy-note').textContent=policy.requireWorktree?'This project requires worktrees, which remote hosts do not support.':'Remote sessions use the host directory; worktrees are local only.';
     onChange();
   }
   function clearList(){
@@ -53,10 +56,18 @@ export function setupWorktreeControls({$,api,onChange}) {
   };
   return {
     projectChanged,
+    setRemote(value){
+      const wasRemote=remote;remote=!!value;
+      if(wasRemote&&!remote){
+        $('workspace-mode').value=policy.defaultMode;
+        $('workspace-policy-note').textContent=`Project default: ${names[policy.defaultMode]}${policy.requireWorktree?' · Isolated worktree required':''}`;
+      }
+      clearList();render();
+    },
     // Resolves once the current project policy has settled, so a caller that fills
     // in fields afterwards cannot race the mode it suggested.
     settled:()=>policyLoad,
-    blocked:()=>!ready||loading||($('workspace-mode').value==='existingWorktree'&&!$('existing-worktree').value),
+    blocked:()=>!ready||(remote?policy.requireWorktree:loading||($('workspace-mode').value==='existingWorktree'&&!$('existing-worktree').value)),
     submission(){
       if(this.blocked())throw new Error('Load the project policy and select an eligible workspace first.');
       const mode=$('workspace-mode').value,workspace={mode};let cwd=$('directory').value;

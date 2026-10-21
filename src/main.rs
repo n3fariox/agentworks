@@ -1,3 +1,4 @@
+mod agent;
 mod automations;
 mod browser_origin;
 mod catalog;
@@ -9,6 +10,7 @@ mod elicitation;
 mod fork;
 mod git_context;
 mod hosting;
+mod hosts;
 mod inbox_delivery;
 mod input_queue;
 mod lifecycle;
@@ -72,6 +74,7 @@ struct App {
     restart: Arc<service_restart::Manager>,
     /// U-02 cross-session stream of noteworthy events.
     notifications: notifications::Hub,
+    hosts: Arc<hosts::Hosts>,
 }
 
 struct Session {
@@ -520,6 +523,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.get(1).is_some_and(|a| a == "mcp") {
         return mcp::stdio().await.map_err(|e| e.to_string().into());
     }
+    if args.get(1).is_some_and(|a| a == "agent") {
+        // Worker cleanup completes inside run(). Tokio stdin uses an uncancellable
+        // blocking reader, so runtime shutdown can hang while a dead peer still
+        // holds stdin open. Only this stateless CLI mode exits explicitly.
+        let code = match agent::run(&args[2..]).await {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("agentworks agent: {error}");
+                1
+            }
+        };
+        std::process::exit(code);
+    }
     if args.get(1).is_some_and(|a| a == "--probe") {
         let provider = args.get(2).map(String::as_str).unwrap_or("demo");
         if !["claude", "codex", "opencode", "demo"].contains(&provider) {
@@ -582,6 +598,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mcp_endpoint,
         restart: Arc::new(service_restart::Manager::new()),
         notifications: notifications::Hub::new(catalog),
+        hosts: hosts::Hosts::new(),
     };
     if let Some(policy) = app
         .catalog
@@ -642,6 +659,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     service_restart::initialize(&app)?;
     input_queue::initialize(&app)?;
     tokio::spawn(service_restart::scheduler(app.clone()));
+    app.hosts.install();
+    for host in app.catalog.lock().unwrap().data.hosts.clone() {
+        app.hosts.start(host);
+    }
     let scheduler = tokio::spawn(limit_resume::scheduler(app.clone()));
     let inbox_scheduler = tokio::spawn(inbox_delivery::scheduler(app.clone()));
     let input_scheduler = tokio::spawn(input_queue::scheduler(app.clone()));
@@ -926,6 +947,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/external-sessions", post(list_external_sessions))
         .route("/api/sessions/import", post(import_session))
         .route("/api/catalog", get(get_catalog))
+        .route("/api/hosts", post(hosts::add))
+        .route("/api/hosts/{id}", axum::routing::delete(hosts::remove))
+        .route("/api/hosts/{id}/reconnect", post(hosts::reconnect))
+        .route(
+            "/api/hosts/{id}/roots",
+            axum::routing::put(hosts::set_roots),
+        )
         .route("/api/projects", post(create_project))
         .route(
             "/api/projects/{id}",
@@ -1033,6 +1061,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
             scheduler.abort();
+            app.hosts.stop_all();
             let _ = scheduler.await;
             input_scheduler.abort();
             let _ = input_scheduler.await;
@@ -1162,6 +1191,19 @@ fn effective_roots(app: &App) -> Vec<PathBuf> {
         .roots
         .clone()
         .unwrap_or_else(|| app.roots.as_ref().clone())
+}
+/// Features that read the session's directory on this server's disk. A
+/// remote session's path belongs to its host, even if the same path happens to
+/// exist here.
+fn local_only(s: &Session) -> Result<(), (StatusCode, String)> {
+    if s.host_id == "local" {
+        Ok(())
+    } else {
+        Err(fail(
+            StatusCode::CONFLICT,
+            "Not available for sessions on remote hosts yet",
+        ))
+    }
 }
 fn checked_cwd(app: &App, path: &str) -> Result<PathBuf, (StatusCode, String)> {
     let cwd = std::fs::canonicalize(path).map_err(|_| {
@@ -1494,10 +1536,19 @@ async fn import_session(State(app): State<App>, Json(req): Json<ImportSession>) 
 }
 async fn get_catalog(State(app): State<App>) -> Json<Value> {
     let catalog = app.catalog.lock().unwrap();
-    Json(
-        json!({"hosts":[{"id":"local","name":"Local","status":"connected"}],
-        "projects":catalog.data.projects,"locations":catalog.data.locations}),
-    )
+    let mut hosts = vec![json!({"id":"local","name":"Local","status":"connected","kind":"local"})];
+    hosts.extend(
+        catalog
+            .data
+            .hosts
+            .iter()
+            .map(|h| hosts::view(&app.hosts, h)),
+    );
+    Json(json!({
+        "hosts": hosts,
+        "projects": catalog.data.projects,
+        "locations": catalog.data.locations,
+    }))
 }
 #[derive(Deserialize)]
 struct ProjectName {
@@ -1806,6 +1857,8 @@ async fn fork_session(
         return session(&app, &child).map(|s| Json(s.meta()));
     }
     let parent = session(&app, &id)?;
+    // Forks carry local workspace state; remote parents are not supported yet.
+    local_only(&parent)?;
     let seed = fork::seed(
         &parent,
         req.boundary_seq,
@@ -1947,13 +2000,20 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
     if !["demo", "claude", "codex", "opencode"].contains(&req.provider.as_str()) {
         return Err(fail(StatusCode::BAD_REQUEST, "Unknown provider"));
     }
-    if use_api_key() && !key_present(&req.provider) {
+    let remote_host = req.host_id.clone().filter(|id| id != "local");
+    if remote_host.is_some() && req.resume_policy.as_ref().is_some_and(|p| p.enabled) {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "Automatic continuation is not available on remote hosts yet",
+        ));
+    }
+    if remote_host.is_none() && use_api_key() && !key_present(&req.provider) {
         return Err(fail(
             StatusCode::CONFLICT,
             "Set this provider's API key in the server environment, then restart Agentworks.",
         ));
     }
-    if !installed(&req.provider) {
+    if remote_host.is_none() && !installed(&req.provider) {
         return Err(fail(
             StatusCode::CONFLICT,
             if req.provider == "opencode" {
@@ -1963,7 +2023,20 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             },
         ));
     }
-    let source = checked_cwd(app, &req.cwd)?;
+    let source = match &remote_host {
+        Some(host) => tokio::time::timeout(
+            std::time::Duration::from_secs(12),
+            hosts::session_directory(app, host, &req),
+        )
+        .await
+        .map_err(|_| {
+            fail(
+                StatusCode::REQUEST_TIMEOUT,
+                "Remote directory validation timed out",
+            )
+        })??,
+        None => checked_cwd(app, &req.cwd)?,
+    };
     // Registered imports/resume retain their original context, even after policy changes.
     if let Some(external) = &req.external_id {
         let existing = app
@@ -1988,12 +2061,8 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             return Ok(Json(existing.meta()));
         }
     }
-    worktrees::verify_import(app, &req, &source).await?;
-    if req.host_id.as_deref().is_some_and(|id| id != "local") {
-        return Err(fail(
-            StatusCode::BAD_REQUEST,
-            "Only the Local host is available in this prototype",
-        ));
+    if remote_host.is_none() {
+        worktrees::verify_import(app, &req, &source).await?;
     }
     if app
         .sessions
@@ -2014,17 +2083,22 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             "Limit: 12 active harnesses. Suspend idle sessions first.",
         ));
     }
-    let (cwd, owned_worktree) = tokio::time::timeout(
-        std::time::Duration::from_secs(12),
-        worktrees::prepare(app, &req, source, creation_key),
-    )
-    .await
-    .map_err(|_| {
-        fail(
-            StatusCode::CONFLICT,
-            "Workspace preparation timed out; inspect retained branch and files before retrying",
+    // Remote sessions work in the checked host directory; worktrees are local only.
+    let (cwd, owned_worktree) = if remote_host.is_some() {
+        (source, None)
+    } else {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(12),
+            worktrees::prepare(app, &req, source, creation_key),
         )
-    })??;
+        .await
+        .map_err(|_| {
+            fail(
+                StatusCode::CONFLICT,
+                "Workspace preparation timed out; inspect retained branch and files before retrying",
+            )
+        })??
+    };
     let mut catalog = app.catalog.lock().unwrap();
     if req
         .project_id
@@ -2033,12 +2107,14 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
     {
         return Err(fail(StatusCode::BAD_REQUEST, "Project not found"));
     }
-    let location = catalog.location(&cwd).map_err(|_| {
-        fail(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Could not save project location",
-        )
-    })?;
+    let location = catalog
+        .location_on(remote_host.as_deref().unwrap_or("local"), &cwd)
+        .map_err(|_| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not save project location",
+            )
+        })?;
     if let Some(project) = req.project_id.as_deref() {
         catalog
             .attach_location(project, &location.id)
@@ -2207,6 +2283,16 @@ fn start_worker(s: &Arc<Session>) {
     let worker = tokio::spawn(async move {
         if let Err(error) = runtime::run(worker_s.clone(), rx).await {
             worker_s.clear_approvals();
+            // A dropped host link is handled like a server restart: the turn
+            // is not retried and the session resumes once the host is back.
+            if worker_s.host_id != "local"
+                && hosts::registry().is_some_and(|h| h.live(&worker_s.host_id).is_none())
+            {
+                let was_active = std::mem::take(&mut worker_s.data.lock().unwrap().turn_active);
+                worker_s.emit("interrupted",json!({"message":if was_active {"The connection to this session's host dropped during a turn. It was not retried. Resume once the host reconnects, and check the last tool result before continuing."} else {"The connection to this session's host dropped. Resume once the host reconnects."}}));
+                worker_s.status("suspended");
+                return;
+            }
             {
                 let mut data = worker_s.data.lock().unwrap();
                 if data.continuation.phase.as_deref() == Some("opening") {
@@ -2240,10 +2326,22 @@ async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
             "This session's worktree was removed on archive; unarchive it to recreate the worktree",
         ));
     }
-    if !installed(&s.provider) || !s.cwd.is_dir() {
+    if s.host_id == "local" {
+        if !installed(&s.provider) || !s.cwd.is_dir() {
+            return Err(fail(
+                StatusCode::CONFLICT,
+                "Harness or working directory is unavailable on this host",
+            ));
+        }
+    } else if !app
+        .hosts
+        .live(&s.host_id)
+        .is_some_and(|live| live.has_provider(&s.provider))
+    {
+        // The worker checks the directory itself when it starts the adapter.
         return Err(fail(
             StatusCode::CONFLICT,
-            "Harness or working directory is unavailable on this host",
+            "This session's host is not connected, or no longer offers this harness",
         ));
     }
     {
@@ -2695,6 +2793,7 @@ async fn file(
     Query(req): Query<FileQuery>,
 ) -> Result<Response, (StatusCode, String)> {
     let s = session(&app, &id)?;
+    local_only(&s)?;
     // Canonicalize before checking roots: traversal and symlinks cannot escape
     // the workspace roots currently allowed for this session's host.
     checked_cwd(&app, &s.cwd.to_string_lossy())?;
