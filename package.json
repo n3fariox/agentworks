@@ -44,7 +44,8 @@
     "test:review-queue": "node scripts/review-queue-smoke.mjs",
     "test:questions": "node tests/questions.test.mjs && playwright test tests/questions.spec.mjs",
     "test:host-enrollment": "node scripts/host-enrollment-smoke.mjs",
-    "test:terminal": "playwright test tests/terminal.spec.mjs"
+    "test:terminal": "playwright test tests/terminal.spec.mjs",
+    "test:starlark": "cargo test --locked -p agentworks-starlark"
   },
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "0.93.0",

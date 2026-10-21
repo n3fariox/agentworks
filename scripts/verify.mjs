@@ -24,6 +24,8 @@ try{
     if(ready)break;await delay(100);
   }
   assert(ready,'Server readiness timed out');
+  // E-01 experiment: separate workspace member, not linked into the service.
+  await run('cargo',['test','--locked','-p','agentworks-starlark']);
   await run('node',['--test','tests/fixture-cleanup.test.mjs']);
   await run('node',['tests/codex-subscription.test.mjs']);
   await run('node',['scripts/mcp-wire-smoke.mjs']);

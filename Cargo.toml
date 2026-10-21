@@ -1,3 +1,7 @@
+[workspace]
+# E-01 is a separate member: plain `cargo build`/`cargo run` still build only the service.
+members = [".", "experiments/starlark"]
+
 [package]
 name = "agentworks"
 version = "0.1.0"

@@ -1,0 +1,155 @@
+//! Type hints are enabled and enforced at install (static) and call (runtime) time.
+mod common;
+use agentworks_starlark::engine::{Capability, DiagnosticKind, Engine, Installation, dialect};
+use common::*;
+use serde_json::json;
+use starlark::syntax::DialectTypes;
+
+fn install_error(capability: Capability, source: &str) -> agentworks_starlark::engine::Diagnostic {
+    match install(&engine(), "typed.star", capability, source) {
+        Ok(_) => panic!("expected install failure for:\n{source}"),
+        Err(d) => d,
+    }
+}
+
+#[test]
+fn dialect_enables_runtime_type_annotations() {
+    assert_eq!(dialect().enable_types, DialectTypes::Enable);
+}
+
+#[test]
+fn typed_samples_install_with_exact_host_signatures() {
+    let engine = engine();
+    let parser = install(&engine, "bazel_progress.star", Capability::Parser, BAZEL).unwrap();
+    let workflow = install(&engine, "check_then_fix.star", Capability::Workflow, WORKFLOW).unwrap();
+    assert_eq!(parser.capability, Capability::Parser);
+    assert_eq!(workflow.capability, Capability::Workflow);
+    assert_eq!(
+        Capability::Parser.signature(),
+        "def(state: ParserState, line: str) -> ParseResult"
+    );
+    assert_eq!(
+        Capability::Workflow.signature(),
+        "def(state: dict[str, typing.Any], event: Event) -> Decision"
+    );
+}
+
+#[test]
+fn static_errors_are_rejected_at_install_even_in_uncalled_code() {
+    let cases = [
+        (
+            "    return ParseResult(state = state, progress = state.phse)\n",
+            "attribute `phse` is not available",
+        ),
+        (
+            "    return state\n",
+            "Expected type `ParseResult` but got `ParserState`",
+        ),
+        (
+            "    return ParseResult(state = ParserState(phase = 3, counts = []), progress = None)\n",
+            "Expected type `None | str` but got `int`",
+        ),
+        (
+            "    m = regex_match(1, line)\n    return ParseResult(state = state, progress = None)\n",
+            "Expected type `str` but got `int`",
+        ),
+    ];
+    for (body, expected) in cases {
+        let d = install_error(Capability::Parser, &parser_source(body));
+        assert_eq!(d.kind, DiagnosticKind::Type, "{d}");
+        assert!(d.message.contains(expected), "{expected:?} not in {d}");
+    }
+    let uncalled = format!(
+        "{PARSER_HEAD}def _never() -> int:\n    return \"x\"\ndef on_line(state: ParserState, line: str) -> ParseResult:\n    return ParseResult(state = state, progress = None)\n"
+    );
+    let d = install_error(Capability::Parser, &uncalled);
+    assert_eq!(d.kind, DiagnosticKind::Type);
+    assert!(d.message.contains("Expected type `int` but got `str`"), "{d}");
+}
+
+#[test]
+fn entry_point_must_match_the_typed_host_contract() {
+    let unannotated =
+        format!("{PARSER_HEAD}def on_line(state, line):\n    return ParseResult(state = state, progress = None)\n");
+    let d = install_error(Capability::Parser, &unannotated);
+    assert!(
+        d.message
+            .contains("found `def(state: typing.Any, line: typing.Any) -> typing.Any`"),
+        "{d}"
+    );
+    let wrong = format!(
+        "{PARSER_HEAD}def on_line(state: ParserState, line: int) -> ParseResult:\n    return ParseResult(state = state, progress = None)\n"
+    );
+    assert_eq!(install_error(Capability::Parser, &wrong).kind, DiagnosticKind::Type);
+    let missing = format!(
+        "{PARSER_HEAD}def parse(state: ParserState, line: str) -> ParseResult:\n    return ParseResult(state = state, progress = None)\n"
+    );
+    assert!(
+        install_error(Capability::Parser, &missing)
+            .message
+            .contains("missing entry point `on_line`")
+    );
+}
+
+#[test]
+fn values_from_untyped_json_are_checked_at_runtime() {
+    // `event.data` is dict[str, typing.Any]: statically unknown, so the record
+    // field annotation `prompt: str` is enforced when the action is built.
+    let source = format!(
+        "{WORKFLOW_HEAD}def on_event(state: dict[str, typing.Any], event: Event) -> Decision:\n    return decide(state, actions = [start_session(\"a\", \"p\", event.data[\"n\"])])\n"
+    );
+    let engine = engine();
+    let script = install(&engine, "runtime.star", Capability::Workflow, &source).unwrap();
+    let d = engine
+        .call(
+            &script,
+            &json!({}),
+            &json!({"id": "e", "kind": "start", "data": {"n": 42}}),
+        )
+        .unwrap_err();
+    assert_eq!(d.kind, DiagnosticKind::Type, "{d}");
+    assert!(d.message.contains("does not match the type annotation"), "{d}");
+    // Not every mistake is static: `str + int` in a body is a runtime error.
+    let source = parser_source("    x = line + 1\n    return ParseResult(state = state, progress = None)\n");
+    let script = install(&engine, "dynamic.star", Capability::Parser, &source).unwrap();
+    let d = engine
+        .call(&script, &json!({"phase": null, "counts": []}), &json!("x"))
+        .unwrap_err();
+    assert_eq!(d.kind, DiagnosticKind::Runtime);
+}
+
+#[test]
+fn capabilities_are_separate_and_installation_is_explicit() {
+    // A parser cannot load workflow action constructors.
+    let parser = "load(\"@agentworks//workflow.star\", \"start_session\")\n".to_owned()
+        + &parser_source("    return ParseResult(state = state, progress = None)\n")[PARSER_HEAD.len()..];
+    assert_eq!(
+        install_error(Capability::Parser, &parser).kind,
+        DiagnosticKind::Capability
+    );
+    // A workflow has no pattern helper, and neither has print/json/I/O.
+    for call in [
+        "regex_match(\"a\", \"a\")",
+        "print(\"x\")",
+        "json.encode({})",
+        "open(\"/etc/passwd\")",
+    ] {
+        let source = format!(
+            "{WORKFLOW_HEAD}def on_event(state: dict[str, typing.Any], event: Event) -> Decision:\n    {call}\n    return decide(state)\n"
+        );
+        let d = install_error(Capability::Workflow, &source);
+        assert_eq!(d.kind, DiagnosticKind::Type, "{call}: {d}");
+        assert!(d.message.contains("not found"), "{call}: {d}");
+    }
+    let engine = Engine::new().unwrap();
+    let mut disabled = Installation::of("bazel_progress.star", Capability::Parser, BAZEL);
+    disabled.enabled = false;
+    assert_eq!(
+        engine.compile(&disabled, BAZEL).err().unwrap().kind,
+        DiagnosticKind::Install
+    );
+    let pinned = Installation::of("bazel_progress.star", Capability::Parser, BAZEL);
+    let edited = BAZEL.replace("Executing", "Running");
+    let d = engine.compile(&pinned, &edited).err().unwrap();
+    assert!(d.message.contains("does not match the installed content hash"), "{d}");
+}

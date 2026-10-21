@@ -82,7 +82,7 @@ Batch 004 implements U-01 and U-04; the other additions below remain planned. Ba
 
 | ID | Experiment | Acceptance |
 | --- | --- | --- |
-| E-01 | Embedded Rust Starlark for progress parsers and workflow logic | Prototype a Bazel progress parser and a durable conditional two-step workflow using the same interpreter library with separate capabilities. Rust owns I/O, scheduling, permissions and persistence. Verify replay/restart behavior, bounded evaluation, parser isolation and dependency/runtime cost; record a go/no-go decision before adopting it for U-05 or a production workflow engine. See [experiment plan](experiments/001-starlark.md). Planned only; no implementation started |
+| E-01 | Embedded Rust Starlark for progress parsers and workflow logic | Prototype a Bazel progress parser and a durable conditional two-step workflow using the same interpreter library with separate capabilities. Rust owns I/O, scheduling, permissions and persistence. Verify replay/restart behavior, bounded evaluation, parser isolation and dependency/runtime cost; record a go/no-go decision before adopting it for U-05 or a production workflow engine. See [experiment plan](experiments/001-starlark.md). Prototype implemented on `feature/starlark-build-type-hints` (separate workspace crate, type hints enabled); decision **adjust**: keep built-in U-05 parsing, Starlark remains a workflow-decision candidate pending a concrete need. Not deployed |
 
 ## Terminal mode
 

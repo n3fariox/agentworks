@@ -26,7 +26,7 @@ Streaming cadence is adapter-dependent. An adapter advertising terminal-output s
 
 General cross-harness normalization, a versioned parser contract, configurable match/capture rules, and user-installed parsers remain future work. Add them only after a concrete need justifies the extra interface; any helper must be explicitly installed, bounded, isolated from tool authority, and unable to alter command outcomes.
 
-The optional [Experiment E-01](experiments/001-starlark.md) is deferred with the broader extension work; it is not a dependency of Bazel progress.
+The [Experiment E-01](experiments/001-starlark.md) prototype matched U-05 output on the shared fixtures but recommends keeping the built-in parser; it is not a dependency of Bazel progress.
 
 Record deterministic sample streams for tests, including dynamic totals, failures, duplicate events, snapshots/deltas, ANSI/carriage returns, replay and harnesses without streaming. The user's existing Bazel mod can provide parsing rules and representative fixtures when available. Do not require harness-specific CLI modifications just to render progress in Agentworks; investigate an adapter extension or an opt-in build progress source if a harness does not expose live output.
 
