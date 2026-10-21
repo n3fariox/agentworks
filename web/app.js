@@ -514,10 +514,12 @@ function connect(gen){
     if(gen!==generation)return;
     const e=JSON.parse(event.data);
     if(e.kind==='input_queue'){inputQueue.set(e.data);updateControls();return;}
+    if(e.kind==='tool_progress'){if(applyToolProgress(tools.get(e.data.toolCallId),e.data,e.seq))scheduleDraw();return;}
     if(e.kind==='snapshot'){
       resetTranscript();usageStatus.reset();currentUserSeq=e.session.lastUserSeq??null;status=e.session.status;Object.assign(active,e.session);
       replaying=true;try{const latestUser=e.events.findLast(item=>item.kind==='user');for(const item of e.events)if(item.kind!=='session_updated'&&(item.kind!=='stop_requested'||item.data.userSeq===(e.session.lastUserSeq??latestUser?.seq)||(!e.session.lastUserSeq&&!latestUser)))consume(item);}finally{replaying=false;}
       currentUserSeq=e.session.lastUserSeq??currentUserSeq;
+      for(const [id,view] of Object.entries(e.toolProgress||{}))applyToolProgress(tools.get(id),view,view.seq);
       Object.assign(active,e.session);setTitle(active.title);
       active.continuation=e.session.continuation;
       approvals=new Map(e.approvals.map(a=>[a.id,a]));status=e.session.status;modelConfig=e.models;syncModelLabel();permissionModes=e.permissionModes;if(status==='suspended'&&!e.session.explicitlySuspended)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();inputQueue.set(e.session.inputQueue);inputQueue.observe(status,{live:false});
@@ -543,40 +545,14 @@ function connect(gen){
   };
 }
 function addMessage(role,text){const message={id:uuid(),type:'message',role,text};transcript.push(message);return message;}
-// U-05 built-in Bazel activity. Private presentation state; the stored ACP events remain raw.
+// U-05 tool activity. Parser scripts run on the server (E-01) and publish an
+// unsequenced derived view; the browser keeps exact raw output and observed timing.
 // Keep this inline: adding a browser asset would require a coordinator-owned route change.
-function bazelLine(previous,line){
-  const next={...previous};
-  const phase=line.match(/^(?:INFO:\s*)?(Loading|Analyzing|Fetching|Building|Testing|Computing (?:main repo|repository) mapping):/i);
-  if(phase)next.phase=phase[1];
-  const number='((?:\\d{1,3}(?:,\\d{3})+|\\d+))';
-  const actions=line.match(new RegExp('^\\s*\\['+number+'\\s*\\/\\s*'+number+'\\]'));
-  const tests=line.match(new RegExp('(?:^|[;\\]\\s])'+number+'\\s*\\/\\s*'+number+'\\s+tests\\b','i'));
-  const counts=match=>{
-    const done=Number(match[1].replaceAll(',','')),total=Number(match[2].replaceAll(',',''));
-    return Number.isSafeInteger(done)&&Number.isSafeInteger(total)&&done>=0&&total>=done?{done,total}:null;
-  };
-  if(actions){const value=counts(actions);if(value){next.actions=value;next.phase='Executing';}}
-  if(tests){const value=counts(tests);if(value){next.tests=value;next.phase='Testing';}}
-  return next;
-}
-function feedBazel(stream,data){
-  // Parse incrementally, retaining only a bounded current line and escape-sequence state.
-  // Raw text is separate and is never stripped, rewritten or sent back to the harness.
-  for(const char of data){
-    if(stream.escape==='osc'){if(char==='\x07')stream.escape='';else if(char==='\x1b')stream.escape='osc-escape';continue;}
-    if(stream.escape==='osc-escape'){stream.escape=char==='\\'?'':'osc';continue;}
-    if(stream.escape==='csi'){if(char>='@'&&char<='~')stream.escape='';continue;}
-    if(stream.escape==='esc'){stream.escape=char==='['?'csi':char===']'?'osc':'';continue;}
-    if(char==='\x1b'){stream.escape='esc';continue;}
-    if(char==='\r'||char==='\n'){
-      if(!stream.overflow)stream.committed=bazelLine(stream.committed,stream.line);
-      stream.line='';stream.overflow=false;
-    }else if(char>=' '||char==='\t'){
-      if(stream.line.length<16384)stream.line+=char;else stream.overflow=true;
-    }
-  }
-  stream.progress=stream.overflow?stream.committed:bazelLine(stream.committed,stream.line);
+function applyToolProgress(tool,view,seq){
+  // Views carry their source event's seq; an older view never replaces a newer one.
+  if(!tool||!view||!Number.isSafeInteger(seq))return false;
+  if(Number.isSafeInteger(tool.progressSeq)&&seq<tool.progressSeq)return false;
+  tool.progressSeq=seq;tool.serverProgress=view;return true;
 }
 function toolOutputText(content){
   if(typeof content==='string')return content;
@@ -594,8 +570,8 @@ function applyToolUpdate(tool,update,seq,observedAt=null){
   function write(key,data,delta){
     if(typeof data!=='string')return;
     let stream=output.streams.get(key);
-    if(!delta||!stream){stream={raw:'',line:'',escape:'',overflow:false,committed:{},progress:{}};output.streams.set(key,stream);}
-    stream.raw+=data;stream.version=++output.version;feedBazel(stream,data);
+    if(!delta||!stream){stream={raw:''};output.streams.set(key,stream);}
+    stream.raw+=data;stream.version=++output.version;
   }
   // ACP content/rawOutput updates are snapshots. Only explicit terminal_output_delta appends.
   if(Object.hasOwn(update,'content')){
@@ -621,10 +597,7 @@ function applyToolUpdate(tool,update,seq,observedAt=null){
 }
 function toolActivityView(tool,now=Date.now(),sessionBusy=true){
   const output=tool.activityOutput;
-  const command=typeof tool.rawInput==='string'?tool.rawInput:tool.rawInput?.command??tool.rawInput?.cmd??tool.title??'';
-  const isBazel=typeof command==='string'&&/(?:^|[\s;&|"'])(?:[^\s;&|"']*\/)?bazel(?:isk)?(?=[\s"']|$)/.test(command);
-  const streams=output?[...output.streams.values()]:[];
-  const progress=isBazel?streams.filter(s=>s.progress.phase).sort((a,b)=>b.version-a.version)[0]?.progress:null;
+  const server=tool.serverProgress,progress=server?.progress;
   const exit=output?.exit;
   const stopped=!!exit||!['pending','in_progress'].includes(tool.status||'pending');
   const unresolved=!stopped&&(!sessionBusy||output?.turnEnded);
@@ -633,18 +606,19 @@ function toolActivityView(tool,now=Date.now(),sessionBusy=true){
   const elapsedLabel=elapsed===null?'':elapsed<60?`${elapsed}s`:`${Math.floor(elapsed/60)}m ${elapsed%60}s`;
   const parts=[];
   if(progress){
-    parts.push('Bazel · '+progress.phase);
-    if(progress.actions)parts.push(`${progress.actions.done.toLocaleString('en-US')} / ${progress.actions.total.toLocaleString('en-US')} actions reported`);
-    if(progress.tests)parts.push(`${progress.tests.done.toLocaleString('en-US')} / ${progress.tests.total.toLocaleString('en-US')} tests reported`);
+    parts.push(server.parser+' · '+progress.phase);
+    for(const c of progress.counts)parts.push(`${c.done.toLocaleString('en-US')} / ${c.total.toLocaleString('en-US')} ${c.unit} reported`);
   }else if(running)parts.push('In progress');
   else if(unresolved)parts.push('No final status');
   if(progress&&unresolved)parts.push('No final status');
+  // A failed parser only removes derived progress; the tool's own status is unchanged.
+  if(server?.parserFailure)parts.push('Progress unavailable');
   if(elapsedLabel)parts.push(elapsedLabel);
   if(exit){
     if(exit.exit_code!==null&&exit.exit_code!==undefined)parts.push('Exit '+exit.exit_code);
     if(exit.signal)parts.push('Signal '+exit.signal);
   }
-  return {text:parts.join(' · '),running,progress:!!progress};
+  return {text:parts.join(' · '),running,progress:!!progress,failure:server?.parserFailure??null};
 }
 function toolRawText(tool){
   const parts=[];
@@ -662,11 +636,11 @@ function renderToolActivity(node,tool,sessionBusy){
   let activity=node.querySelector('.tool-activity');
   if(!activity){activity=el('span','tool-activity');summary.append(activity);}else summary.append(activity);
   const view=toolActivityView(tool,Date.now(),sessionBusy);
-  activity.textContent=view.text;activity.hidden=!view.text;
+  activity.textContent=view.text;activity.hidden=!view.text;activity.title=view.failure||'';
   activity.classList.toggle('is-running',view.running);activity.classList.toggle('has-progress',view.progress);
   node.querySelector('pre').textContent=toolRawText(tool);
 }
-// End U-05 built-in Bazel activity.
+// End U-05 tool activity.
 
 function consume(e,live=false){
   const d=e.data;

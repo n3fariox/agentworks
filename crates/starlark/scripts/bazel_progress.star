@@ -1,7 +1,12 @@
-# Sample E-01 parser: Bazel phase and reported action/test counts.
-# Mirrors the built-in U-05 rules in web/app.js. The host strips ANSI/OSC,
-# splits lines on CR/LF, handles snapshots versus deltas and bounds line size.
+# Built-in U-05 parser: Bazel phase and reported action/test counts.
+# Shipped with Agentworks and seeded into the scripts table. The host strips
+# ANSI/OSC, splits lines on CR/LF, handles snapshots versus deltas and bounds
+# line size. No percentage is derived; counts are only what Bazel reports.
 load("@agentworks//progress.star", "Counts", "LineContext", "Progress")
+
+# Host routing: only output of tool commands matching this regex reaches on_line.
+COMMAND_PATTERN = "(?:^|[\\s;&|\"'])(?:[^\\s;&|\"']*/)?bazel(?:isk)?(?:[\\s\"']|$)"
+DISPLAY_NAME = "Bazel"
 
 _NUMBER = "(\\d{1,3}(?:,\\d{3})+|\\d+)"
 _PHASE = "(?i)^(?:INFO:\\s*)?(Loading|Analyzing|Fetching|Building|Testing|Computing (?:main repo|repository) mapping):"

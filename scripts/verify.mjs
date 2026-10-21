@@ -24,8 +24,9 @@ try{
     if(ready)break;await delay(100);
   }
   assert(ready,'Server readiness timed out');
-  // E-01 experiment: separate workspace member, not linked into the service.
+  // U-05 progress: embedded Starlark crate, browser view logic and the running service.
   await run('cargo',['test','--locked','-p','agentworks-starlark']);
+  await run('node',['--test','tests/bazel-progress.test.mjs']);
   await run('node',['--test','tests/fixture-cleanup.test.mjs']);
   await run('node',['tests/codex-subscription.test.mjs']);
   await run('node',['scripts/mcp-wire-smoke.mjs']);
@@ -33,6 +34,7 @@ try{
   await run('node',['scripts/remote-plumbing-smoke.mjs']);
   await run('node',['scripts/remote-partition-smoke.mjs']);
   await run('node',['scripts/smoke.mjs']);
+  await run('node',['scripts/progress-smoke.mjs']);
   await run('node',['scripts/projects-smoke.mjs']);
   await run('node',['scripts/settings-smoke.mjs']);
   await run('node',['scripts/import-smoke.mjs']);

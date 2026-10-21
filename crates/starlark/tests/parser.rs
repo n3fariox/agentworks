@@ -312,3 +312,104 @@ fn state_spans_lines_and_provisional_changes_are_discarded() {
         Some("//app:server after 5 lines (partial)")
     );
 }
+
+#[test]
+fn parser_scripts_declare_routing_and_display_name() {
+    let engine = engine();
+    let body = "def on_line(ctx: LineContext, line: str) -> Progress | None:\n    return None\n";
+    for (decls, expected) in [
+        ("DISPLAY_NAME = \"X\"\n", "must define `COMMAND_PATTERN: str`"),
+        ("COMMAND_PATTERN = \"x\"\n", "must define `DISPLAY_NAME: str`"),
+        (
+            "COMMAND_PATTERN = 3\nDISPLAY_NAME = \"X\"\n",
+            "`COMMAND_PATTERN` must be a str",
+        ),
+        (
+            "COMMAND_PATTERN = \"(\"\nDISPLAY_NAME = \"X\"\n",
+            "must be a valid regex",
+        ),
+        ("COMMAND_PATTERN = \"x\"\nDISPLAY_NAME = \"\"\n", "must be 1..=32 bytes"),
+    ] {
+        let source = format!("{PARSER_HEAD}{decls}{body}");
+        let d = install(&engine, "decl.star", Capability::Parser, &source)
+            .err()
+            .expect(decls);
+        assert_eq!(d.kind, DiagnosticKind::Type, "{d}");
+        assert!(d.message.contains(expected), "{expected:?} not in {d}");
+    }
+    let script = install(&engine, "bazel_progress.star", Capability::Parser, BAZEL).unwrap();
+    assert_eq!(script.display_name, "Bazel");
+    let parser = StarlarkParser { engine, script };
+    for (command, expected) in [
+        ("bazel test //...", true),
+        ("cd x && /usr/bin/bazelisk build //a", true),
+        ("bash -lc 'bazel build //a'", true),
+        ("make bazel-docs", false),
+        ("bazelrc-lint", false),
+    ] {
+        assert_eq!(parser.matches(command), expected, "{command}");
+        assert_eq!(BuiltinBazel.matches(command), expected, "{command}");
+    }
+}
+
+#[test]
+fn the_first_matching_parser_in_a_set_handles_a_tool() {
+    let engine = engine();
+    let make = format!(
+        "{PARSER_HEAD}COMMAND_PATTERN = \"^make\\\\b\"\nDISPLAY_NAME = \"Make\"\ndef on_line(ctx: LineContext, line: str) -> Progress | None:\n    return Progress(phase = \"Building\", label = None, counts = [])\n"
+    );
+    let set = vec![
+        StarlarkParser {
+            engine: Arc::clone(&engine),
+            script: install(&engine, "make.star", Capability::Parser, &make).unwrap(),
+        },
+        StarlarkParser {
+            engine: Arc::clone(&engine),
+            script: install(&engine, "bazel_progress.star", Capability::Parser, BAZEL).unwrap(),
+        },
+    ];
+    let mut make_tool = ToolProgress::default();
+    make_tool.apply(
+        set.as_slice(),
+        &json!({"rawInput": {"command": "make all"}, "status": "in_progress"}),
+        Some(1),
+    );
+    make_tool.apply(set.as_slice(), &snapshot("anything\n"), Some(2));
+    assert_eq!(make_tool.view(), "Make · Building");
+    let mut bazel_tool = build();
+    bazel_tool.apply(set.as_slice(), &delta("[1 / 2] compile\r"), Some(1));
+    assert_eq!(bazel_tool.view(), "Bazel · Executing · 1 / 2 actions reported");
+    let mut other = ToolProgress::default();
+    other.apply(
+        set.as_slice(),
+        &json!({"rawInput": {"command": "cargo build"}}),
+        Some(1),
+    );
+    other.apply(set.as_slice(), &delta("[1 / 2] compile\r"), Some(2));
+    assert_eq!((other.parser.as_deref(), other.calls), (None, 0));
+}
+
+/// The service keeps raw events itself; derived state holds raw output only
+/// while the command is unknown, and nothing for commands no parser handles.
+#[test]
+fn service_mode_keeps_raw_output_only_until_the_command_is_known() {
+    let parser = starlark();
+    let mut tool = ToolProgress::without_raw();
+    tool.apply(&parser, &delta("Load"), Some(1));
+    assert_eq!(tool.raw("terminal:term-build"), Some("Load"));
+    tool.apply(
+        &parser,
+        &json!({"rawInput": {"command": "bazel build //..."}, "status": "in_progress"}),
+        Some(2),
+    );
+    assert_eq!(tool.raw("terminal:term-build"), Some(""));
+    tool.apply(&parser, &delta("ing: 3 packages\r[1 / 9] x\r"), Some(3));
+    assert_eq!(tool.raw("terminal:term-build"), Some(""));
+    assert_eq!(tool.view(), "Bazel · Executing · 1 / 9 actions reported");
+    assert_eq!(tool.derived()["parser"], "Bazel");
+    let mut other = ToolProgress::without_raw();
+    other.apply(&parser, &delta("big output"), Some(1));
+    other.apply(&parser, &json!({"rawInput": {"command": "cargo build"}}), Some(2));
+    other.apply(&parser, &delta("more"), Some(3));
+    assert!(other.streams.is_empty());
+}

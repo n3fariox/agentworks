@@ -63,6 +63,7 @@ name = "agentworks"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
+ "agentworks-starlark",
  "ammonia",
  "axum",
  "futures",

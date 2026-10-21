@@ -24,5 +24,7 @@ pub fn workflow_source(body: &str) -> String {
 
 /// A parser whose entry runs `body` (indented) under the standard signature.
 pub fn parser_source(body: &str) -> String {
-    format!("{PARSER_HEAD}def on_line(ctx: LineContext, line: str) -> Progress | None:\n{body}")
+    format!(
+        "{PARSER_HEAD}COMMAND_PATTERN = \"\\\\bbazel\\\\b\"\nDISPLAY_NAME = \"Bazel\"\ndef on_line(ctx: LineContext, line: str) -> Progress | None:\n{body}"
+    )
 }

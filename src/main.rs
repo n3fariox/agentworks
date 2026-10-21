@@ -26,6 +26,7 @@ mod sha256;
 mod store;
 mod terminal;
 mod timeouts;
+mod tool_progress;
 mod workspace;
 mod worktree_cleanup;
 mod worktrees;
@@ -77,6 +78,9 @@ struct App {
     /// U-02 cross-session stream of noteworthy events.
     notifications: notifications::Hub,
     hosts: Arc<hosts::Hosts>,
+
+    /// U-05 progress parser thread and installed scripts.
+    progress: tool_progress::Hub,
 }
 
 struct Session {
@@ -99,6 +103,8 @@ struct Session {
     mcp_refresh_pending: std::sync::atomic::AtomicBool,
     /// U-02; cloned from the app hub so `emit` needs no global state.
     notifications: notifications::Hub,
+    /// U-05; derived tool progress, fed from `emit`.
+    progress: tool_progress::Hub,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -281,6 +287,10 @@ impl Session {
             );
             state.status = "error".into();
         }
+        if kind == "acp" {
+            self.progress
+                .update(&self.id, &self.tx, state.seq, &event["data"]);
+        }
         let _ = self.tx.send(event);
         if let Some(message) = &state.storage_error {
             let _ = self
@@ -328,7 +338,8 @@ impl Session {
             "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"])},"events":data.events,
             "truncated":data.events.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
             "permissionModes":data.permission_modes,"models":data.models,"commands":data.available_commands,"storageError":data.storage_error,
-            "approvals":approvals.iter().map(|(id,a)|a.event(id)).collect::<Vec<_>>()})
+            "approvals":approvals.iter().map(|(id,a)|a.event(id)).collect::<Vec<_>>(),
+            "toolProgress":self.progress.views(&self.id)})
     }
     fn display_title(&self) -> String {
         self.data
@@ -586,6 +597,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| e.to_string())?;
     inbox_delivery::reconcile(&mut store).map_err(|(_, e)| e)?;
     let restored = store.load().map_err(|e| e.to_string())?;
+    let progress = tool_progress::start(&store.connection)?;
     let mcp_listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let mcp_endpoint = mcp_listener.local_addr()?;
     // C-01: external stdio bridges discover this process's loopback endpoint here.
@@ -606,6 +618,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         restart: Arc::new(service_restart::Manager::new()),
         notifications: notifications::Hub::new(catalog),
         hosts: hosts::Hosts::new(),
+
+        progress,
     };
     if let Some(policy) = app
         .catalog
@@ -636,6 +650,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         data.status = "suspended".into();
         data.turn_active = false;
         data.inbox_turn = None;
+        // U-05: rebuild derived progress from the retained event window.
+        let replay: Vec<(u64, Value)> = data
+            .events
+            .iter()
+            .filter(|e| e["kind"] == "acp")
+            .filter_map(|e| Some((e["seq"].as_u64()?, e["data"].clone())))
+            .collect();
         let (tx, _) = broadcast::channel(128);
         let s = Arc::new(Session {
             id: metadata.id,
@@ -656,7 +677,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             mcp_token: Mutex::new(Uuid::new_v4().to_string()),
             mcp_refresh_pending: std::sync::atomic::AtomicBool::new(false),
             notifications: app.notifications.clone(),
+            progress: app.progress.clone(),
         });
+        for (seq, data) in &replay {
+            app.progress.update(&s.id, &s.tx, *seq, data);
+        }
         if interrupted {
             s.emit("interrupted",json!({"message":"The server stopped during this turn. It was not automatically retried. Check the last tool result before continuing."}));
         }
@@ -958,6 +983,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/status", get(status))
         .route("/api/activity", get(activity))
         .route("/api/settings", get(get_settings).put(save_settings))
+        .route("/api/scripts", get(tool_progress::get_scripts))
+        .route(
+            "/api/scripts/{name}",
+            axum::routing::put(tool_progress::put_script).delete(tool_progress::delete_script),
+        )
+        .route(
+            "/api/scripts/{name}/enabled",
+            axum::routing::put(tool_progress::put_enabled),
+        )
         .route("/api/timeouts", get(get_timeouts).put(save_timeouts))
         .route(
             "/api/notifications",
@@ -2321,6 +2355,7 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
         mcp_token: Mutex::new(Uuid::new_v4().to_string()),
         mcp_refresh_pending: std::sync::atomic::AtomicBool::new(false),
         notifications: app.notifications.clone(),
+        progress: app.progress.clone(),
     });
     // Event publication takes session state before the catalog. Release the
     // catalog before reading other sessions, so turn completion can run while
@@ -2727,6 +2762,7 @@ async fn delete_session_locked(app: &App, s: &Session) -> Result<(), (StatusCode
     })?;
     terminal::stop(&s.id, true).await;
     app.sessions.lock().unwrap().remove(&s.id);
+    app.progress.forget(&s.id);
     s.status("closed");
     Ok(())
 }
@@ -2899,7 +2935,8 @@ async fn event_socket(socket: WebSocket, s: Arc<Session>) {
                 let event=match next {Ok(event)=>event,Err(broadcast::error::RecvError::Lagged(_))=>s.snapshot(),Err(_)=>break};
                 let n=event["seq"].as_u64().unwrap_or(0);
                 // L-05 hook: queue state is broadcast unsequenced (not stored in event history).
-                if event["kind"]!="input_queue" {if n<=seq {continue;} seq=n;}
+                // U-05: derived tool progress reuses its source event's seq and is never stored.
+                if event["kind"]!="input_queue" && event["kind"]!="tool_progress" {if n<=seq {continue;} seq=n;}
                 let closed=event["kind"]=="status" && (event["data"]["status"]=="closed" || event["data"]["status"]=="suspended");
                 if sink.send(Message::Text(event.to_string().into())).await.is_err(){break;}
                 if closed {let _=sink.send(Message::Close(None)).await;break;}

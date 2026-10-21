@@ -953,6 +953,7 @@ mod fork_tests {
                 mcp_token: Mutex::new("child-token".into()),
                 mcp_refresh_pending: AtomicBool::new(false),
                 notifications: crate::notifications::Hub::new(catalog),
+                progress: crate::tool_progress::Hub::empty(),
             });
             store
                 .lock()

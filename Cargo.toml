@@ -1,6 +1,6 @@
 [workspace]
-# E-01 is a separate member: plain `cargo build`/`cargo run` still build only the service.
-members = [".", "experiments/starlark"]
+# Embedded Starlark (E-01) used by the service for progress parser scripts.
+members = [".", "crates/starlark"]
 
 [package]
 name = "agentworks"
@@ -24,4 +24,5 @@ rmcp = { version = "=3.5.1", default-features = false, features = ["server", "tr
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 libc = "0.2"
 libghostty-vt = "=0.2.2"
+agentworks-starlark = { path = "crates/starlark" }
 

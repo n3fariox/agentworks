@@ -987,6 +987,8 @@ mod tests {
                 restart: Arc::new(crate::service_restart::Manager::new()),
                 notifications: crate::notifications::Hub::new(catalog),
                 hosts: crate::hosts::Hosts::new(),
+
+                progress: crate::tool_progress::Hub::empty(),
             };
             let make = |id: &str| {
                 let d:crate::SessionData=serde_json::from_value(json!({"status":"idle","seq":0,"requests":[],"models":null,"available_commands":[],"turn_active":false,"project_id":"project","provider_session_id":format!("native-{id}")})).unwrap();
@@ -1033,6 +1035,7 @@ mod tests {
                     mcp_token: Mutex::new("fixture-only".into()),
                     mcp_refresh_pending: Default::default(),
                     notifications: app.notifications.clone(),
+                    progress: app.progress.clone(),
                 });
                 app.sessions.lock().unwrap().insert(id.into(), s.clone());
                 (s, receiver)
@@ -1292,7 +1295,7 @@ mod tests {
                     .connection
                     .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                     .unwrap(),
-                8
+                9
             );
             assert!(store.access("retained").unwrap().communicate);
             assert_eq!(

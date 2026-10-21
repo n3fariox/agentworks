@@ -16,17 +16,21 @@ Use distinct clocks for total duration, meaningful last activity and time waitin
 
 [L-09 limit-reset continuation](LIMIT-RESUME.md), delivered first in batch 003, is the explicitly opt-in exception for recognized provider quota exhaustion: a durable timer may start a new continuation turn after the reset, retaining native context and checking current state. It does not retry arbitrary timeouts, replay a tool invocation or override a human stop. The suggested tool-display work below remains deferred.
 
-## Built-in Bazel progress — U-05 first slice delivered
+## Built-in Bazel progress — U-05 first slice delivered, now a Starlark parser script
 
-For recognized Bazel commands, derive a compact phase and reported action/test counts from available terminal metadata, output content or raw output. Parse output incrementally across split lines, ANSI/OSC control sequences, carriage-return updates and dynamic totals. Keep raw data unchanged. Progress is presentation only; command/tool status remains authoritative and no percentage is invented. When a useful stream is absent, retain the ordinary elapsed-activity display. The implementation is built into the existing tool cards and intentionally has no public parser registry or plugin system.
+For recognized Bazel commands, derive a compact phase and reported action/test counts from available terminal metadata, output content or raw output. Parse output incrementally across split lines, ANSI/OSC control sequences, carriage-return updates and dynamic totals. Keep raw data unchanged. Progress is presentation only; command/tool status remains authoritative and no percentage is invented. When a useful stream is absent, retain the ordinary elapsed-activity display. Parsing now runs on the server as the built-in Starlark script `bazel_progress.star` ([E-01](experiments/001-starlark.md)). Behavior is unchanged; the same fixture produces the same text.
+
+- **Parser thread.** `Session::emit` forwards ACP tool updates to one dedicated parser thread (`src/tool_progress.rs`). Rust handles snapshots versus deltas, sequence deduplication, ANSI/OSC, CR/LF and line bounds. The script only sees `on_line(ctx, line)`.
+- **Temporary results.** Derived progress is published as unsequenced `tool_progress` events, carrying the source event's `seq`, and as `toolProgress` in session snapshots. It is never stored. After a restart it is rebuilt from the retained event window.
+- **Browser.** The browser keeps exact raw output, observed timing and exit/status display, and renders the server's view. It no longer parses output. A parser failure shows "Progress unavailable", with the attributable diagnostic as the tooltip, and never changes tool status.
+- **Scripts.** Scripts live in the SQLite `scripts` table (schema v9); nothing is loaded from disk. The shipped Bazel parser is seeded as a built-in that follows the shipped source until a user saves their own version under the same name. It can be disabled but not deleted. Each parser script declares `COMMAND_PATTERN`, which Rust uses for routing, and `DISPLAY_NAME`. Scripts are trusted on this single-user host and run in-process with tick/heap/time bounds.
+- **API.** `GET /api/scripts`, `PUT /api/scripts/{name}` with `{source}` (compiled and type-checked first; failures return 400 with the diagnostic), `PUT /api/scripts/{name}/enabled` with `{enabled}`, and `DELETE /api/scripts/{name}`. There is no settings UI yet.
 
 Streaming cadence is adapter-dependent. An adapter advertising terminal-output support does not guarantee that every command reports incremental output; no live provider query or command is started to obtain progress. Terminal exit metadata can enrich the display but does not override the harness's tool result.
 
 ## Deferred extensibility
 
-General cross-harness normalization, a versioned parser contract, configurable match/capture rules, and user-installed parsers remain future work. Add them only after a concrete need justifies the extra interface; any helper must be explicitly installed, bounded, isolated from tool authority, and unable to alter command outcomes.
-
-The [Experiment E-01](experiments/001-starlark.md) prototype matched U-05 output on the shared fixtures but recommends keeping the built-in parser; it is not a dependency of Bazel progress.
+User-installed parsers exist through the script API and host API v1 ([E-01](experiments/001-starlark.md)). A settings UI for scripts, general cross-harness normalization and workflow scripts remain future work. Parsers stay bounded, cannot touch tool authority and cannot alter command outcomes.
 
 Record deterministic sample streams for tests, including dynamic totals, failures, duplicate events, snapshots/deltas, ANSI/carriage returns, replay and harnesses without streaming. The user's existing Bazel mod can provide parsing rules and representative fixtures when available. Do not require harness-specific CLI modifications just to render progress in Agentworks; investigate an adapter extension or an opt-in build progress source if a harness does not expose live output.
 

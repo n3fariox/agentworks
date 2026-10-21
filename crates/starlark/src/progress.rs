@@ -17,6 +17,8 @@ use serde_json::{Value as Json, json};
 use crate::engine::{CallStats, Compiled, Diagnostic, Engine};
 
 const MAX_LINE: usize = 16 * 1024;
+/// Raw output retained per stream while a tool's command is still unknown.
+const PENDING_RAW: usize = 1024 * 1024;
 const MAX_COUNT: u64 = 9_007_199_254_740_991;
 
 /// Script-owned, temporary per-stream state: plain data only. Kept in memory
@@ -70,7 +72,34 @@ pub struct LineContext<'a> {
 /// built-in Rust baseline used for comparison. Implementations update `state`
 /// in place only for committed lines, and leave it untouched on error.
 pub trait LineParser {
+    /// Short display name shown before the phase, e.g. "Bazel".
+    fn display_name(&self) -> &str;
+    /// Host routing: whether this parser receives a tool command's output.
+    fn matches(&self, command: &str) -> bool;
     fn parse(&self, ctx: &LineContext, state: &mut State, line: &str) -> Result<Option<Progress>, Diagnostic>;
+}
+
+/// Chooses the parser for a command; the first match wins.
+pub trait ParserSet {
+    fn select(&self, command: &str) -> Option<&dyn LineParser>;
+}
+
+impl<T: LineParser> ParserSet for T {
+    fn select(&self, command: &str) -> Option<&dyn LineParser> {
+        self.matches(command).then_some(self as &dyn LineParser)
+    }
+}
+
+impl ParserSet for dyn LineParser + '_ {
+    fn select(&self, command: &str) -> Option<&dyn LineParser> {
+        self.matches(command).then_some(self)
+    }
+}
+
+impl<T: LineParser> ParserSet for [T] {
+    fn select(&self, command: &str) -> Option<&dyn LineParser> {
+        self.iter().find(|p| p.matches(command)).map(|p| p as &dyn LineParser)
+    }
 }
 
 pub struct StarlarkParser {
@@ -108,6 +137,15 @@ impl StarlarkParser {
 }
 
 impl LineParser for StarlarkParser {
+    fn display_name(&self) -> &str {
+        &self.script.display_name
+    }
+    fn matches(&self, command: &str) -> bool {
+        self.script
+            .command_pattern
+            .as_ref()
+            .is_some_and(|r| r.is_match(command))
+    }
     fn parse(&self, ctx: &LineContext, state: &mut State, line: &str) -> Result<Option<Progress>, Diagnostic> {
         self.parse_with_stats(ctx, state, line).map(|(p, _)| p)
     }
@@ -138,6 +176,12 @@ fn builtin_patterns() -> &'static BuiltinPatterns {
 }
 
 impl LineParser for BuiltinBazel {
+    fn display_name(&self) -> &str {
+        "Bazel"
+    }
+    fn matches(&self, command: &str) -> bool {
+        is_bazel(command)
+    }
     fn parse(&self, ctx: &LineContext, state: &mut State, line: &str) -> Result<Option<Progress>, Diagnostic> {
         let p = builtin_patterns();
         let mut scratch;
@@ -224,6 +268,11 @@ pub struct ToolProgress {
     pub command: Option<String>,
     /// Set on the first parser failure; progress is then withheld for this tool.
     pub parser_failure: Option<Diagnostic>,
+    /// Display name of the parser handling this tool, once its command matched.
+    pub parser: Option<String>,
+    /// Keep raw output only until the command is known. The service sets this:
+    /// it already persists raw events, so derived state needs no second copy.
+    pub drop_raw: bool,
     seq: Option<i64>,
     version: u64,
     pub calls: u64,
@@ -251,8 +300,16 @@ fn output_text(content: &Json) -> Option<String> {
 }
 
 impl ToolProgress {
+    /// Derived state for a service that persists raw events itself (`drop_raw`).
+    pub fn without_raw() -> Self {
+        ToolProgress {
+            drop_raw: true,
+            ..ToolProgress::default()
+        }
+    }
+
     /// Apply one persisted ACP tool update. Returns false for duplicates.
-    pub fn apply(&mut self, parser: &dyn LineParser, update: &Json, seq: Option<i64>) -> bool {
+    pub fn apply<P: ParserSet + ?Sized>(&mut self, parsers: &P, update: &Json, seq: Option<i64>) -> bool {
         if let (Some(seq), Some(last)) = (seq, self.seq)
             && seq <= last
         {
@@ -261,7 +318,7 @@ impl ToolProgress {
         if seq.is_some() {
             self.seq = seq;
         }
-        let was_parsing = self.parsing();
+        let was_known = self.command.is_some();
         if let Some(s) = update.get("status").and_then(Json::as_str) {
             self.status = Some(s.to_owned());
         }
@@ -279,13 +336,21 @@ impl ToolProgress {
         {
             self.command = Some(t.to_owned());
         }
-        if !was_parsing && self.parsing() {
-            self.reparse(parser);
+        if !was_known && self.command.is_some() {
+            match self.active(parsers) {
+                Some(parser) => {
+                    self.parser = Some(parser.display_name().to_owned());
+                    self.reparse(parser);
+                }
+                // No parser handles this command: nothing derived, nothing to keep.
+                None if self.drop_raw => self.streams.clear(),
+                None => {}
+            }
         }
         if let Some(content) = update.get("content") {
             self.streams.remove("content");
             if let Some(text) = output_text(content) {
-                self.write(parser, "content", &text, false);
+                self.write(parsers, "content", &text, false);
             }
         }
         if let Some(raw) = update.get("rawOutput") {
@@ -302,7 +367,7 @@ impl ToolProgress {
                 _ => None,
             };
             if let Some(text) = text {
-                self.write(parser, "rawOutput", &text, false);
+                self.write(parsers, "rawOutput", &text, false);
             }
         }
         let meta = update.get("_meta");
@@ -312,7 +377,7 @@ impl ToolProgress {
                 value.and_then(|v| v["terminal_id"].as_str()),
                 value.and_then(|v| v["data"].as_str()),
             ) {
-                self.write(parser, &format!("terminal:{id}"), data, delta);
+                self.write(parsers, &format!("terminal:{id}"), data, delta);
             }
         }
         if let Some(exit) = meta.and_then(|m| m.get("terminal_exit"))
@@ -323,6 +388,13 @@ impl ToolProgress {
         true
     }
 
+    fn active<'p, P: ParserSet + ?Sized>(&self, parsers: &'p P) -> Option<&'p dyn LineParser> {
+        if self.parser_failure.is_some() {
+            return None;
+        }
+        parsers.select(self.command.as_deref()?)
+    }
+
     /// Output can arrive before the tool call names its command. Once it is
     /// recognised, rebuild derived state from the retained raw output.
     fn reparse(&mut self, parser: &dyn LineParser) {
@@ -330,7 +402,7 @@ impl ToolProgress {
         for key in keys {
             let old = self.streams.remove(&key).unwrap();
             let mut stream = Stream {
-                raw: old.raw.clone(),
+                raw: if self.drop_raw { String::new() } else { old.raw.clone() },
                 version: old.version,
                 ..Stream::default()
             };
@@ -346,22 +418,28 @@ impl ToolProgress {
         }
     }
 
-    fn parsing(&self) -> bool {
-        self.parser_failure.is_none() && self.command.as_deref().is_some_and(is_bazel)
-    }
-
-    fn write(&mut self, parser: &dyn LineParser, key: &str, data: &str, delta: bool) {
+    fn write<P: ParserSet + ?Sized>(&mut self, parsers: &P, key: &str, data: &str, delta: bool) {
+        let parser = self.active(parsers);
+        if self.drop_raw && parser.is_none() && (self.command.is_some() || self.parser_failure.is_some()) {
+            return;
+        }
         self.version += 1;
         let version = self.version;
-        let parsing = self.parsing();
         let mut stream = match self.streams.remove(key) {
             Some(s) if delta => s,
             _ => Stream::default(),
         };
-        stream.raw.push_str(data);
+        if !self.drop_raw {
+            stream.raw.push_str(data);
+        } else if parser.is_none() && stream.raw.len() + data.len() <= PENDING_RAW {
+            // Needed to parse output that arrives before the command is known.
+            stream.raw.push_str(data);
+        }
         stream.version = version;
         let mut failure = None;
-        if parsing && let Err(d) = self.feed(parser, key, &mut stream, data) {
+        if let Some(parser) = parser
+            && let Err(d) = self.feed(parser, key, &mut stream, data)
+        {
             failure = Some(d);
         }
         self.streams.insert(key.to_owned(), stream);
@@ -440,7 +518,7 @@ impl ToolProgress {
 
     /// Most recently updated stream's progress, if derived progress is available.
     pub fn progress(&self) -> Option<&Progress> {
-        if !self.parsing() {
+        if self.parser.is_none() || self.parser_failure.is_some() {
             return None;
         }
         self.streams
@@ -462,7 +540,7 @@ impl ToolProgress {
             self.exit.is_some() || !matches!(self.status.as_deref().unwrap_or("pending"), "pending" | "in_progress");
         match self.progress() {
             Some(p) => {
-                parts.push(format!("Bazel · {}", p.phase));
+                parts.push(format!("{} · {}", self.parser.as_deref().unwrap_or_default(), p.phase));
                 for unit in ["actions", "tests"] {
                     if let Some(c) = p.counts.iter().find(|c| c.unit == unit) {
                         parts.push(format!("{} / {} {unit} reported", group(c.done), group(c.total)));
@@ -485,6 +563,13 @@ impl ToolProgress {
 
     pub fn snapshot(&self) -> Json {
         json!({"status": self.status, "progress": self.progress(), "exit": self.exit,
+            "parserFailure": self.parser_failure.as_ref().map(|d| d.to_string())})
+    }
+
+    /// Derived view published to browsers: parser name, progress and any
+    /// attributable parser failure. Tool status and exit come from raw events.
+    pub fn derived(&self) -> Json {
+        json!({"parser": self.parser, "progress": self.progress(),
             "parserFailure": self.parser_failure.as_ref().map(|d| d.to_string())})
     }
 }

@@ -32,6 +32,13 @@ async function prompt(id, params) {
   const chunk=text=>update(params.sessionId,{sessionUpdate:'agent_message_chunk',content:{type:'text',text}});
   // U-07 fixture: `usage-status {json}` emits that usage_update deterministically; no model is called.
   if(text.startsWith('usage-status ')){update(params.sessionId,{sessionUpdate:'usage_update',...JSON.parse(text.slice(13))});chunk('usage reported');save(params.sessionId);reply(id,{stopReason:'end_turn'});return;}
+  // U-05 fixture: `bazel demo` replays recorded Bazel tool output; no command is executed.
+  if(text==='bazel demo'){
+    const toolCallId=randomUUID();
+    for(const e of JSON.parse(readFileSync(new URL('../tests/fixtures/bazel-events.json',import.meta.url),'utf8')))
+      if(e.kind==='acp'){update(params.sessionId,{...e.data,toolCallId});await delay(10);}
+    chunk('Replayed the recorded Bazel fixture. No command was executed.');save(params.sessionId);reply(id,{stopReason:'end_turn'});return;
+  }
   chunk(`### Local session, turn ${turn}\n\n`);
   // B-02: deterministic provider-local read; no model/tool action is dispatched.
   if(text==='/status'||text==='/usage') {

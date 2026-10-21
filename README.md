@@ -339,7 +339,7 @@ AGENTWORKS_ENROLL_REAL_MISE=1 npm run test:host-enrollment
 
 The browser flow is covered by `npx playwright test tests/hosts.spec.mjs`, including mobile layout, terminal input, setup errors/retries, cancellation, and directory selection.
 
-`npm run test:starlark` runs the [E-01 Starlark experiment](work/experiments/001-starlark.md) tests. That crate is a separate workspace member: plain `cargo build`/`cargo run` do not build it and the service does not link it.
+`npm run test:starlark` runs the embedded Starlark crate tests (`crates/starlark`, [E-01](work/experiments/001-starlark.md)). With the server running, `npm run test:progress` checks server-side Bazel progress and the `/api/scripts` endpoints using the demo agent's recorded `bazel demo` output. See [tool activity](work/TOOL-ACTIVITY.md).
 
 The smoke test uses the demo agent to exercise ACP streaming, multiple turns, disconnect survival, idempotency, approval allow/stale/invalid responses, cancellation, Markdown sanitization, and directory/origin checks. Workspace checks also cover file boundaries, manual automation runs, approval/concurrency handling, and retained run history. They make no paid model requests.
 
@@ -352,7 +352,7 @@ npx playwright test
 
 Browser checks cover desktop/mobile layout, session switching, permission requests across reload, cancellation, images, and Markdown file preview.
 
-After `cargo build --locked`, `npm run verify` starts an isolated server on port 4318, runs the E-01 experiment tests, the API, remote-host relay, project, settings/model, import, workspace/automation, completion-report, worktree-policy, Git-context and browser suites, checks shutdown with an open browser connection, and stops its server. Use `AGENTWORKS_VERIFY_PORT` to change the main test port; worktree policy owns a separate server on port 4351.
+After `cargo build --locked`, `npm run verify` starts an isolated server on port 4318, runs the Starlark crate and progress checks, the API, remote-host relay, project, settings/model, import, workspace/automation, completion-report, worktree-policy, Git-context and browser suites, checks shutdown with an open browser connection, and stops its server. Use `AGENTWORKS_VERIFY_PORT` to change the main test port; worktree policy owns a separate server on port 4351.
 
 Architecture and follow-up work: [ROADMAP.md](ROADMAP.md), [Rust/ACP assessment](RUST-INTEGRATION.md), and [morsh reuse notes](MORSH-REUSE.md).
 

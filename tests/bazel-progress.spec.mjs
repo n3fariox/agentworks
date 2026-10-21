@@ -2,9 +2,10 @@ import {test,expect} from '@playwright/test';
 import {createServer} from 'node:http';
 import {readFile} from 'node:fs/promises';
 import {resolve,extname} from 'node:path';
-import {events} from './fixtures/bazel-helpers.mjs';
+import {events,progressEvents,view} from './fixtures/bazel-helpers.mjs';
 
 // Static application with isolated fixture APIs and WebSockets. No provider, live data or model calls.
+// The fixture server publishes the service's golden `tool_progress` events for the U-05 fixture.
 const base='http://127.0.0.1:4521';let server;
 test.beforeAll(async()=>{
   server=createServer(async(req,res)=>{
@@ -19,8 +20,14 @@ test.afterAll(async()=>{await new Promise(ok=>server.close(ok));});
 async function fixture(page){
   const sessions=[{id:'bazel-fixture',title:'Bazel fixture',provider:'demo',cwd:'/fixture',status:'running',hostId:'local'},
     {id:'other-fixture',title:'Other fixture',provider:'demo',cwd:'/fixture',status:'running',hostId:'local'}];
-  const history=new Map(sessions.map(s=>[s.id,[]]));const sockets=new Map();
-  const snapshot=session=>({kind:'snapshot',seq:100,session,events:history.get(session.id),approvals:[],commands:[],permissionModes:{options:[]}});
+  const history=new Map(sessions.map(s=>[s.id,[]]));const published=new Map(sessions.map(s=>[s.id,[]]));const sockets=new Map();
+  // Like the service: the latest derived view per tool, rebuilt from the retained history.
+  const toolProgress=id=>{
+    const last=Math.max(0,...history.get(id).map(e=>e.seq));const views={};
+    for(const p of published.get(id))if(p.seq<=last)views[p.data.toolCallId]={...p.data,seq:p.seq};
+    return views;
+  };
+  const snapshot=session=>({kind:'snapshot',seq:100,session,events:history.get(session.id),approvals:[],commands:[],permissionModes:{options:[]},toolProgress:toolProgress(session.id)});
   await page.addInitScript(()=>localStorage.setItem('agentworks-session','bazel-fixture'));
   await page.routeWebSocket('**/api/sessions/*/events',ws=>{
     const session=sessions.find(s=>ws.url().includes('/'+s.id+'/'));
@@ -38,10 +45,12 @@ async function fixture(page){
   });
   await page.goto(base);await expect(page.locator('#header-title')).toHaveText('Bazel fixture');
   await expect(page.locator('#session-state')).toHaveText('Running');
+  const progress=(p,id)=>{published.get(id).push(p);sockets.get(id)?.send(JSON.stringify(p));};
   return {send(event,id='bazel-fixture'){
     history.get(id).push(event);if(event.kind==='status')sessions.find(s=>s.id===id).status=event.data.status;
     sockets.get(id)?.send(JSON.stringify(event));
-  },replace(list,id='bazel-fixture'){history.set(id,list);sockets.get(id)?.send(JSON.stringify(snapshot(sessions.find(s=>s.id===id))));}};
+    if(id==='bazel-fixture'&&events.includes(event))for(const p of progressEvents)if(p.seq===event.seq)progress(p,id);
+  },progress(seq,data,id='bazel-fixture'){progress({kind:'tool_progress',seq,data:{toolCallId:'build',...data}},id);},replace(list,id='bazel-fixture'){history.set(id,list);sockets.get(id)?.send(JSON.stringify(snapshot(sessions.find(s=>s.id===id))));}};
 }
 for(const mobile of [false,true])test(`live progress, raw output, failed result and replay ${mobile?'phone':'desktop'}`,async({page})=>{
   if(mobile)await page.setViewportSize({width:390,height:844});
@@ -82,6 +91,7 @@ test('quiet commands show ticking elapsed activity; final-only output makes no s
   await expect(activity).toHaveText('In progress · 0s');
   await page.clock.fastForward(2100);await expect(activity).toHaveText('In progress · 2s');
   f.send({kind:'acp',seq:4,data:{sessionUpdate:'tool_call_update',toolCallId:'build',status:'completed',content:[{type:'content',content:{type:'text',text:'[2 / 2] fixture\nINFO: Build completed successfully'}}]}});
+  f.progress(4,view('Executing',[[2,2,'actions']]));
   await expect(activity).toHaveText('Bazel · Executing · 2 / 2 actions reported · 2s');
   await expect(activity).not.toHaveClass(/is-running/);
 });

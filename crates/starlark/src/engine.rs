@@ -263,6 +263,10 @@ pub struct Compiled {
     entry: OwnedFrozenValue,
     context: OwnedFrozenValue,
     event: Option<OwnedFrozenValue>,
+    /// Parser scripts: `DISPLAY_NAME`, shown before the phase. Workflows: the script name.
+    pub display_name: String,
+    /// Parser scripts: `COMMAND_PATTERN`. Rust routes only matching commands' output.
+    pub command_pattern: Option<Arc<regex::Regex>>,
     pub compile_time: Duration,
 }
 
@@ -409,6 +413,38 @@ impl Engine {
                 ),
             ));
         }
+        let (display_name, command_pattern) = match install.capability {
+            Capability::Parser => {
+                let constant = |name: &str| -> Result<String, Diagnostic> {
+                    let value = module.get_option(name).ok().flatten().ok_or_else(|| {
+                        fail(
+                            DiagnosticKind::Type,
+                            format!("parser scripts must define `{name}: str`"),
+                        )
+                    })?;
+                    value
+                        .unpack_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| fail(DiagnosticKind::Type, format!("`{name}` must be a str")))
+                };
+                let display = constant("DISPLAY_NAME")?;
+                if display.is_empty() || display.len() > 32 {
+                    return Err(fail(DiagnosticKind::Type, "`DISPLAY_NAME` must be 1..=32 bytes".into()));
+                }
+                let pattern = constant("COMMAND_PATTERN")?;
+                let regex = (pattern.len() <= 512)
+                    .then(|| regex::RegexBuilder::new(&pattern).size_limit(1 << 20).build().ok())
+                    .flatten()
+                    .ok_or_else(|| {
+                        fail(
+                            DiagnosticKind::Type,
+                            "`COMMAND_PATTERN` must be a valid regex of at most 512 bytes".into(),
+                        )
+                    })?;
+                (display, Some(Arc::new(regex)))
+            }
+            Capability::Workflow => (install.name.clone(), None),
+        };
         let compiled = Arc::new(Compiled {
             name: install.name.clone(),
             hash: install.hash.clone(),
@@ -416,6 +452,8 @@ impl Engine {
             entry,
             context: prelude.context.clone(),
             event: prelude.event.clone(),
+            display_name,
+            command_pattern,
             compile_time: started.elapsed(),
         });
         self.cache
