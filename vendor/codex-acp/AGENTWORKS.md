@@ -21,7 +21,7 @@ The helper maintains a parallel cache of just the subscription window fields
 with observation times, because the upstream cache has no field timestamps and
 its merge loses omitted primary/secondary fields. No account methods are called.
 The tracked contract and limitations are documented in
-`../../work/CODEX-SUBSCRIPTION-QUOTA-PROPOSAL.md`.
+`../../docs/CODEX-SUBSCRIPTION-QUOTA.md`.
 
 After changing this fork, run `npm run test:codex-quota`,
 `node tests/usage-status.test.mjs`, and the focused browser and Rust checks from
