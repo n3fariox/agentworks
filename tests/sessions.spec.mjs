@@ -439,7 +439,7 @@ test('workspace: file browsing, side preview, drafts, and manual automation runs
     await page.locator('#workspace-preview').getByRole('button',{name:'← Files'}).click();
     await expect(page.locator('#side-file-entries')).toContainText('README.md');await expect(page.locator('#workspace-preview')).toBeHidden();
     await page.locator('#side-close').click();await expect(page.locator('#side-panel')).toBeHidden();
-    await page.locator('#nav-automations').click();await page.locator('#new-automation').click();await page.locator('#automation-name').fill('Browser test manual review');await page.locator('#automation-provider').selectOption('demo');await page.locator('#automation-model').fill('demo/quick');await page.locator('#automation-directory').fill(cwd);await page.locator('#automation-prompt').fill('approval');await page.locator('#save-automation').click();
+    await page.locator('#nav-automations').click();await page.locator('#new-automation').click();await page.locator('#automation-name').fill('Browser test manual review');await page.locator('#automation-provider').selectOption('demo');await page.locator('#automation-model').fill('demo/quick');await page.locator('#automation-directory').fill(cwd);await page.getByLabel('Step 1 instructions').fill('approval');await page.locator('#save-automation').click();
     await expect(page.locator('#automation-detail h1')).toHaveText('Browser test manual review');
     defId=await page.evaluate(async()=>{const defs=await fetch('/api/automations').then(r=>r.json());return defs.find(d=>d.name==='Browser test manual review').id;});
     await page.locator('#run-automation').click();await expect(page.locator('#session-state')).toHaveText('Needs your approval');

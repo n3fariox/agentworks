@@ -35,9 +35,72 @@ pub struct Definition {
     pub host_id: String,
     pub project_id: Option<String>,
     pub prompt: String,
+    /// Recipe form of the definition. `prompt` is derived from it, so runs and
+    /// older clients keep using the single prompt. Absent on legacy definitions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<Workflow>,
     pub enabled: bool,
     pub created: u64,
     pub updated: u64,
+}
+/// "When [trigger], do [steps]". Only what the runtime can perform is
+/// representable: a manual trigger, and agent steps that are carried out in
+/// order within one agent turn of the run's session.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Workflow {
+    pub version: u32,
+    pub trigger: Trigger,
+    pub steps: Vec<Step>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum Trigger {
+    Manual,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum Step {
+    Agent { text: String },
+}
+pub const MAX_STEPS: usize = 20;
+const MAX_PROMPT: usize = 32768;
+impl Workflow {
+    /// Trims steps, rejects empty or oversized recipes and returns the
+    /// normalised workflow with the prompt a run will send.
+    pub fn compile(mut self) -> Result<(Workflow, String), &'static str> {
+        if self.version != 1 {
+            return Err("Unsupported workflow version");
+        }
+        for Step::Agent { text } in &mut self.steps {
+            *text = text.trim().to_string();
+        }
+        if self.steps.is_empty()
+            || self.steps.len() > MAX_STEPS
+            || self
+                .steps
+                .iter()
+                .any(|Step::Agent { text }| text.is_empty())
+        {
+            return Err("Add 1 to 20 steps, each with instructions");
+        }
+        let prompt = match self.steps.as_slice() {
+            [Step::Agent { text }] => text.clone(),
+            steps => {
+                let mut prompt = String::from(
+                    "Complete these steps in order. Finish each step before starting the next, and stop and report if a step cannot be completed.\n",
+                );
+                for (index, Step::Agent { text }) in steps.iter().enumerate() {
+                    prompt.push_str(&format!("\nStep {}:\n{}\n", index + 1, text));
+                }
+                prompt
+            }
+        };
+        if prompt.len() > MAX_PROMPT {
+            return Err("Use instructions up to 32 KB in total");
+        }
+        Ok((self, prompt))
+    }
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,7 +113,10 @@ pub struct Input {
     project_id: Option<String>,
     #[serde(default = "enabled")]
     enabled: bool,
+    #[serde(default)]
     prompt: String,
+    #[serde(default)]
+    workflow: Option<Workflow>,
 }
 fn enabled() -> bool {
     true
@@ -66,11 +132,20 @@ async fn definition(
     id: Option<&str>,
     input: Input,
 ) -> Result<Definition, (StatusCode, String)> {
+    let (workflow, prompt) = match input.workflow {
+        Some(workflow) => {
+            let (workflow, prompt) = workflow
+                .compile()
+                .map_err(|message| fail(StatusCode::BAD_REQUEST, message))?;
+            (Some(workflow), prompt)
+        }
+        None => (None, input.prompt),
+    };
     let name = input.name.trim();
     if name.is_empty()
         || name.chars().count() > 80
-        || input.prompt.trim().is_empty()
-        || input.prompt.len() > 32768
+        || prompt.trim().is_empty()
+        || prompt.len() > MAX_PROMPT
     {
         return Err(fail(
             StatusCode::BAD_REQUEST,
@@ -140,7 +215,8 @@ async fn definition(
         location_id: location.id,
         host_id: host.into(),
         project_id: input.project_id,
-        prompt: input.prompt,
+        prompt,
+        workflow,
         enabled: input.enabled,
         created,
         updated: now(),
@@ -317,4 +393,76 @@ pub fn run_status(data: &SessionData) -> &str {
             "error" => "failed",
             other => other,
         })
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn agent(text: &str) -> Step {
+        Step::Agent { text: text.into() }
+    }
+    fn recipe(steps: Vec<Step>) -> Workflow {
+        Workflow {
+            version: 1,
+            trigger: Trigger::Manual,
+            steps,
+        }
+    }
+    #[test]
+    fn single_step_prompt_is_verbatim() {
+        let (workflow, prompt) = recipe(vec![agent("  Review changes \n")])
+            .compile()
+            .unwrap();
+        assert_eq!(prompt, "Review changes");
+        assert_eq!(workflow.steps, vec![agent("Review changes")]);
+    }
+    #[test]
+    fn steps_compile_in_order() {
+        let (_, prompt) = recipe(vec![agent("Run tests"), agent("Summarise failures")])
+            .compile()
+            .unwrap();
+        let first = prompt.find("Step 1:\nRun tests").unwrap();
+        let second = prompt.find("Step 2:\nSummarise failures").unwrap();
+        assert!(prompt.starts_with("Complete these steps in order."));
+        assert!(first < second);
+    }
+    #[test]
+    fn rejects_empty_oversized_and_unknown() {
+        assert!(recipe(vec![]).compile().is_err());
+        assert!(recipe(vec![agent("ok"), agent("   ")]).compile().is_err());
+        assert!(
+            recipe((0..=MAX_STEPS).map(|_| agent("x")).collect())
+                .compile()
+                .is_err()
+        );
+        assert!(
+            recipe(vec![agent(&"x".repeat(MAX_PROMPT + 1))])
+                .compile()
+                .is_err()
+        );
+        assert!(
+            Workflow {
+                version: 2,
+                ..recipe(vec![agent("x")])
+            }
+            .compile()
+            .is_err()
+        );
+        for invalid in [
+            r#"{"version":1,"trigger":{"kind":"schedule","cron":"* * * * *"},"steps":[{"kind":"agent","text":"x"}]}"#,
+            r#"{"version":1,"trigger":{"kind":"manual"},"steps":[{"kind":"shell","text":"rm -rf /"}]}"#,
+            r#"{"version":1,"trigger":{"kind":"manual"},"steps":[{"kind":"agent","text":"x","approval":true}]}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Workflow>(invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+    #[test]
+    fn legacy_definitions_round_trip_without_workflow() {
+        let legacy = r#"{"id":"a","name":"n","provider":"demo","model":null,"cwd":"/","locationId":"l","hostId":"local","projectId":null,"prompt":"p","enabled":true,"created":1,"updated":1}"#;
+        let def: Definition = serde_json::from_str(legacy).unwrap();
+        assert!(def.workflow.is_none());
+        assert!(!serde_json::to_string(&def).unwrap().contains("workflow"));
+    }
 }
