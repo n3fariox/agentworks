@@ -245,7 +245,7 @@ test('automation editor selects a remote host for models and saved execution',as
   await page.locator('#automation-load-models').click();
   await expect(page.locator('#automation-models option')).toHaveCount(1);
   expect(models).toMatchObject({hostId:'r1',provider:'demo',cwd:'/remote/project'});
-  await page.locator('#automation-name').fill('Remote task');await page.locator('#automation-prompt').fill('/status');
+  await page.locator('#automation-name').fill('Remote task');await page.getByLabel('Step 1 instructions').fill('/status');
   await page.locator('#save-automation').click();await expect(page.locator('#automation-error')).toHaveText('automation captured');
   expect(saved).toMatchObject({hostId:'r1',provider:'demo',cwd:'/remote/project',prompt:'/status'});
 });

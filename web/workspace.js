@@ -183,10 +183,34 @@ export function createWorkspace(hooks){
     $('automation-directory').value=active?.hostId===id?active.cwd:id==='local'?directory():(catalog.hosts.find(h=>h.id===id)?.roots?.[0]||'');
     $('automation-model').value='';$('automation-models').replaceChildren();
   }
+  // Recipe steps being edited. The server derives the run prompt from them; legacy definitions are one step.
+  const MAX_STEPS=20;let steps=[];
+  const stepsOf=def=>def?.workflow?.steps?.map(step=>step.text)||(def?.prompt?[def.prompt]:['']);
+  function renderSteps(focus=null){
+    const list=$('automation-steps');list.replaceChildren();
+    steps.forEach((text,i)=>{
+      const item=el('li','recipe-step'),input=el('textarea'),tools=el('div','recipe-step-tools');
+      input.rows=3;input.required=true;input.maxLength=32768;input.value=text;input.placeholder=i?'Then…':'Describe what the agent should do first.';input.setAttribute('aria-label',`Step ${i+1} instructions`);input.oninput=()=>{steps[i]=input.value;};
+      const tool=(label,glyph,disabled,action)=>{const button=el('button','icon-button',glyph);button.type='button';button.title=label;button.setAttribute('aria-label',`${label} step ${i+1}`);button.disabled=disabled;button.onclick=action;tools.append(button);};
+      tool('Move up','↑',i===0,()=>moveStep(i,-1));tool('Move down','↓',i===steps.length-1,()=>moveStep(i,1));
+      tool('Remove','×',steps.length===1,()=>{steps.splice(i,1);renderSteps(Math.min(i,steps.length-1));});
+      item.append(el('span','recipe-step-number',String(i+1)),input,tools);list.append(item);
+    });
+    $('add-automation-step').disabled=steps.length>=MAX_STEPS;
+    if(focus!==null)list.querySelectorAll('textarea')[focus]?.focus();
+  }
+  function moveStep(i,delta){const [step]=steps.splice(i,1);steps.splice(i+delta,0,step);renderSteps(i+delta);}
+  function recipeView(def){
+    const box=el('div','automation-recipe-view'),when=el('p','recipe-row'),then=el('p','recipe-row'),list=el('ol','recipe-steps'),texts=stepsOf(def);
+    when.append(el('span','recipe-word','When'),el('span','recipe-trigger','I click Run now'));
+    then.append(el('span','recipe-word','Do'),el('span','field-note',texts.length>1?`${texts.length} steps in order, in one agent turn`:'1 step'));
+    for(const text of texts)list.append(el('li','automation-instructions',text));
+    box.append(when,then,list);return box;
+  }
   function automationEditor(def=null){
     editorGeneration++;editing=def?.id||null;automationOptions();automationHosts(def?.hostId||hooks.getActive()?.hostId||'local');$('automation-dialog-title').textContent=def?'Edit automation':'New automation';
     $('automation-name').value=def?.name||'';$('automation-provider').value=def?.provider||hooks.getActive()?.provider||'claude';$('automation-model').value=def?.model||'';
-    $('automation-project').value=def?.projectId||state.projectId||'';$('automation-directory').value=def?.cwd||(hooks.getActive()?.hostId===$('automation-host').value?hooks.getActive().cwd:$('automation-host').value==='local'?directory():catalog.hosts.find(h=>h.id===$('automation-host').value)?.roots?.[0]||'');$('automation-prompt').value=def?.prompt||'';$('automation-enabled').checked=def?.enabled??true;
+    $('automation-project').value=def?.projectId||state.projectId||'';$('automation-directory').value=def?.cwd||(hooks.getActive()?.hostId===$('automation-host').value?hooks.getActive().cwd:$('automation-host').value==='local'?directory():catalog.hosts.find(h=>h.id===$('automation-host').value)?.roots?.[0]||'');steps=stepsOf(def);renderSteps();$('automation-enabled').checked=def?.enabled??true;
     $('delete-automation').hidden=!def;$('automation-error').textContent='';$('automation-models').replaceChildren();$('automation-load-models').disabled=false;$('automation-dialog').showModal();
   }
   async function loadAutomations(){
@@ -198,7 +222,7 @@ export function createWorkspace(hooks){
   function renderAutomations(){
     const list=$('automation-list');list.replaceChildren();const visible=visibleDefinitions();
     if(!visible.some(d=>d.id===state.automationId))state.automationId=visible[0]?.id||null;
-    for(const def of visible){const button=el('button','automation-item'+(def.id===state.automationId?' selected':''));button.append(el('strong','',def.name),el('small','',`${hooks.labels[def.provider]} · ${def.enabled?'Manual':'Paused'}`));button.onclick=()=>{state.automationId=def.id;save();renderAutomations();};list.append(button);}
+    for(const def of visible){const button=el('button','automation-item'+(def.id===state.automationId?' selected':''));button.append(el('strong','',def.name),el('small','',`${hooks.labels[def.provider]} · ${def.enabled?'Manual':'Paused'} · ${stepsOf(def).length===1?'1 step':stepsOf(def).length+' steps'}`));button.onclick=()=>{state.automationId=def.id;save();renderAutomations();};list.append(button);}
     if(!visible.length)list.append(el('p','field-note','No automations in this project yet.'));
     const def=visible.find(d=>d.id===state.automationId);renderAutomation(def);if(def)loadRuns(def.id);
   }
@@ -207,7 +231,7 @@ export function createWorkspace(hooks){
     const header=el('div','automation-detail-header'),titles=el('div');titles.append(el('div','workspace-eyebrow','MANUAL AUTOMATION'),el('h1','',def.name));
     const actions=el('div','workspace-action-row'),edit=el('button','text-button','Edit'),run=el('button','primary','Run now ↗');edit.onclick=()=>automationEditor(def);run.id='run-automation';run.disabled=!def.enabled||runStarting;run.onclick=()=>runAutomation(def);actions.append(edit,run);header.append(titles,actions);area.append(header);
     const details=el('div','automation-execution');details.append(el('p','',`${hooks.labels[def.provider]} · ${def.model||'Host default'} · ${catalog.hosts.find(h=>h.id===def.hostId)?.name||def.hostId||'Local'}`),el('p','field-note',def.cwd),el('span','automation-badge',def.enabled?'Manual trigger':'Paused'));area.append(details);
-    area.append(el('h2','','Agent instructions'),el('pre','automation-instructions',def.prompt),el('h2','','Recent runs'));
+    area.append(el('h2','','Recipe'),recipeView(def),el('h2','','Recent runs'));
     const rows=el('div');rows.id='automation-runs';rows.append(el('p','field-note','Loading runs…'));area.append(rows);
   }
   async function loadRuns(id){
@@ -257,6 +281,7 @@ export function createWorkspace(hooks){
   $('side-files-hidden').onchange=()=>{setHiddenFiles($('side-files-hidden').checked);loadSideFiles();};
   $('automation-source').onclick=()=>{const origin=hooks.getActive()?.automation;if(origin)openAutomation(origin.automationId);};
   $('new-automation').onclick=()=>automationEditor();$('dismiss-automation').onclick=()=>$('automation-dialog').close();
+  $('add-automation-step').onclick=()=>{if(steps.length>=MAX_STEPS)return;steps.push('');renderSteps(steps.length-1);};
   $('automation-host').onchange=automationHostChanged;
   $('automation-provider').onchange=()=>{editorGeneration++;$('automation-model').value='';$('automation-models').replaceChildren();};$('automation-directory').oninput=()=>{editorGeneration++;};
   $('automation-load-models').onclick=async()=>{const token=editorGeneration;const button=$('automation-load-models');button.disabled=true;$('automation-error').textContent='';
@@ -264,7 +289,7 @@ export function createWorkspace(hooks){
     catch(error){if(token===editorGeneration)$('automation-error').textContent=error.message;}finally{button.disabled=false;}
   };
   $('automation-form').onsubmit=async event=>{event.preventDefault();$('save-automation').disabled=true;$('automation-error').textContent='';
-    try{const def=await api(editing?'/api/automations/'+editing:'/api/automations',{method:editing?'PUT':'POST',body:JSON.stringify({name:$('automation-name').value,provider:$('automation-provider').value,model:$('automation-model').value||null,projectId:$('automation-project').value||null,...($('automation-host').value!=='local'?{hostId:$('automation-host').value}:{}),cwd:$('automation-directory').value,prompt:$('automation-prompt').value,enabled:$('automation-enabled').checked})});state.projectId=def.projectId;state.locationKey=def.locationId;state.automationId=def.id;await hooks.refreshSessions();$('automation-dialog').close();showView('automations');}
+    try{const def=await api(editing?'/api/automations/'+editing:'/api/automations',{method:editing?'PUT':'POST',body:JSON.stringify({name:$('automation-name').value,provider:$('automation-provider').value,model:$('automation-model').value||null,projectId:$('automation-project').value||null,...($('automation-host').value!=='local'?{hostId:$('automation-host').value}:{}),cwd:$('automation-directory').value,workflow:{version:1,trigger:{kind:'manual'},steps:steps.map(text=>({kind:'agent',text}))},enabled:$('automation-enabled').checked})});state.projectId=def.projectId;state.locationKey=def.locationId;state.automationId=def.id;await hooks.refreshSessions();$('automation-dialog').close();showView('automations');}
     catch(error){$('automation-error').textContent=error.message;}finally{$('save-automation').disabled=false;}
   };
   $('delete-automation').onclick=async()=>{if(!editing||!confirm('Delete this automation definition? Its run sessions and history will remain.'))return;try{await api('/api/automations/'+editing,{method:'DELETE'});$('automation-dialog').close();loadAutomations();}catch(error){$('automation-error').textContent=error.message;}};
