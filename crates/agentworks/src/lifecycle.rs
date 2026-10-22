@@ -26,6 +26,17 @@ pub struct Update {
     /// Fingerprint from `GET /worktree` that the human confirmed for dirty removal.
     confirm_dirty: Option<String>,
 }
+impl Update {
+    /// MCP archive exposes only the default safe cleanup policy.
+    pub fn archive() -> Self {
+        Self {
+            title: None,
+            archived: Some(true),
+            worktree: None,
+            confirm_dirty: None,
+        }
+    }
+}
 pub async fn update(
     State(app): State<App>,
     Path(id): Path<String>,

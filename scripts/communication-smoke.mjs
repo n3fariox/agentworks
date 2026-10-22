@@ -44,7 +44,7 @@ try{
  await enable(a.id,{communicate:true,startSessions:true,promptSessions:true,cancelSessions:true,runAutomations:true});
  const child=value(await call(a.id,'start_session',{provider:'demo',cwd:roots[0],title:'Created by coordinator',requestId:'child'}));await idle(child.id);
  assert(value(await call(a.id,'list_sessions')).sessions.some(s=>s.id===child.id&&s.status==='idle'));
- assert.equal(child.initiatedBy.actor,a.id);assert.equal(child.projectId,project.id);assert.deepEqual((await api(`/api/sessions/${child.id}/agent-access`)),{communicate:true,startSessions:false,promptSessions:false,cancelSessions:false,runAutomations:false,restartService:false,manageReviewQueue:false});
+ assert.equal(child.initiatedBy.actor,a.id);assert.equal(child.projectId,project.id);assert.deepEqual((await api(`/api/sessions/${child.id}/agent-access`)),{communicate:true,startSessions:false,promptSessions:false,cancelSessions:false,runAutomations:false,restartService:false,manageReviewQueue:false,archiveSessions:false});
  const childTools=(await call(child.id,'tools/list')).tools.map(t=>t.name);assert(childTools.includes('send_message'));assert(childTools.includes('report_completion'));assert(!childTools.includes('start_session'));assert(!childTools.includes('prompt_session'));assert(!childTools.includes('cancel_session'));
  const same=value(await call(a.id,'start_session',{provider:'demo',cwd:roots[0],title:'Created by coordinator',requestId:'child'}));assert.equal(same.id,child.id);
  denied(await call(a.id,'start_session',{provider:'demo',cwd:roots[0],title:'Changed title',requestId:'child'}),409);

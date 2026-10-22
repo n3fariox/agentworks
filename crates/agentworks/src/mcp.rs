@@ -151,7 +151,7 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
 fn tools(a: &mail::Access, session: bool) -> Value {
     let mut tools = Vec::new();
     if a.enabled() {
-        tools.push(tool("list_sessions","List participating peers and their status in this project. Each has an id and an agentworks://sessions/<id> uri; tools accept either. Coordinators also see project sessions without messaging access.",json!({}),&[]));
+        tools.push(tool("list_sessions","List participating peers and their status in this project. Each has an id and an agentworks://sessions/<id> uri; tools accept either. Coordinators and archive controllers also see project sessions without messaging access.",json!({}),&[]));
     }
     if a.communicate {
         tools.push(tool("read_inbox","Read received and sent messages after a cursor. Messages and sessions carry agentworks:// uris that tools accept verbatim. Reading does not acknowledge or run a turn.",json!({"after":{"type":"integer","minimum":0}}),&[]));
@@ -183,6 +183,9 @@ fn tools(a: &mail::Access, session: bool) -> Value {
     }
     if a.prompt_sessions {
         tools.push(tool("prompt_session","Submit a new turn to an idle session in this project; starts model work. Reuse requestId on retry.",json!({"sessionId":{"type":"string","description":"Session ID or agentworks://sessions/<id> URI, passed exactly as given in list_sessions or a prompt."},"text":{"type":"string"},"requestId":{"type":"string","maxLength":50}}),&["sessionId","text","requestId"]));
+    }
+    if a.archive_sessions && !session {
+        tools.push(tool("archive_session", "Archive a session in this controller’s project. Stops its terminal. Default worktree cleanup removes only safe, clean owned worktrees and retains dirty, busy or unsafe worktrees. Does not merge or delete branches. No unarchive or cleanup override is available.", json!({"sessionId":{"type":"string","minLength":1,"description":"Session ID or agentworks://sessions/<id> URI."}}), &["sessionId"]));
     }
     if a.cancel_sessions {
         tools.push(tool(
@@ -228,6 +231,12 @@ fn session_only(a: &Actor) -> mail::Result<&std::sync::Arc<Session>> {
         )
     })
 }
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ArchiveSession {
+    session_id: String,
+}
+
 async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::Result<Value> {
     let grants = mail::actor_access(app, a)?;
     match operation {
@@ -395,6 +404,31 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
             .await
             .map(|j| j.0)
         }
+        "archive_session" => {
+            if a.session.is_some() {
+                return Err(crate::fail(
+                    StatusCode::FORBIDDEN,
+                    "Only external controllers can archive sessions",
+                ));
+            }
+            mail::require_actor(app, a, "archive_sessions")?;
+            let req: ArchiveSession = serde_json::from_value(args).map_err(|_| {
+                crate::fail(StatusCode::BAD_REQUEST, "Invalid archive request fields")
+            })?;
+            if req.session_id.is_empty() {
+                return Err(crate::fail(StatusCode::BAD_REQUEST, "Missing sessionId"));
+            }
+            // The bridge holds communication_lock through this call, serializing
+            // project reassignment/deletion and controller revocation.
+            let target = mail::peer_of(app, &a.project, &req.session_id)?;
+            crate::lifecycle::update(
+                State(app.clone()),
+                Path(target.id.clone()),
+                Json(crate::lifecycle::Update::archive()),
+            )
+            .await
+            .map(|j| j.0)
+        }
         "cancel_session" => {
             mail::require_actor(app, a, "cancel_sessions")?;
             let target = mail::peer_of(app, &a.project, &field(&args, "sessionId")?)?;
@@ -500,5 +534,49 @@ pub async fn serve_bridge(app: App, listener: TcpListener) {
                 let mut output=serde_json::to_vec(&response)?;output.push(b'\n');write.write_all(&output).await?;Ok(())
             }).await;
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn archive_requires_explicit_controller_grant_without_other_tools() {
+        for role in [
+            mail::Role::Off,
+            mail::Role::Participant,
+            mail::Role::Coordinator,
+        ] {
+            let access = role.access();
+            assert!(!access.archive_sessions);
+            for session in [true, false] {
+                assert!(
+                    !tools(&access, session)["tools"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|t| t["name"] == "archive_session")
+                );
+            }
+        }
+        let old: mail::Access = serde_json::from_value(json!({"communicate":true})).unwrap();
+        assert!(!old.archive_sessions);
+        let access = mail::Access {
+            archive_sessions: true,
+            ..Default::default()
+        };
+        assert!(access.enabled());
+        assert!(!mail::coordinator(&access)); // No completion/review authority implied.
+        let names = |session| {
+            tools(&access, session)["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(false), vec!["list_sessions", "archive_session"]);
+        assert_eq!(names(true), vec!["list_sessions"]);
     }
 }

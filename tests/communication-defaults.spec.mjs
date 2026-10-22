@@ -28,7 +28,7 @@ async function stop(){if(server&&!exited){const stopped=new Promise(r=>server.on
 async function setGlobal(role){const current=await api('/api/settings');return api('/api/settings',{...current,defaultCommunicationRole:role},'PUT');}
 async function create(project,agentAccess){return api('/api/sessions',{provider:'demo',cwd:fixture,projectId:project?.id,...(agentAccess===undefined?{}:{agentAccess})});}
 async function access(s){return api(`/api/sessions/${s.id}/agent-access`);}
-const off={communicate:false,startSessions:false,promptSessions:false,cancelSessions:false,runAutomations:false,restartService:false,manageReviewQueue:false};
+const off={communicate:false,startSessions:false,promptSessions:false,cancelSessions:false,runAutomations:false,restartService:false,manageReviewQueue:false,archiveSessions:false};
 const participant={...off,communicate:true};
 const coordinator={...participant,startSessions:true,promptSessions:true,cancelSessions:true,runAutomations:true};
 test.beforeAll(async()=>{await mkdir('.cache',{recursive:true});fixture=await mkdtemp(resolve('.cache/communication-defaults-'));await start();});

@@ -90,7 +90,7 @@ try{
 
  // Nothing is granted by forking: no coordinator access, no continuation timer.
  const access=await api(`/api/sessions/${forked.id}/agent-access`);
- assert.deepEqual(access,{communicate:false,startSessions:false,promptSessions:false,cancelSessions:false,runAutomations:false,restartService:false,manageReviewQueue:false},'Forking grants no Agentworks access');
+ assert.deepEqual(access,{communicate:false,startSessions:false,promptSessions:false,cancelSessions:false,runAutomations:false,restartService:false,manageReviewQueue:false,archiveSessions:false},'Forking grants no Agentworks access');
  assert.equal(child.session.continuation.enabled,false);
  assert.equal(child.session.continuation.parent,null);
 

@@ -8,14 +8,16 @@ An external controller is an explicit, named, revocable identity for an MCP clie
 
 ## Scope and grants
 
-Each controller belongs to exactly one project and is created by a human in **Project settings → External controllers…**. Grants use the existing capability names. The default is messaging only (`communicate`). `startSessions`, `promptSessions`, `cancelSessions` and `runAutomations` must be selected explicitly. `restartService` is rejected, and at least one grant is required.
+Each controller belongs to exactly one project and is created by a human in **Project settings → External controllers…**. Grants use the existing capability names. The default is messaging only (`communicate`). `startSessions`, `promptSessions`, `cancelSessions`, `archiveSessions` and `runAutomations` must be selected explicitly. `restartService` is rejected, and at least one grant is required.
 
 | Capability | Controller tools |
 | --- | --- |
-| any grant | `list_sessions` (same-project sessions; coordinators also see non-messaging sessions), `get_completion` |
+| any grant | `list_sessions` (same-project sessions; coordinators and archive controllers also see non-messaging sessions) |
+| `communicate` or coordinator grants | `get_completion` |
 | `communicate` | `read_inbox`, `send_message`, `acknowledge_message` |
 | `startSessions` | `start_session` in its project; started sessions inherit no grants and record the controller as initiator |
 | `promptSessions` / `cancelSessions` | `prompt_session` / `cancel_session` on same-project sessions |
+| `archiveSessions` | `archive_session {sessionId}` on same-project sessions, including non-messaging sessions |
 | `runAutomations` | `list_automations`, `run_automation` for project automations |
 
 These are never available to controllers, regardless of stored grants:
@@ -23,7 +25,9 @@ These are never available to controllers, regardless of stored grants:
 - `report_completion` (claims are self-authored by sessions);
 - the service restart tools;
 - `inheritResumePolicy`;
-- any human-only operation: grants, settings, deletion, worktree cleanup and harness approvals.
+- any human-only operation: grants, settings, deletion, explicit worktree removal and harness approvals.
+
+`archiveSessions` is default-off for existing grants and every session role. Only external controllers can call `archive_session`; other grants do not authorize it. It accepts a bare session ID or session URI and rejects all additional fields. The tool uses the HTTP lifecycle archive path with default (`auto`) cleanup: clean, safe owned worktrees may be removed (branch retained), while dirty, busy, shared, locked or unsafe worktrees are retained. Terminal shutdown, persistence and events are unchanged. It cannot rename, unarchive, force removal or confirm dirty deletion. Repeating a call on an already archived session returns its metadata without rerunning cleanup. Every call, including retries, checks current grants and project scope and is audited.
 
 Project boundaries are enforced in every handler, including for known IDs, retries and reply targets.
 
@@ -69,6 +73,7 @@ These are application permissions, as described in [AGENT-COMMUNICATION.md](AGEN
 ```bash
 CARGO_TARGET_DIR="$PWD/target" cargo test --locked --offline
 npm run test:controllers
+npm run test:controller-archive
 ```
 
 The smoke owns `127.0.0.1:4531` (4531–4535 via `AGENTWORKS_CONTROLLER_PORT`) and isolated data under `.cache/controllers-*`. It drives the real `agentworks mcp` stdio bridge with the MCP SDK, as an external client does, using the endpoint and token files. It covers:
@@ -80,3 +85,5 @@ The smoke owns `127.0.0.1:4531` (4531–4535 via `AGENTWORKS_CONTROLLER_PORT`) a
 - immediate revocation of a connected client and forged tokens;
 - restart persistence with endpoint following, and revocation on project deletion;
 - the browser create, show-once, revoke and phone-layout flow.
+
+The controller archive smoke uses its own server on ports 4536–4540 (`AGENTWORKS_CONTROLLER_ARCHIVE_PORT`) and disposable Git/database/demo fixtures. It covers explicit grants, hidden-tool denial, invalid fields, project movement, session identity denial, clean/dirty/locked/shared/busy worktree handling, terminal shutdown, retry behavior, audit attribution and connected-client revocation. It never connects to the live service or restarts a service.

@@ -30,6 +30,7 @@ impl Role {
             run_automations: self == Self::Coordinator,
             restart_service: false,
             manage_review_queue: false,
+            archive_sessions: false,
         }
     }
 }
@@ -56,6 +57,9 @@ pub struct Access {
     pub restart_service: bool,
     #[serde(default)]
     pub manage_review_queue: bool,
+    /// Explicit controller grant; never inherited from a session role.
+    #[serde(default)]
+    pub archive_sessions: bool,
 }
 impl Access {
     pub fn enabled(&self) -> bool {
@@ -66,6 +70,7 @@ impl Access {
             || self.run_automations
             || self.restart_service
             || self.manage_review_queue
+            || self.archive_sessions
     }
 }
 pub use agentworks_session::origins::ControlOrigin;
@@ -229,6 +234,7 @@ fn permitted(a: &Access, capability: &str) -> bool {
         "run_automations" => a.run_automations,
         "restart_service" => a.restart_service,
         "manage_review_queue" => a.manage_review_queue,
+        "archive_sessions" => a.archive_sessions,
         _ => false,
     }
 }
@@ -289,7 +295,7 @@ pub fn peers_as(app: &App, a: &Actor) -> Result<Value> {
             "Agentworks discovery is not granted",
         ));
     }
-    let coordinator = coordinator(&grants);
+    let coordinator = coordinator(&grants) || (a.session.is_none() && grants.archive_sessions);
     let scope = a.project.clone();
     let candidates: Vec<_> = app.sessions.lock().unwrap().values().cloned().collect();
     let mut values = Vec::new();

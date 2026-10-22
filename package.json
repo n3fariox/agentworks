@@ -24,6 +24,7 @@
     "test:worktree-policy": "node scripts/worktree-policy-smoke.mjs",
     "test:worktree-cleanup": "node scripts/worktree-cleanup-smoke.mjs",
     "test:remote-worktree-cleanup": "AGENTWORKS_CLEANUP_REMOTE=1 node scripts/worktree-cleanup-smoke.mjs",
+    "test:controller-archive": "node scripts/controller-archive-smoke.mjs",
     "test:controllers": "node scripts/controller-smoke.mjs",
     "test:fork": "node scripts/fork-smoke.mjs",
     "test:worktree-ui": "playwright test tests/worktree-launch.spec.mjs",
