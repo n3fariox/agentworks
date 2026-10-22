@@ -6,7 +6,7 @@ Run commands from the repository root.
 
 ## Checks
 
-Use `mise exec --` before direct Cargo commands to select the pinned Zig toolchain. For example, `mise exec -- cargo test --locked`.
+Use `mise exec --` before direct Cargo commands to select the pinned Rust and Zig toolchains. For example, `mise exec -- cargo test --locked`.
 
 With the server running:
 

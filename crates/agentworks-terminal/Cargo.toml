@@ -8,5 +8,9 @@ publish.workspace = true
 [dependencies]
 libghostty-vt = "=0.2.2"
 libc.workspace = true
+portable-pty = "0.9"
 serde = { workspace = true, features = ["rc"] }
 tokio = { workspace = true, features = ["sync", "macros", "rt", "time"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }

@@ -1,4 +1,6 @@
 //! PTY processes, terminal emulation, and incremental presentation frames.
+mod pty;
+
 use libghostty_vt::{
     Terminal, TerminalOptions,
     render::{CellIterator, RenderState, RowIterator},
@@ -6,16 +8,11 @@ use libghostty_vt::{
     style::{Style, StyleColor, Underline},
     terminal::{Mode, Point, PointCoordinate, PointSpace},
 };
+use pty::Event;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::Write as _,
-    io::{self, Read, Write},
-    os::{
-        fd::{AsRawFd, FromRawFd},
-        unix::process::CommandExt,
-    },
     path::PathBuf,
-    process::Command,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -277,254 +274,6 @@ pub fn spawn(cwd: PathBuf) -> Result<Handle> {
     })
 }
 
-struct Shell {
-    child: std::process::Child,
-    master: std::fs::File,
-    reaped: bool,
-}
-impl Shell {
-    // Observe exit without reaping: the shell PID/session ID stays reserved
-    // until cleanup has finished. A numeric ID from a reaped child is unsafe
-    // to use for finding or signaling terminal jobs.
-    #[cfg(target_os = "linux")]
-    fn exited(&self) -> io::Result<bool> {
-        let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
-        if unsafe {
-            libc::waitid(
-                libc::P_PID,
-                self.child.id(),
-                &mut info,
-                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-            )
-        } < 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(unsafe { info.si_pid() } != 0)
-    }
-    #[cfg(target_os = "linux")]
-    fn jobs(&self) -> Vec<std::fs::File> {
-        if self.reaped {
-            return Vec::new();
-        }
-        let sid = self.child.id() as i32;
-        // Fail closed for an unexpected session or a /proc mount from another
-        // PID namespace. Never translate /proc IDs into process-group signals.
-        let own = unsafe { libc::getpid() };
-        let proc_pid = std::fs::read_to_string("/proc/self/stat")
-            .ok()
-            .and_then(|stat| stat.split_whitespace().next()?.parse::<i32>().ok());
-        if sid <= 1 || sid == unsafe { libc::getsid(0) } || proc_pid != Some(own) {
-            return Vec::new();
-        }
-        std::fs::read_dir("/proc")
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|entry| {
-                let pid = entry.file_name().to_str()?.parse::<i32>().ok()?;
-                if pid <= 1 || pid == own || unsafe { libc::getsid(pid) } != sid {
-                    return None;
-                }
-                let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
-                if fd < 0 {
-                    return None;
-                }
-                let handle = unsafe { std::fs::File::from_raw_fd(fd as i32) };
-                // Recheck after opening: the handle pins the target identity, and
-                // the unreaped session leader prevents session-ID reuse.
-                (unsafe { libc::getsid(pid) } == sid).then_some(handle)
-            })
-            .collect()
-    }
-}
-impl Drop for Shell {
-    fn drop(&mut self) {
-        #[cfg(target_os = "linux")]
-        for job in self.jobs() {
-            unsafe {
-                libc::syscall(
-                    libc::SYS_pidfd_send_signal,
-                    job.as_raw_fd(),
-                    libc::SIGKILL,
-                    std::ptr::null::<libc::siginfo_t>(),
-                    0,
-                );
-            }
-        }
-        // Child owns an unreaped process. No negative PID or group kill is used.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-// A terminal is a new interactive context, even when its service was launched
-// by an agent, CI runner, desktop terminal or service manager. Keep the user's
-// credentials, paths, locale and desktop/SSH integration; remove only launcher
-// controls and process-specific state. NO_BROWSER is intentionally preserved.
-fn transient_shell_variable(key: &std::ffi::OsStr) -> bool {
-    let Some(key) = key.to_str() else {
-        return false;
-    };
-    if key.starts_with("AGENTWORKS_") {
-        return true;
-    }
-    if ["GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"]
-        .iter()
-        .any(|prefix| {
-            key.strip_prefix(prefix).is_some_and(|suffix| {
-                !suffix.is_empty() && suffix.bytes().all(|c| c.is_ascii_digit())
-            })
-        })
-    {
-        return true;
-    }
-    matches!(
-        key,
-        "NO_COLOR"
-            | "FORCE_COLOR"
-            | "CLICOLOR"
-            | "CLICOLOR_FORCE"
-            | "CI"
-            | "CONTINUOUS_INTEGRATION"
-            | "CODEX_CI"
-            | "CODEX_SESSION_ID"
-            | "CODEX_THREAD_ID"
-            | "CODEX_VERSION"
-            | "CODEX_MANAGED_BY_NPM"
-            | "CODEX_MANAGED_PACKAGE_ROOT"
-            | "CODEX_SANDBOX_NETWORK_DISABLED"
-            | "CLAUDECODE"
-            | "CLAUDE_CODE_ENTRYPOINT"
-            | "CLAUDE_CODE_SESSION_ID"
-            | "PAGER"
-            | "GIT_PAGER"
-            | "GH_PAGER"
-            | "NOTIFY_SOCKET"
-            | "LISTEN_PID"
-            | "LISTEN_FDS"
-            | "LISTEN_FDNAMES"
-            | "WATCHDOG_PID"
-            | "WATCHDOG_USEC"
-            | "INVOCATION_ID"
-            | "JOURNAL_STREAM"
-            | "SYSTEMD_EXEC_PID"
-            | "MANAGERPID"
-            | "MANAGERPIDFDID"
-            | "MEMORY_PRESSURE_WATCH"
-            | "MEMORY_PRESSURE_WRITE"
-            | "TERM_PROGRAM"
-            | "TERM_PROGRAM_VERSION"
-            | "TERM_SESSION_ID"
-            | "TERMCAP"
-            | "LINES"
-            | "COLUMNS"
-            | "COLORFGBG"
-            | "TTY"
-            | "SSH_TTY"
-            | "TMUX"
-            | "TMUX_PANE"
-            | "STY"
-            | "WINDOW"
-            | "WINDOWID"
-            | "WT_SESSION"
-            | "WT_PROFILE_ID"
-            | "VTE_VERSION"
-            | "KONSOLE_VERSION"
-            | "KONSOLE_DBUS_SESSION"
-            | "KONSOLE_DBUS_SERVICE"
-            | "KONSOLE_DBUS_WINDOW"
-            | "ITERM_SESSION_ID"
-            | "ITERM_PROFILE"
-            | "ALACRITTY_SOCKET"
-            | "ALACRITTY_WINDOW_ID"
-            | "PWD"
-            | "OLDPWD"
-            | "SHLVL"
-            | "_"
-            | "BASHOPTS"
-            | "SHELLOPTS"
-            | "GIT_DIR"
-            | "GIT_WORK_TREE"
-            | "GIT_INDEX_FILE"
-            | "GIT_COMMON_DIR"
-            | "GIT_OBJECT_DIRECTORY"
-            | "GIT_ALTERNATE_OBJECT_DIRECTORIES"
-            | "GIT_NAMESPACE"
-            | "GIT_PREFIX"
-            | "GIT_CONFIG"
-            | "GIT_CONFIG_COUNT"
-            | "GIT_CONFIG_PARAMETERS"
-    )
-}
-fn shell_environment(command: &mut Command, keys: impl IntoIterator<Item = std::ffi::OsString>) {
-    for key in keys {
-        if transient_shell_variable(&key) {
-            command.env_remove(key);
-        }
-    }
-    command
-        .env("TERM", "xterm-256color")
-        .env("COLORTERM", "truecolor")
-        .env("TERM_PROGRAM", "agentworks")
-        .env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-}
-fn shell(cwd: PathBuf) -> io::Result<Shell> {
-    let (mut master, mut slave) = (-1, -1);
-    let size = libc::winsize {
-        ws_col: 80,
-        ws_row: 24,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    if unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            &size,
-        )
-    } < 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    let master = unsafe { std::fs::File::from_raw_fd(master) };
-    let slave = unsafe { std::fs::File::from_raw_fd(slave) };
-    for file in [&master, &slave] {
-        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-    }
-    if unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let program = std::env::var("SHELL")
-        .ok()
-        .filter(|s| s.starts_with('/') && std::path::Path::new(s).is_file())
-        .unwrap_or_else(|| "/bin/sh".into());
-    let mut command = Command::new(program);
-    shell_environment(&mut command, std::env::vars_os().map(|(key, _)| key));
-    command
-        .arg("-i")
-        .current_dir(cwd)
-        .stdin(slave.try_clone()?)
-        .stdout(slave.try_clone()?)
-        .stderr(slave);
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let child = command.spawn()?;
-    Ok(Shell {
-        child,
-        master,
-        reaped: false,
-    })
-}
 fn run(
     cwd: PathBuf,
     mut incoming: mpsc::Receiver<Input>,
@@ -557,23 +306,24 @@ fn run(
     terminal
         .on_pty_write(move |_, bytes| reply_sink.borrow_mut().extend_from_slice(bytes))
         .map_err(|e| e.to_string())?;
-    let mut shell = shell(cwd).map_err(|e| e.to_string())?;
+    let mut shell = pty::spawn(cwd, 80, 24).map_err(|e| e.to_string())?;
     let mut previous = Vec::new();
     let mut history_state = HistoryState::default();
-    let mut pending = Vec::new();
-    let mut offset = 0;
     let mut dirty = true;
     let mut last_frame = Instant::now() - Duration::from_secs(1);
     let mut exit = None;
     let mut exit_at = None;
     let mut eof = false;
-    let mut buf = [0; 16384];
+    let mut next = None;
     loop {
         if stop.load(Ordering::Acquire) {
-            for _ in 0..16 {
-                match shell.master.read(&mut buf) {
-                    Ok(n) if n > 0 => terminal.vt_write(&buf[..n]),
-                    _ => break,
+            for event in next
+                .take()
+                .into_iter()
+                .chain(shell.events.try_iter().take(16))
+            {
+                if let Event::Output(data) = event {
+                    terminal.vt_write(&data);
                 }
             }
             publish(
@@ -588,29 +338,13 @@ fn run(
         }
         // Bound processing per tick, preserving complete input chunks and resize order.
         for _ in 0..64 {
-            if offset < pending.len() {
-                break;
-            }
-            pending.clear();
-            offset = 0;
             match incoming.try_recv() {
-                Ok(Input::Input { data }) => pending.extend_from_slice(data.as_bytes()),
-                Ok(Input::Binary { data }) => pending.extend(data),
+                Ok(Input::Input { data }) => shell.write(data.into_bytes())?,
+                Ok(Input::Binary { data }) => shell.write(data)?,
                 Ok(Input::Resize { cols, rows }) => {
                     let (cols, rows) = (cols.clamp(20, 300), rows.clamp(5, 120));
                     if terminal.cols().ok() != Some(cols) || terminal.rows().ok() != Some(rows) {
-                        let size = libc::winsize {
-                            ws_col: cols,
-                            ws_row: rows,
-                            ws_xpixel: 0,
-                            ws_ypixel: 0,
-                        };
-                        if unsafe {
-                            libc::ioctl(shell.master.as_raw_fd(), libc::TIOCSWINSZ as _, &size)
-                        } < 0
-                        {
-                            return Err(io::Error::last_os_error().to_string());
-                        }
+                        shell.resize(cols, rows)?;
                         terminal
                             .resize(cols, rows, 0, 0)
                             .map_err(|e| e.to_string())?;
@@ -622,73 +356,34 @@ fn run(
                 Err(mpsc::error::TryRecvError::Disconnected) => return Ok(()),
             }
         }
-        if offset < pending.len() {
-            match shell.master.write(&pending[offset..]) {
-                Ok(n) => offset += n,
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-                Err(e) => return Err(e.to_string()),
-            }
-        }
-        if offset > 0 {
-            pending.drain(..offset);
-            offset = 0;
-        }
-        // Drain at most 256 KiB per tick so chatty programs cannot starve input.
+        // Drain at most 16 chunks (256 KiB) per tick so chatty programs cannot starve input.
         for _ in 0..16 {
-            match shell.master.read(&mut buf) {
-                Ok(0) => {
-                    eof = true;
-                    break;
-                }
-                Ok(n) => {
-                    terminal.vt_write(&buf[..n]);
+            let Some(event) = next.take().or_else(|| shell.events.try_recv().ok()) else {
+                break;
+            };
+            match event {
+                Event::Output(data) => {
+                    terminal.vt_write(&data);
                     dirty = true;
                 }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(e) if e.raw_os_error() == Some(libc::EIO) => {
+                Event::Closed => {
                     eof = true;
                     break;
                 }
-                Err(e) => return Err(e.to_string()),
+                Event::Failed(error) => return Err(error),
             }
         }
-        let reply = std::mem::take(&mut *replies.borrow_mut());
-        // Responses join the pending writer, never competing with browser input.
-        pending.extend(reply);
-        if pending.len().saturating_sub(offset) > 1024 * 1024 {
-            return Err("Terminal input queue exceeded its limit".into());
+        // Responses queue behind earlier browser input, never competing with it.
+        shell.write(std::mem::take(&mut *replies.borrow_mut()))?;
+        if exit_at.is_none() && shell.exited().map_err(|e| e.to_string())? {
+            exit_at = Some(Instant::now());
         }
-        if exit_at.is_none() {
-            #[cfg(target_os = "linux")]
-            let exited = shell.exited().map_err(|e| e.to_string())?;
-            #[cfg(not(target_os = "linux"))]
-            let exited = {
-                exit = shell.child.try_wait().map_err(|e| e.to_string())?;
-                exit.is_some()
-            };
-            if exited {
-                exit_at = Some(Instant::now());
-            }
-        }
+        // Wait briefly for final output: ConPTY can report exit before its last
+        // output, and a backgrounded job can hold a Unix PTY open.
         let done = exit_at.is_some()
             && (eof || exit_at.is_some_and(|t| t.elapsed() > Duration::from_secs(1)));
         if done {
-            // Capture descendants while the leader is still unreaped. Signal
-            // only those pinned identities, then collect the actual exit code.
-            #[cfg(target_os = "linux")]
-            for job in shell.jobs() {
-                unsafe {
-                    libc::syscall(
-                        libc::SYS_pidfd_send_signal,
-                        job.as_raw_fd(),
-                        libc::SIGKILL,
-                        std::ptr::null::<libc::siginfo_t>(),
-                        0,
-                    );
-                }
-            }
-            exit = Some(shell.child.wait().map_err(|e| e.to_string())?);
-            shell.reaped = true;
+            exit = shell.finish().map_err(|e| e.to_string())?;
         }
         if (dirty && last_frame.elapsed() >= Duration::from_millis(33)) || done {
             publish(
@@ -697,7 +392,7 @@ fn run(
                 &mut previous,
                 frames,
                 done,
-                exit.and_then(|status| status.code()),
+                exit,
             )?;
             dirty = false;
             last_frame = Instant::now();
@@ -705,21 +400,14 @@ fn run(
         if done {
             return Ok(());
         }
-        let mut poll = libc::pollfd {
-            fd: shell.master.as_raw_fd(),
-            events: libc::POLLIN
-                | if offset < pending.len() {
-                    libc::POLLOUT
-                } else {
-                    0
-                },
-            revents: 0,
-        };
-        unsafe {
-            libc::poll(&mut poll, 1, 10);
-        }
         if eof {
             std::thread::sleep(Duration::from_millis(10));
+        } else {
+            match shell.events.recv_timeout(Duration::from_millis(10)) {
+                Ok(event) => next = Some(event),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => eof = true,
+            }
         }
     }
 }
@@ -900,7 +588,6 @@ fn display(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     fn terminal() -> Terminal<'static, 'static> {
         Terminal::new(TerminalOptions {
             cols: 40,
@@ -1028,119 +715,6 @@ mod tests {
         let mut invalid = patch.clone();
         invalid.end += 2;
         assert!(invalid.restore(&replica).is_none());
-    }
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn cleanup_pins_only_its_own_terminal_session_and_keeps_leader_unreaped() {
-        let mut sentinel = Command::new("/bin/sleep").arg("30").spawn().unwrap();
-        let mut shell = shell(std::env::temp_dir()).unwrap();
-        let sid = shell.child.id() as i32;
-        assert_ne!(sid, unsafe { libc::getsid(0) });
-        assert_eq!(unsafe { libc::getsid(sid) }, sid);
-        for job in shell.jobs() {
-            let info =
-                std::fs::read_to_string(format!("/proc/self/fdinfo/{}", job.as_raw_fd())).unwrap();
-            let pid = info
-                .lines()
-                .find_map(|line| line.strip_prefix("Pid:")?.trim().parse::<i32>().ok())
-                .unwrap();
-            assert_ne!(pid, sentinel.id() as i32);
-            assert_ne!(pid, unsafe { libc::getpid() });
-            assert_eq!(unsafe { libc::getsid(pid) }, sid);
-        }
-        // Use the child-owned handle, then observe twice without releasing its PID.
-        shell.child.kill().unwrap();
-        for _ in 0..100 {
-            if shell.exited().unwrap() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert!(shell.exited().unwrap());
-        assert!(shell.exited().unwrap());
-        drop(shell);
-        assert!(sentinel.try_wait().unwrap().is_none());
-        sentinel.kill().unwrap();
-        sentinel.wait().unwrap();
-    }
-    #[test]
-    fn shell_environment_removes_launcher_state_preserves_user_settings_and_no_browser() {
-        // Inject settings into this child only; never mutate the test runner's
-        // environment or rely on whichever variables the runner inherited.
-        let dropped = [
-            "NO_COLOR",
-            "FORCE_COLOR",
-            "CI",
-            "CODEX_CI",
-            "CODEX_THREAD_ID",
-            "CLAUDECODE",
-            "PAGER",
-            "GIT_PAGER",
-            "GH_PAGER",
-            "AGENTWORKS_DB_PATH",
-            "AGENTWORKS_SUPERVISOR_TOKEN",
-            "NOTIFY_SOCKET",
-            "LISTEN_FDS",
-            "WATCHDOG_PID",
-            "TMUX",
-            "SSH_TTY",
-            "COLUMNS",
-            "PWD",
-            "GIT_DIR",
-            "GIT_CONFIG_COUNT",
-            "GIT_CONFIG_KEY_0",
-            "GIT_CONFIG_VALUE_0",
-        ];
-        let kept = [
-            ("NO_BROWSER", "1"),
-            ("HOME", "/user/home"),
-            ("PATH", "/user/bin"),
-            ("LANG", "C.UTF-8"),
-            ("XDG_CONFIG_HOME", "/user/config"),
-            ("XDG_RUNTIME_DIR", "/user/run"),
-            ("SSH_AUTH_SOCK", "/user/agent.sock"),
-            ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/user/bus"),
-            ("DISPLAY", ":0"),
-            ("CODEX_HOME", "/user/codex"),
-            ("OPENAI_API_KEY", "fixture-key"),
-            ("ANTHROPIC_API_KEY", "fixture-key"),
-            ("GIT_SSH_COMMAND", "fixture-ssh"),
-            ("TERMINFO_DIRS", "/user/terminfo"),
-        ];
-        let mut command = Command::new("/usr/bin/env");
-        command.arg("-0");
-        for key in dropped {
-            command.env(key, "launcher-only");
-        }
-        for (key, value) in kept {
-            command.env(key, value);
-        }
-        command
-            .env("TERM", "dumb")
-            .env("COLORTERM", "")
-            .env("TERM_PROGRAM", "parent-terminal");
-        let keys = dropped
-            .into_iter()
-            .chain(kept.into_iter().map(|(key, _)| key))
-            .chain(["TERM", "COLORTERM", "TERM_PROGRAM"])
-            .map(std::ffi::OsString::from);
-        shell_environment(&mut command, keys);
-        let output = command.output().unwrap();
-        assert!(output.status.success());
-        let values: HashMap<_, _> = std::str::from_utf8(&output.stdout)
-            .unwrap()
-            .split('\0')
-            .filter_map(|entry| entry.split_once('='))
-            .collect();
-        for key in dropped {
-            assert!(!values.contains_key(key), "{key} leaked into shell");
-        }
-        for (key, value) in kept {
-            assert_eq!(values.get(key), Some(&value), "{key} changed");
-        }
-        assert_eq!(values.get("TERM"), Some(&"xterm-256color"));
-        assert_eq!(values.get("COLORTERM"), Some(&"truecolor"));
-        assert_eq!(values.get("TERM_PROGRAM"), Some(&"agentworks"));
     }
     #[tokio::test]
     async fn shell_keeps_state_drains_final_output_and_reports_real_exit() {

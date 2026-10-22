@@ -3,7 +3,7 @@
 The root is a virtual Cargo workspace. `cargo build`, `cargo run`, and
 `npm start` still select the `agentworks` service by default, and binaries stay
 in the root `target/` directory. Use `cargo test --workspace` to test every crate.
-The pinned Zig toolchain is selected by `mise exec -- cargo …` or
+The pinned Rust and Zig toolchains are selected by `mise exec -- cargo …` or
 `scripts/mise-cargo.sh`.
 
 | Crate | Owns |

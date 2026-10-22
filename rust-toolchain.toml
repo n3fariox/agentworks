@@ -1,0 +1,6 @@
+# Keep in sync with the rust entry in mise.toml, which installs rustup and puts it first on PATH.
+[toolchain]
+channel = "1.98.1"
+profile = "minimal"
+components = ["clippy", "rustfmt"]
+targets = ["x86_64-pc-windows-gnu"]
