@@ -59,6 +59,10 @@ Only the human control interface changes grants. Coordinator-created sessions us
 
 Messages, replies, acknowledgements, grants, and control activity persist in SQLite. Sender/recipient IDs and names remain on messages after a session is deleted. Sending does not interrupt a turn, start inference, or wake an idle/suspended agent. Agents read their inbox through tools at useful checkpoints. The browser shows sent and received messages, supports acknowledgement, and can add a received message to your existing draft with **Use as next turn**; you review and send it explicitly. Acknowledgement records receipt, not completion of requested work. Inbox messages support text and reply references. Optional automatic delivery requires a separately enabled [bounded inbox policy](INBOX-DELIVERY.md).
 
+### Subagent activity
+
+When a harness delegates work through native ACP subagents, `Sub: Name` tabs beside Chat and Terminal show each child's task, activity, text and tools. Nested agents get their own tabs and identify their delegating parent. Child permissions and questions use the usual approval area. Your messages still go to the main agent. Tabs survive reloads and service restarts. **Stop** cancels the owning turn through the harness; individual child controls are not exposed. See [subagent support](SUBAGENTS.md).
+
 ### Chat attachments
 
 Use the composer’s 📎 button, drag and drop, or paste to attach up to four files to a message. PNG, JPEG, GIF and WebP images are limited to 5 MB; UTF-8 text files are limited to 256 KB. Availability depends on the harness’s advertised ACP prompt capabilities; OpenCode images, PDFs and other binary files are refused. Files are stored per session outside the workspace and sent as embedded content, without exposing host paths. Each attachment is consumed by one request and is not replayed after cancellation, queueing, quota continuation, or restart. Attachments cannot be queued while an agent is turning. Session deletion removes stored attachments. MCP `prompt_session` remains text-only.

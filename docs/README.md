@@ -15,7 +15,7 @@ Start with the [quick start](../README.md). Commands in these documents run from
 
 | Area | References |
 | --- | --- |
-| Sessions | [Lifecycle](LIFECYCLE.md), [forks](FORKING.md), [queued inputs](INPUT-QUEUE.md), [composer recovery](COMPOSER-RECOVERY.md) |
+| Sessions | [Lifecycle](LIFECYCLE.md), [forks](FORKING.md), [subagents](SUBAGENTS.md), [queued inputs](INPUT-QUEUE.md), [composer recovery](COMPOSER-RECOVERY.md) |
 | Runtime | [Timeouts](TIMEOUTS.md), [usage-limit continuation](LIMIT-RESUME.md), [questions and elicitation](QUESTIONS.md) |
 | Workspaces | [Git context](WORKTREES.md), [worktree policy/API](WORKTREE-POLICY.md), [launch controls](WORKTREE-UI.md), [archive cleanup](WORKTREE-CLEANUP.md), [diff viewer](DIFF.md) |
 | Communication | [MCP and permissions](AGENT-COMMUNICATION.md), [external controllers](CONTROLLERS.md), [completion reports](COMPLETION-REPORTS.md), [review queue](REVIEW-QUEUE.md), [inbox delivery](INBOX-DELIVERY.md) |

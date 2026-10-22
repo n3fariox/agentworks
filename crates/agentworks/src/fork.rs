@@ -99,6 +99,13 @@ fn render(events: &[Value], provider: &str) -> String {
             continue;
         }
         let update = &event["data"];
+        if let Some(child) = update["parentSessionId"]
+            .as_str()
+            .and_then(|_| update["acpSessionId"].as_str())
+        {
+            in_assistant = false;
+            body.push_str(&format!("\n\n### Subagent {child} (recorded activity)\n"));
+        }
         match update["sessionUpdate"].as_str() {
             // Imported history may contain only ACP user chunks, without local user events.
             Some("user_message_chunk") if !own_user_seen && update["content"]["type"] == "text" => {
@@ -265,6 +272,7 @@ pub fn seed(
                 e["kind"] == "acp"
                     && e["data"]["sessionUpdate"] == "agent_message_chunk"
                     && e["data"].get("forkSourceCwd").is_none()
+                    && !e["data"]["parentSessionId"].is_string()
             })
             .and_then(|e| e["data"]["messageId"].as_str())
             .map(str::to_owned),

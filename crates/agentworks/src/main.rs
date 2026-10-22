@@ -687,6 +687,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route(
+            "/subagents.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/subagents.js"),
+                )
+            }),
+        )
+        .route(
             "/usage-status.js",
             get(|| async {
                 (

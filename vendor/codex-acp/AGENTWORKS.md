@@ -11,9 +11,12 @@ Upstream gap: https://github.com/agentclientprotocol/codex-acp/issues/227
 
 `AGENTWORKS.patch` is the complete bundle delta: import/modification notice,
 observe native subscription push notifications, attach cached metadata to genuine
-parent usage events, and label the local version. The small new implementation
+parent usage events, label the local version, and preserve the canonical `clientCapabilities.subagents`
+field through the bundled SDK parser. Without that parser correction the
+adapter silently strips the capability before its existing native-subagent
+router can negotiate it. The small new implementation
 is `dist/subscription-limits.js`. `upstream.sha256` identifies the original
-packaged bundle; the adapter test reverses those four changes and verifies that
+packaged bundle; the adapter test reverses those five changes and verifies that
 hash. No other bundled code is changed. There is no postinstall script.
 
 The existing upstream rate-limit cache and `/status` behavior are unchanged.

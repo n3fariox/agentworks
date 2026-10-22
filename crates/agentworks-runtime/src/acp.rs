@@ -6,6 +6,7 @@ use agent_client_protocol::schema::{
         AuthenticateRequest, ClientCapabilities, ElicitationCapabilities,
         ElicitationFormCapabilities, InitializeRequest, ListSessionsRequest, NewSessionRequest,
         RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+        SubagentCapabilities,
     },
 };
 use agent_client_protocol::{Agent, Client, ConnectionTo, DynConnectTo};
@@ -16,6 +17,7 @@ pub fn initialize_request() -> InitializeRequest {
     // Support ACP forms, but not URL elicitations that could send users to arbitrary sites.
     InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
         ClientCapabilities::new()
+            .subagents(SubagentCapabilities::new())
             .elicitation(ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()))
             .meta(
                 json!({"terminal_output": true, "terminal_output_delta": true})

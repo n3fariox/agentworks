@@ -1,20 +1,21 @@
 use crate::{Approval, Session, use_api_key};
-#[cfg(test)]
-use agent_client_protocol::AcpAgentConfig;
 use agent_client_protocol::schema::v1::{
     CancelNotification, ContentBlock, CreateElicitationRequest, CreateElicitationResponse,
     ElicitationAction, EmbeddedResource, EmbeddedResourceResource, ForkSessionRequest,
     ImageContent, LoadSessionRequest, NewSessionRequest, PromptRequest, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
-    SelectedPermissionOutcome, SessionConfigOptionValue, SessionNotification,
-    SetSessionConfigOptionRequest, TextContent, TextResourceContents,
+    SelectedPermissionOutcome, SessionConfigOptionValue, SetSessionConfigOptionRequest,
+    TextContent, TextResourceContents,
 };
 use agent_client_protocol::{AcpAgent, Agent, Client, ConnectionTo, DynConnectTo};
+#[cfg(test)]
+use agent_client_protocol::{AcpAgentConfig, schema::v1::SessionNotification};
 use agentworks_runtime::acp::initialize_on;
 #[cfg(test)]
 use agentworks_runtime::acp::initialize_request;
 use agentworks_runtime::provider::parse_model_config;
 use agentworks_runtime::provider::{agent_config, is_free_model, prepare, safe_error};
+use agentworks_runtime::subagents::{Notification, Sessions};
 use serde_json::{Value, json};
 use std::{
     path::PathBuf,
@@ -263,6 +264,21 @@ pub async fn run(
     if s.host_id == "local" {
         prepare(&s.provider)?;
     }
+    let child_sessions = {
+        let data = s.data.lock().unwrap();
+        let mut sessions = Sessions::new(data.provider_session_id.clone());
+        if data.provider_session_id.is_some() {
+            for event in &data.events {
+                if event["kind"] == "acp" {
+                    sessions.restore(&event["data"]);
+                }
+            }
+        }
+        Arc::new(std::sync::Mutex::new(sessions))
+    };
+    let notify_sessions = child_sessions.clone();
+    let permission_sessions = child_sessions.clone();
+    let question_sessions = child_sessions.clone();
     let notify_s = s.clone();
     let permission_s = s.clone();
     let question_s = s.clone();
@@ -297,20 +313,20 @@ pub async fn run(
     let history = Arc::new(std::sync::Mutex::new((Vec::<Value>::new(), 0usize, false)));
     let notify_history = history.clone();
     Client.builder()
-        .on_receive_notification(async move |notification:SessionNotification,_cx| {
-            let update=serde_json::to_value(&notification.update).unwrap_or(Value::Null);
-            if update["sessionUpdate"]=="available_commands_update" {
+        .on_receive_notification(async move |notification:Notification,_cx| {
+            let Some((update,is_child))=notify_sessions.lock().unwrap().route(notification) else {return Ok(());};
+            if !is_child && update["sessionUpdate"]=="available_commands_update" {
                 notify_s.set_commands(update["availableCommands"].clone());
-            } else if update["sessionUpdate"]=="config_option_update" {
+            } else if !is_child && update["sessionUpdate"]=="config_option_update" {
                 if let Some(config)=parse_model_config(&update,notify_s.provider=="opencode") {notify_s.set_models(config);}
                 if let Some(config)=crate::permission_modes::parse(&update) {notify_s.set_permission_modes(config);}
             }
-            if import_pending && notify_replaying.load(Ordering::SeqCst) && !matches!(update["sessionUpdate"].as_str(),Some("available_commands_update"|"config_option_update")) {
+            if import_pending && notify_replaying.load(Ordering::SeqCst) && (is_child || !matches!(update["sessionUpdate"].as_str(),Some("available_commands_update"|"config_option_update"))) {
                 let mut staged=notify_history.lock().unwrap();staged.1+=update.to_string().len();
                 if staged.1>32*1024*1024 || staged.0.len()>=50000 {staged.2=true;}else{staged.0.push(update.clone());}
             }
-            if !notify_replaying.load(Ordering::SeqCst) || matches!(update["sessionUpdate"].as_str(),Some("available_commands_update"|"config_option_update")) {
-                crate::limit_resume::observe(&notify_s, &update);
+            if !notify_replaying.load(Ordering::SeqCst) || (!is_child && matches!(update["sessionUpdate"].as_str(),Some("available_commands_update"|"config_option_update"))) {
+                if !is_child {crate::limit_resume::observe(&notify_s, &update);}
                 crate::timeouts::observe(&notify_s.id,&update,crate::timeouts::now_ms());
                 notify_s.emit("acp",update);
             }
@@ -319,6 +335,9 @@ pub async fn run(
         .on_receive_request(async move |request:RequestPermissionRequest,responder,_cx| {
             let id=Uuid::new_v4().to_string();
             let value=serde_json::to_value(&request).unwrap_or(Value::Null);
+            if !permission_sessions.lock().unwrap().contains(&request.session_id.to_string()) {
+                return responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
+            }
             let (tx,rx)=oneshot::channel();
             {
                 let mut approvals = permission_s.approvals.lock().unwrap();
@@ -347,6 +366,9 @@ pub async fn run(
             // updates), then wait in a task so `$/cancel_request` can still be processed.
             let id=Uuid::new_v4().to_string();
             let value=serde_json::to_value(&request).unwrap_or(Value::Null);
+            if value["sessionId"].as_str().is_some_and(|id| !question_sessions.lock().unwrap().contains(id)) {
+                return responder.respond(CreateElicitationResponse::new(ElicitationAction::Cancel));
+            }
             let (tx,rx)=oneshot::channel();
             {
                 let mut approvals = question_s.approvals.lock().unwrap();
@@ -391,6 +413,7 @@ pub async fn run(
             }
             replaying.store(false,Ordering::SeqCst);
             let provider_id=created["sessionId"].as_str().ok_or_else(||agent_client_protocol::Error::internal_error().data("Harness returned no session ID"))?.to_owned();
+            child_sessions.lock().unwrap().set_root(provider_id.clone());
             let desired_model={
                 let mut data=s.data.lock().unwrap();
                 let desired=if data.provider_session_id.is_some(){data.models["currentValue"].as_str().map(str::to_owned).or_else(||s.initial_model.clone())}else{s.initial_model.clone()};
