@@ -1,3 +1,4 @@
+import {createSubagents} from './subagents.js';
 import {setupTerminal} from './terminal.js';
 import {hostEnrollment} from './host-enrollment.js';
 import {appUrl, socketUrl, localState as localStorage, sessionState as sessionStorage} from './hosting.js';
@@ -56,8 +57,9 @@ let sidePanel=null;
 setInterval(()=>usageStatus.render(),60000);
 let timeoutControls=null,parserScripts=null;
 let transcript=[], tools=new Map(), approvals=new Map(), assistant=null, status='starting';
+const subagents=createSubagents({append:()=>{},tabs:$('session-tabs'),panel:$('subagent-view'),messages:$('messages'),onSelect:view=>{sessionTerminal.select(view);scheduleDraw();},uuid,applyToolUpdate,renderToolActivity,renderMessage:(body,item)=>{if(item.role==='Agent')updateMarkdown(item,body);else body.textContent=item.text;},el});
 // L-05 hook: activity indicator and explicit queued inputs (server-owned state).
-const questions=setupQuestions({api,uuid:()=>uuid(),storage:localStorage,getActive:()=>active,isConnected:()=>connected,agentName:()=>labels[active?.provider]||'the agent'});
+const questions=setupQuestions({api,uuid:()=>uuid(),storage:localStorage,getActive:()=>active,isConnected:()=>connected,agentName:request=>subagents.name(request?.sessionId)||labels[active?.provider]||'the agent'});
 const inputQueue=setupInputQueue({$,api,uuid:()=>uuid(),getActive:()=>active,getStatus:()=>status,toolActive:()=>[...tools.values()].some(t=>['pending','in_progress'].includes(t.status))});
 let permissionModes=null;
 const mentions=setupMentions({prompt:$('prompt'),list:$('mention-list'),getActive:()=>active,getSessions:()=>sessions});
@@ -477,7 +479,7 @@ function openProjectDialog(project=null){
   $('archive-project').textContent=project?.archived?'Unarchive project':'Archive project';
   policyEditor.open(editingProject);$('project-dialog').showModal();$('project-name').focus();
 }
-function resetTranscript(){transcript=[];tools=new Map();approvals=new Map();assistant=null;nodes.clear();turnEnds=new Map();workLogs?.reset();$('messages').replaceChildren();$('approval-area').replaceChildren();}
+function resetTranscript(){subagents.reset();transcript=[];tools=new Map();approvals=new Map();assistant=null;nodes.clear();turnEnds=new Map();workLogs?.reset();$('messages').replaceChildren();$('approval-area').replaceChildren();}
 // The desktop header and the phone session bar both show the session title.
 function setTitle(title){$('header-title').textContent=title;$('session-heading-title').textContent=title;}
 // Phone navigation: the session browser and a chat are separate history
@@ -651,6 +653,7 @@ function consume(e,live=false){
   if(e.kind==='stop_requested'&&pendingSends[active.id]?.requestId===d.requestId){delete pendingSends[active.id];sessionStorage.setItem('agentworks-pending-sends',JSON.stringify(pendingSends));}
   if(e.kind==='user'||e.kind==='turn_end')for(const tool of tools.values())if(tool.activityOutput&&!tool.activityOutput.turnEnded){tool.activityOutput.turnEnded=true;if(live&&!replaying)tool.activityOutput.turnEndedAt=Date.now();}
   usageStatus.consume(e,{live});
+  if(subagents.consume(e,{live:live&&!replaying}))return;
   if(d?.continuationState&&active)active.continuation=d.continuationState;
   {const t=timeoutControls?.notice(e.kind,d);if(t){transcript.push({id:uuid(),type:'notice',text:t});assistant=null;}}
   if(e.kind==='session_updated'){
@@ -758,6 +761,7 @@ function updateControls(){questions.refresh();
   inputQueue.render();inputQueue.renderActivity();$('stop').hidden=!busy&&!['starting','resuming','configuring'].includes(status)&&!active?.continuation?.enabled;$('stop').disabled=!connected||status==='cancelling';
   attachments.render();
   $('prompt').placeholder=status==='starting'?'Starting your agent…':status==='waiting'?'Respond to the permission request above…':busy?'Your agent is working… type to queue a follow-up':status==='error'?'Session unavailable. Use Resume session to try again.':'What would you like to work on?';
+  if(subagents.viewingChild())$('prompt').placeholder=busy?'Queue a message for the main agent…':'Message the main agent…';
 }
 function scheduleDraw(){if(!drawTimer)drawTimer=setTimeout(()=>{drawTimer=null;draw();},70);}
 function fileUrl(path,download=false){return appUrl(`/api/sessions/${active.id}/file?path=${encodeURIComponent(path)}${download?'&download=true':''}`);}
@@ -787,7 +791,7 @@ function updateMarkdown(message,body){
 }
 function draw(){
   if(!active)return;
-  const area=$('messages');const atBottom=area.scrollHeight-area.scrollTop-area.clientHeight<100;
+  const area=$('messages'),visible=!area.hidden&&!$('session-chat').hidden;const atBottom=visible&&area.scrollHeight-area.scrollTop-area.clientHeight<100;
   const empty=area.querySelector('.session-empty');if(transcript.length)empty?.remove();
   if(!transcript.length&&!empty){
     const wrap=el('div','session-empty');wrap.append(el('div','empty-symbol',icons[active.provider]),el('h3','',status==='starting'?'Preparing your workspace':'Ready when you are'),el('p','',active.provider==='demo'?'Try “hello”, “approval”, or “slow”. This demo uses no API credits.':'Send a message to start working in this project.'));area.append(wrap);
@@ -813,12 +817,13 @@ function draw(){
       renderToolActivity(node,item,['running','waiting','cancelling'].includes(status));
     }
   }
+  subagents.sync(['running','waiting','cancelling'].includes(status));
   const pending=$('approval-area');for(const node of [...pending.children])if(!node.classList.contains('question'))node.remove();
   workLogs.apply(area,transcript,nodes,{sessionIdle:['idle','closed','suspended','error'].includes(status),scope:active.id,turnEnds});
   questions.sync(pending,[...approvals].filter(([,a])=>a.kind==='question'));
   for(const [id,{kind,request}]of approvals){
     if(kind==='question')continue;
-    const card=el('div','approval');card.append(el('h4','','Permission requested'),el('p','',request.toolCall?.title||'An agent needs your decision'));
+    const card=el('div','approval');card.append(el('h4','',subagents.name(request.sessionId)?`Permission requested · ${subagents.name(request.sessionId)}`:'Permission requested'),el('p','',request.toolCall?.title||'An agent needs your decision'));
     if(request.toolCall?.rawInput)card.append(el('pre','',JSON.stringify(request.toolCall.rawInput,null,2)));
     for(const option of request.options||[]){
       const button=el('button',option.kind.startsWith('reject')?'reject':'',option.name);button.disabled=!connected;
@@ -829,7 +834,7 @@ function draw(){
       };card.append(button);
     }pending.append(card);
   }
-  if(restoreScroll!==null){area.scrollTop=restoreScroll;restoreScroll=null;}else if(atBottom)area.scrollTop=area.scrollHeight;
+  if(restoreScroll!==null&&visible){area.scrollTop=restoreScroll;restoreScroll=null;}else if(atBottom)area.scrollTop=area.scrollHeight;
 }
 $('new-session').onclick=()=>openCreate();$('welcome-new').onclick=()=>openCreate();
 $('view-hosts').onclick=()=>setSidebarView('hosts');$('view-projects').onclick=()=>setSidebarView('projects');
@@ -1141,7 +1146,7 @@ workspace=createWorkspace({api,toast,labels,uuid,
   openPanel:tab=>sidePanel?.open(tab),
   appendDraft(text){if(!active)return;const current=$('prompt').value;$('prompt').value=current?current+'\n\n'+text:text;drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));promptResize.size();},
 });
-const sessionTerminal=setupTerminal({$,api,getActive:()=>active,socketUrl});
+const sessionTerminal=setupTerminal({$,api,getActive:()=>active,socketUrl,onSelect:view=>{subagents.select(view);updateControls();scheduleDraw();}});
 const hostTerminal=setupTerminal({$:id=>$(id==='session-terminal'?'host-terminal-view':id.replace(/^terminal-/,'host-terminal-')),api,getActive:()=>terminalHost,socketUrl,tabs:false,endpoint:id=>`/api/hosts/${id}/terminal`});
 $('host-terminal-back').onclick=()=>{workspace.showView('sessions');sidebar();if(phone())showBrowser();};
 

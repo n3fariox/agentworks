@@ -72,6 +72,7 @@ function applyCodexQuota(previous,meta,fresh){
 // Usage explicitly attributed to a parent tool call or subagent must not
 // overwrite the composer's own session values.
 function attributedElsewhere(d){
+  if(d.parentSessionId!=null)return true;
   const m=d._meta||{};
   return ['parentToolUseId','parent_tool_use_id','_claude/parentToolUseId','subagent','_claude/subagent','agentId'].some(k=>d[k]!=null||m[k]!=null);
 }

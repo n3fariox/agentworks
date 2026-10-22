@@ -118,16 +118,30 @@ impl Activity {
             }
             // Only a new call (or a changed one) counts; repeated announcements are heartbeats.
             Some("tool_call") => {
-                let id = update["toolCallId"].as_str().unwrap_or_default();
+                let id = format!(
+                    "{}\0{}",
+                    update["acpSessionId"].as_str().unwrap_or_default(),
+                    update["toolCallId"].as_str().unwrap_or_default()
+                );
                 self.changed(&format!("{id}\0call"), update)
             }
-            Some("plan") => self.changed("\0plan", &update["entries"]),
+            Some("plan") => self.changed(
+                &format!(
+                    "{}\0plan",
+                    update["acpSessionId"].as_str().unwrap_or_default()
+                ),
+                &update["entries"],
+            ),
             Some("tool_call_update") => {
-                let id = update["toolCallId"].as_str().unwrap_or_default();
+                let id = format!(
+                    "{}\0{}",
+                    update["acpSessionId"].as_str().unwrap_or_default(),
+                    update["toolCallId"].as_str().unwrap_or_default()
+                );
                 let terminal = matches!(update["status"].as_str(), Some("completed" | "failed"))
                     && self.changed(&format!("{id}\0status"), &update["status"]);
                 let output = (!empty(update.get("content")) || !empty(update.get("rawOutput")))
-                    && self.changed(id, &json!([update["content"], update["rawOutput"]]));
+                    && self.changed(&id, &json!([update["content"], update["rawOutput"]]));
                 terminal || output
             }
             _ => false,

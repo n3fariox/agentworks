@@ -6,3 +6,5 @@ pub mod worker;
 
 use agentworks_terminal as terminal;
 use agentworks_workspace::{cleanup as worktree_cleanup, worktrees};
+
+pub mod subagents;

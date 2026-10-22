@@ -402,3 +402,23 @@ dialog.image-viewer{width:96vw;max-width:96vw;height:92dvh;max-height:92dvh;padd
 @media(max-width:650px){.composer-attach{width:36px;height:36px;font-size:16px}.attachment-chip{max-width:100%}}
 
 .parser-script-hooks{margin:0;padding:0 4px 8px;list-style:none;color:var(--muted);font-size:11px;line-height:1.7;overflow-wrap:anywhere}.parser-script-hooks code{font:10px ui-monospace,SFMono-Regular,monospace;color:#c9b9eb;white-space:pre-wrap}
+
+/* Native subagents share the session tab strip and keep independent transcripts. */
+.session-tabs{overflow-x:auto;scrollbar-width:thin;min-width:0}
+.session-tabs button{flex:none;white-space:nowrap}
+.subagent-tab{display:inline-flex;align-items:center;gap:8px;max-width:240px}
+.subagent-tab-label{overflow:hidden;text-overflow:ellipsis}
+.subagent-dot{width:6px;height:6px;border-radius:50%;background:var(--muted);flex:none}
+.subagent-tab[data-activity=running] .subagent-dot{background:var(--accent);animation:pulse 1.6s infinite}
+.subagent-tab[data-activity=waiting] .subagent-dot{background:#ddb878}
+.subagent-tab[data-activity=completed] .subagent-dot{background:var(--green)}
+.subagent-tab[data-activity=failed] .subagent-dot{background:#ef9292}
+#messages[hidden],.subagent-view[hidden]{display:none}
+.subagent-view{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;padding:24px max(23px,calc((100% - 780px)/2))}
+.subagent-heading{display:flex;align-items:center;gap:12px;margin-bottom:8px}.subagent-title{font-size:14px}.subagent-state{font-size:11px;color:var(--muted)}
+.subagent-description,.subagent-parent{margin:0 0 8px;color:var(--muted);font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}.subagent-parent{font-size:11px;margin-bottom:20px}
+.subagent-transcript{min-width:0}.subagent-message{padding:12px 0;font-size:13px;min-width:0}.subagent-message>strong{font-size:11px;color:var(--muted)}
+.subagent-text{white-space:pre-wrap;overflow-wrap:anywhere;margin-top:6px;line-height:1.6}.subagent-transcript .tool-card{margin:10px 0;max-width:100%}
+@media(max-width:650px){.subagent-view{padding:20px 16px}.session-tabs button{min-height:44px;padding:10px 12px}.session-tabs{padding:0 8px}}
+
+.subagent-reply-note{font-size:11px;color:var(--muted);margin:0 0 16px}

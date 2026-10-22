@@ -1,5 +1,5 @@
 // The browser can disconnect freely; the service owns the shell and emulator.
-export function setupTerminal({$,api,getActive,socketUrl,tabs=true,endpoint=id=>`/api/sessions/${id}/terminal`}) {
+export function setupTerminal({$,api,getActive,socketUrl,tabs=true,onSelect=()=>{},endpoint=id=>`/api/sessions/${id}/terminal`}) {
   let current=null, terminal=null, socket=null, timer=null, observer=null, generation=0, ready=false, exited=false;
   const selected=new Map();
   let renderQueue=[],writing=false,alternate=false,historyStart=0,historyEpoch=null;
@@ -85,19 +85,30 @@ export function setupTerminal({$,api,getActive,socketUrl,tabs=true,endpoint=id=>
   function select(tab){
     const session=getActive();if(!session)return;
     selected.set(session.id,tab);
-    for(const name of ['chat','terminal']){
-      const active=name===tab;$( 'session-tab-'+name).setAttribute('aria-selected',String(active));$('session-tab-'+name).tabIndex=active?0:-1;$('session-'+name).hidden=!active;
+    const terminalView=tab==='terminal';
+    $('session-chat').hidden=terminalView;$('session-terminal').hidden=!terminalView;
+    for(const button of $('session-tabs')?.querySelectorAll('[role="tab"]')||[]){
+      const view=button.dataset.sessionView||button.id.replace('session-tab-','');
+      const active=view===tab;button.setAttribute('aria-selected',String(active));button.tabIndex=active?0:-1;
+      if(active&&!terminalView)$('session-chat').setAttribute('aria-labelledby',button.id);
     }
+    onSelect(tab);
     if(tab==='terminal'){if(current!==session.id||!terminal)start();else{requestAnimationFrame(fit);terminal.focus();}}
   }
   if(tabs){
     for(const tab of ['chat','terminal'])$('session-tab-'+tab).onclick=()=>select(tab);
-    $('session-tabs').onkeydown=event=>{if(['ArrowLeft','ArrowRight','Home','End'].includes(event.key)){const tab=event.key==='Home'?'chat':event.key==='End'?'terminal':$('session-chat').hidden?'chat':'terminal';select(tab);$('session-tab-'+tab).focus();event.preventDefault();}};
+    $('session-tabs').onkeydown=event=>{
+      if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
+      const buttons=[...$('session-tabs').querySelectorAll('[role="tab"]')];
+      const current=buttons.indexOf(event.target);if(current<0)return;
+      const index=event.key==='Home'?0:event.key==='End'?buttons.length-1:(current+(event.key==='ArrowRight'?1:-1)+buttons.length)%buttons.length;
+      const button=buttons[index];select(button.dataset.sessionView||button.id.replace('session-tab-',''));button.focus();button.scrollIntoView({block:'nearest',inline:'nearest'});event.preventDefault();
+    };
   }
   $('terminal-restart').onclick=()=>start(true);
   if($('terminal-stop'))$('terminal-stop').onclick=async()=>{const id=current;ready=false;$('terminal-stop').disabled=true;try{await api(endpoint(id),{method:'DELETE'});}catch(error){if(current===id){status(error.message);$('terminal-stop').disabled=false;ready=!exited;}}};
   // Escape belongs to terminal applications (vim, less, shell line editing).
   $('session-terminal').addEventListener('keydown',event=>event.stopPropagation());
   addEventListener('pagehide',dispose);
-  return {open(){if(current!==getActive()?.id||!terminal)start();else{requestAnimationFrame(fit);terminal.focus();}},sessionUpdated(){if(exited){const archived=Boolean(getActive()?.archived);$('terminal-restart').hidden=archived;if(archived)status('Archived · saved terminal history');else status('Terminal stopped');}},sessionChanged(){const session=getActive();if(session?.id!==current){dispose();current=null;}select(selected.get(session?.id)||'chat');}};
+  return {select,open(){if(current!==getActive()?.id||!terminal)start();else{requestAnimationFrame(fit);terminal.focus();}},sessionUpdated(){if(exited){const archived=Boolean(getActive()?.archived);$('terminal-restart').hidden=archived;if(archived)status('Archived · saved terminal history');else status('Terminal stopped');}},sessionChanged(){const session=getActive();if(session?.id!==current){dispose();current=null;}select(selected.get(session?.id)||'chat');}};
 }

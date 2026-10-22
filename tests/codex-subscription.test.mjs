@@ -11,9 +11,10 @@ const bundle=readFileSync(new URL('../vendor/codex-acp/dist/index.js',import.met
 const rootManifest=JSON.parse(readFileSync(new URL('../package.json',import.meta.url)));
 assert.equal(rootManifest.dependencies['@agentclientprotocol/codex-acp'],'file:vendor/codex-acp');
 assert.equal(realpathSync('node_modules/@agentclientprotocol/codex-acp/dist/index.js'),realpathSync(new URL('../vendor/codex-acp/dist/index.js',import.meta.url)),'installed CLI resolves tracked local fork');
-// Verify that the vendored bundle differs from pinned upstream in exactly four
+// Verify that the vendored bundle differs from pinned upstream in exactly five
 // places. Any accidental bundled-code change fails this provenance check.
 const upstream=bundle
+  .replace('  subagents: defaultOnError(object({}).nullish(), () => void 0), // Agentworks: preserve canonical subagent negotiation.\n','')
   .replace("// Modified by Agentworks: cached subscription metadata; see ../AGENTWORKS.md.\nimport {observeSubscriptionLimits, subscriptionLimitsMeta} from './subscription-limits.js';\n",'')
   .replace('  version: \"2.2.2-agentworks.1\",', '  version: \"2.2.2\",')
   .replace('      size,\n      ...(params.threadId === this.sessionState.sessionId ? subscriptionLimitsMeta(this.sessionState) : {})','      size')

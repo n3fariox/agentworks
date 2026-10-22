@@ -102,7 +102,7 @@ export function setupQuestions({api,uuid,storage,getActive,isConnected,agentName
     const request=entry.request||{};const fields=entry.unsupported?[]:formFields(request);
     const draft=load(sid,id);const values={...initialValues(fields),...(draft.values||{})};
     const form=el('form','approval question');form.noValidate=true;form.dataset.questionId=id;
-    const heading=el('h4','',`Question from ${agentName()}`);heading.id=`q-${id}-title`;form.setAttribute('aria-labelledby',heading.id);
+    const heading=el('h4','',`Question from ${agentName(request)}`);heading.id=`q-${id}-title`;form.setAttribute('aria-labelledby',heading.id);
     form.append(heading,el('p','question-message',request.message||'The agent needs your input.'));
     if(entry.unsupported){const note=el('p','question-unsupported',entry.unsupported);note.setAttribute('role','note');form.append(note);}
     const summary=el('p','question-error');summary.setAttribute('role','alert');summary.hidden=true;form.append(summary);

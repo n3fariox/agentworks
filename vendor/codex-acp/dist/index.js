@@ -25135,6 +25135,7 @@ var zClientNesCapabilities = object({
   _meta: defaultOnError(record(string2(), unknown()).nullish(), () => void 0)
 });
 var zClientCapabilities = object({
+  subagents: defaultOnError(object({}).nullish(), () => void 0), // Agentworks: preserve canonical subagent negotiation.
   fs: defaultOnError(zFileSystemCapabilities.optional().default({ readTextFile: false, writeTextFile: false }), () => ({ readTextFile: false, writeTextFile: false })),
   terminal: defaultOnError(boolean2().optional().default(false), () => false),
   session: defaultOnError(zClientSessionCapabilities.nullish(), () => void 0),

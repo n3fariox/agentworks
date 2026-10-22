@@ -230,6 +230,10 @@ impl Tracker {
         ) {
             return None;
         }
+        // Child tool IDs are scoped to their ACP session, not the root parser.
+        if data["parentSessionId"].is_string() {
+            return None;
+        }
         let tool = data["toolCallId"].as_str()?.to_owned();
         let key = (session.to_owned(), tool.clone());
         let progress = self
