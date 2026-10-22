@@ -1,3 +1,5 @@
+import {slug} from './mentions.js';
+
 // Interpret only local URLs. External URLs retain their path, query and fragment.
 export function localReference(href,base=''){
   if(!href||href.startsWith('#'))return null;
@@ -14,11 +16,28 @@ export function localReference(href,base=''){
     return path.startsWith('/')?path:base+path.replace(/^\.\//,'');
   }catch{return null;}
 }
-export function setupChatReferences({getSession,openFile,fileUrl,imageViewer}){
+// Session URIs are shared by mentions, formatters and the MCP tools.
+export function sessionReference(href){
+  try{
+    const url=new URL(href);
+    return url.protocol==='agentworks:'&&url.host==='sessions'&&!url.search&&!url.hash&&/^\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(url.pathname)
+      ?url.pathname.slice(1).toLowerCase():null;
+  }catch{return null;}
+}
+export function setupChatReferences({getSession,getSessions,openSession,openFile,fileUrl,imageViewer}){
   return (node,base='')=>{
     const session=getSession();
     for(const link of node.querySelectorAll('a')){
-      const href=link.getAttribute('href'),reference=localReference(href,base);
+      const href=link.getAttribute('href'),sessionId=sessionReference(href);
+      if(sessionId){
+        const target=getSessions?.().find(s=>s.id===sessionId);
+        if(target)link.textContent='@'+slug(target.title);
+        link.onclick=event=>{event.preventDefault();openSession?.(sessionId);};
+        continue;
+      }
+      // Unknown Agentworks URIs are data, not an external-protocol launch.
+      if(/^agentworks:/i.test(href||'')){link.removeAttribute('href');continue;}
+      const reference=localReference(href,base);
       if(reference!==null){
         const suffix=/:(\d+)(?::\d+)?$/.exec(reference);
         const line=suffix&&Number(suffix[1])>0?Number(suffix[1]):null;

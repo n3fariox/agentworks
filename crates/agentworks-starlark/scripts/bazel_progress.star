@@ -48,3 +48,5 @@ def on_line(ctx: LineContext, line: str) -> Progress | None:
         return None
     counts = [Counts(done = state[u]["done"], total = state[u]["total"], unit = u) for u in _UNITS if u in state]
     return Progress(phase = phase, label = label, counts = counts)
+
+agent.register_progress(on_line, command_pattern = COMMAND_PATTERN, display_name = DISPLAY_NAME)

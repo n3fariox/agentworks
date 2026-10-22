@@ -56,9 +56,53 @@ test('built-in parser can be disabled and enabled; Settings stays open',async({p
   await expect(page.locator('#settings-dialog')).toBeVisible();
 });
 
+test('inbox formatter can be edited, checked and restored',async({page})=>{
+  const panel=await openPanel(page),name='inbox_message.star';
+  expect((await script(name)).capability).toBe('hooks');
+  expect((await script(name)).hooks[0]).toMatchObject({hook:'formatter',message_type:'inbox.peer',pattern:'.*'});
+  await row(panel,name).getByRole('button',{name:`Edit ${name}`}).click();
+  const source=panel.locator('[data-source]'),original=await source.inputValue();
+  await expect(source).toHaveValue(/def format_message/);
+  await source.fill(original.replace('text = message.text','text = "**Peer message**\\n\\n" + message.text'));
+  await panel.getByRole('button',{name:'Save and check'}).click();
+  await expect(row(panel,name).locator('.parser-script-badge')).toHaveText('Modified');
+  expect((await script(name)).error).toBeUndefined();
+  await row(panel,name).getByRole('button',{name:`Edit ${name}`}).click();
+  await source.fill(original.replace('return text','return 123'));
+  await panel.getByRole('button',{name:'Save and check'}).click();
+  await expect(panel.locator('[data-error]')).toContainText(name);
+  await panel.getByRole('button',{name:'Cancel'}).click();
+  await row(panel,name).getByRole('button',{name:`More actions for ${name}`}).click();
+  await panel.getByRole('menuitem',{name:'Restore shipped version'}).click();
+  await expect(row(panel,name).locator('.parser-script-badge')).toHaveText('Built-in');
+  expect((await script(name)).source).toBe(original);
+});
+
+test('one arbitrarily named script exposes progress and formatter registrations',async({page})=>{
+  const panel=await openPanel(page);
+  await panel.getByRole('button',{name:'＋ New script'}).click();
+  await panel.locator('[data-starter]').selectOption('both');
+  await panel.locator('[data-name]').fill('a_handlers.star');
+  await expect(panel.locator('[data-source]')).toHaveValue(/agent.register_progress/);
+  await expect(panel.locator('[data-source]')).toHaveValue(/agent.register_formatter/);
+  await panel.getByRole('button',{name:'Save and check'}).click();
+  const entry=panel.locator('[data-script-entry="a_handlers.star"]');
+  await expect(entry.locator('.parser-script-hooks li')).toHaveCount(2);
+  await expect(entry.locator('.parser-script-hooks')).toContainText('Tool progress · command:');
+  await expect(entry.locator('.parser-script-hooks')).toContainText('Formatter · inbox.peer · text: ^Review');
+  const saved=await script('a_handlers.star');expect(saved.hooks.map(h=>h.hook)).toEqual(['progress','formatter']);
+  await row(panel,'a_handlers.star').getByRole('button',{name:'Edit a_handlers.star'}).click();
+  await panel.locator('[data-source]').fill(saved.source.replace(/^agent\.register.*$/gm,''));
+  await panel.getByRole('button',{name:'Save and check'}).click();
+  await expect(panel.locator('[data-error]')).toContainText('no hooks registered');
+  expect((await script('a_handlers.star')).source).toBe(saved.source);
+  await panel.getByRole('button',{name:'Cancel'}).click();
+  await api('/api/scripts/a_handlers.star',undefined,'DELETE');
+});
+
 test('new parser from the typed template; type errors are shown and nothing is saved',async({page})=>{
   const panel=await openPanel(page);
-  await panel.getByRole('button',{name:'＋ New parser'}).click();
+  await panel.getByRole('button',{name:'＋ New script'}).click();
   const source=panel.locator('[data-source]');
   await expect(source).toHaveValue(/def on_line\(ctx: LineContext, line: str\) -> Progress \| None:/);
   await panel.locator('[data-name]').fill('make_progress.star');
@@ -77,7 +121,7 @@ test('new parser from the typed template; type errors are shown and nothing is s
   expect((await script('make_progress.star')).source).toBe(saved.source);
   await panel.getByRole('button',{name:'Cancel'}).click();
   // Names are validated before anything is sent.
-  await panel.getByRole('button',{name:'＋ New parser'}).click();await panel.locator('[data-name]').fill('make_progress.star');
+  await panel.getByRole('button',{name:'＋ New script'}).click();await panel.locator('[data-name]').fill('make_progress.star');
   await panel.getByRole('button',{name:'Save and check'}).click();
   await expect(panel.locator('[data-error]')).toHaveText('make_progress.star already exists; edit it instead.');
 });
@@ -131,7 +175,7 @@ test('phone layout: one row per script, 44px targets, no horizontal overflow',as
   expect(await panel.evaluate(n=>n.scrollWidth<=n.clientWidth+1)).toBe(true);
   await page.screenshot({path:'.cache/parser-scripts-mobile.png'});
   await page.keyboard.press('Escape');
-  await panel.getByRole('button',{name:'＋ New parser'}).click();
+  await panel.getByRole('button',{name:'＋ New script'}).click();
   await expect(panel.locator('[data-source]')).toBeVisible();
   expect(await panel.evaluate(n=>n.scrollWidth<=n.clientWidth+1)).toBe(true);
   await page.screenshot({path:'.cache/parser-scripts-mobile-editor.png'});

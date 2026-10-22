@@ -11,6 +11,9 @@
 //! The host additionally requires the compiled entry point's type to match the
 //! versioned host API exactly, so unannotated or mistyped entries are rejected.
 
+mod registration;
+pub use registration::{HookInfo, RegisteredScript};
+
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
@@ -29,6 +32,7 @@ use starlark::values::none::NoneOr;
 
 pub const HOST_API_VERSION: u32 = 1;
 const PROGRESS_PRELUDE: &str = "@agentworks//progress.star";
+const MESSAGE_PRELUDE: &str = "@agentworks//message.star";
 const WORKFLOW_PRELUDE: &str = "@agentworks//workflow.star";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -38,12 +42,15 @@ pub enum Capability {
     Parser,
     /// Proposes workflow actions as data. No pattern helpers, no I/O.
     Workflow,
+    /// Formats peer message data as Markdown. No actions or I/O.
+    MessageFormatter,
 }
 
 impl Capability {
     fn prelude(self) -> (&'static str, &'static str) {
         match self {
             Capability::Parser => (PROGRESS_PRELUDE, include_str!("../host/progress.star")),
+            Capability::MessageFormatter => (MESSAGE_PRELUDE, include_str!("../host/message.star")),
             Capability::Workflow => (WORKFLOW_PRELUDE, include_str!("../host/workflow.star")),
         }
     }
@@ -51,6 +58,7 @@ impl Capability {
         match self {
             Capability::Parser => "on_line",
             Capability::Workflow => "on_event",
+            Capability::MessageFormatter => "format_message",
         }
     }
     /// Host API v1 entry signature, as rendered by the starlark typechecker.
@@ -58,6 +66,7 @@ impl Capability {
         match self {
             Capability::Parser => "def(ctx: LineContext, line: str) -> None | Progress",
             Capability::Workflow => "def(ctx: WorkflowContext, event: Event) -> list[Action]",
+            Capability::MessageFormatter => "def(ctx: MessageContext, message: PeerMessage) -> str",
         }
     }
     /// Prelude record type for the hook's `ctx` argument.
@@ -65,6 +74,7 @@ impl Capability {
         match self {
             Capability::Parser => "LineContext",
             Capability::Workflow => "WorkflowContext",
+            Capability::MessageFormatter => "MessageContext",
         }
     }
 }
@@ -112,6 +122,7 @@ impl Limits {
         match capability {
             Capability::Parser => Self::parser(),
             Capability::Workflow => Self::workflow(),
+            Capability::MessageFormatter => Self::parser(),
         }
     }
 }
@@ -240,7 +251,13 @@ fn globals(capability: Capability) -> Globals {
     ];
     let builder = GlobalsBuilder::extended_by(&base);
     match capability {
-        Capability::Parser => builder.with(parser_helpers).build(),
+        Capability::Parser => builder
+            .with(parser_helpers)
+            .with_namespace("agent", registration::registration_helpers)
+            .build(),
+        Capability::MessageFormatter => builder
+            .with_namespace("agent", registration::registration_helpers)
+            .build(),
         Capability::Workflow => builder.build(),
     }
 }
@@ -267,6 +284,8 @@ pub struct Compiled {
     pub display_name: String,
     /// Parser scripts: `COMMAND_PATTERN`. Rust routes only matching commands' output.
     pub command_pattern: Option<Arc<regex::Regex>>,
+    pub text_pattern: Option<Arc<regex::Regex>>,
+    pub message_type: Option<String>,
     pub compile_time: Duration,
 }
 
@@ -291,23 +310,33 @@ pub struct CallStats {
 pub struct Engine {
     parser_globals: Globals,
     workflow_globals: Globals,
+    message_globals: Globals,
     parser_prelude: Prelude,
     workflow_prelude: Prelude,
+    message_prelude: Prelude,
     cache: Mutex<HashMap<String, Arc<Compiled>>>,
+    hook_globals: Globals,
+    hook_cache: Mutex<HashMap<(String, String), Arc<RegisteredScript>>>,
 }
 
 impl Engine {
     pub fn new() -> Result<Self, String> {
         let parser_globals = globals(Capability::Parser);
         let workflow_globals = globals(Capability::Workflow);
+        let message_globals = globals(Capability::MessageFormatter);
+        let message_prelude = prelude(Capability::MessageFormatter, &message_globals)?;
         let parser_prelude = prelude(Capability::Parser, &parser_globals)?;
         let workflow_prelude = prelude(Capability::Workflow, &workflow_globals)?;
         Ok(Engine {
             parser_globals,
             workflow_globals,
+            message_globals,
+            message_prelude,
             parser_prelude,
             workflow_prelude,
             cache: Mutex::default(),
+            hook_globals: globals(Capability::Parser),
+            hook_cache: Mutex::default(),
         })
     }
 
@@ -315,6 +344,7 @@ impl Engine {
         match capability {
             Capability::Parser => (&self.parser_globals, &self.parser_prelude),
             Capability::Workflow => (&self.workflow_globals, &self.workflow_prelude),
+            Capability::MessageFormatter => (&self.message_globals, &self.message_prelude),
         }
     }
 
@@ -385,6 +415,11 @@ impl Engine {
         let modules = HashMap::from([(prelude.id, &prelude.module)]);
         let loader = ReturnFileLoader { modules: &modules };
         let module = Module::with_temp_heap(|module| -> Result<FrozenModule, Diagnostic> {
+            module.set_extra_value(
+                module
+                    .heap()
+                    .alloc(starlark::values::list::AllocList(Vec::<starlark::values::Value>::new())),
+            );
             {
                 let mut eval = Evaluator::new(&module);
                 eval.set_loader(&loader);
@@ -443,7 +478,7 @@ impl Engine {
                     })?;
                 (display, Some(Arc::new(regex)))
             }
-            Capability::Workflow => (install.name.clone(), None),
+            Capability::Workflow | Capability::MessageFormatter => (install.name.clone(), None),
         };
         let compiled = Arc::new(Compiled {
             name: install.name.clone(),
@@ -454,6 +489,8 @@ impl Engine {
             event: prelude.event.clone(),
             display_name,
             command_pattern,
+            text_pattern: None,
+            message_type: None,
             compile_time: started.elapsed(),
         });
         self.cache
@@ -608,6 +645,7 @@ fn cap_name(c: Capability) -> &'static str {
     match c {
         Capability::Parser => "parser",
         Capability::Workflow => "workflow",
+        Capability::MessageFormatter => "message_formatter",
     }
 }
 
@@ -631,6 +669,7 @@ fn prelude(capability: Capability, globals: &Globals) -> Result<Prelude, String>
     let context = module.get(capability.context_type()).map_err(|e| e.to_string())?;
     let event = match capability {
         Capability::Parser => None,
+        Capability::MessageFormatter => Some(module.get("message_from_json").map_err(|e| e.to_string())?),
         Capability::Workflow => Some(module.get("event_from_json").map_err(|e| e.to_string())?),
     };
     // The standalone typechecker does not evaluate `record(...)`, so names bound to

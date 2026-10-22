@@ -59,6 +59,33 @@ async function save(page){
 }
 const localDate=timestamp=>{const d=new Date(timestamp);return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,16);};
 
+test('inbox deliveries are attributed to Agentworks live and after reload',async({page})=>{
+  await openSession(page);
+  await api(`/api/sessions/${session.id}/prompt`,{text:'Human request',requestId:crypto.randomUUID()});
+  await expect(page.locator('.message.user').filter({hasText:'Human request'}).locator('.message-label')).toHaveText('You');
+  await expect(page.locator('#session-state')).toHaveText('Ready');
+  const sender=await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Peer sender',projectId:project.id,agentAccess:{communicate:true}});
+  try{
+    await expect.poll(async()=>(await api(`/api/sessions/${sender.id}`)).session.status).toBe('idle');
+    await api(`/api/sessions/${session.id}/inbox-delivery`,{enabled:true,requestId:crypto.randomUUID(),deadline:Date.now()+60000,maxTurns:1,cooldownSeconds:5,maxBatch:1},'PUT');
+    await api(`/api/sessions/${sender.id}/mailbox`,{recipient:session.id,text:`Peer **review** request\n\n[This session](agentworks://sessions/${session.id})`,requestId:crypto.randomUUID()});
+    const delivery=page.locator('.message.agentworks');
+    await expect(delivery.locator('.message-label')).toHaveText('Agentworks',{timeout:15000});
+    await expect(delivery.locator('.avatar')).toHaveText('A');
+    await expect(delivery.getByRole('link',{name:'@peer-sender'})).toHaveAttribute('href',`agentworks://sessions/${sender.id}`);
+    await expect(delivery.locator('blockquote strong')).toHaveText('review');
+    await expect(delivery.locator('blockquote').getByRole('link',{name:'@inbox-settings-test'})).toHaveAttribute('href',`agentworks://sessions/${session.id}`);
+    await expect(page.locator('.message.user').filter({hasText:'Agentworks inbox delivery'})).toHaveCount(0);
+    await page.reload();
+    await expect(delivery.locator('.message-label')).toHaveText('Agentworks');
+    await expect(delivery.locator('.avatar')).toHaveText('A');
+    await expect(page.locator('.message.user').filter({hasText:'Human request'}).locator('.message-label')).toHaveText('You');
+    await delivery.getByRole('link',{name:'@peer-sender'}).click();
+    await expect(page.locator('#session-heading-title')).toHaveText('Peer sender');
+    await expect(page.locator('#workspace-preview')).not.toBeVisible();
+  }finally{await api(`/api/sessions/${sender.id}`,undefined,'DELETE');}
+});
+
 for(const mobile of [false,true])test(`inbox settings persist and reload capped, uncapped and disabled policies ${mobile?'mobile':'desktop'}`,async({page})=>{
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.setViewportSize(mobile?{width:390,height:844}:{width:1440,height:1000});

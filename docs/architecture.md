@@ -13,7 +13,7 @@ The pinned Zig toolchain is selected by `mise exec -- cargo …` or
 | `agentworks-session` | Serialized session payloads and identities, input queue transitions, continuation decisions, timeout policies and activity clocks |
 | `agentworks-terminal` | PTY processes and cleanup, Ghostty emulation, presentation frames, incremental history, and terminal input |
 | `agentworks-workspace` | Bounded Git execution and inspection, comparisons, worktree policies, preparation, ownership verification, dirty fingerprints, removal, and restoration |
-| `agentworks-starlark` | Typed interpreter APIs, parser execution, experimental workflow decisions, worker binary, and bundled Starlark sources |
+| `agentworks-starlark` | Typed interpreter APIs, progress parsing, message formatting, experimental workflow decisions, worker binary, and bundled Starlark sources |
 
 The service depends on all five libraries. Runtime depends on terminal and
 workspace; session depends on workspace for recorded worktree ownership. There
