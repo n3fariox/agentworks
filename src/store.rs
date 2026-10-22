@@ -415,6 +415,7 @@ impl Store {
                 timeouts: None,
                 lineage: Default::default(),
                 carried_context: None,
+                prompt_capabilities: serde_json::Value::Null,
                 worktree: None,
             };
             let inserted = tx.execute(
@@ -728,6 +729,7 @@ mod tests {
             timeouts: None,
             lineage: Default::default(),
             carried_context: None,
+            prompt_capabilities: serde_json::Value::Null,
             worktree: None,
         };
         {

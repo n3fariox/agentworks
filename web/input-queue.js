@@ -135,6 +135,8 @@ export function setupPromptRecovery({area,storage,getSession,onChange}){
     for(const item of items){
       const row=document.createElement('div'),note=document.createElement('p');
       note.textContent=item.outcome==='cancelled'?'Cancelled. History and tool effects are retained. Edit the prompt and send deliberately to start a new turn.':item.outcome==='error'?'Cancellation ended with an error. Inspect the retained history before retrying.':item.finished?'The turn completed while Stop was being handled. Its prompt is available to edit. History was retained; sending starts a new turn.':'Stop requested. The prompt is available to edit. Cancellation may finish after more output arrives. History and tool effects are retained; sending starts a new turn.';row.append(note);
+      // Attachments are consumed by the stopped turn and never resent automatically.
+      if(item.attachments)note.textContent+=` ${item.attachments} attachment${item.attachments>1?'s were':' was'} sent with it; attach again to resend.`;
       if(item.text!==null){
         const button=document.createElement('button');button.type='button';button.className='text-button';button.textContent='Edit recovered prompt (keep current draft)';
         button.onclick=()=>{const previous=area.value;area.value=item.text;item.text=previous||null;save();onChange();area.focus();render();};row.append(button);
@@ -168,7 +170,7 @@ export function setupPromptRecovery({area,storage,getSession,onChange}){
       const sent=submissions[sid+':'+d.requestId],text=sent?sent.draft:d.text;
       if(typeof text!=='string'){save();return;}
       const outcome=turns.get(sid)?.seq===d.userSeq?turns.get(sid)?.outcome:null;
-      const item={text,userSeq:d.userSeq,outcome,finished:!!d.alreadyFinished||!!outcome};
+      const item={text,userSeq:d.userSeq,outcome,finished:!!d.alreadyFinished||!!outcome,attachments:d.attachments||0};
       (pending[sid]??=[]).push(item);
       if(sid===getSession()&&(!area.value||area.value===text)){area.value=text;item.text=null;onChange();}
       save();render();

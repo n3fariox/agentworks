@@ -33,6 +33,9 @@ async function prompt(id, params) {
   // U-07 fixture: `usage-status {json}` emits that usage_update deterministically; no model is called.
   if(text.startsWith('usage-status ')){update(params.sessionId,{sessionUpdate:'usage_update',...JSON.parse(text.slice(13))});chunk('usage reported');save(params.sessionId);reply(id,{stopReason:'end_turn'});return;}
   chunk(`### Local session, turn ${turn}\n\n`);
+  // Attachment fixture: report exactly which non-text blocks arrived (kind, type, size, URI).
+  const attached=params.prompt.filter(p=>p.type!=='text');
+  if(attached.length)chunk('Received attachments:\n'+attached.map(p=>p.type==='image'?`- image ${p.mimeType} ${Buffer.from(p.data,'base64').length} bytes`:p.type==='resource'?`- resource ${p.resource.mimeType} ${p.resource.uri} ${p.resource.text.length} chars: ${JSON.stringify(p.resource.text.slice(0,40))}`:`- ${p.type}`).join('\n')+'\n\n');
   // B-02: deterministic provider-local read; no model/tool action is dispatched.
   if(text==='/status'||text==='/usage') {
     await delay(Number(process.env.AGENTWORKS_DEMO_STATUS_DELAY_MS||0));
@@ -131,7 +134,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   }
   const {id,method,params={}}=message;
   switch(method){
-    case 'initialize': elicitForm=!!params.clientCapabilities?.elicitation?.form;reply(id,{protocolVersion:1,agentInfo:{name:'agentworks-demo',version:'0.1.0'},agentCapabilities:{loadSession:true,sessionCapabilities:{resume:{},list:{}},promptCapabilities:{image:true}},authMethods:[]});break;
+    case 'initialize': elicitForm=!!params.clientCapabilities?.elicitation?.form;reply(id,{protocolVersion:1,agentInfo:{name:'agentworks-demo',version:'0.1.0'},agentCapabilities:{loadSession:true,sessionCapabilities:{resume:{},list:{}},promptCapabilities:process.env.AGENTWORKS_DEMO_PROMPT_CAPS?JSON.parse(process.env.AGENTWORKS_DEMO_PROMPT_CAPS):{image:true,embeddedContext:true}},authMethods:[]});break;
     case 'session/new':{
       const sessionId=randomUUID();mcpConfigs.set(sessionId,params.mcpServers||[]);sessions.set(sessionId,{cwd:params.cwd,turn:0,cancelled:false,model:'demo/steady'});
       save(sessionId);reply(id,{sessionId,configOptions:modelConfig('demo/steady')});

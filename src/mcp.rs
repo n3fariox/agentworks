@@ -389,6 +389,7 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
                     initiator_title: a.session.is_none().then(|| a.title.clone()),
                     text: field(&args, "text")?,
                     request_id: format!("mcp:{}:{}", a.id, request),
+                    attachments: Vec::new(),
                 }),
             )
             .await

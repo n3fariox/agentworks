@@ -1,4 +1,5 @@
 mod agent;
+mod attachments;
 mod automations;
 mod browser_origin;
 mod catalog;
@@ -156,6 +157,9 @@ struct SessionData {
     /// L-08 fork context held until the first prompt hands it to the harness.
     #[serde(default)]
     carried_context: Option<String>,
+    /// ACP `promptCapabilities` advertised at the last initialization.
+    #[serde(default)]
+    prompt_capabilities: Value,
     /// C-04b; present only when Agentworks created this session's worktree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     worktree: Option<worktree_cleanup::Owned>,
@@ -327,7 +331,7 @@ impl Session {
         json!({"kind":"snapshot","seq":data.seq,"session":{"id":self.id,"provider":self.provider,
             "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"])},"events":data.events,
             "truncated":data.events.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
-            "permissionModes":data.permission_modes,"models":data.models,"commands":data.available_commands,"storageError":data.storage_error,
+            "permissionModes":data.permission_modes,"models":data.models,"attachments":attachments::policy(&self.provider,&data.prompt_capabilities),"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|a.event(id)).collect::<Vec<_>>()})
     }
     fn display_title(&self) -> String {
@@ -586,6 +590,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| e.to_string())?;
     inbox_delivery::reconcile(&mut store).map_err(|(_, e)| e)?;
     let restored = store.load().map_err(|e| e.to_string())?;
+    let attachment_root = db_path.with_extension("attachments");
+    attachments::prune_orphans(
+        &attachment_root,
+        &restored.iter().map(|(m, _)| m.id.clone()).collect(),
+    );
+    attachments::init(attachment_root);
     let mcp_listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let mcp_endpoint = mcp_listener.local_addr()?;
     // C-01: external stdio bridges discover this process's loopback endpoint here.
@@ -777,6 +787,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (
                     [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
                     include_str!("../web/image-viewer.js"),
+                )
+            }),
+        )
+        .route(
+            "/attachments.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../web/attachments.js"),
                 )
             }),
         )
@@ -1083,6 +1102,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             axum::routing::put(limit_resume::configure),
         )
         .route("/api/sessions/{id}/prompt", post(prompt))
+        .route(
+            "/api/sessions/{id}/attachments",
+            post(attachments::upload).layer(DefaultBodyLimit::max(attachments::MAX_IMAGE_BYTES)),
+        )
+        .route(
+            "/api/sessions/{id}/attachments/{attachment}",
+            get(attachments::content).delete(attachments::discard),
+        )
         .route(
             "/api/sessions/{id}/queue",
             get(input_queue::get).post(input_queue::enqueue),
@@ -2310,6 +2337,7 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             timeouts: None,
             lineage: Default::default(),
             carried_context: None,
+            prompt_capabilities: Value::Null,
             worktree: owned_worktree,
         }),
         tx,
@@ -2518,6 +2546,9 @@ struct Prompt {
     text: String,
     #[serde(rename = "requestId")]
     request_id: String,
+    /// Uploaded attachment IDs; empty keeps the text-only prompt path.
+    #[serde(default)]
+    attachments: Vec<String>,
 }
 async fn prompt(
     State(app): State<App>,
@@ -2547,12 +2578,18 @@ async fn prompt(
         input_queue::Bound::Conflict => return Err(input_queue::conflict()),
         input_queue::Bound::New => {}
     }
+    let attachments = if req.attachments.is_empty() {
+        Vec::new()
+    } else {
+        attachments::prepare_for(&s, &req.attachments, &req.request_id)?
+    };
     accept_prompt(
         &s,
         req.text,
         req.request_id,
         req.initiated_by,
         req.initiator_title,
+        attachments,
     )
 }
 /// Shared turn acceptance for direct prompts and L-05 queued dispatch. Callers hold
@@ -2563,6 +2600,7 @@ fn accept_prompt(
     request_id: String,
     initiated_by: Option<String>,
     initiator_title: Option<String>,
+    attachments: Vec<(attachments::Meta, attachments::Payload)>,
 ) -> ApiResult {
     {
         let mut data = s.data.lock().unwrap();
@@ -2575,6 +2613,11 @@ fn accept_prompt(
                 "Wait for this session to become idle",
             ));
         }
+        // Bind before dispatch so an interrupted or cancelled turn never resends them.
+        if !attachments.is_empty() {
+            let metas: Vec<_> = attachments.iter().map(|(m, _)| m.clone()).collect();
+            attachments::consume_for(s, &metas, &request_id)?;
+        }
         data.inbox_turn = None;
         let commands = data.available_commands.clone();
         data.continuation.begin_turn(&s.provider, &commands, &text);
@@ -2583,12 +2626,19 @@ fn accept_prompt(
         data.turn_active = true;
         data.requests.insert(request_id.clone());
     }
-    s.emit(
-        "user",
-        json!({"text":text,"requestId":request_id,"initiatedBy":initiated_by,"initiatorTitle":initiator_title}),
-    );
+    let mut user = json!({"text":text,"requestId":request_id,"initiatedBy":initiated_by,"initiatorTitle":initiator_title});
+    let command = if attachments.is_empty() {
+        runtime::Command::Prompt(text)
+    } else {
+        user["attachments"] = attachments.iter().map(|(m, _)| m.public()).collect();
+        runtime::Command::AttachedPrompt {
+            text,
+            attachments: attachments.into_iter().map(|(_, p)| p).collect(),
+        }
+    };
+    s.emit("user", user);
     s.emit("status", json!({"status":"running"}));
-    if let Err(error) = s.send_command(runtime::Command::Prompt(text)) {
+    if let Err(error) = s.send_command(command) {
         s.status("error");
         return Err(error);
     }
@@ -2645,7 +2695,7 @@ async fn cancel(
         matches!(status.as_str(), "running" | "waiting" | "cancelling")
             || (status == "idle" && target.user_seq.is_some())
     }) {
-        s.emit("stop_requested", json!({"userSeq":user["seq"],"requestId":user["data"]["requestId"],"text":user["data"]["text"],"alreadyFinished":!matches!(status.as_str(), "running" | "waiting" | "cancelling"),"historyRewound":false}));
+        s.emit("stop_requested", json!({"userSeq":user["seq"],"requestId":user["data"]["requestId"],"text":user["data"]["text"],"attachments":user["data"]["attachments"].as_array().map_or(0,|a|a.len()),"alreadyFinished":!matches!(status.as_str(), "running" | "waiting" | "cancelling"),"historyRewound":false}));
     }
     if matches!(status.as_str(), "starting" | "resuming" | "configuring") {
         let _ = lifecycle::suspend_locked(&s).await?;
@@ -2726,6 +2776,7 @@ async fn delete_session_locked(app: &App, s: &Session) -> Result<(), (StatusCode
         )
     })?;
     terminal::stop(&s.id, true).await;
+    attachments::delete_session(&s.id);
     app.sessions.lock().unwrap().remove(&s.id);
     s.status("closed");
     Ok(())

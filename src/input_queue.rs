@@ -545,7 +545,7 @@ async fn dispatch_next(app: &App, s: &Session, deliberate: bool) -> bool {
         claimed
     };
     broadcast(s);
-    match crate::accept_prompt(s, text, id, Some("queue".into()), None) {
+    match crate::accept_prompt(s, text, id, Some("queue".into()), None, Vec::new()) {
         Ok(_) => true,
         Err((_, message)) => {
             {

@@ -378,3 +378,22 @@ dialog.image-viewer{width:96vw;max-width:96vw;height:92dvh;max-height:92dvh;padd
 #host-terminal{padding:10px;background:#101218;border-radius:8px;overflow:hidden;min-width:0}
 #host-stage{font-size:13px;margin:12px 0 8px;color:var(--text)}
 #host-terminal .xterm{padding:0}
+/* Composer attachments: compact chips above the prompt; sent ones under the user message. */
+.composer-attach{display:inline-flex;align-items:center;justify-content:center;flex:none;width:30px;height:30px;border-radius:8px;background:transparent;border:1px solid #3b3d46;color:var(--text);font-size:14px;padding:0}
+.composer-attach:hover:not(:disabled){background:#25272c}
+.composer-attach:disabled{opacity:.4;cursor:not-allowed}
+#composer.dragging{border-color:var(--accent);border-style:dashed}
+.attachment-list,.message-attachments{display:flex;flex-wrap:wrap;gap:6px}
+.attachment-list{margin:0 0 8px}
+.message-attachments{margin-top:8px}
+.attachment-chip{display:inline-flex;align-items:center;gap:6px;max-width:240px;border:1px solid #3b3d46;border-radius:7px;background:#202328;padding:3px 4px 3px 6px;font-size:11px;color:var(--text);text-decoration:none}
+.attachment-chip.uploading{opacity:.7}
+.attachment-chip.error{border-color:#7b4048;color:#e8a1a5}
+.attachment-thumb{width:22px;height:22px;object-fit:cover;border-radius:4px}
+.attachment-icon{color:var(--muted)}
+.attachment-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.attachment-meta{color:var(--muted);font-size:10px;white-space:nowrap;max-width:140px;overflow:hidden;text-overflow:ellipsis}
+.attachment-remove{border:0;background:transparent;color:var(--muted);font-size:14px;padding:0 4px;line-height:1}
+.attachment-remove:hover{color:var(--text)}
+.attachment-sent-image{max-width:180px;max-height:140px;object-fit:contain;border-radius:7px;border:1px solid #32343c;cursor:zoom-in}
+@media(max-width:650px){.composer-attach{width:36px;height:36px;font-size:16px}.attachment-chip{max-width:100%}}
