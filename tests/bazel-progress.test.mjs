@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {applyToolUpdate,applyToolProgress,toolActivityView as view,toolRawText as raw,events,progressEvents,build,delta,snapshot,view as serverView} from './fixtures/bazel-helpers.mjs';
 
-// Parsing runs on the server (crates/starlark, src/tool_progress.rs) and is tested there.
+// Parsing runs on the server (crates/agentworks-starlark, crates/agentworks/src/tool_progress.rs) and is tested there.
 // These tests cover the browser's half: raw output fidelity, server views and timing.
 function replay(upto=Infinity){
   const tool={};

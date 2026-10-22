@@ -27,6 +27,7 @@ Start with the [quick start](../README.md). Commands in these documents run from
 ## Design and future work
 
 - [Future work](BACKLOG.md): remaining candidates without completed batch history.
+- [Rust workspace architecture](architecture.md): crate ownership, dependencies, and application adapters.
 - [Original architecture and phased roadmap](ROADMAP.md): historical planning reference.
 - [Rust/ACP integration assessment](RUST-INTEGRATION.md): original integration rationale and prototype evidence.
 - [Morsh terminal reuse assessment](MORSH-REUSE.md): original source review and reuse rationale.
