@@ -378,6 +378,25 @@ dialog.image-viewer{width:96vw;max-width:96vw;height:92dvh;max-height:92dvh;padd
 #host-terminal{padding:10px;background:#101218;border-radius:8px;overflow:hidden;min-width:0}
 #host-stage{font-size:13px;margin:12px 0 8px;color:var(--text)}
 #host-terminal .xterm{padding:0}
-
 /* U-05 progress parser scripts (Settings). One row per script; less-used actions in a temporary ⋯ popover. */
 .parser-script-list{display:flex;flex-direction:column;margin:14px 0 6px;border-top:1px solid var(--border)}.parser-script{position:relative;display:flex;align-items:center;gap:8px;min-height:46px;padding:2px 2px 2px 4px;border-bottom:1px solid var(--border)}.parser-script-entry .parser-script{border-bottom:0}.parser-script-entry{border-bottom:1px solid var(--border);padding-bottom:6px}.parser-script-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:12px ui-monospace,SFMono-Regular,monospace;color:#d3d7de}.parser-script-badge{flex:none;font-size:10px;border-radius:4px;padding:3px 6px;background:#292334;color:#d6c6ff}.parser-script-badge.error{background:#302026;color:#e6a7af}#parser-script-controls label.parser-script-toggle{display:flex;align-items:center;gap:6px;margin:0;font-size:11px;color:#a1a8b7;flex:none;min-height:44px;padding:0 4px;cursor:pointer}.parser-script-toggle input{width:auto;margin:0;accent-color:var(--accent)}.parser-script>.text-button{flex:none;min-height:44px;min-width:44px;font-size:12px}.parser-script-more{font-size:16px!important;line-height:1}.parser-script-new{min-height:44px;color:#b6a1d5;font-size:12px;padding-left:2px}.parser-script-popover{position:absolute;right:2px;top:calc(100% - 4px);z-index:3;display:flex;flex-direction:column;min-width:200px;background:#1f2228;border:1px solid #3c3e47;border-radius:9px;padding:4px;box-shadow:0 12px 32px #0009}.parser-script-popover .text-button{text-align:left;min-height:44px;font-size:13px;color:var(--text);padding:6px 10px;border-radius:6px}.parser-script-popover .text-button:hover{background:#2a2d34}.parser-script-popover .danger{color:#efaaaa}.parser-script-error{white-space:pre-wrap;overflow:auto;max-height:180px;margin:4px 0;font:11px/1.6 ui-monospace,SFMono-Regular,monospace;color:#e6a7af;background:#261c20;border:1px solid #633b40;border-radius:7px;padding:9px}.parser-script-editor{margin-top:6px;padding-top:4px;border-top:1px solid var(--border)}.parser-script-editor input[readonly]{color:#a1a8b7}.parser-script-editor input{font-family:ui-monospace,SFMono-Regular,monospace}.parser-script-editor textarea{width:100%;min-height:280px;resize:vertical;background:#111417;color:var(--text);border:1px solid #3a3d45;border-radius:7px;padding:10px;font:12px/1.6 ui-monospace,SFMono-Regular,monospace;tab-size:4;white-space:pre;overflow:auto}.parser-script-editor-actions{display:flex;justify-content:flex-end;align-items:center;gap:12px;margin-top:10px}.parser-script-editor-actions .text-button{min-height:44px;font-size:12px}#parser-script-controls code{font:11px ui-monospace,monospace;color:#d1c7ed}@media(max-width:650px){.parser-script{gap:4px}.parser-script-toggle>span{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}.parser-script-badge{padding:3px 4px}}.parser-script-more-slot{flex:none;width:44px}
+
+/* Composer attachments: compact chips above the prompt; sent ones under the user message. */
+.composer-attach{display:inline-flex;align-items:center;justify-content:center;flex:none;width:30px;height:30px;border-radius:8px;background:transparent;border:1px solid #3b3d46;color:var(--text);font-size:14px;padding:0}
+.composer-attach:hover:not(:disabled){background:#25272c}
+.composer-attach:disabled{opacity:.4;cursor:not-allowed}
+#composer.dragging{border-color:var(--accent);border-style:dashed}
+.attachment-list,.message-attachments{display:flex;flex-wrap:wrap;gap:6px}
+.attachment-list{margin:0 0 8px}
+.message-attachments{margin-top:8px}
+.attachment-chip{display:inline-flex;align-items:center;gap:6px;max-width:240px;border:1px solid #3b3d46;border-radius:7px;background:#202328;padding:3px 4px 3px 6px;font-size:11px;color:var(--text);text-decoration:none}
+.attachment-chip.uploading{opacity:.7}
+.attachment-chip.error{border-color:#7b4048;color:#e8a1a5}
+.attachment-thumb{width:22px;height:22px;object-fit:cover;border-radius:4px}
+.attachment-icon{color:var(--muted)}
+.attachment-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.attachment-meta{color:var(--muted);font-size:10px;white-space:nowrap;max-width:140px;overflow:hidden;text-overflow:ellipsis}
+.attachment-remove{border:0;background:transparent;color:var(--muted);font-size:14px;padding:0 4px;line-height:1}
+.attachment-remove:hover{color:var(--text)}
+.attachment-sent-image{max-width:180px;max-height:140px;object-fit:contain;border-radius:7px;border:1px solid #32343c;cursor:zoom-in}
+@media(max-width:650px){.composer-attach{width:36px;height:36px;font-size:16px}.attachment-chip{max-width:100%}}

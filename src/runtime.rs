@@ -4,11 +4,12 @@ use agent_client_protocol::schema::{
     v1::{
         AuthenticateRequest, CancelNotification, ClientCapabilities, ContentBlock,
         CreateElicitationRequest, CreateElicitationResponse, ElicitationAction,
-        ElicitationCapabilities, ElicitationFormCapabilities, ForkSessionRequest,
-        InitializeRequest, ListSessionsRequest, LoadSessionRequest, NewSessionRequest,
-        PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
-        RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome,
-        SessionConfigOptionValue, SessionNotification, SetSessionConfigOptionRequest, TextContent,
+        ElicitationCapabilities, ElicitationFormCapabilities, EmbeddedResource,
+        EmbeddedResourceResource, ForkSessionRequest, ImageContent, InitializeRequest,
+        ListSessionsRequest, LoadSessionRequest, NewSessionRequest, PromptRequest,
+        RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+        ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigOptionValue,
+        SessionNotification, SetSessionConfigOptionRequest, TextContent, TextResourceContents,
     },
 };
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo, DynConnectTo};
@@ -26,6 +27,12 @@ use uuid::Uuid;
 
 pub enum Command {
     Prompt(String),
+    /// A human prompt with attachments, consumed once; never replayed by queue,
+    /// continuation or restart paths, which only carry text.
+    AttachedPrompt {
+        text: String,
+        attachments: Vec<crate::attachments::Payload>,
+    },
     InboxPrompt {
         text: String,
         owner: crate::inbox_delivery::Turn,
@@ -259,6 +266,9 @@ async fn open_session(
         s.host_id == "local" && use_api_key(),
     )
     .await?;
+    let caps = init["agentCapabilities"]["promptCapabilities"].clone();
+    s.data.lock().unwrap().prompt_capabilities = if caps.is_object() { caps } else { json!({}) };
+    s.emit("attachment_policy", crate::attachments::session_policy(s));
     let saved = s.data.lock().unwrap().provider_session_id.clone();
     let Some(id) = saved else {
         let lineage = s.data.lock().unwrap().lineage.clone();
@@ -700,8 +710,8 @@ pub async fn run(
                         }
                         s.status("idle");
                     }
-                    command @ (Command::Prompt(_) | Command::InboxPrompt{..})=>{
-                        let (text,inbox_owner)=match command {Command::Prompt(text)=>(text,None),Command::InboxPrompt{text,owner}=>(text,Some(owner)),_=>unreachable!()};
+                    command @ (Command::Prompt(_) | Command::AttachedPrompt{..} | Command::InboxPrompt{..})=>{
+                        let (text,inbox_owner,attachments)=match command {Command::Prompt(text)=>(text,None,Vec::new()),Command::AttachedPrompt{text,attachments}=>(text,None,attachments),Command::InboxPrompt{text,owner}=>(text,Some(owner),Vec::new()),_=>unreachable!()};
                         if let Some(owner)=&inbox_owner {
                             if !crate::inbox_delivery::begin(&s,owner,&provider_id.to_string()) {continue;}
                         }else{s.data.lock().unwrap().inbox_turn=None;}
@@ -716,6 +726,8 @@ pub async fn run(
                             blocks.push(ContentBlock::Text(TextContent::new(carried)));
                         }
                         blocks.push(ContentBlock::Text(TextContent::new(text)));
+                        // Embedded content only: the harness never receives a host path.
+                        blocks.extend(attachments.into_iter().map(attachment_block));
                         // Persist the claim before dispatch. Ambiguous delivery is never replayed.
                         if handoff {
                             s.emit("carried_context",json!({"phase":"claimed","detail":"Context dispatch claimed; interrupted or failed delivery requires inspection."}));
@@ -769,7 +781,7 @@ pub async fn run(
                                             cancelled=true;
                                         }
                                     }
-                                    Some(Command::Prompt(_) | Command::InboxPrompt{..})=>{},
+                                    Some(Command::Prompt(_) | Command::AttachedPrompt{..} | Command::InboxPrompt{..})=>{},
                                     Some(Command::Model(_)|Command::PermissionMode(_))=>{},
                                     None=>return Ok(()),
                                 },
@@ -803,8 +815,44 @@ pub async fn run(
     Ok(())
 }
 
+/// Attachments travel as embedded ACP content: base64 images and text resources
+/// with a synthetic URI. Adapters map these to their native image/context inputs.
+fn attachment_block(attachment: crate::attachments::Payload) -> ContentBlock {
+    match attachment {
+        crate::attachments::Payload::Image { mime, base64 } => {
+            ContentBlock::Image(ImageContent::new(base64, mime))
+        }
+        crate::attachments::Payload::Text { uri, mime, text } => ContentBlock::Resource(
+            EmbeddedResource::new(EmbeddedResourceResource::TextResourceContents(
+                TextResourceContents::new(text, uri).mime_type(mime),
+            )),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn attachment_blocks_use_acp_embedded_content() {
+        use crate::attachments::Payload;
+        let image = super::attachment_block(Payload::Image {
+            mime: "image/png".into(),
+            base64: "iVBO".into(),
+        });
+        assert_eq!(
+            serde_json::to_value(image).unwrap(),
+            serde_json::json!({"type":"image","data":"iVBO","mimeType":"image/png"})
+        );
+        let text = super::attachment_block(Payload::Text {
+            uri: "agentworks://attachments/a/notes.md".into(),
+            mime: "text/markdown".into(),
+            text: "# hi".into(),
+        });
+        assert_eq!(
+            serde_json::to_value(text).unwrap(),
+            serde_json::json!({"type":"resource","resource":{"uri":"agentworks://attachments/a/notes.md","mimeType":"text/markdown","text":"# hi"}})
+        );
+    }
     #[test]
     fn terminal_output_capabilities_and_raw_metadata_survive_v1() {
         let request = serde_json::to_value(super::initialize_request()).unwrap();

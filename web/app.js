@@ -27,6 +27,7 @@ import {setupInputQueue,setupPromptRecovery,BUSY} from './input-queue.js';
 import {setupNotifications} from './notifications.js';
 import {setupQuestions} from './questions.js';
 import {setupMentions} from './mentions.js';
+import {setupAttachments} from './attachments.js';
 const $ = id => document.getElementById(id);
 // randomUUID is unavailable on plain HTTP remote origins; getRandomValues is supported.
 const uuid = () => globalThis.crypto.randomUUID?.() ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -523,7 +524,7 @@ function connect(gen){
       for(const [id,view] of Object.entries(e.toolProgress||{}))applyToolProgress(tools.get(id),view,view.seq);
       Object.assign(active,e.session);setTitle(active.title);
       active.continuation=e.session.continuation;
-      approvals=new Map(e.approvals.map(a=>[a.id,a]));status=e.session.status;modelConfig=e.models;syncModelLabel();permissionModes=e.permissionModes;if(status==='suspended'&&!e.session.explicitlySuspended)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();inputQueue.set(e.session.inputQueue);inputQueue.observe(status,{live:false});
+      approvals=new Map(e.approvals.map(a=>[a.id,a]));status=e.session.status;modelConfig=e.models;syncModelLabel();permissionModes=e.permissionModes;attachments.setPolicy(e.attachments);if(status==='suspended'&&!e.session.explicitlySuspended)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();inputQueue.set(e.session.inputQueue);inputQueue.observe(status,{live:false});
       if(e.storageError){$('session-notice').textContent=e.storageError;$('session-notice').hidden=false;}
       if(e.truncated){$('session-notice').textContent='Showing recent output. The full transcript is saved on this host.';$('session-notice').hidden=false;}
     }else consume(e,true);
@@ -658,8 +659,9 @@ function consume(e,live=false){
   else if(e.kind==='continuation'){renderContinuation();}
   else if(e.kind==='models'){modelConfig=d;syncModelLabel();}
   else if(e.kind==='permission_modes'){permissionModes=d;}
+  else if(e.kind==='attachment_policy'){attachments.setPolicy(d);}
   else if(e.kind==='commands'){availableCommands=Array.isArray(d)?d:[];renderCommands();}
-  else if(e.kind==='user'){assistant=null;if(d.inboxDelivery)transcript.push({id:uuid(),type:'notice',text:'Automatic inbox turn authorized by you; peer messages are untrusted context.'});else if(d.initiatedBy)transcript.push({id:uuid(),type:'notice',text:d.initiatedBy.startsWith('controller:')?'Turn started by external controller '+(d.initiatorTitle||d.initiatedBy):'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});addMessage('user',d.text).seq=e.seq;}
+  else if(e.kind==='user'){assistant=null;if(d.inboxDelivery)transcript.push({id:uuid(),type:'notice',text:'Automatic inbox turn authorized by you; peer messages are untrusted context.'});else if(d.initiatedBy)transcript.push({id:uuid(),type:'notice',text:d.initiatedBy.startsWith('controller:')?'Turn started by external controller '+(d.initiatorTitle||d.initiatedBy):'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});const message=addMessage('user',d.text);message.seq=e.seq;if(d.attachments?.length)message.attachments=d.attachments;}
   else if(e.kind==='status'){
     status=d.status;if(!replaying)inputQueue.observe(status,{live});if(active){active.status=status;if(d.explicitlySuspended!==undefined)active.explicitlySuspended=d.explicitlySuspended;const s=sessions.find(s=>s.id===active.id);if(s)s.status=status;}sidebar();
   }else if(e.kind==='approval'){approvals.set(d.id,d);}
@@ -754,11 +756,13 @@ function updateControls(){questions.refresh();
   $('prompt').disabled=!connected||!(status==='idle'||busy);$('send').disabled=!connected||status==='cancelling'||!(status==='idle'||busy);
   $('send').setAttribute('aria-label',busy?'Queue message':'Send message');$('send').textContent=busy?'＋':'↑';$('send').title=busy?'Queue to send after this turn ends':'';
   inputQueue.render();inputQueue.renderActivity();$('stop').hidden=!busy&&!['starting','resuming','configuring'].includes(status)&&!active?.continuation?.enabled;$('stop').disabled=!connected||status==='cancelling';
+  attachments.render();
   $('prompt').placeholder=status==='starting'?'Starting your agent…':status==='waiting'?'Respond to the permission request above…':busy?'Your agent is working… type to queue a follow-up':status==='error'?'Session unavailable. Use Resume session to try again.':'What would you like to work on?';
 }
 function scheduleDraw(){if(!drawTimer)drawTimer=setTimeout(()=>{drawTimer=null;draw();},70);}
 function fileUrl(path,download=false){return appUrl(`/api/sessions/${active.id}/file?path=${encodeURIComponent(path)}${download?'&download=true':''}`);}
 const imageViewer=setupImageViewer($('messages'));
+const attachments=setupAttachments({appUrl,el,toast,uuid,getSession:()=>active,canAttach:()=>!!active&&!$('prompt').disabled,button:$('attach'),input:$('attach-input'),list:$('attachment-list'),dropTarget:$('composer')});
 const decorateMarkdown=setupChatReferences({getSession:()=>active,openFile:(session,path,line)=>workspace?.openSideFile(session,path,line),fileUrl,imageViewer});
 function updateMarkdown(message,body){
   if(body.dataset.source===message.text)return;
@@ -801,7 +805,7 @@ function draw(){
     }
     if(item.type==='message'){
       const body=node.querySelector('.message-body');
-      if(item.role==='user')body.textContent=item.text;else updateMarkdown(item,body);
+      if(item.role==='user'){body.textContent=item.text;if(item.attachments&&!node.querySelector('.message-attachments')){const sent=el('div','message-attachments');attachments.renderSent(sent,active.id,item.attachments);for(const img of sent.querySelectorAll('img'))imageViewer.decorate(img);body.after(sent);}}else updateMarkdown(item,body);
     }else if(item.type==='tool'){
       renderToolActivity(node,item,['running','waiting','cancelling'].includes(status));
     }
@@ -955,8 +959,10 @@ $('create-form').onsubmit=async event=>{
 // L-05: one stable pending identity per session (survives switches, reloads and lost
 // responses) shared by direct send and queueing, so a retry can never send twice.
 const pendingSends=readStorage(sessionStorage,'agentworks-pending-sends',{});
-function pendingFor(sid,text){
-  if(pendingSends[sid]?.text!==text)pendingSends[sid]={text,requestId:uuid()};
+function pendingFor(sid,text,attached=[]){
+  // Attachment IDs are part of the intended input: a different set is a new request.
+  const same=pendingSends[sid]?.text===text&&JSON.stringify(pendingSends[sid].attachments||[])===JSON.stringify(attached);
+  if(!same)pendingSends[sid]={text,requestId:uuid(),...(attached.length?{attachments:attached}:{})};
   sessionStorage.setItem('agentworks-pending-sends',JSON.stringify(pendingSends));return pendingSends[sid];
 }
 // draft is the composer text; submission.text may carry resolved @mentions.
@@ -967,9 +973,18 @@ function settle(sid,submission,draft=submission.text){
   if(pendingSends[sid]?.requestId===submission.requestId){delete pendingSends[sid];sessionStorage.setItem('agentworks-pending-sends',JSON.stringify(pendingSends));}
 }
 $('composer').onsubmit=async event=>{
-  event.preventDefault();const text=$('prompt').value;if(!active||!text.trim())return;
+  event.preventDefault();const text=$('prompt').value;if(!active)return;
+  const sid=active.id,attached=attachments.ids(sid);
+  if(attachments.count(sid)){
+    if(attachments.uploading(sid)){toast('Wait for attachments to finish uploading');return;}
+    if(attachments.failed(sid)){toast('Remove attachments that failed to upload');return;}
+    if(!text.trim()){toast('Add a message to send with the attachments');return;}
+    // Queued inputs are text-only; attachments are never held for a later turn.
+    if(BUSY.includes(status)){toast('Attachments can’t be queued. Send once the agent is idle; your draft is kept.');return;}
+  }
+  if(!text.trim())return;
   if(status==='cancelling'||(!BUSY.includes(status)&&status!=='idle'))return;
-  const sid=active.id,submission={...pendingFor(sid,mentions.expand(text))};
+  const submission={...pendingFor(sid,mentions.expand(text),attached)};
   promptRecovery.submitted(sid,submission,text);
   $('send').disabled=true;
   try{
@@ -978,9 +993,11 @@ $('composer').onsubmit=async event=>{
     catch(e){
       // Send→Enter race: the session became busy first. Queue the same intended input.
       if(e.status!==409||!/become idle/.test(e.message))throw e;
+      if(attached.length)throw new Error('The agent became busy first. Attachments are kept; send again once it is idle.');
       await inputQueue.enqueue(sid,submission);
     }
     settle(sid,submission,text);
+    if(attached.length)attachments.clear(sid,attached);
   }catch(e){toast(e.message);}finally{updateControls();}
 };
 $('prompt').oninput=()=>{mentions.update();commandsOpen=/^[/\$]\S*$/.test($('prompt').value);renderCommands();if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));}};
