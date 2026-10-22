@@ -1,0 +1,22 @@
+[package]
+name = "agentworks-starlark"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Embedded Starlark progress parsers and experimental workflow decisions."
+
+[dependencies]
+starlark = "=0.14.2"
+# Already transitive dependencies of starlark/rusqlite; listed directly at the same versions.
+anyhow = "1"
+regex = "1"
+serde.workspace = true
+serde_json.workspace = true
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+blake3 = "=1.8.2"
+libc.workspace = true
+
+[[bin]]
+name = "agentworks-starlark-worker"
+path = "src/bin/worker.rs"

@@ -342,12 +342,14 @@ and MCP relay.
 
 Implementation entry points:
 
-- [src/hosts.rs](../src/hosts.rs): SSH supervisor, handshake, link registry, channel relay and host API.
-- [src/agent.rs](../src/agent.rs): worker handshake/lock, heartbeat, adapter groups, environment and directory operations.
-- [src/runtime.rs](../src/runtime.rs): shared ACP client and local/remote transport selection.
-- [src/main.rs](../src/main.rs): host routes, session admission/resume and local-path guards.
-- [src/catalog.rs](../src/catalog.rs): durable host and host-local location configuration.
-- [src/mcp.rs](../src/mcp.rs): local-only Agentworks MCP configuration.
+- [crates/agentworks-runtime/src/remote.rs](../crates/agentworks-runtime/src/remote.rs): SSH supervisor, handshake, link registry and channel relay.
+- [crates/agentworks-runtime/src/worker.rs](../crates/agentworks-runtime/src/worker.rs): worker handshake/lock, heartbeat, adapter groups, environment and directory operations.
+- [crates/agentworks-runtime/src/acp.rs](../crates/agentworks-runtime/src/acp.rs): shared ACP negotiation and model/history discovery.
+- [crates/agentworks/src/session_runtime.rs](../crates/agentworks/src/session_runtime.rs): local/remote transport selection and session prompt coordination.
+- [crates/agentworks/src/hosts.rs](../crates/agentworks/src/hosts.rs): host HTTP API and session/workspace coordination.
+- [crates/agentworks/src/main.rs](../crates/agentworks/src/main.rs): host routes, session admission/resume and local-path guards.
+- [crates/agentworks/src/catalog.rs](../crates/agentworks/src/catalog.rs): durable host and host-local location configuration.
+- [crates/agentworks/src/mcp.rs](../crates/agentworks/src/mcp.rs): local-only Agentworks MCP configuration.
 
 After a locked build, `npm run test:remote-hosts` checks the API/relay through an
 SSH stand-in, including paths, two hosts, slow mise, approvals/questions,

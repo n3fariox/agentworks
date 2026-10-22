@@ -63,12 +63,15 @@ name = "agentworks"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
+ "agentworks-runtime",
+ "agentworks-session",
  "agentworks-starlark",
+ "agentworks-terminal",
+ "agentworks-workspace",
  "ammonia",
  "axum",
  "futures",
  "libc",
- "libghostty-vt",
  "pulldown-cmark",
  "rmcp",
  "rusqlite",
@@ -76,6 +79,34 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite",
+ "uuid",
+]
+
+[[package]]
+name = "agentworks-runtime"
+version = "0.1.0"
+dependencies = [
+ "agent-client-protocol",
+ "agentworks-terminal",
+ "agentworks-workspace",
+ "futures",
+ "http",
+ "libc",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "uuid",
+]
+
+[[package]]
+name = "agentworks-session"
+version = "0.1.0"
+dependencies = [
+ "agentworks-workspace",
+ "http",
+ "serde",
+ "serde_json",
  "uuid",
 ]
 
@@ -91,6 +122,27 @@ dependencies = [
  "serde",
  "serde_json",
  "starlark",
+]
+
+[[package]]
+name = "agentworks-terminal"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "libghostty-vt",
+ "serde",
+ "tokio",
+]
+
+[[package]]
+name = "agentworks-workspace"
+version = "0.1.0"
+dependencies = [
+ "http",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

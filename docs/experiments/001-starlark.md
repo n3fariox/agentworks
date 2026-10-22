@@ -43,14 +43,14 @@ This experiment informs U-05 and a future workflow engine. It does not implement
 
 ### What was built
 
-A separate Cargo workspace member, `agentworks-starlark` (`crates/starlark`). Plain `cargo build`/`cargo run` at the root still build only the service (it is the only default member), and the service does not link the interpreter (`cargo tree -p agentworks -i starlark` finds nothing). `npm run test:starlark` runs its tests and `npm run verify` now includes them. The production U-05 browser parser is unchanged.
+A separate Cargo workspace member, `agentworks-starlark` (`crates/agentworks-starlark`). Plain `cargo build`/`cargo run` at the root still build only the service (it is the only default member), and the service does not link the interpreter (`cargo tree -p agentworks -i starlark` finds nothing). `npm run test:starlark` runs its tests and `npm run verify` now includes them. The production U-05 browser parser is unchanged.
 
 - `engine.rs`: shared embedding of `starlark = "=0.14.2"`, with one dialect, per-capability globals, host-owned typed preludes, compile caching keyed by content hash, a fresh heap per call, limits, and panic capture. Every failure becomes a `Diagnostic` naming the script, its hash and a kind (`install`, `syntax`, `type`, `capability`, `runtime`, `limit`, `invalid_result`, `panic` or `worker`).
 - `host/progress.star` and `host/workflow.star`: versioned host API preludes. Parsers can load only the progress prelude and get one native helper, `regex_match`, which uses the linear-time `regex` crate with a bounded pattern cache. Workflows can load only the workflow prelude, whose constructors return data. Neither capability has `print`, `json`, file or network access. A parser cannot load action constructors, and a workflow cannot use the pattern helper; both are tested.
 - `progress.rs`: Rust-owned stream handling, ported from the U-05 browser implementation. It covers snapshots versus deltas, sequence deduplication, ANSI/OSC/CR/LF handling, 16 KiB line bounds, provisional parsing of the unterminated line, and recognizing Bazel commands. It also includes a `BuiltinBazel` Rust baseline with the same rules. The `LineParser` trait lets tests run every case against both parsers.
 - `workflow.rs`: a SQLite-backed host. Each workflow run is pinned to a script hash and host API version. Every event is deduplicated by a stable ID. A decision, its state and its pending actions are committed in one transaction. Dispatch re-checks authorization through an `Authorizer` trait and uses stable request IDs (`wf:<workflow>:<key>`) with an idempotent `Dispatcher`. Cancellation, explicit `upgrade`, and replay without dispatch are all supported.
 - `worker.rs` and the `agentworks-starlark-worker` binary: a supervised interpreter worker speaking JSON lines. It applies `RLIMIT_AS`, `RLIMIT_CPU` and `RLIMIT_CORE=0`, sets `PR_SET_DUMPABLE=0`, and is killed on a wall-clock deadline. It respawns lazily.
-- Sample scripts: [`scripts/bazel_progress.star`](../../crates/starlark/scripts/bazel_progress.star) and [`scripts/check_then_fix.star`](../../crates/starlark/scripts/check_then_fix.star). [`examples/measure.rs`](../../crates/starlark/examples/measure.rs) produces the numbers below.
+- Sample scripts: [`scripts/bazel_progress.star`](../../crates/agentworks-starlark/scripts/bazel_progress.star) and [`scripts/check_then_fix.star`](../../crates/agentworks-starlark/scripts/check_then_fix.star). [`examples/measure.rs`](../../crates/agentworks-starlark/examples/measure.rs) produces the numbers below.
 
 ### Type hints and type checking
 
@@ -145,7 +145,7 @@ An early run measured 36 µs per line. The cause was cloning `regex::Regex`, whi
 
 ## Production integration (October 21, 2026)
 
-U-05 Bazel progress now runs on this engine. The crate moved to `crates/starlark`, and the service depends on it.
+U-05 Bazel progress now runs on this engine. The crate moved to `crates/agentworks-starlark`, and the service depends on it.
 
 - **Trust and storage.** Scripts are trusted and run in-process on one dedicated parser thread, never on async request threads. Per-call tick, heap, wall-clock and size limits still apply. The worker process stays available but is unused. Scripts live in the SQLite `scripts` table (schema v9) and are compiled once; there is no reloading from disk. `bazel_progress.star` is seeded as a built-in.
 - **Routing and display.** Parser scripts must declare `COMMAND_PATTERN`, which Rust uses for routing (first enabled match wins, in name order), and `DISPLAY_NAME`. Both are validated at install, next to the typed entry contract.
