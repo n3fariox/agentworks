@@ -3004,7 +3004,7 @@ fn render_markdown_with_marker(text: &str, marker: &str) -> String {
         .url_relative(ammonia::UrlRelative::PassThrough)
         // Agents link host files as file:// URLs; the browser turns local ones
         // into in-app previews instead of navigating.
-        .add_url_schemes(&["file"])
+        .add_url_schemes(&["file", "agentworks"])
         .add_tag_attributes("code", &["class"])
         .attribute_filter(|element, attribute, value| {
             if element != "code" || attribute != "class" {
@@ -3091,6 +3091,17 @@ mod tests {
         assert!(html.contains(r#"href="./sample.rs:42""#));
         assert!(!html.contains("javascript:"));
     }
+    #[test]
+    fn markdown_keeps_session_links_from_formatters() {
+        let html = render_markdown(
+            "[@ui-hover](agentworks://sessions/28d9887c-e7c3-4096-870c-8ccf6d4eb4ae)",
+        );
+        assert!(
+            html.contains(r#"href="agentworks://sessions/28d9887c-e7c3-4096-870c-8ccf6d4eb4ae""#)
+        );
+        assert!(html.contains(">@ui-hover</a>"));
+    }
+
     #[test]
     fn markdown_marks_only_mermaid_fences() {
         let html = render_markdown_with_marker(

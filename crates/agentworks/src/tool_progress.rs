@@ -1,14 +1,17 @@
-//! U-05 tool progress from installed Starlark parser scripts (E-01).
+//! U-05 tool progress and inbox message formatting from Starlark scripts (E-01).
 //!
 //! Scripts are stored in SQLite and compiled once; there is no reloading from
 //! disk. The shipped Bazel parser is seeded as a built-in. Tool updates reach a
-//! single dedicated parser thread from `Session::emit`, so evaluation never runs
+//! single dedicated interpreter thread from `Session::emit`, so evaluation never runs
 //! on async request threads. Derived progress is temporary: it is published as
 //! unsequenced `tool_progress` events, included in snapshots, never persisted,
-//! and rebuilt from the retained event window after a restart. Raw events and
+//! and rebuilt from the retained event window after a restart. Inbox formatting
+//! uses the same thread and script installation lifecycle. Raw events and
 //! tool status remain authoritative; a parser failure only removes progress.
 
-use agentworks_starlark::engine::{Capability, Diagnostic, Engine, Installation, content_hash};
+use agentworks_starlark::engine::{
+    Capability, Compiled, Diagnostic, Engine, HookInfo, content_hash,
+};
 use agentworks_starlark::progress::{StarlarkParser, ToolProgress};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
@@ -21,10 +24,17 @@ pub const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS scripts(name TEXT PRIMARY K
 
 /// Shipped scripts. A built-in follows the shipped source until a user saves
 /// their own version under the same name; it can be disabled but not deleted.
-const BUILTIN: &[(&str, &str)] = &[(
-    "bazel_progress.star",
-    agentworks_starlark::BAZEL_PROGRESS_SCRIPT,
-)];
+const BUILTIN: &[(&str, &str)] = &[
+    (
+        "bazel_progress.star",
+        agentworks_starlark::BAZEL_PROGRESS_SCRIPT,
+    ),
+    (
+        "inbox_message.star",
+        agentworks_starlark::INBOX_MESSAGE_SCRIPT,
+    ),
+];
+
 /// Derived views retained per session; the oldest are dropped first.
 const MAX_VIEWS_PER_SESSION: usize = 1000;
 
@@ -32,6 +42,8 @@ const MAX_VIEWS_PER_SESSION: usize = 1000;
 pub struct Script {
     pub name: String,
     pub capability: String,
+    /// Validated installation-time registrations, in declaration order.
+    pub hooks: Vec<HookInfo>,
     pub source: String,
     pub hash: String,
     pub enabled: bool,
@@ -63,6 +75,33 @@ fn now() -> i64 {
 
 /// Insert missing built-ins and move unmodified built-ins to the shipped source.
 pub fn seed(db: &Connection) -> rusqlite::Result<()> {
+    // Preserve saved edits, enable flags and ownership. Legacy assignments become
+    // explicit declarations once; filename routing is no longer used.
+    let legacy = {
+        let mut query = db.prepare("SELECT name,capability,source FROM scripts WHERE capability IN ('parser','message_formatter')")?;
+        query
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let tx = db.unchecked_transaction()?;
+    for (name, capability, mut source) in legacy {
+        source.push_str(if capability == "parser" {
+            "\nagent.register_progress(on_line, command_pattern = COMMAND_PATTERN, display_name = DISPLAY_NAME)\n"
+        } else {
+            "\nagent.register_formatter(format_message, message_type = \"inbox.peer\")\n"
+        });
+        tx.execute(
+            "UPDATE scripts SET capability='hooks',source=?2,hash=?3 WHERE name=?1",
+            params![name, source, content_hash(&source)],
+        )?;
+    }
+    tx.commit()?;
     for (name, source) in BUILTIN {
         let hash = content_hash(source);
         let existing: Option<(bool, String)> = db
@@ -74,7 +113,7 @@ pub fn seed(db: &Connection) -> rusqlite::Result<()> {
             .optional()?;
         match existing {
             None => {
-                db.execute("INSERT INTO scripts(name,capability,source,hash,enabled,builtin,updated) VALUES (?1,'parser',?2,?3,1,1,?4)",
+                db.execute("INSERT INTO scripts(name,capability,source,hash,enabled,builtin,updated) VALUES (?1,'hooks',?2,?3,1,1,?4)",
                     params![name, source, hash, now()])?;
             }
             Some((true, current)) if current != hash => {
@@ -97,6 +136,7 @@ pub fn list(db: &Connection) -> rusqlite::Result<Vec<Script>> {
         Ok(Script {
             name: r.get(0)?,
             capability: r.get(1)?,
+            hooks: Vec::new(),
             source: r.get(2)?,
             hash: r.get(3)?,
             enabled: r.get(4)?,
@@ -115,8 +155,8 @@ pub fn list(db: &Connection) -> rusqlite::Result<Vec<Script>> {
 
 /// Save a validated user script. Saving over a built-in makes it user-owned.
 pub fn save(db: &Connection, name: &str, source: &str) -> rusqlite::Result<()> {
-    db.execute("INSERT INTO scripts(name,capability,source,hash,enabled,builtin,updated) VALUES (?1,'parser',?2,?3,1,0,?4)
-        ON CONFLICT(name) DO UPDATE SET source=excluded.source,hash=excluded.hash,builtin=0,updated=excluded.updated",
+    db.execute("INSERT INTO scripts(name,capability,source,hash,enabled,builtin,updated) VALUES (?1,'hooks',?2,?3,1,0,?4)
+        ON CONFLICT(name) DO UPDATE SET source=excluded.source,hash=excluded.hash,capability=excluded.capability,builtin=0,updated=excluded.updated",
         params![name, source, content_hash(source), now()])?;
     Ok(())
 }
@@ -245,7 +285,11 @@ enum Message {
         data: Value,
         tx: broadcast::Sender<Value>,
     },
-    Reload(Vec<StarlarkParser>),
+    Reload(Vec<StarlarkParser>, Vec<Arc<Compiled>>),
+    FormatInbox {
+        messages: Vec<Value>,
+        reply: mpsc::SyncSender<Vec<Option<String>>>,
+    },
     Forget(String),
 }
 
@@ -261,7 +305,9 @@ impl Hub {
     pub fn new(engine: Arc<Engine>, parsers: Vec<StarlarkParser>) -> Self {
         let views = Views::default();
         let (tx, rx) = mpsc::channel::<Message>();
+        let mut formatters: Vec<Arc<Compiled>> = Vec::new();
         let mut tracker = Tracker::new(parsers, views.clone());
+        let interpreter = engine.clone();
         std::thread::Builder::new()
             .name("tool-progress".into())
             .spawn(move || {
@@ -277,7 +323,42 @@ impl Hub {
                                 let _ = tx.send(event);
                             }
                         }
-                        Message::Reload(parsers) => tracker.parsers = parsers,
+                        Message::Reload(parsers, next) => {
+                            tracker.parsers = parsers;
+                            formatters = next;
+                        }
+                        Message::FormatInbox { messages, reply } => {
+                            let formatted = messages
+                                .iter()
+                                .map(|message| {
+                                    let script = formatters.iter().find(|script| {
+                                        script.message_type.as_deref() == Some("inbox.peer")
+                                            && script.text_pattern.as_ref().is_some_and(|pattern| {
+                                                pattern.is_match(
+                                                    message["text"].as_str().unwrap_or_default(),
+                                                )
+                                            })
+                                    })?;
+                                    match interpreter.call(
+                                        script,
+                                        &json!({"channel":"inbox", "state":{}}),
+                                        message,
+                                    ) {
+                                        Ok((value, _)) => value["result"]
+                                            .as_str()
+                                            .filter(|s| !s.trim().is_empty())
+                                            .map(str::to_owned),
+                                        Err(error) => {
+                                            eprintln!(
+                                                "Inbox formatter failed; using quoted JSON: {error}"
+                                            );
+                                            None
+                                        }
+                                    }
+                                })
+                                .collect();
+                            let _ = reply.send(formatted);
+                        }
                         Message::Forget(session) => tracker.forget(&session),
                     }
                 }
@@ -329,41 +410,72 @@ impl Hub {
         Value::Object(map)
     }
 
-    /// Validate a parser script before it is saved.
+    /// Run message formatting on the interpreter thread, away from request threads.
+    /// Timeout, disabled script or evaluation failure falls back to host-quoted JSON.
+    pub fn format_inbox(&self, messages: &[Value]) -> Vec<Option<String>> {
+        let (reply, rx) = mpsc::sync_channel(1);
+        if self
+            .tx
+            .send(Message::FormatInbox {
+                messages: messages.to_vec(),
+                reply,
+            })
+            .is_err()
+        {
+            return vec![None; messages.len()];
+        }
+        rx.recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap_or_else(|_| vec![None; messages.len()])
+    }
+
+    /// Validate a script before it is saved.
     pub fn check(&self, name: &str, source: &str) -> Result<(), Diagnostic> {
-        self.engine
-            .compile(&Installation::of(name, Capability::Parser, source), source)
-            .map(|_| ())
+        self.engine.compile_registered(name, source).map(|_| ())
     }
 
     /// Recompile enabled scripts from the store and swap them in.
     pub fn reload(&self, db: &Connection) -> rusqlite::Result<Vec<Diagnostic>> {
-        let (parsers, errors) = compile_enabled(&self.engine, db)?;
-        let _ = self.tx.send(Message::Reload(parsers));
+        let (parsers, formatters, errors) = compile_hooks(&self.engine, db)?;
+        let _ = self.tx.send(Message::Reload(parsers, formatters));
         Ok(errors)
     }
 }
 
-/// Compile enabled parser scripts in name order. Scripts that no longer compile
-/// are skipped with a diagnostic rather than blocking startup.
-pub fn compile_enabled(
+/// Compile enabled modules in filename order, then route their declarations in
+/// source order. One broken module contributes no handlers to either hook.
+fn compile_hooks(
+    engine: &Arc<Engine>,
+    db: &Connection,
+) -> rusqlite::Result<(Vec<StarlarkParser>, Vec<Arc<Compiled>>, Vec<Diagnostic>)> {
+    let (mut parsers, mut formatters, mut errors) = (Vec::new(), Vec::new(), Vec::new());
+    for script in list(db)?.into_iter().filter(|s| s.enabled) {
+        match engine.compile_registered(&script.name, &script.source) {
+            Ok(compiled) => {
+                for handler in &compiled.handlers {
+                    match handler.capability {
+                        Capability::Parser => parsers.push(StarlarkParser {
+                            engine: engine.clone(),
+                            script: handler.clone(),
+                        }),
+                        Capability::MessageFormatter => formatters.push(handler.clone()),
+                        Capability::Workflow => {
+                            unreachable!("workflow registrations are not exposed")
+                        }
+                    }
+                }
+            }
+            Err(error) => errors.push(error),
+        }
+    }
+    Ok((parsers, formatters, errors))
+}
+
+#[cfg(test)]
+fn compile_enabled(
     engine: &Arc<Engine>,
     db: &Connection,
 ) -> rusqlite::Result<(Vec<StarlarkParser>, Vec<Diagnostic>)> {
-    let (mut parsers, mut errors) = (Vec::new(), Vec::new());
-    for script in list(db)?
-        .into_iter()
-        .filter(|s| s.enabled && s.capability == "parser")
-    {
-        let install = Installation::of(&script.name, Capability::Parser, &script.source);
-        match engine.compile(&install, &script.source) {
-            Ok(compiled) => parsers.push(StarlarkParser {
-                engine: engine.clone(),
-                script: compiled,
-            }),
-            Err(d) => errors.push(d),
-        }
-    }
+    let (parsers, _, errors) = compile_hooks(engine, db)?;
     Ok((parsers, errors))
 }
 
@@ -389,12 +501,24 @@ fn db_error(e: rusqlite::Error) -> (axum::http::StatusCode, String) {
 /// Scripts with the current compile error of each enabled one.
 fn annotated(app: &crate::App, db: &Connection) -> crate::ApiResult {
     let mut scripts = list(db).map_err(db_error)?;
-    for script in scripts.iter_mut().filter(|s| s.enabled) {
-        script.error = app
-            .progress
-            .check(&script.name, &script.source)
-            .err()
-            .map(|d| d.to_string());
+    for script in &mut scripts {
+        let compiled = if script.enabled {
+            Some(
+                app.progress
+                    .engine
+                    .compile_registered(&script.name, &script.source),
+            )
+        } else {
+            app.progress
+                .engine
+                .cached_registered(&script.name, &content_hash(&script.source))
+                .map(Ok)
+        };
+        match compiled {
+            Some(Ok(compiled)) => script.hooks = compiled.hooks.clone(),
+            Some(Err(error)) => script.error = Some(error.to_string()),
+            None => {}
+        }
     }
     Ok(axum::Json(json!({"scripts": scripts})))
 }
@@ -411,7 +535,7 @@ pub async fn get_scripts(
     annotated(&app, &store.connection)
 }
 
-/// Install or replace a parser script after compiling and type-checking it.
+/// Install or replace a script after validating all of its hook registrations.
 pub async fn put_script(
     axum::extract::State(app): axum::extract::State<crate::App>,
     axum::extract::Path(name): axum::extract::Path<String>,
@@ -463,15 +587,15 @@ pub async fn delete_script(
     }
 }
 
-/// Seed built-ins and start the parser thread with the enabled scripts.
+/// Seed built-ins and start the interpreter thread with the enabled scripts.
 pub fn start(db: &Connection) -> Result<Hub, String> {
     seed(db).map_err(|e| e.to_string())?;
     let engine = Arc::new(Engine::new()?);
-    let (parsers, errors) = compile_enabled(&engine, db).map_err(|e| e.to_string())?;
-    for error in errors {
-        eprintln!("Parser script disabled for this run: {error}");
+    let hub = Hub::new(engine, Vec::new());
+    for error in hub.reload(db).map_err(|e| e.to_string())? {
+        eprintln!("Script disabled for this run: {error}");
     }
-    Ok(Hub::new(engine, parsers))
+    Ok(hub)
 }
 
 #[cfg(test)]
@@ -565,10 +689,144 @@ mod tests {
     }
 
     #[test]
+    fn legacy_scripts_gain_registrations_once_without_losing_edits_or_enable_flags() {
+        let db = db();
+        let source = agentworks_starlark::BAZEL_PROGRESS_SCRIPT
+            .split("\nagent.register_progress")
+            .next()
+            .unwrap()
+            .replace("DISPLAY_NAME = \"Bazel\"", "DISPLAY_NAME = \"Custom\"");
+        db.execute("INSERT INTO scripts(name,capability,source,hash,enabled,builtin,updated) VALUES ('legacy.star','parser',?1,?2,0,0,123)", params![source, content_hash(&source)]).unwrap();
+        let formatter_source = agentworks_starlark::INBOX_MESSAGE_SCRIPT
+            .split("\nagent.register_formatter")
+            .next()
+            .unwrap();
+        db.execute("INSERT INTO scripts(name,capability,source,hash,enabled,builtin,updated) VALUES ('old_formatter.star','message_formatter',?1,?2,1,0,456)", params![formatter_source, content_hash(formatter_source)]).unwrap();
+        seed(&db).unwrap();
+        seed(&db).unwrap();
+        let scripts = list(&db).unwrap();
+        let legacy = scripts.iter().find(|s| s.name == "legacy.star").unwrap();
+        assert_eq!(legacy.capability, "hooks");
+        assert!(!legacy.enabled && !legacy.builtin);
+        assert_eq!(legacy.updated, 123);
+        assert!(legacy.source.starts_with(&source));
+        assert_eq!(legacy.source.matches("agent.register_progress").count(), 1);
+        assert_eq!(legacy.hash, content_hash(&legacy.source));
+        let engine = Engine::new().unwrap();
+        let compiled = engine
+            .compile_registered(&legacy.name, &legacy.source)
+            .unwrap();
+        assert_eq!(compiled.handlers[0].display_name, "Custom");
+        let old_formatter = scripts
+            .iter()
+            .find(|s| s.name == "old_formatter.star")
+            .unwrap();
+        assert_eq!(
+            engine
+                .compile_registered(&old_formatter.name, &old_formatter.source)
+                .unwrap()
+                .hooks[0]
+                .message_type
+                .as_deref(),
+            Some("inbox.peer")
+        );
+    }
+
+    #[test]
+    fn modules_route_registered_hooks_by_filter_and_filename_not_reserved_names() {
+        let db = db();
+        let custom_formatter = agentworks_starlark::INBOX_MESSAGE_SCRIPT
+            .replace("text = message.text", "text = \"Custom: \" + message.text")
+            .replace(
+                "message_type = \"inbox.peer\"",
+                "message_type = \"inbox.peer\", text_pattern = \"^Special\"",
+            );
+        let mixed = format!(
+            "{}\n{}",
+            agentworks_starlark::BAZEL_PROGRESS_SCRIPT,
+            custom_formatter
+        );
+        save(&db, "a_handlers.star", &mixed).unwrap();
+        let hub = start(&db).unwrap();
+        let message = |text| json!({"id":1,"sender":"peer","senderTitle":"Peer","text":text});
+        assert_eq!(
+            hub.format_inbox(&[message("Special review"), message("Other review")]),
+            vec![
+                Some("Custom: Special review".into()),
+                Some("Other review".into())
+            ]
+        );
+        let (parsers, formatters, errors) = compile_hooks(&hub.engine, &db).unwrap();
+        assert!(errors.is_empty());
+        assert_eq!(parsers.len(), 2);
+        assert_eq!(formatters.len(), 2);
+        assert_eq!(parsers[0].script.name, "a_handlers.star");
+        set_enabled(&db, "a_handlers.star", false).unwrap();
+        hub.reload(&db).unwrap();
+        assert_eq!(
+            hub.format_inbox(&[message("Special review")]),
+            vec![Some("Special review".into())]
+        );
+        // First match owns the event even on failure; errors use the safe host fallback.
+        let broken = mixed.replace("text = \"Custom: \" + message.text", "text = str(1 // 0)");
+        save(&db, "a_handlers.star", &broken).unwrap();
+        set_enabled(&db, "a_handlers.star", true).unwrap();
+        hub.reload(&db).unwrap();
+        assert_eq!(hub.format_inbox(&[message("Special review")]), vec![None]);
+    }
+
+    #[test]
+    fn inbox_formatter_edits_disable_restore_and_failures() {
+        let db = db();
+        let hub = start(&db).unwrap();
+        let messages = vec![
+            json!({"id":187,"sender":"peer","senderTitle":"UI Hover","text":"Please review.\n\n- Branch: main", "truncated":true}),
+        ];
+        let formatted = hub.format_inbox(&messages).remove(0).unwrap();
+        assert!(formatted.starts_with("Please review.\n\n- Branch: main"));
+        assert!(formatted.contains("Message truncated"));
+        let source = agentworks_starlark::INBOX_MESSAGE_SCRIPT.replace(
+            "text = message.text",
+            "text = \"**Review request**\\n\\n\" + message.text",
+        );
+        hub.check("inbox_message.star", &source).unwrap();
+        save(&db, "inbox_message.star", &source).unwrap();
+        hub.reload(&db).unwrap();
+        assert!(
+            hub.format_inbox(&messages)[0]
+                .as_ref()
+                .unwrap()
+                .starts_with("**Review request**")
+        );
+        seed(&db).unwrap();
+        assert!(!list(&db).unwrap()[1].builtin);
+        set_enabled(&db, "inbox_message.star", false).unwrap();
+        hub.reload(&db).unwrap();
+        assert_eq!(hub.format_inbox(&messages), vec![None]);
+        set_enabled(&db, "inbox_message.star", true).unwrap();
+        let broken = agentworks_starlark::INBOX_MESSAGE_SCRIPT
+            .replace("text = message.text", "text = str(1 // 0)");
+        hub.check("inbox_message.star", &broken).unwrap();
+        save(&db, "inbox_message.star", &broken).unwrap();
+        hub.reload(&db).unwrap();
+        assert_eq!(hub.format_inbox(&messages), vec![None]);
+        assert_eq!(
+            delete(&db, "inbox_message.star").unwrap(),
+            Removal::Restored
+        );
+        hub.reload(&db).unwrap();
+        assert_eq!(hub.format_inbox(&messages), vec![Some(formatted)]);
+        assert!(
+            hub.check("anything.star", agentworks_starlark::BAZEL_PROGRESS_SCRIPT)
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn builtins_are_seeded_updated_disabled_and_user_owned_when_saved() {
         let db = db();
         let rows = list(&db).unwrap();
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 2);
         assert!(rows[0].builtin && rows[0].enabled);
         db.execute("UPDATE scripts SET source='old',hash='old'", [])
             .unwrap();
@@ -603,7 +861,7 @@ mod tests {
             "restoring returns to the shipped source"
         );
         save(&db, "make.star", "x").unwrap();
-        assert!(!list(&db).unwrap()[1].shipped);
+        assert!(!list(&db).unwrap()[2].shipped);
         assert_eq!(delete(&db, "make.star").unwrap(), Removal::Deleted);
         assert_eq!(delete(&db, "missing.star").unwrap(), Removal::Missing);
         assert!(

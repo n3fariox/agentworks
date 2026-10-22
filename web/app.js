@@ -661,7 +661,7 @@ function consume(e,live=false){
   else if(e.kind==='permission_modes'){permissionModes=d;}
   else if(e.kind==='attachment_policy'){attachments.setPolicy(d);}
   else if(e.kind==='commands'){availableCommands=Array.isArray(d)?d:[];renderCommands();}
-  else if(e.kind==='user'){assistant=null;if(d.inboxDelivery)transcript.push({id:uuid(),type:'notice',text:'Automatic inbox turn authorized by you; peer messages are untrusted context.'});else if(d.initiatedBy)transcript.push({id:uuid(),type:'notice',text:d.initiatedBy.startsWith('controller:')?'Turn started by external controller '+(d.initiatorTitle||d.initiatedBy):'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});const message=addMessage('user',d.text);message.seq=e.seq;if(d.attachments?.length)message.attachments=d.attachments;}
+  else if(e.kind==='user'){assistant=null;if(d.inboxDelivery)transcript.push({id:uuid(),type:'notice',text:'Automatic inbox turn authorized by you; peer messages are untrusted context.'});else if(d.initiatedBy)transcript.push({id:uuid(),type:'notice',text:d.initiatedBy.startsWith('controller:')?'Turn started by external controller '+(d.initiatorTitle||d.initiatedBy):'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});const message=addMessage('user',d.text);message.seq=e.seq;message.inboxDelivery=!!d.inboxDelivery;if(d.attachments?.length)message.attachments=d.attachments;}
   else if(e.kind==='status'){
     status=d.status;if(!replaying)inputQueue.observe(status,{live});if(active){active.status=status;if(d.explicitlySuspended!==undefined)active.explicitlySuspended=d.explicitlySuspended;const s=sessions.find(s=>s.id===active.id);if(s)s.status=status;}sidebar();
   }else if(e.kind==='approval'){approvals.set(d.id,d);}
@@ -763,7 +763,10 @@ function scheduleDraw(){if(!drawTimer)drawTimer=setTimeout(()=>{drawTimer=null;d
 function fileUrl(path,download=false){return appUrl(`/api/sessions/${active.id}/file?path=${encodeURIComponent(path)}${download?'&download=true':''}`);}
 const imageViewer=setupImageViewer($('messages'));
 const attachments=setupAttachments({appUrl,el,toast,uuid,getSession:()=>active,canAttach:()=>!!active&&!$('prompt').disabled,button:$('attach'),input:$('attach-input'),list:$('attachment-list'),dropTarget:$('composer')});
-const decorateMarkdown=setupChatReferences({getSession:()=>active,openFile:(session,path,line)=>workspace?.openSideFile(session,path,line),fileUrl,imageViewer});
+const decorateMarkdown=setupChatReferences({getSession:()=>active,getSessions:()=>sessions,openSession:async id=>{
+  try{const target=sessions.find(s=>s.id===id)||(await api('/api/sessions/'+encodeURIComponent(id))).session;selectSession(target);}
+  catch(e){toast('Cannot open session: '+e.message);}
+},openFile:(session,path,line)=>workspace?.openSideFile(session,path,line),fileUrl,imageViewer});
 function updateMarkdown(message,body){
   if(body.dataset.source===message.text)return;
   body.dataset.source=message.text;
@@ -793,8 +796,8 @@ function draw(){
     let node=nodes.get(item.id);
     if(!node){
       if(item.type==='message'){
-        node=el('article','message '+item.role);node.dataset.messageId=item.id;node.tabIndex=0;node.append(el('div','avatar',item.role==='user'?'Y':icons[active.provider]));
-        const content=el('div','message-content');content.append(el('div','message-label',item.role==='user'?'You':labels[active.provider]),el('div','message-body'));node.append(content);
+        node=el('article','message '+(item.inboxDelivery?'agentworks':item.role));node.dataset.messageId=item.id;node.tabIndex=0;node.append(el('div','avatar',item.inboxDelivery?'A':item.role==='user'?'Y':icons[active.provider]));
+        const content=el('div','message-content');content.append(el('div','message-label',item.inboxDelivery?'Agentworks':item.role==='user'?'You':labels[active.provider]),el('div','message-body'));node.append(content);
       }else if(item.type==='tool'){
         node=el('details','tool-card');node.append(el('summary'),el('pre'));
       }else if(item.type==='image'){
@@ -805,7 +808,7 @@ function draw(){
     }
     if(item.type==='message'){
       const body=node.querySelector('.message-body');
-      if(item.role==='user'){body.textContent=item.text;if(item.attachments&&!node.querySelector('.message-attachments')){const sent=el('div','message-attachments');attachments.renderSent(sent,active.id,item.attachments);for(const img of sent.querySelectorAll('img'))imageViewer.decorate(img);body.after(sent);}}else updateMarkdown(item,body);
+      if(item.role==='user'&&!item.inboxDelivery){body.textContent=item.text;if(item.attachments&&!node.querySelector('.message-attachments')){const sent=el('div','message-attachments');attachments.renderSent(sent,active.id,item.attachments);for(const img of sent.querySelectorAll('img'))imageViewer.decorate(img);body.after(sent);}}else updateMarkdown(item,body);
     }else if(item.type==='tool'){
       renderToolActivity(node,item,['running','waiting','cancelling'].includes(status));
     }

@@ -53,10 +53,10 @@ try{
  const humanBase=turns(await snap(id));
  await prompt(id,'approval');await until(async()=>(await snap(id)).approvals.length);
  const a=await send(id,'First bounded context','stable-message');const duplicate=await send(id,'First bounded context','stable-message');assert.equal(a.id,duplicate.id);assert(duplicate.duplicate);
- await send(id,'Second bounded context');await delay(6000);assert.equal((await policy(id)).pending,2);assert.equal(turns(await snap(id)),humanBase+1);
+ await send(id,'Second bounded context\n\n- **Review** the branch.');await delay(6000);assert.equal((await policy(id)).pending,2);assert.equal(turns(await snap(id)),humanBase+1);
  const held=await snap(id);await api(path(id)+`/approvals/${held.approvals[0].id}`,{optionId:'allow'});
  await until(async()=>(await policy(id)).policy.attempts===1);const done=await idle(id);assert.equal(turns(done),humanBase+2);assert.equal(native(done),originalNative);
- const wake=done.events.filter(e=>e.kind==='user').at(-1).data;assert(wake.text.includes('UNTRUSTED PEER DATA'));assert(wake.text.includes('First bounded context'));assert(wake.text.includes('Second bounded context'));assert(wake.text.includes(sender));assert.equal(wake.initiatedBy,'human-authorized inbox delivery');
+ const wake=done.events.filter(e=>e.kind==='user').at(-1).data;assert(wake.text.includes('UNTRUSTED PEER DATA'));assert(wake.text.includes('First bounded context'));assert(wake.text.includes('Second bounded context'));assert(wake.text.includes(sender));assert.equal(wake.initiatedBy,'human-authorized inbox delivery');assert(wake.text.startsWith('## Agentworks inbox delivery'));assert(wake.text.includes('> - **Review** the branch.'));
  await send(id,'No ping pong beyond one turn');await delay(6000);assert.equal(turns(await snap(id)),humanBase+2);assert.equal((await policy(id)).policy.enabled,false);
  assert.equal((await api(path(id)+'/mailbox')).messages.length,6);assert((await api(path(id)+'/mailbox')).messages.every(m=>!m.acknowledged));
  console.log('PASS default off, explicit validation, payload binding, idempotent send, busy coalescing, attributed prompt, same native identity, bounds, manual cursors');
@@ -86,7 +86,7 @@ try{
  await authorize(id);await send(id);await prompt(id,'mcp report_completion {"requestId":"inbox-complete","status":"completed","summary":"Fixture done"}');await idle(id);assert.equal((await policy(id)).policy.enabled,false);
  // Mobile controls expose explicit authorization and visible bounded status.
  browser=await chromium.launch({headless:true});const page=await browser.newPage({viewport:{width:390,height:844}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
- await page.goto(base);await page.evaluate(id=>localStorage.setItem('agentworks-session',id),id);await page.reload();await page.locator('#session-more').click();await page.locator('#session-agents').click();await expect(page.locator('#inbox-delivery-status')).toContainText('Off');
+ await page.goto(base);await page.evaluate(id=>localStorage.setItem('agentworks-session',id),id);await page.reload();await expect(page.locator('.message-body.markdown h2').filter({hasText:'Agentworks inbox delivery'}).first()).toBeVisible();await expect(page.locator('.message-body.markdown blockquote strong').filter({hasText:'Review'}).first()).toBeVisible();await page.locator('#session-more').click();await page.locator('#session-agents').click();await expect(page.locator('#inbox-delivery-status')).toContainText('Off');
  await expect(page.locator('#inbox-maxTurns')).toBeVisible();await page.locator('#inbox-maxTurns').fill('2');await page.locator('#inbox-deadline').fill('');await page.locator('#inbox-delivery-controls button[type=submit]').click();await expect(page.locator('#inbox-delivery-status')).toContainText('Enabled');
  assert(await page.locator('#inbox-maxTurns').evaluate(n=>{const r=n.getBoundingClientRect();return r.width>0&&r.left>=0&&r.right<=innerWidth&&r.height>=44;}));
  assert(await page.locator('#inbox-unlimitedTurns').evaluate(n=>{const r=n.getBoundingClientRect();return r.width>0&&r.left>=0&&r.right<=innerWidth;}));
@@ -114,7 +114,7 @@ try{
  await api(path(id)+'/resume',{});await until(async()=>(await snap(id)).session.status==='error');await api(path(id)+'/inbox-delivery',{enabled:true,requestId:'unavailable',deadline:Date.now()+60000,maxTurns:1,cooldownSeconds:5,maxBatch:1},'PUT',409);await delay(1500);assert.equal((await policy(id)).policy.enabled,false);assert.equal(native(await snap(id)),originalNative);await writeFile(nativeFile,saved);
  // Deletion cascades policy/ledger, preserving historical peer messages.
  const doomed=await create('Deleted recipient');await authorize(doomed);await send(doomed);await api(path(doomed),undefined,'DELETE');assert.equal(sql(`SELECT count(*) FROM inbox_policies WHERE session_id='${doomed}'`)[0][0],0);assert.equal(sql(`SELECT count(*) FROM inbox_deliveries WHERE recipient='${doomed}'`)[0][0],0);
- assert.equal(sql('PRAGMA user_version')[0][0],8);
- console.log('PASS completion cancellation, accessible mobile enable/cancel, restart ambiguity/no replay, unavailable native context, deletion and schema v8');
+ assert.equal(sql('PRAGMA user_version')[0][0],9);
+ console.log('PASS completion cancellation, accessible mobile enable/cancel, restart ambiguity/no replay, unavailable native context, deletion and schema v9');
  console.log(`Fixture root: ${dir}`);
 }finally{if(browser)await browser.close();if(server)await stop();await removeFixture(dir);}

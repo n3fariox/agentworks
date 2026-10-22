@@ -148,7 +148,7 @@ An early run measured 36 µs per line. The cause was cloning `regex::Regex`, whi
 U-05 Bazel progress now runs on this engine. The crate moved to `crates/agentworks-starlark`, and the service depends on it.
 
 - **Trust and storage.** Scripts are trusted and run in-process on one dedicated parser thread, never on async request threads. Per-call tick, heap, wall-clock and size limits still apply. The worker process stays available but is unused. Scripts live in the SQLite `scripts` table (schema v9) and are compiled once; there is no reloading from disk. `bazel_progress.star` is seeded as a built-in.
-- **Routing and display.** Parser scripts must declare `COMMAND_PATTERN`, which Rust uses for routing (first enabled match wins, in name order), and `DISPLAY_NAME`. Both are validated at install, next to the typed entry contract.
+- **Routing and display.** Scripts register typed callbacks with `agent.register_progress` and `agent.register_formatter`. Routing uses filename order and then declaration order, with the first matching handler winning for each hook. Patterns and callback signatures are validated at installation.
 - **Publishing.** Progress is derived on the server and published as unsequenced `tool_progress` events plus snapshot `toolProgress`. It is never stored and is rebuilt by replay after a restart. Rust keeps raw output only until a tool's command is known, because the service already stores raw events. It frees stream state when a tool finishes and keeps at most 1,000 views per session.
 - **Browser and tests.** The browser renders server views and no longer parses output. A golden file (`tests/fixtures/bazel-progress-events.json`), checked by a Rust test, feeds the browser unit and Playwright tests, so they replay exactly what the service publishes.
 
@@ -159,6 +159,88 @@ Evidence:
 - **End to end.** `scripts/progress-smoke.mjs`, run with the demo agent's deterministic `bazel demo` replay, shows live progress events, the snapshot view, that history contains no stored progress, that invalid scripts are rejected with diagnostics, that built-ins can't be deleted, and that disabling a parser stops progress. A manual restart of the service rebuilt `Bazel · Testing · 4 / 9 · 3 / 5` from the stored window.
 - **Cost.** The service release binary grew from 22.0 MB to 36.4 MB (unstripped). An incremental release build of the service after the change took 77 s.
 
-Settings → Progress parsers (`web/parser-scripts.js`, `tests/parser-scripts.spec.mjs`) lists, enables, edits, installs, deletes and restores scripts. It shows server diagnostics in place, including for enabled scripts that no longer compile. It is checked on desktop and at 390×844.
+Settings → Starlark scripts (`web/parser-scripts.js`, `tests/parser-scripts.spec.mjs`) lists, enables, edits, installs, deletes and restores scripts. It shows server diagnostics in place, including for enabled scripts that no longer compile. It is checked on desktop and at 390×844.
 
 Not done: workflow scripts in the service, and per-harness verification of live streaming cadence (unchanged from U-05).
+
+
+### Message formatting
+
+Settings → Starlark scripts also includes `inbox_message.star`, the editable
+formatter for automatic MCP peer inbox deliveries. Its registration selects
+the `inbox.peer` message type and it loads `@agentworks//message.star`:
+
+```python
+load("@agentworks//message.star", "MessageContext", "PeerMessage")
+
+def format_message(ctx: MessageContext, message: PeerMessage) -> str:
+    return message.text
+
+agent.register_formatter(format_message, message_type = "inbox.peer")
+```
+
+`ctx.channel` is `"inbox"`; `ctx.state` starts empty on each call and is discarded.
+`PeerMessage` has `id`, `sender`, `sender_title`, `text` and `truncated` fields.
+The bundled formatter preserves peer Markdown and appends a truncation notice.
+The existing 80-character sender-title and 256-character message excerpt bounds
+still apply; the saved mailbox retains the complete message.
+
+Rust owns the delivery request, trust/authorization notice and per-message
+attribution. It wraps every formatted line in a Markdown blockquote. A formatter
+cannot change delivery policy or submit actions. Calls run on the existing
+interpreter thread with parser-sized evaluation limits. Disabled scripts,
+compile/runtime errors, empty output or timeout use escaped, quoted JSON instead.
+Edits, enable/disable and restore use the existing scripts API and affect future
+deliveries. Already persisted events retain their original text. Automatic inbox
+messages render as Markdown with an Agentworks label and avatar in the transcript.
+
+Sender attribution uses `[@session-name](agentworks://sessions/<id>)`. Markdown
+rendering preserves these URIs and opens the referenced session in Agentworks.
+Formatters can return the same Markdown links anywhere in a message; the UI
+resolves the display name from the session list when available.
+
+
+### Registered presentation hooks
+
+One installed `.star` module can register any combination of progress and
+formatter callbacks. Callback names and script filenames have no assignment
+meaning. The global `agent` namespace exposes these installation-time APIs:
+
+```python
+agent.register_progress(
+    my_progress,
+    command_pattern = "^make\\b",
+    display_name = "Make",
+)
+agent.register_formatter(
+    my_formatter,
+    message_type = "inbox.peer",
+    text_pattern = "^Review",
+)
+```
+
+`command_pattern` matches the tool command. `text_pattern` matches the delivered
+message excerpt and defaults to `.*`; `inbox.peer` is the currently supported
+message type. Progress handlers retain the `LineContext, str -> Progress | None`
+contract; formatters retain `MessageContext, PeerMessage -> str`. Modules may load
+both presentation preludes but cannot load workflow action constructors.
+
+Rust collects at most 32 registrations per module, validates every callback and
+filter, and freezes the whole module before accepting it. Any invalid registration
+rejects the entire save. Runtime callbacks cannot change registrations. Each call
+still receives a fresh heap and the existing evaluation limits. A selected
+progress handler returning `None` does not select another handler. A selected
+formatter failing or returning empty output uses the quoted host fallback.
+
+Enabled modules are routed in filename order and then declaration order; first
+match wins for each hook. Manual priority ordering is deferred. Disabling a script
+disables all of its hooks. Disabled source is not evaluated to render Settings;
+previously cached registrations can still be shown.
+
+Settings displays each script's registered hooks and filters and offers progress,
+formatter and combined starters under **New script**. Existing saved parser and
+formatter installations gain explicit declarations once at startup, preserving
+custom source, ownership, enable state and timestamps. They remain in schema v9;
+the `capability` column identifies these modules as `hooks`. The older single-hook
+engine API remains for the experiment tests and supervised worker, while service
+routing uses registrations exclusively.

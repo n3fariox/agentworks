@@ -1,4 +1,4 @@
-// U-05/E-01 progress parser scripts in Settings: list, enable, edit and install.
+// Starlark hook registrations in Settings: list, enable, edit and install.
 // Changes save immediately. The server compiles and type-checks a script before it
 // is stored, and reports its diagnostic here; nothing is loaded from disk.
 // Starter for a new parser; scripts/progress-smoke.mjs checks that it installs.
@@ -18,16 +18,28 @@ def on_line(ctx: LineContext, line: str) -> Progress | None:
         return None
     counts = [Counts(done = ctx.state["done"], total = ctx.state["total"], unit = "steps")]
     return Progress(phase = "Building", label = None, counts = counts)
+
+agent.register_progress(on_line, command_pattern = COMMAND_PATTERN, display_name = DISPLAY_NAME)
 `;
+
+export const FORMATTER_TEMPLATE=String.raw`load("@agentworks//message.star", "MessageContext", "PeerMessage")
+
+def format_message(ctx: MessageContext, message: PeerMessage) -> str:
+    return message.text
+
+agent.register_formatter(format_message, message_type = "inbox.peer", text_pattern = "^Review")
+`;
+const TEMPLATES={progress:TEMPLATE,formatter:FORMATTER_TEMPLATE,both:TEMPLATE+'\n'+FORMATTER_TEMPLATE};
 
 export function setupParserScripts({$,api,el}){
   const root=$('parser-script-controls');
-  root.innerHTML=`<legend>Progress parsers</legend>
-    <p class="field-note">Starlark scripts that turn tool output into progress on tool cards. Each handles the commands matching its <code>COMMAND_PATTERN</code>; the first enabled match wins. Scripts are checked before they are saved.</p>
+  root.innerHTML=`<legend>Starlark scripts</legend>
+    <p class="field-note">Scripts register tool-progress and message-formatting hooks. Enabled handlers run in filename order, then registration order; the first matching handler for each hook wins. Each script can register both kinds. Changes apply to future output and inbox deliveries.</p>
     <div class="parser-script-list" role="list" data-list></div>
-    <button type="button" class="text-button parser-script-new" data-new>＋ New parser</button>
+    <button type="button" class="text-button parser-script-new" data-new>＋ New script</button>
     <div class="field-note" role="status" data-note></div>
     <div class="parser-script-editor" data-editor hidden>
+      <label data-starter-label>Starter<select data-starter><option value="progress">Tool progress</option><option value="formatter">Inbox formatter</option><option value="both">Progress and inbox formatter</option></select></label>
       <label>Name<input data-name spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="make_progress.star"></label>
       <div class="field-note" data-editor-note></div>
       <label>Source<textarea data-source spellcheck="false" autocomplete="off" autocapitalize="off" rows="16"></textarea></label>
@@ -65,29 +77,38 @@ export function setupParserScripts({$,api,el}){
       const edit=el('button','text-button','Edit');edit.type='button';edit.setAttribute('aria-label',`Edit ${script.name}`);edit.onclick=()=>open(script);row.append(edit);
       const actions=script.builtin?[]:script.shipped?[['Restore shipped version',()=>remove(script,'restore')]]:[['Delete…',()=>remove(script,'delete'),true]];
       if(actions.length){const more=el('button','text-button parser-script-more','⋯');more.type='button';more.setAttribute('aria-label',`More actions for ${script.name}`);more.setAttribute('aria-haspopup','menu');more.setAttribute('aria-expanded','false');more.onclick=()=>popover.hidden||trigger!==more?openPopover(more,actions):closePopover();row.append(more);}else row.append(el('span','parser-script-more-slot'));
-      if(script.error){const details=el('pre','parser-script-error',script.error);const wrap=el('div','parser-script-entry');wrap.setAttribute('role','listitem');row.removeAttribute('role');wrap.append(row,details);return wrap;}
-      return row;
+      const wrap=el('div','parser-script-entry');wrap.dataset.scriptEntry=script.name;wrap.setAttribute('role','listitem');row.removeAttribute('role');wrap.append(row);
+      if(script.hooks?.length){
+        const hooks=el('ul','parser-script-hooks');
+        for(const hook of script.hooks){
+          const item=el('li');item.append(document.createTextNode(hook.hook==='progress'?'Tool progress · command: ':'Formatter · '+hook.message_type+' · text: '),el('code','',hook.pattern));hooks.append(item);
+        }
+        wrap.append(hooks);
+      }
+      if(script.error)wrap.append(el('pre','parser-script-error',script.error));
+      return wrap;
     }));
-    if(!scripts.length)list.append(el('div','field-note','No parser scripts.'));
+    if(!scripts.length)list.append(el('div','field-note','No scripts.'));
   }
   async function load(){
     note.textContent='';close();
-    try{render((await api('/api/scripts')).scripts);}catch(e){list.replaceChildren();note.textContent='Cannot load parser scripts: '+e.message;}
+    try{render((await api('/api/scripts')).scripts);}catch(e){list.replaceChildren();note.textContent='Cannot load scripts: '+e.message;}
   }
   async function setEnabled(script,enabled,box){
     box.disabled=true;
-    try{render((await api(path(script.name)+'/enabled',{method:'PUT',body:JSON.stringify({enabled})})).scripts);note.textContent=`${script.name} ${enabled?'enabled':'disabled'}. Applies to new tool output.`;}
+    try{render((await api(path(script.name)+'/enabled',{method:'PUT',body:JSON.stringify({enabled})})).scripts);note.textContent=`${script.name} ${enabled?'enabled':'disabled'}. Applies to future output and inbox deliveries.`;}
     catch(e){box.checked=!enabled;box.disabled=false;note.textContent='Not changed: '+e.message;}
   }
   async function remove(script,kind){
-    if(kind==='delete'&&!confirm(`Delete ${script.name}? Progress for its commands stops.`))return;
+    if(kind==='delete'&&!confirm(`Delete ${script.name}? Its registered hooks stop running.`))return;
     try{render((await api(path(script.name),{method:'DELETE'})).scripts);note.textContent=kind==='restore'?`${script.name} restored to the shipped version.`:`${script.name} deleted.`;if(editing===script.name)close();}
     catch(e){note.textContent=(kind==='restore'?'Not restored: ':'Not deleted: ')+e.message;}
   }
   function open(script){
     editing=script?.name??null;editor.hidden=false;error.hidden=true;error.textContent='';
+    q('[data-starter-label]').hidden=!!script;q('[data-starter]').value='progress';
     name.value=script?.name??'';name.readOnly=!!script;source.value=script?.source??TEMPLATE;
-    q('[data-editor-note]').textContent=script?.builtin?'Saving makes this your version; it stops following Agentworks updates until you restore it.':script?'':'Names use lowercase letters, digits, - or _ and end in .star. New parsers are enabled when saved.';
+    q('[data-editor-note]').textContent=script?.builtin?'Saving makes this your version; it stops following Agentworks updates until you restore it.':script?'':'Names use lowercase letters, digits, - or _ and end in .star. Register one or more handlers with agent.register_progress or agent.register_formatter. New scripts are enabled when saved.';
     (script?source:name).focus();
   }
   function close(){editing=null;editor.hidden=true;error.hidden=true;}
@@ -100,6 +121,7 @@ export function setupParserScripts({$,api,el}){
     catch(e){error.textContent=e.message;error.hidden=false;}
     finally{button.disabled=false;}
   }
+  q('[data-starter]').onchange=event=>{if(!editing)source.value=TEMPLATES[event.target.value];};
   q('[data-new]').onclick=()=>open(null);
   q('[data-cancel]').onclick=()=>{close();note.textContent='';};
   q('[data-save]').onclick=save;

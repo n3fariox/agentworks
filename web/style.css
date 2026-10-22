@@ -400,3 +400,5 @@ dialog.image-viewer{width:96vw;max-width:96vw;height:92dvh;max-height:92dvh;padd
 .attachment-remove:hover{color:var(--text)}
 .attachment-sent-image{max-width:180px;max-height:140px;object-fit:contain;border-radius:7px;border:1px solid #32343c;cursor:zoom-in}
 @media(max-width:650px){.composer-attach{width:36px;height:36px;font-size:16px}.attachment-chip{max-width:100%}}
+
+.parser-script-hooks{margin:0;padding:0 4px 8px;list-style:none;color:var(--muted);font-size:11px;line-height:1.7;overflow-wrap:anywhere}.parser-script-hooks code{font:10px ui-monospace,SFMono-Regular,monospace;color:#c9b9eb;white-space:pre-wrap}
