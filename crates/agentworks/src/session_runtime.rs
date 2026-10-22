@@ -268,10 +268,12 @@ pub async fn run(
     let question_s = s.clone();
     let replaying = Arc::new(AtomicBool::new(true));
     let notify_replaying = replaying.clone();
-    let initial_claude_mode = {
+    let initial_mode = {
         let data = s.data.lock().unwrap();
         if s.provider == "claude" && data.provider_session_id.is_none() {
-            data.initial_claude_permission_mode
+            data.initial_claude_permission_mode.map(|mode| mode.id())
+        } else if s.provider == "codex" && data.provider_session_id.is_none() {
+            data.initial_codex_permission_mode.map(|mode| mode.id())
         } else {
             None
         }
@@ -424,10 +426,10 @@ pub async fn run(
                 } else {
                     return Err(agent_client_protocol::Error::internal_error().data("Saved permission mode is no longer advertised; inspect session configuration"));
                 }
-            } else if let Some(mode)=initial_claude_mode {
-                mode_config=crate::permission_modes::apply_initial(mode_config,mode,|config_id,mode| async {
+            } else if let Some(mode)=initial_mode {
+                mode_config=crate::permission_modes::apply_initial(mode_config,if s.provider=="codex" {"Codex"} else {"Claude"},mode,|config_id,mode| async {
                     let request=SetSessionConfigOptionRequest::new(provider_id.clone(),config_id,SessionConfigOptionValue::value_id(mode));
-                    let selected=tokio::time::timeout(Duration::from_secs(30),connection.send_request(request).block_task()).await.map_err(|_|agent_client_protocol::Error::internal_error().data("Claude default permission mode selection timed out; no prompt was sent"))??;
+                    let selected=tokio::time::timeout(Duration::from_secs(30),connection.send_request(request).block_task()).await.map_err(|_|agent_client_protocol::Error::internal_error().data("Default permission mode selection timed out; no prompt was sent"))??;
                     Ok(serde_json::to_value(selected).unwrap_or(Value::Null))
                 }).await?;
             }

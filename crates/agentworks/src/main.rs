@@ -1266,7 +1266,7 @@ async fn get_settings(State(app): State<App>) -> Json<Value> {
     let roots = effective_roots(&app);
     let settings = app.catalog.lock().unwrap().data.settings.clone();
     Json(
-        json!({"roots":roots,"defaultModels":settings.default_models,"claudeDefaultPermissionMode":settings.claude_default_permission_mode.unwrap_or_default(),"defaultCommunicationRole":settings.default_communication_role.unwrap_or_default()}),
+        json!({"roots":roots,"defaultModels":settings.default_models,"claudeDefaultPermissionMode":settings.claude_default_permission_mode.unwrap_or_default(),"codexDefaultPermissionMode":settings.codex_default_permission_mode.unwrap_or_default(),"defaultCommunicationRole":settings.default_communication_role.unwrap_or_default()}),
     )
 }
 
@@ -1351,6 +1351,9 @@ async fn save_settings(State(app): State<App>, Json(mut settings): Json<Settings
         settings.claude_default_permission_mode = settings
             .claude_default_permission_mode
             .or(current.claude_default_permission_mode);
+        settings.codex_default_permission_mode = settings
+            .codex_default_permission_mode
+            .or(current.codex_default_permission_mode);
         settings.default_communication_role = settings
             .default_communication_role
             .or(current.default_communication_role);
@@ -2258,6 +2261,11 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
                 &req.provider,
                 req.external_id.is_some(),
                 catalog.data.settings.claude_default_permission_mode,
+            ),
+            initial_codex_permission_mode: permission_modes::initial_codex_default(
+                &req.provider,
+                req.external_id.is_some(),
+                catalog.data.settings.codex_default_permission_mode,
             ),
             available_commands: json!([]),
             turn_active: false,

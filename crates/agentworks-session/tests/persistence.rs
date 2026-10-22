@@ -15,6 +15,7 @@ fn old_database_payloads_load_without_enabling_new_execution_policies() {
     assert_eq!(state.provider_session_id.as_deref(), Some("native-saved"));
     assert!(state.requests.contains("old-request"));
     assert!(state.initial_claude_permission_mode.is_none());
+    assert!(state.initial_codex_permission_mode.is_none());
     assert!(!state.continuation.enabled);
     assert!(state.input_queue.items.is_empty());
     assert!(state.inbox_turn.is_none());
@@ -29,6 +30,8 @@ fn persisted_identities_and_uncertain_dispatch_survive_the_crate_boundary() {
     let mut saved = legacy();
     saved["inbox_turn"] = json!({"requestId":"inbox-r", "generation":3, "native":"native-saved"});
     saved["lifecycle"] = json!({"title":"Stored title", "archived":true, "suspended":true});
+    saved["initial_codex_permission_mode"] = json!("workspace-write");
+    saved["permission_modes"] = json!({"configId":"mode","currentValue":"read-only","options":[{"value":"read-only"},{"value":"agent-full-access"}]});
     saved["initial_claude_permission_mode"] = json!("acceptEdits");
     saved["automation"] = json!({"automationId":"a", "name":"Recipe", "runId":"run", "requestId":"automation-r", "outcome":"running", "initiatedBy":"human"});
     saved["control_origin"] = json!({"actor":"controller:c", "request":"control-r", "payload":{"exact":"binding"}, "actorTitle":"Controller"});
@@ -46,6 +49,8 @@ fn persisted_identities_and_uncertain_dispatch_survive_the_crate_boundary() {
         "inbox_turn",
         "lifecycle",
         "initial_claude_permission_mode",
+        "initial_codex_permission_mode",
+        "permission_modes",
         "automation",
         "control_origin",
         "worktree",

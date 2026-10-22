@@ -41,6 +41,8 @@ pub struct Settings {
     pub default_communication_role: Option<crate::communication::Role>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_default_permission_mode: Option<crate::permission_modes::ClaudeDefault>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_default_permission_mode: Option<crate::permission_modes::CodexDefault>,
     /// L-07 saved default; absent keeps the built-in default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeouts: Option<crate::timeouts::Policy>,
@@ -423,6 +425,44 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
     #[test]
+    fn codex_permission_default_is_compatible_and_persistent() {
+        use crate::permission_modes::CodexDefault;
+        let mut settings: Settings =
+            serde_json::from_value(serde_json::json!({"defaultModels":{"claude":"unchanged"}}))
+                .unwrap();
+        assert_eq!(
+            settings.codex_default_permission_mode.unwrap_or_default(),
+            CodexDefault::FullAccess
+        );
+        let path =
+            std::env::temp_dir().join(format!("agentworks-codex-setting-{}.json", Uuid::new_v4()));
+        let mut catalog = Catalog::open(path.clone()).unwrap();
+        for mode in [
+            CodexDefault::ReadOnly,
+            CodexDefault::WorkspaceWrite,
+            CodexDefault::Agent,
+            CodexDefault::FullAccess,
+        ] {
+            settings.codex_default_permission_mode = Some(mode);
+            catalog.settings(settings.clone()).unwrap();
+            let saved = Catalog::open(path.clone()).unwrap().data.settings;
+            assert_eq!(saved.codex_default_permission_mode, Some(mode));
+            assert_eq!(saved.default_models["claude"], "unchanged");
+            assert_eq!(
+                serde_json::to_value(saved).unwrap()["codexDefaultPermissionMode"],
+                mode.id()
+            );
+        }
+        // Raw sandbox policy names are not ACP mode IDs.
+        assert!(
+            serde_json::from_value::<Settings>(
+                serde_json::json!({"codexDefaultPermissionMode":"danger-full-access"})
+            )
+            .is_err()
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
     fn claude_permission_default_is_compatible_and_persistent() {
         use crate::permission_modes::ClaudeDefault;
         let legacy: CatalogData = serde_json::from_value(serde_json::json!({
@@ -487,6 +527,7 @@ mod tests {
                 default_models: HashMap::from([("codex".into(), "example-model".into())]),
                 timeouts: None,
                 claude_default_permission_mode: None,
+                codex_default_permission_mode: None,
                 default_communication_role: None,
                 notifications: Default::default(),
             })

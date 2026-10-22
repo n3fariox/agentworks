@@ -18,7 +18,7 @@ test.beforeAll(async()=>{
 });
 test.afterAll(async()=>{await new Promise(ok=>server.close(ok));});
 
-test('Claude default starts at Auto, saves beside its model, and survives reopening',async({page})=>{
+test('Claude and Codex defaults save beside their models and survive reopening',async({page})=>{
   let settings={roots:['/repo'],defaultModels:{claude:'claude-model',codex:'codex-model',opencode:'free-model'}};
   const writes=[],unexpected=[];
   await page.route('**/api/**',async route=>{
@@ -40,8 +40,14 @@ test('Claude default starts at Auto, saves beside its model, and survives reopen
   await page.locator('#nav-settings').click();await page.locator('#settings-tab-models').click();
   const mode=page.getByLabel('Claude default permission mode');
   await expect(mode).toHaveValue('auto');
+  const codexMode=page.getByLabel('Codex default sandbox / permission mode');
+  await expect(codexMode).toHaveValue('agent-full-access');
+  await expect(codexMode.locator('option')).toHaveText(['Full access','Read-only','Workspace access','Auto review']);
+  await expect(page.locator('#default-model-codex')).toHaveValue('codex-model');
+  await expect(page.locator('#default-model-fields')).toContainText('MCP/controller grants or host controls');
+  await codexMode.selectOption('workspace-write');
   await expect(page.locator('#default-model-claude')).toHaveValue('claude-model');
-  await expect(page.locator('#default-model-fields select')).toHaveCount(1);
+  await expect(page.locator('#default-model-fields select')).toHaveCount(2);
   await expect(page.locator('#default-model-fields')).toContainText('does not advertise your choice');
   await expect(mode.locator('option')).toHaveText(['Auto','Default','Accept edits','Plan']);
   await mode.selectOption('plan');
@@ -64,8 +70,9 @@ test('Claude default starts at Auto, saves beside its model, and survives reopen
   await page.locator('#save-settings').click();
   await expect(page.locator('#settings-dialog')).not.toBeVisible();
   expect(writes).toHaveLength(1);
-  expect(writes[0]).toEqual({roots:['/repo'],defaultModels:{claude:'claude-model',codex:'codex-model',opencode:'free-model'},claudeDefaultPermissionMode:'plan',defaultCommunicationRole:'participant'});
+  expect(writes[0]).toEqual({roots:['/repo'],defaultModels:{claude:'claude-model',codex:'codex-model',opencode:'free-model'},claudeDefaultPermissionMode:'plan',codexDefaultPermissionMode:'workspace-write',defaultCommunicationRole:'participant'});
   await page.reload();await page.locator('#nav-settings').click();await page.locator('#settings-tab-models').click();
   await expect(mode).toHaveValue('plan');
+  await expect(codexMode).toHaveValue('workspace-write');
   expect(unexpected).toEqual([]);
 });

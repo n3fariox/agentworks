@@ -8,7 +8,15 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-pub use agentworks_session::permissions::ClaudeDefault;
+pub use agentworks_session::permissions::{ClaudeDefault, CodexDefault};
+pub fn initial_codex_default(
+    provider: &str,
+    external: bool,
+    setting: Option<CodexDefault>,
+) -> Option<CodexDefault> {
+    (provider == "codex" && !external).then(|| setting.unwrap_or_default())
+}
+
 pub fn initial_claude_default(
     provider: &str,
     external: bool,
@@ -17,18 +25,18 @@ pub fn initial_claude_default(
     (provider == "claude" && !external).then(|| setting.unwrap_or_default())
 }
 
-/// Runs only for a new native Claude session. Await adapter confirmation before
+/// Runs only for a new native session. Await adapter confirmation before
 /// publishing readiness or allowing the queued initial prompt to start.
 pub async fn apply_initial<F, Fut>(
     mut config: Value,
-    mode: ClaudeDefault,
+    provider: &str,
+    mode: &str,
     select: F,
 ) -> Result<Value, agent_client_protocol::Error>
 where
     F: FnOnce(String, String) -> Fut,
     Fut: std::future::Future<Output = Result<Value, agent_client_protocol::Error>>,
 {
-    let mode = mode.id();
     if !config["options"]
         .as_array()
         .is_some_and(|items| items.iter().any(|o| o["value"] == mode))
@@ -37,7 +45,7 @@ where
             config = json!({});
         }
         config["defaultFallback"] = json!(format!(
-            "Claude default '{mode}' is not advertised by this adapter. Using the adapter's current permission mode; choose an available mode in Session options."
+            "{provider} default '{mode}' is not advertised by this adapter. Using the adapter's current permission mode; choose an available mode in Session options."
         ));
         return Ok(config);
     }
@@ -49,9 +57,9 @@ where
     let confirmed = parse(&selected)
         .filter(|value| value["currentValue"] == mode)
         .ok_or_else(|| {
-            agent_client_protocol::Error::internal_error().data(
-                "Harness did not confirm the Claude default permission mode; no prompt was sent",
-            )
+            agent_client_protocol::Error::internal_error().data(format!(
+                "Harness did not confirm the {provider} default permission mode; no prompt was sent"
+            ))
         })?;
     Ok(confirmed)
 }
@@ -129,6 +137,84 @@ mod tests {
         json!({"configOptions":[{"id":"mode","category":"mode","currentValue":current,"options":[{"value":"default"},{"value":"auto"},{"value":"plan"}]}]})
     }
 
+    fn codex_advertised(current: &str) -> Value {
+        json!({"configOptions":[{"id":"mode","category":"mode","currentValue":current,"options":[{"value":"read-only"},{"value":"workspace-write"},{"value":"agent"},{"value":"agent-full-access"}]}]})
+    }
+
+    #[test]
+    fn codex_default_is_captured_only_at_native_creation() {
+        assert_eq!(
+            initial_codex_default("codex", false, None),
+            Some(CodexDefault::FullAccess)
+        );
+        assert_eq!(
+            initial_codex_default("codex", false, Some(CodexDefault::ReadOnly)),
+            Some(CodexDefault::ReadOnly)
+        );
+        for provider in ["claude", "opencode", "demo"] {
+            assert_eq!(initial_codex_default(provider, false, None), None);
+        }
+        assert_eq!(initial_codex_default("codex", true, None), None);
+        let state: crate::SessionData = serde_json::from_value(json!({"status":"suspended","seq":0,"requests":[],"models":null,"available_commands":[],"turn_active":false,"project_id":null,"provider_session_id":"native-saved","permission_modes":{"currentValue":"read-only"}})).unwrap();
+        assert!(state.initial_codex_permission_mode.is_none());
+        assert_eq!(state.permission_modes["currentValue"], "read-only");
+    }
+
+    #[tokio::test]
+    async fn codex_defaults_use_acp_ids_and_require_confirmation() {
+        for mode in [
+            CodexDefault::FullAccess,
+            CodexDefault::ReadOnly,
+            CodexDefault::WorkspaceWrite,
+            CodexDefault::Agent,
+        ] {
+            let result = apply_initial(
+                parse(&codex_advertised("agent")).unwrap(),
+                "Codex",
+                mode.id(),
+                |id, requested| async move {
+                    assert_eq!(id, "mode");
+                    assert_eq!(requested, mode.id());
+                    Ok(codex_advertised(&requested))
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(result["currentValue"], mode.id());
+        }
+        assert!(
+            apply_initial(
+                parse(&codex_advertised("agent")).unwrap(),
+                "Codex",
+                CodexDefault::FullAccess.id(),
+                |_, _| async { Ok(codex_advertised("agent")) }
+            )
+            .await
+            .is_err()
+        );
+        for config in [parse(&advertised("default")).unwrap(), Value::Null] {
+            let fallback = apply_initial(
+                config.clone(),
+                "Codex",
+                CodexDefault::FullAccess.id(),
+                |_, _| async {
+                    panic!("must not request unadvertised full access");
+                    #[allow(unreachable_code)]
+                    Ok(Value::Null)
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(fallback["currentValue"], config["currentValue"]);
+            assert!(
+                fallback["defaultFallback"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Codex default 'agent-full-access' is not advertised")
+            );
+        }
+    }
+
     #[test]
     fn defaults_are_only_captured_for_new_claude_sessions() {
         assert_eq!(
@@ -162,7 +248,8 @@ mod tests {
         let initialization = tokio::spawn(async move {
             let config = apply_initial(
                 parse(&advertised("default")).unwrap(),
-                ClaudeDefault::Auto,
+                "Claude",
+                ClaudeDefault::Auto.id(),
                 |id, mode| async move {
                     request_tx.send((id, mode)).unwrap();
                     Ok(accept_rx.await.unwrap())
@@ -185,11 +272,16 @@ mod tests {
     #[tokio::test]
     async fn unsupported_default_keeps_adapter_mode_without_selection() {
         for config in [parse(&advertised("default")).unwrap(), Value::Null] {
-            let result = apply_initial(config.clone(), ClaudeDefault::AcceptEdits, |_, _| async {
-                panic!("unsupported mode must never be requested");
-                #[allow(unreachable_code)]
-                Ok(Value::Null)
-            })
+            let result = apply_initial(
+                config.clone(),
+                "Claude",
+                ClaudeDefault::AcceptEdits.id(),
+                |_, _| async {
+                    panic!("unsupported mode must never be requested");
+                    #[allow(unreachable_code)]
+                    Ok(Value::Null)
+                },
+            )
             .await
             .unwrap();
             assert_eq!(result["currentValue"], config["currentValue"]);
@@ -206,17 +298,23 @@ mod tests {
     async fn rejected_or_unconfirmed_mode_stops_initialization() {
         let config = parse(&advertised("default")).unwrap();
         assert!(
-            apply_initial(config.clone(), ClaudeDefault::Auto, |_, _| async {
-                Err(agent_client_protocol::Error::invalid_params())
-            })
+            apply_initial(
+                config.clone(),
+                "Claude",
+                ClaudeDefault::Auto.id(),
+                |_, _| async { Err(agent_client_protocol::Error::invalid_params()) }
+            )
             .await
             .is_err()
         );
         for response in [advertised("default"), json!({})] {
             assert!(
-                apply_initial(config.clone(), ClaudeDefault::Auto, |_, _| async {
-                    Ok(response)
-                })
+                apply_initial(
+                    config.clone(),
+                    "Claude",
+                    ClaudeDefault::Auto.id(),
+                    |_, _| async { Ok(response) }
+                )
                 .await
                 .is_err()
             );
