@@ -46,6 +46,7 @@
     "test:questions": "node tests/questions.test.mjs && playwright test tests/questions.spec.mjs",
     "test:host-enrollment": "node scripts/host-enrollment-smoke.mjs",
     "test:terminal": "playwright test tests/terminal.spec.mjs",
+    "test:transcript-history": "playwright test tests/transcript-history.spec.mjs",
     "test:starlark": "cargo test --locked -p agentworks-starlark",
     "test:progress": "node --test tests/bazel-progress.test.mjs && node scripts/progress-smoke.mjs",
     "test:attachments": "node tests/attachments-adapters.test.mjs && playwright test tests/attachments.spec.mjs"

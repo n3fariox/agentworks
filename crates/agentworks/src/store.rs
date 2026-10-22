@@ -355,6 +355,41 @@ impl Store {
         }
         Ok(sessions)
     }
+    /// Stored events with seq strictly below `before`, oldest first: the newest `limit`
+    /// such events, cut at `max_bytes` (at least one event is always returned). The flag
+    /// reports whether any stored event remains below the returned page.
+    pub fn older_events(
+        &self,
+        id: &str,
+        before: u64,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<(Vec<Value>, bool)> {
+        let before = i64::try_from(before)?;
+        let mut query = self.connection.prepare(
+            "SELECT seq,payload FROM events WHERE session_id=?1 AND seq<?2 ORDER BY seq DESC LIMIT ?3",
+        )?;
+        let rows = query.query_map(params![id, before, i64::try_from(limit)?], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let (mut page, mut bytes, mut earliest) = (Vec::new(), 0, before);
+        for row in rows {
+            let (seq, payload) = row?;
+            if !page.is_empty() && bytes + payload.len() > max_bytes {
+                break;
+            }
+            bytes += payload.len();
+            earliest = seq;
+            page.push(serde_json::from_str::<Value>(&payload)?);
+        }
+        page.reverse();
+        let more = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE session_id=?1 AND seq<?2)",
+            params![id, earliest],
+            |r| r.get::<_, bool>(0),
+        )?;
+        Ok((page, more))
+    }
     /// One-time import from the pre-persistence HTTP snapshot. Never overwrite an existing row.
     pub fn import_legacy(&mut self, path: &Path) -> Result<()> {
         if !path.exists() {
@@ -769,6 +804,49 @@ mod tests {
             state.seq = 2;
             store.event("test", &state, &json!({"seq":2})).unwrap();
             assert!(store.load().unwrap().is_empty());
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(path.with_extension("sqlite3.lock")).unwrap();
+    }
+    #[test]
+    fn older_events_page_backwards_without_gaps_or_overlap() {
+        let path =
+            std::env::temp_dir().join(format!("agentworks-older-{}.sqlite3", uuid::Uuid::new_v4()));
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .connection
+                .execute_batch("INSERT INTO sessions VALUES ('a','{}','{}'),('b','{}','{}');")
+                .unwrap();
+            for seq in 1..=10 {
+                for id in ["a", "b"] {
+                    store.connection.execute("INSERT INTO events VALUES (?1,?2,?3)",
+                        params![id, seq, json!({"seq":seq,"kind":"user","data":{"text":format!("{id}{seq}")}}).to_string()]).unwrap();
+                }
+            }
+            let seqs = |page: &[Value]| {
+                page.iter()
+                    .map(|e| e["seq"].as_u64().unwrap())
+                    .collect::<Vec<_>>()
+            };
+            let (page, more) = store.older_events("a", 8, 3, usize::MAX).unwrap();
+            assert_eq!((seqs(&page), more), (vec![5, 6, 7], true));
+            assert_eq!(page[0]["data"]["text"], "a5");
+            let (page, more) = store.older_events("a", 5, 3, usize::MAX).unwrap();
+            assert_eq!((seqs(&page), more), (vec![2, 3, 4], true));
+            let (page, more) = store.older_events("a", 2, 3, usize::MAX).unwrap();
+            assert_eq!((seqs(&page), more), (vec![1], false));
+            let (page, more) = store.older_events("a", 1, 3, usize::MAX).unwrap();
+            assert_eq!((seqs(&page), more), (vec![], false));
+            // The byte budget shortens a page but never starves it.
+            let (page, more) = store.older_events("a", 8, 3, 1).unwrap();
+            assert_eq!((seqs(&page), more), (vec![7], true));
+            // Reading history never removes it.
+            let count: i64 = store
+                .connection
+                .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 20);
         }
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_file(path.with_extension("sqlite3.lock")).unwrap();
