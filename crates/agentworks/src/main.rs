@@ -25,6 +25,7 @@ mod session_runtime;
 mod store;
 mod terminal;
 mod tool_progress;
+mod transcript_history;
 mod workspace;
 mod worktree_cleanup;
 mod worktrees;
@@ -1077,6 +1078,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/{id}/terminal", post(terminal::open))
         .route("/api/sessions/{id}/terminal/events", get(terminal::events))
         .route("/api/sessions/{id}/events", get(events))
+        .route("/api/sessions/{id}/history", get(transcript_history::older))
         .route("/api/sessions/{id}/file", get(file))
         .route("/api/sessions/{id}/workspace", get(git_context::workspace))
         .route("/api/sessions/{id}/worktree", get(worktree_cleanup::status))

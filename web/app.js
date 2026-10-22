@@ -62,6 +62,12 @@ const inputQueue=setupInputQueue({$,api,uuid:()=>uuid(),getActive:()=>active,get
 let permissionModes=null;
 const mentions=setupMentions({prompt:$('prompt'),list:$('mention-list'),getActive:()=>active,getSessions:()=>sessions});
 let replaying=false,workLogs=null,turnEnds=new Map();
+// Older transcript pages. `storedEvents` holds the stored events behind the current transcript
+// (older pages + snapshot window + live events, unique and ascending by seq) so prepending a
+// page re-folds everything: a message or tool stream may straddle a page boundary.
+// `older.mode`: 'none' (snapshot is complete), 'more' (server reported truncation) or
+// 'begin' (the server confirmed there is nothing earlier).
+let storedEvents=[],older={mode:'none',loading:false,error:''},rebuilding=false,itemKey=null,itemCount=0;
 let modelConfig=null, availableCommands=[], commandsOpen=false;
 let discoveryGeneration=0;
 let externalSessions=[], externalSelection=null, externalCursor=null, externalGeneration=0, externalLoading=false, externalImporting=false;
@@ -500,7 +506,7 @@ function selectSession(s) {
   if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));scrollPositions.set(active.id,$('messages').scrollTop);}
   $('prompt').value=drafts[s.id]||'';restoreScroll=scrollPositions.get(s.id)??null;
   clearTimeout(retryTimer);generation++;socket?.close();socket=null;connected=false;
-  active=s;currentUserSeq=null;promptRecovery.render();status=s.status;modelConfig=null;permissionModes=null;availableCommands=[];commandsOpen=false;renderCommands();mentions.close();composerMenu.close();sessionMenu.close();resetTranscript();usageStatus.reset();inputQueue.reset();
+  active=s;storedEvents=[];older={mode:'none',loading:false,error:''};currentUserSeq=null;promptRecovery.render();status=s.status;modelConfig=null;permissionModes=null;availableCommands=[];commandsOpen=false;renderCommands();mentions.close();composerMenu.close();sessionMenu.close();resetTranscript();usageStatus.reset();inputQueue.reset();
   localStorage.setItem('agentworks-session',s.id);$('welcome').hidden=true;$('conversation').hidden=false;
   setTitle(s.title);$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;
   $('session-notice').hidden=true;document.body.classList.remove('menu-open');sidebarPin.close();sidebar();updateControls();connect(generation);
@@ -519,15 +525,21 @@ function connect(gen){
     if(e.kind==='tool_progress'){if(applyToolProgress(tools.get(e.data.toolCallId),e.data,e.seq))scheduleDraw();return;}
     if(e.kind==='snapshot'){
       resetTranscript();usageStatus.reset();currentUserSeq=e.session.lastUserSeq??null;status=e.session.status;Object.assign(active,e.session);
-      replaying=true;try{const latestUser=e.events.findLast(item=>item.kind==='user');for(const item of e.events)if(item.kind!=='session_updated'&&(item.kind!=='stop_requested'||item.data.userSeq===(e.session.lastUserSeq??latestUser?.seq)||(!e.session.lastUserSeq&&!latestUser)))consume(item);}finally{replaying=false;}
+      // Keep already-loaded older pages when they join the new window without a gap.
+      const first=e.events[0]?.seq,last=storedEvents.at(-1)?.seq;
+      const kept=Number.isSafeInteger(first)&&Number.isSafeInteger(last)&&last>=first-1?storedEvents.filter(item=>item.seq<first):[];
+      storedEvents=[...kept,...e.events];if(!kept.length)older={mode:e.truncated?'more':'none',loading:false,error:''};
+      replay(e.session.lastUserSeq);
       currentUserSeq=e.session.lastUserSeq??currentUserSeq;
       for(const [id,view] of Object.entries(e.toolProgress||{}))applyToolProgress(tools.get(id),view,view.seq);
       Object.assign(active,e.session);setTitle(active.title);
       active.continuation=e.session.continuation;
       approvals=new Map(e.approvals.map(a=>[a.id,a]));status=e.session.status;modelConfig=e.models;syncModelLabel();permissionModes=e.permissionModes;attachments.setPolicy(e.attachments);if(status==='suspended'&&!e.session.explicitlySuspended)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();inputQueue.set(e.session.inputQueue);inputQueue.observe(status,{live:false});
       if(e.storageError){$('session-notice').textContent=e.storageError;$('session-notice').hidden=false;}
-      if(e.truncated){$('session-notice').textContent='Showing recent output. The full transcript is saved on this host.';$('session-notice').hidden=false;}
-    }else consume(e,true);
+    }else{
+      if(Number.isSafeInteger(e.seq)&&e.kind!=='storage_error'&&!(e.seq<=storedEvents.at(-1)?.seq))storedEvents.push(e);
+      consume(e,true);
+    }
     scheduleDraw();updateControls();renderContinuation();usageStatus.render();
   };
   ws.onclose=()=>{
@@ -546,7 +558,52 @@ function connect(gen){
     retryTimer=setTimeout(retry,reconnectDelay);reconnectDelay=Math.min(5000,reconnectDelay*2);
   };
 }
-function addMessage(role,text){const message={id:uuid(),type:'message',role,text};transcript.push(message);return message;}
+// Items get ids derived from their source event so a re-fold maps them onto the same DOM nodes.
+function itemId(){return itemKey?`${itemKey}:${itemCount++}`:uuid();}
+function addMessage(role,text){const message={id:itemId(),type:'message',role,text};transcript.push(message);return message;}
+function replay(lastUserSeq){
+  replaying=true;try{const latestUser=storedEvents.findLast(item=>item.kind==='user');for(const item of storedEvents)if(item.kind!=='session_updated'&&(item.kind!=='stop_requested'||item.data.userSeq===(lastUserSeq??latestUser?.seq)||(!lastUserSeq&&!latestUser)))consume(item);}finally{replaying=false;}
+}
+async function loadOlder(){
+  const state=older,sid=active?.id,before=storedEvents[0]?.seq;
+  if(!sid||state.loading||state.mode!=='more'||!Number.isSafeInteger(before))return;
+  state.loading=true;state.error='';renderHistoryControl();
+  try{
+    const page=await api(`/api/sessions/${encodeURIComponent(sid)}/history?before=${before}`);
+    // A snapshot that replaced the history or a session switch makes this page stale.
+    if(state!==older||storedEvents[0]?.seq!==before)return;
+    const events=page.events.filter(item=>Number.isSafeInteger(item.seq)&&item.seq<before);
+    storedEvents=[...events,...storedEvents];state.mode=page.hasMore&&events.length?'more':'begin';
+    rebuildTranscript();
+  }catch(error){state.error=error.message||'Request failed';}
+  finally{state.loading=false;if(state===older)renderHistoryControl();}
+}
+function rebuildTranscript(){
+  const area=$('messages'),top=area.getBoundingClientRect().top,fromBottom=area.scrollHeight-area.scrollTop;
+  // The first visible item anchors the reader's place; its node is reused below.
+  let anchor=null;
+  for(const item of transcript){const rect=nodes.get(item.id)?.getBoundingClientRect();if(rect?.height&&rect.bottom>top){anchor={id:item.id,offset:rect.top-top};break;}}
+  const keep={status,approvals,currentUserSeq,modelConfig,permissionModes,availableCommands},oldTools=tools,oldNodes=new Map(nodes);
+  resetTranscript();rebuilding=true;
+  try{replay(currentUserSeq);}finally{rebuilding=false;({status,approvals,currentUserSeq,modelConfig,permissionModes,availableCommands}=keep);}
+  for(const tool of tools.values()){
+    // Browser-observed timing and derived progress are not in stored events.
+    const was=oldTools.get(tool.id);if(!was)continue;
+    for(const key of ['observedStart','observedEnd','progressSeq','serverProgress'])if(was[key]!==undefined)tool[key]=was[key];
+    if(tool.activityOutput&&was.activityOutput)for(const key of ['turnEndedAt','exitObservedAt'])if(was.activityOutput[key]!==undefined)tool.activityOutput[key]=was.activityOutput[key];
+  }
+  for(const item of transcript){const node=oldNodes.get(item.id);if(node)nodes.set(item.id,node);}
+  draw();
+  const node=anchor&&nodes.get(anchor.id);
+  const target=node?.isConnected&&node.getBoundingClientRect().height?area.scrollTop+node.getBoundingClientRect().top-top-anchor.offset:area.scrollHeight-fromBottom;
+  area.scrollTo({top:target,behavior:'instant'});
+}
+const historyControl=el('div','history-boundary');historyControl.setAttribute('aria-live','polite');
+function renderHistoryControl(){
+  if(older.mode==='begin'){historyControl.replaceChildren(el('span','history-start','Beginning of conversation'));return;}
+  const button=el('button','history-more',older.loading?'Loading earlier messages…':'Load earlier messages');button.type='button';button.disabled=older.loading;button.onclick=loadOlder;
+  historyControl.replaceChildren(button);if(older.error)historyControl.append(el('span','history-error','Could not load earlier messages: '+older.error));
+}
 // U-05 tool activity. Parser scripts run on the server (E-01) and publish an
 // unsequenced derived view; the browser keeps exact raw output and observed timing.
 // Keep this inline: adding a browser asset would require a coordinator-owned route change.
@@ -645,15 +702,19 @@ function renderToolActivity(node,tool,sessionBusy){
 // End U-05 tool activity.
 
 function consume(e,live=false){
-  const d=e.data;
+  const d=e.data;itemKey=Number.isSafeInteger(e.seq)?`${active.id}:${e.seq}`:null;itemCount=0;
   if(e.kind==='user')currentUserSeq=e.seq;
-  promptRecovery.consume(active.id,e);
-  if(e.kind==='stop_requested'&&pendingSends[active.id]?.requestId===d.requestId){delete pendingSends[active.id];sessionStorage.setItem('agentworks-pending-sends',JSON.stringify(pendingSends));}
+  // A re-fold only rebuilds the transcript; session state, drafts and usage are already current.
+  if(!rebuilding){
+    promptRecovery.consume(active.id,e);
+    if(e.kind==='stop_requested'&&pendingSends[active.id]?.requestId===d.requestId){delete pendingSends[active.id];sessionStorage.setItem('agentworks-pending-sends',JSON.stringify(pendingSends));}
+  }
   if(e.kind==='user'||e.kind==='turn_end')for(const tool of tools.values())if(tool.activityOutput&&!tool.activityOutput.turnEnded){tool.activityOutput.turnEnded=true;if(live&&!replaying)tool.activityOutput.turnEndedAt=Date.now();}
-  usageStatus.consume(e,{live});
-  if(d?.continuationState&&active)active.continuation=d.continuationState;
-  {const t=timeoutControls?.notice(e.kind,d);if(t){transcript.push({id:uuid(),type:'notice',text:t});assistant=null;}}
-  if(e.kind==='session_updated'){
+  if(!rebuilding)usageStatus.consume(e,{live});
+  if(d?.continuationState&&active&&!rebuilding)active.continuation=d.continuationState;
+  {const t=timeoutControls?.notice(e.kind,d);if(t){transcript.push({id:itemId(),type:'notice',text:t});assistant=null;}}
+  if(rebuilding&&['session_updated','continuation','models','permission_modes','attachment_policy','commands','status','storage_error'].includes(e.kind)){}
+  else if(e.kind==='session_updated'){
     Object.assign(active,d);sessionTerminal?.sessionUpdated();setTitle(active.title);const row=sessions.find(s=>s.id===active.id);if(row)Object.assign(row,d);sidebar();
   }
   else if(e.kind==='continuation'){renderContinuation();}
@@ -661,7 +722,7 @@ function consume(e,live=false){
   else if(e.kind==='permission_modes'){permissionModes=d;}
   else if(e.kind==='attachment_policy'){attachments.setPolicy(d);}
   else if(e.kind==='commands'){availableCommands=Array.isArray(d)?d:[];renderCommands();}
-  else if(e.kind==='user'){assistant=null;if(d.inboxDelivery)transcript.push({id:uuid(),type:'notice',text:'Automatic inbox turn authorized by you; peer messages are untrusted context.'});else if(d.initiatedBy)transcript.push({id:uuid(),type:'notice',text:d.initiatedBy.startsWith('controller:')?'Turn started by external controller '+(d.initiatorTitle||d.initiatedBy):'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});const message=addMessage('user',d.text);message.seq=e.seq;message.inboxDelivery=!!d.inboxDelivery;if(d.attachments?.length)message.attachments=d.attachments;}
+  else if(e.kind==='user'){assistant=null;if(d.inboxDelivery)transcript.push({id:itemId(),type:'notice',text:'Automatic inbox turn authorized by you; peer messages are untrusted context.'});else if(d.initiatedBy)transcript.push({id:itemId(),type:'notice',text:d.initiatedBy.startsWith('controller:')?'Turn started by external controller '+(d.initiatorTitle||d.initiatedBy):'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});const message=addMessage('user',d.text);message.seq=e.seq;message.inboxDelivery=!!d.inboxDelivery;if(d.attachments?.length)message.attachments=d.attachments;}
   else if(e.kind==='status'){
     status=d.status;if(!replaying)inputQueue.observe(status,{live});if(active){active.status=status;if(d.explicitlySuspended!==undefined)active.explicitlySuspended=d.explicitlySuspended;const s=sessions.find(s=>s.id===active.id);if(s)s.status=status;}sidebar();
   }else if(e.kind==='approval'){approvals.set(d.id,d);}
@@ -671,21 +732,21 @@ function consume(e,live=false){
       // L-02: record the outcome in the transcript; drafts end with the question.
       questions.forget(d.id);assistant=null;
       const asked=(pending.request?.message||'Question').slice(0,120);
-      transcript.push({id:uuid(),type:'notice',text:`${asked} — ${d.action==='accept'?'answer sent':d.action==='decline'?'skipped':d.action==='cancel'?'cancelled by you':d.withdrawn?'withdrawn by the agent':'cancelled because the turn ended'}.`});
+      transcript.push({id:itemId(),type:'notice',text:`${asked} — ${d.action==='accept'?'answer sent':d.action==='decline'?'skipped':d.action==='cancel'?'cancelled by you':d.withdrawn?'withdrawn by the agent':'cancelled because the turn ended'}.`});
     }
   }
-  else if(e.kind==='interrupted'){transcript.push({id:uuid(),type:'notice',text:d.message,interrupted:true});assistant=null;}
+  else if(e.kind==='interrupted'){transcript.push({id:itemId(),type:'notice',text:d.message,interrupted:true});assistant=null;}
   else if(e.kind==='storage_error'){status='error';$('session-notice').textContent=d.message;$('session-notice').hidden=false;}
-  else if(e.kind==='error'){transcript.push({id:uuid(),type:'error',text:d.message});assistant=null;}
+  else if(e.kind==='error'){transcript.push({id:itemId(),type:'error',text:d.message});assistant=null;}
   else if(e.kind==='turn_end'){assistant=null;turnEnds.set(transcript.at(-1)?.id,{seq:e.seq,stopReason:d?.timedOut?`timeout_${d.timedOut}`:d?.stopReason});}
   else if(e.kind==='fork'){
     // L-08: the carried transcript belongs to another session; say so plainly.
-    transcript.push({id:uuid(),type:'notice',
+    transcript.push({id:itemId(),type:'notice',
       text:`Forked from “${d.parentTitle}” after ${d.boundaryTurn===1?'its first finished turn':`turn ${d.boundaryTurn}`}${d.parentProvider?` (${labels[d.parentProvider]||d.parentProvider})`:''}. The conversation below is recorded history. Context handoff uses the chosen native or fresh-session method.`});
     assistant=null;
   }
-  else if(e.kind==='fork_mode'){assistant=null;transcript.push({id:uuid(),type:'notice',text:d.mode==='native'?'Provider native fork created at the recorded boundary.':`${d.detail}${d.truncated?' Available source history is truncated.':''}`});}
-  else if(e.kind==='carried_context'){assistant=null;transcript.push({id:uuid(),type:'notice',text:'Context handoff dispatched with this message; interrupted delivery requires inspection.'});}
+  else if(e.kind==='fork_mode'){assistant=null;transcript.push({id:itemId(),type:'notice',text:d.mode==='native'?'Provider native fork created at the recorded boundary.':`${d.detail}${d.truncated?' Available source history is truncated.':''}`});}
+  else if(e.kind==='carried_context'){assistant=null;transcript.push({id:itemId(),type:'notice',text:'Context handoff dispatched with this message; interrupted delivery requires inspection.'});}
   else if(e.kind==='acp'){
     switch(d.sessionUpdate){
       case 'user_message_chunk':{
@@ -699,7 +760,7 @@ function consume(e,live=false){
         if(d.content?.type==='text'){
           if(!assistant||(d.messageId&&assistant.providerMessageId&&d.messageId!==assistant.providerMessageId))assistant=addMessage('assistant','');assistant.providerMessageId=d.messageId;assistant.referenceCwd=d.forkSourceCwd;assistant.text+=d.content.text;
         }else if(d.content?.type==='image'){
-          transcript.push({id:uuid(),type:'image',content:d.content});assistant=null;
+          transcript.push({id:itemId(),type:'image',content:d.content});assistant=null;
         }else if(d.content?.type==='resource_link'){
           assistant=null;addMessage('assistant',`[${d.content.name||'Open file'}](${d.content.uri})`).referenceCwd=d.forkSourceCwd;
         }break;
@@ -713,7 +774,7 @@ function consume(e,live=false){
       }
       case 'plan':{
         const text=(d.entries||[]).map(p=>`- ${p.status==='completed'?'✓':'○'} ${p.content}`).join('\n');
-        transcript.push({id:uuid(),type:'plan',text});break;
+        transcript.push({id:itemId(),type:'plan',text});break;
       }
       default:break;
     }
@@ -789,6 +850,7 @@ function draw(){
   if(!active)return;
   const area=$('messages');const atBottom=area.scrollHeight-area.scrollTop-area.clientHeight<100;
   const empty=area.querySelector('.session-empty');if(transcript.length)empty?.remove();
+  if(older.mode==='none')historyControl.remove();else if(area.firstChild!==historyControl){renderHistoryControl();area.prepend(historyControl);}
   if(!transcript.length&&!empty){
     const wrap=el('div','session-empty');wrap.append(el('div','empty-symbol',icons[active.provider]),el('h3','',status==='starting'?'Preparing your workspace':'Ready when you are'),el('p','',active.provider==='demo'?'Try “hello”, “approval”, or “slow”. This demo uses no API credits.':'Send a message to start working in this project.'));area.append(wrap);
   }
@@ -805,7 +867,7 @@ function draw(){
         if(/^image\/(png|jpeg|gif|webp)$/.test(item.content.mimeType)&&item.content.data.length<14*1024*1024){image.src=`data:${item.content.mimeType};base64,${item.content.data}`;image.alt='Image from agent';imageViewer.decorate(image);node.append(image);}else node.textContent='Unsupported image format';
       }else node=el('div',item.type==='error'?'error-card':'notice-card',item.text);
       nodes.set(item.id,node);area.append(node);
-    }
+    }else if(!node.isConnected)area.append(node);
     if(item.type==='message'){
       const body=node.querySelector('.message-body');
       if(item.role==='user'&&!item.inboxDelivery){body.textContent=item.text;if(item.attachments&&!node.querySelector('.message-attachments')){const sent=el('div','message-attachments');attachments.renderSent(sent,active.id,item.attachments);for(const img of sent.querySelectorAll('img'))imageViewer.decorate(img);body.after(sent);}}else updateMarkdown(item,body);
