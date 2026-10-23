@@ -67,6 +67,14 @@ pub(super) fn registration_helpers(builder: &mut GlobalsBuilder) {
     ) -> anyhow::Result<NoneType> {
         register(eval, function, "formatter", text_pattern, "", message_type)
     }
+
+    fn register_tool_header<'v>(
+        #[starlark(require = pos)] function: Value<'v>,
+        #[starlark(require = named, default = ".*")] title_pattern: &str,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        register(eval, function, "tool_header", title_pattern, "", "")
+    }
 }
 
 impl Engine {
@@ -121,13 +129,13 @@ impl Engine {
         let started = Instant::now();
         let ast = AstModule::parse(name, source.to_owned(), &dialect())
             .map_err(|e| fail(DiagnosticKind::Syntax, e.to_string()))?;
-        let preludes = [&self.parser_prelude, &self.message_prelude];
+        let preludes = [&self.parser_prelude, &self.message_prelude, &self.tool_prelude];
         for load in ast.loads() {
             if !preludes.iter().any(|p| load.module_id == p.id) {
                 return Err(fail(
                     DiagnosticKind::Capability,
                     format!(
-                        "hook scripts may only load progress.star and message.star, not {:?}",
+                        "hook scripts may only load progress.star, message.star and tool.star, not {:?}",
                         load.module_id
                     ),
                 ));
@@ -175,7 +183,7 @@ impl Engine {
         let registry = module.owned_extra_value().expect("host registry initialized");
         let entries = ListRef::from_value(registry.value()).expect("host registry is a list");
         if entries.is_empty() {
-            return Err(fail(DiagnosticKind::Install, "no hooks registered; call agent.register_progress(...) or agent.register_formatter(...) at module scope".into()));
+            return Err(fail(DiagnosticKind::Install, "no hooks registered; call agent.register_progress(...), agent.register_formatter(...) or agent.register_tool_header(...) at module scope".into()));
         }
         let mut handlers = Vec::new();
         let mut hooks = Vec::new();
@@ -187,10 +195,10 @@ impl Engine {
                 row[3].unpack_str().unwrap(),
                 row[4].unpack_str().unwrap(),
             );
-            let capability = if kind == "progress" {
-                Capability::Parser
-            } else {
-                Capability::MessageFormatter
+            let capability = match kind {
+                "progress" => Capability::Parser,
+                "tool_header" => Capability::ToolHeader,
+                _ => Capability::MessageFormatter,
             };
             let signature = Ty::of_value(row[1]).to_string();
             if signature != capability.signature() {
@@ -244,12 +252,17 @@ impl Engine {
                     name.to_owned()
                 },
                 command_pattern: (kind == "progress").then(|| regex.clone()),
-                text_pattern: (kind == "formatter").then(|| regex.clone()),
+                // Formatters route on message text, tool headers on the tool title.
+                text_pattern: (kind != "progress").then(|| regex.clone()),
                 message_type: (kind == "formatter").then(|| message_type.to_owned()),
                 compile_time: started.elapsed(),
             }));
             hooks.push(HookInfo {
-                hook: if kind == "progress" { "progress" } else { "formatter" },
+                hook: match kind {
+                    "progress" => "progress",
+                    "tool_header" => "tool_header",
+                    _ => "formatter",
+                },
                 pattern: pattern.to_owned(),
                 message_type: (kind == "formatter").then(|| message_type.to_owned()),
                 display_name: (kind == "progress").then(|| label.to_owned()),

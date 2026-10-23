@@ -132,5 +132,8 @@ export function createSubagents({append,uuid,applyToolUpdate,renderToolActivity,
     for(const button of tabs?.querySelectorAll('.subagent-tab')||[])button.remove();
     if(panel){panel.replaceChildren();delete panel.dataset.subagentSession;}
   }
-  return {consume,sync,select,reset,viewingChild:()=>selected!==null,name:id=>children.get(id)?.title};
+  function setHeaders(headers){
+    for(const [session,child] of children)for(const [id,tool] of child.tools)tool.header=headers[session+'\u001f'+id]??null;
+  }
+  return {consume,sync,select,reset,setHeaders,viewingChild:()=>selected!==null,name:id=>children.get(id)?.title,tool:(session,toolCallId)=>children.get(session)?.tools.get(toolCallId)};
 }

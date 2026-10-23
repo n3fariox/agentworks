@@ -75,6 +75,8 @@ let discoveryGeneration=0;
 let externalSessions=[], externalSelection=null, externalCursor=null, externalGeneration=0, externalLoading=false, externalImporting=false;
 let externalFetch=Promise.resolve();
 let drawTimer=null, retryTimer=null, reconnectDelay=500, creating=false;
+// Last sequenced event applied to this transcript; a reconnect resumes after it.
+let eventSeq=null;
 const nodes=new Map();
 let pendingCreate=readStorage(sessionStorage,'agentworks-pending-create',null);
 // L-08: set only while the new-session dialog is pre-filled from an existing session.
@@ -503,7 +505,7 @@ function openProjectDialog(project=null){
   $('archive-project').textContent=project?.archived?'Unarchive project':'Archive project';
   policyEditor.open(editingProject);$('project-dialog').showModal();$('project-name').focus();
 }
-function resetTranscript(){subagents.reset();transcript=[];tools=new Map();approvals=new Map();assistant=null;nodes.clear();turnEnds=new Map();workLogs?.reset();$('messages').replaceChildren();$('approval-area').replaceChildren();}
+function resetTranscript(){eventSeq=null;subagents.reset();transcript=[];tools=new Map();approvals=new Map();assistant=null;nodes.clear();turnEnds=new Map();workLogs?.reset();$('messages').replaceChildren();$('approval-area').replaceChildren();}
 // The desktop header and the phone session bar both show the session title.
 function setTitle(title){$('header-title').textContent=title;$('session-heading-title').textContent=title;}
 // Phone navigation: the session browser and a chat are separate history
@@ -536,21 +538,40 @@ function selectSession(s) {
 function connect(gen){
   if(gen!==generation||!active)return;
   $('connection').textContent='Connecting';
-  const ws=new WebSocket(socketUrl(`/api/sessions/${active.id}/events`));socket=ws;
+  const ws=new WebSocket(socketUrl(`/api/sessions/${active.id}/events${eventSeq!==null?'?after='+eventSeq:''}`));socket=ws;
   ws.onopen=()=>{if(gen!==generation)return;connected=true;reconnectDelay=500;$('connection').textContent='Connected';updateControls();};
   ws.onmessage=event=>{
     if(gen!==generation)return;
     const e=JSON.parse(event.data);
     if(e.kind==='input_queue'){inputQueue.set(e.data);updateControls();return;}
     if(e.kind==='tool_progress'){if(applyToolProgress(tools.get(e.data.toolCallId),e.data,e.seq))scheduleDraw();return;}
+    if(e.kind==='tool_header'){
+      const d=e.data,tool=typeof d.parentSessionId==='string'?subagents.tool(d.acpSessionId,d.toolCallId):tools.get(d.toolCallId);
+      if(tool){tool.header=d.header;scheduleDraw();}return;
+    }
+    if(Number.isSafeInteger(e.seq)&&e.kind!=='snapshot')eventSeq=Math.max(eventSeq??0,e.seq);
     if(e.kind==='snapshot'){
-      resetTranscript();usageStatus.reset();currentUserSeq=e.session.lastUserSeq??null;status=e.session.status;Object.assign(active,e.session);
-      // Keep already-loaded older pages when they join the new window without a gap.
-      const first=e.events[0]?.seq,last=storedEvents.at(-1)?.seq;
-      const kept=Number.isSafeInteger(first)&&Number.isSafeInteger(last)&&last>=first-1?storedEvents.filter(item=>item.seq<first):[];
-      storedEvents=[...kept,...e.events];if(!kept.length)older={mode:e.truncated?'more':'none',loading:false,error:''};
-      replay(e.session.lastUserSeq);
+      // A full snapshot replaces the transcript; a resumed one adds only newer events.
+      if(e.resumed===null||e.resumed===undefined){
+        resetTranscript();usageStatus.reset();
+        currentUserSeq=e.session.lastUserSeq??null;status=e.session.status;Object.assign(active,e.session);
+        // Keep loaded earlier pages when they meet the current retained window without a gap.
+        const first=e.events[0]?.seq,last=storedEvents.at(-1)?.seq;
+        const kept=Number.isSafeInteger(first)&&Number.isSafeInteger(last)&&last>=first-1?storedEvents.filter(item=>item.seq<first):[];
+        storedEvents=[...kept,...e.events];if(!kept.length)older={mode:e.truncated?'more':'none',loading:false,error:''};
+        replay(e.session.lastUserSeq);
+      }else{
+        eventSeq=e.seq;currentUserSeq=e.session.lastUserSeq??null;status=e.session.status;Object.assign(active,e.session);
+        const last=storedEvents.at(-1)?.seq??0;
+        storedEvents.push(...e.events.filter(item=>Number.isSafeInteger(item.seq)&&item.seq>last));
+        replaying=true;try{const latestUser=e.events.findLast(item=>item.kind==='user');for(const item of e.events)if(item.kind!=='session_updated'&&(item.kind!=='stop_requested'||item.data.userSeq===(e.session.lastUserSeq??latestUser?.seq)||(!e.session.lastUserSeq&&!latestUser)))consume(item);}finally{replaying=false;}
+      }
+      if(Number.isSafeInteger(e.seq))eventSeq=e.seq;
       currentUserSeq=e.session.lastUserSeq??currentUserSeq;
+      if(e.toolHeaders){
+        for(const [id,tool] of tools)tool.header=e.toolHeaders[id]??null;
+        subagents.setHeaders(e.toolHeaders);
+      }
       for(const [id,view] of Object.entries(e.toolProgress||{}))applyToolProgress(tools.get(id),view,view.seq);
       Object.assign(active,e.session);setTitle(active.title);
       active.continuation=e.session.continuation;
@@ -568,7 +589,7 @@ function connect(gen){
     connected=false;$('connection').textContent='Reconnecting';updateControls();
     const retry=async()=>{
       if(gen!==generation||!active)return;
-      try{await api(`/api/sessions/${active.id}`);connect(gen);}catch(error){
+      try{await api(`/api/sessions/${active.id}?view=meta`);connect(gen);}catch(error){
         if(gen!==generation)return;
         if(error.status===404){
           $('session-notice').textContent='This session was deleted.';$('session-notice').hidden=false;
@@ -605,7 +626,7 @@ function rebuildTranscript(){
   let anchor=null;
   for(const item of transcript){const rect=nodes.get(item.id)?.getBoundingClientRect();if(rect?.height&&rect.bottom>top){anchor={id:item.id,offset:rect.top-top};break;}}
   const keep={status,approvals,currentUserSeq,modelConfig,permissionModes,availableCommands},oldTools=tools,oldNodes=new Map(nodes);
-  resetTranscript();rebuilding=true;
+  const appliedSeq=eventSeq;resetTranscript();eventSeq=appliedSeq;rebuilding=true;
   try{replay(currentUserSeq);}finally{rebuilding=false;({status,approvals,currentUserSeq,modelConfig,permissionModes,availableCommands}=keep);}
   for(const tool of tools.values()){
     // Browser-observed timing and derived progress are not in stored events.
@@ -641,6 +662,8 @@ function toolOutputText(content){
   return texts.length?texts.join('\n'):null;
 }
 function applyToolUpdate(tool,update,seq,observedAt=null){
+  // Updates arriving while the stored body loads are applied again on top of it.
+  tool.bodyQueue?.push([update,seq]);
   const output=tool.activityOutput??={streams:new Map(),version:0,seq:null};
   // Persisted session sequence numbers deduplicate replay/delivery, never text equality:
   // two identical chunks can be real output. Session snapshots rebuild all derived state.
@@ -700,7 +723,26 @@ function toolActivityView(tool,now=Date.now(),sessionBusy=true){
   }
   return {text:parts.join(' · '),running,progress:!!progress,failure:server?.parserFailure??null};
 }
+// Snapshots omit tool output (`bodyOmitted`); an explicit button loads stored events.
+async function loadToolBody(tool){
+  if(!active||!tool.bodyOmitted||tool.bodyQueue||!tool.toolCallId)return;
+  const sid=active.id,gen=generation;tool.bodyQueue=[];tool.bodyError=null;
+  scheduleDraw();
+  try{
+    const query=tool.acpSessionId?'?acpSession='+encodeURIComponent(tool.acpSessionId):'';
+    const {events}=await api(`/api/sessions/${sid}/tools/${encodeURIComponent(tool.toolCallId)}${query}`);
+    if(gen!==generation)return;
+    const previous=tool.activityOutput,queued=tool.bodyQueue;tool.bodyQueue=null;
+    // Rebuild output from the stored events; browser-observed timing is kept.
+    tool.activityOutput={streams:new Map(),version:(previous?.version||0)+1,seq:null,exitObservedAt:previous?.exitObservedAt,turnEnded:previous?.turnEnded,turnEndedAt:previous?.turnEndedAt};
+    for(const e of events)applyToolUpdate(tool,e.data,e.seq);
+    tool.bodyOmitted=false;
+    for(const [update,seq] of queued)applyToolUpdate(tool,update,seq);
+  }catch(error){tool.bodyError=error.message||'Could not load tool output';}
+  finally{tool.bodyQueue=null;scheduleDraw();}
+}
 function toolRawText(tool){
+  if(tool.bodyOmitted)return tool.bodyError?'Could not load tool output: '+tool.bodyError:'Loading tool output…';
   const parts=[];
   // Preserve mixed content and raw result fields, including unrecognized metadata.
   for(const key of ['content','rawOutput','rawInput'])if(tool[key]!==undefined&&tool[key]!==null){
@@ -712,13 +754,29 @@ function toolRawText(tool){
 }
 function renderToolActivity(node,tool,sessionBusy){
   const summary=node.querySelector('summary');
-  summary.replaceChildren(el('span','tool-title',tool.title||'Tool activity'),el('span','tool-state',tool.status||'pending'));
+  // Header hooks shorten long commands; the full title stays in the tooltip and details.
+  const title=el('span','tool-title',tool.header||tool.title||'Tool activity');if(tool.header&&tool.title)title.title=tool.title;
+  summary.replaceChildren(title,el('span','tool-state',tool.status||'pending'));
+  let loader=node.querySelector('.tool-output-loader');
+  if(!loader){
+    loader=el('div','tool-output-loader');
+    const button=el('button','tool-output-load','Load tool output');button.type='button';
+    const message=el('span','tool-output-status');message.setAttribute('role','status');
+    loader.append(button,message);node.insertBefore(loader,node.querySelector('pre'));
+  }
+  loader.hidden=!tool.bodyOmitted;
+  const button=loader.querySelector('button'),message=loader.querySelector('.tool-output-status');
+  button.textContent=tool.bodyQueue?'Loading tool output…':tool.bodyError?'Retry loading tool output':'Load tool output';
+  button.disabled=!!tool.bodyQueue;
+  button.onclick=()=>loadToolBody(tool);
+  message.textContent=tool.bodyError?'Could not load tool output: '+tool.bodyError:'';
   let activity=node.querySelector('.tool-activity');
   if(!activity){activity=el('span','tool-activity');summary.append(activity);}else summary.append(activity);
   const view=toolActivityView(tool,Date.now(),sessionBusy);
   activity.textContent=view.text;activity.hidden=!view.text;activity.title=view.failure||'';
   activity.classList.toggle('is-running',view.running);activity.classList.toggle('has-progress',view.progress);
-  node.querySelector('pre').textContent=toolRawText(tool);
+  const output=node.querySelector('pre');output.hidden=!!tool.bodyOmitted;
+  output.textContent=tool.bodyOmitted?'':toolRawText(tool);
 }
 // End U-05 tool activity.
 

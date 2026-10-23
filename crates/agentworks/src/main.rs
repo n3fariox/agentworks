@@ -26,6 +26,8 @@ mod session_config;
 mod session_runtime;
 mod store;
 mod terminal;
+mod tool_bodies;
+mod tool_headers;
 mod tool_progress;
 mod transcript_history;
 mod workspace;
@@ -234,11 +236,17 @@ impl Session {
             );
             state.status = "error".into();
         }
+        // Publish the tool before any derived header/progress for it.
+        let _ = self.tx.send(event.clone());
         if kind == "acp" {
-            self.progress
-                .update(&self.id, &self.tx, state.seq, &event["data"]);
+            self.progress.update(
+                &self.id,
+                (&self.provider, &self.cwd),
+                &self.tx,
+                state.seq,
+                &event["data"],
+            );
         }
-        let _ = self.tx.send(event);
         if let Some(message) = &state.storage_error {
             let _ = self
                 .tx
@@ -278,11 +286,39 @@ impl Session {
             "archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"created":self.created,"status":data.status,"turnRunning":data.turn_active,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"]),
             "projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"providerCapabilities":data.agent_capabilities["sessionCapabilities"],"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None}})
     }
+    /// Full snapshot for the HTTP API, with every retained event as stored.
     fn snapshot(&self) -> Value {
+        self.snapshot_with(|events, _| (json!(events), None))
+    }
+    /// Browser snapshot: tool bodies are fetched on demand (`tool_bodies`). With
+    /// `after`, a reconnecting browser receives only newer events, provided the
+    /// retained window still continues from that sequence (`resumed`).
+    fn browser_snapshot(&self, after: Option<u64>) -> Value {
+        let headers = self.progress.headers(&self.id);
+        let mut snapshot = self.snapshot_with(|events, seq| {
+            let resumed = after.filter(|&after| {
+                after <= seq
+                    && events.front().map_or(after == seq, |e| {
+                        e["seq"].as_u64().unwrap_or(0) <= after.saturating_add(1)
+                    })
+            });
+            (
+                json!(tool_bodies::compact(events, resumed.unwrap_or(0), &headers)),
+                resumed,
+            )
+        });
+        snapshot["toolHeaders"] = json!(headers);
+        snapshot
+    }
+    fn snapshot_with(
+        &self,
+        events: impl FnOnce(&std::collections::VecDeque<Value>, u64) -> (Value, Option<u64>),
+    ) -> Value {
         let approvals = self.approvals.lock().unwrap();
         let data = self.data.lock().unwrap();
-        json!({"kind":"snapshot","seq":data.seq,"session":{"id":self.id,"provider":self.provider,
-            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None},"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"])} ,"events":data.events,
+        let (events, resumed) = events(&data.events, data.seq);
+        json!({"kind":"snapshot","seq":data.seq,"resumed":resumed,"session":{"id":self.id,"provider":self.provider,
+            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None},"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"])} ,"events":events,
             "truncated":data.events.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
             "providerCapabilities":data.agent_capabilities["sessionCapabilities"],"sessionConfig":data.session_config,"permissionModes":data.permission_modes,"models":data.models,"attachments":attachments::policy(&self.provider,&data.prompt_capabilities),"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|a.event(id)).collect::<Vec<_>>(),
@@ -405,7 +441,7 @@ impl Session {
         *data = next;
         // Publish one snapshot so a large replay does not overflow browser event queues.
         drop(data);
-        let _ = self.tx.send(self.snapshot());
+        let _ = self.tx.send(self.browser_snapshot(None));
         Ok(())
     }
     fn clear_approvals(&self) {
@@ -607,7 +643,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             progress: app.progress.clone(),
         });
         for (seq, data) in &replay {
-            app.progress.update(&s.id, &s.tx, *seq, data);
+            app.progress
+                .update(&s.id, (&s.provider, &s.cwd), &s.tx, *seq, data);
         }
         if interrupted {
             s.emit("interrupted",json!({"message":"The server stopped during this turn. It was not automatically retried. Check the last tool result before continuing."}));
@@ -1116,6 +1153,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/{id}/terminal/events", get(terminal::events))
         .route("/api/sessions/{id}/events", get(events))
         .route("/api/sessions/{id}/history", get(transcript_history::older))
+        .route(
+            "/api/sessions/{id}/tools/{tool}",
+            get(tool_bodies::tool_body),
+        )
         .route("/api/sessions/{id}/file", get(file))
         .route("/api/sessions/{id}/workspace", get(git_context::workspace))
         .route("/api/sessions/{id}/worktree", get(worktree_cleanup::status))
@@ -1921,8 +1962,21 @@ async fn activity(State(app): State<App>) -> Json<Value> {
         "busySessions":busy,"scheduledContinuations":scheduled,"unfinishedLimitedSessions":unfinished,"sessions":sessions}),
     )
 }
-async fn get_session(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
-    Ok(Json(session(&app, &id)?.snapshot()))
+#[derive(Deserialize)]
+struct SessionQuery {
+    /// `meta`: session metadata only, e.g. to check that a session still exists.
+    view: Option<String>,
+}
+async fn get_session(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Query(query): Query<SessionQuery>,
+) -> ApiResult {
+    let s = session(&app, &id)?;
+    Ok(Json(match query.view.as_deref() {
+        Some("meta") => s.meta(),
+        _ => s.snapshot(),
+    }))
 }
 
 /// L-08: creation options default to the parent's; a stable requestId is required.
@@ -2954,9 +3008,15 @@ fn resolve_approval(
     }
     Ok(())
 }
+#[derive(Deserialize)]
+struct EventsQuery {
+    /// Last event sequence the browser applied; resumes without a full replay.
+    after: Option<u64>,
+}
 async fn events(
     State(app): State<App>,
     Path(id): Path<String>,
+    Query(query): Query<EventsQuery>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, (StatusCode, String)> {
     let s = match session(&app, &id) {
@@ -2968,7 +3028,7 @@ async fn events(
     };
     Ok(ws.on_upgrade(move |socket| {
         eprintln!("Session WebSocket upgraded");
-        event_socket(socket, s)
+        event_socket(socket, s, query.after)
     }))
 }
 
@@ -2999,10 +3059,10 @@ async fn notification_socket(socket: WebSocket, mut rx: broadcast::Receiver<Valu
         }
     }
 }
-async fn event_socket(socket: WebSocket, s: Arc<Session>) {
+async fn event_socket(socket: WebSocket, s: Arc<Session>, after: Option<u64>) {
     let mut rx = s.tx.subscribe();
     let (mut sink, mut stream) = socket.split();
-    let snapshot = s.snapshot();
+    let snapshot = s.browser_snapshot(after);
     let mut seq = snapshot["seq"].as_u64().unwrap_or(0);
     if sink
         .send(Message::Text(snapshot.to_string().into()))
@@ -3014,11 +3074,11 @@ async fn event_socket(socket: WebSocket, s: Arc<Session>) {
     loop {
         tokio::select! {
             next=rx.recv()=>{
-                let event=match next {Ok(event)=>event,Err(broadcast::error::RecvError::Lagged(_))=>s.snapshot(),Err(_)=>break};
+                let event=match next {Ok(event)=>event,Err(broadcast::error::RecvError::Lagged(_))=>s.browser_snapshot(None),Err(_)=>break};
                 let n=event["seq"].as_u64().unwrap_or(0);
                 // L-05 hook: queue state is broadcast unsequenced (not stored in event history).
-                // U-05: derived tool progress reuses its source event's seq and is never stored.
-                if event["kind"]!="input_queue" && event["kind"]!="tool_progress" {if n<=seq {continue;} seq=n;}
+                // U-05: derived tool progress and headers reuse their source event's seq and are never stored.
+                if !matches!(event["kind"].as_str(),Some("input_queue"|"tool_progress"|"tool_header")) {if n<=seq {continue;} seq=n;}
                 let closed=event["kind"]=="status" && (event["data"]["status"]=="closed" || event["data"]["status"]=="suspended");
                 if sink.send(Message::Text(event.to_string().into())).await.is_err(){break;}
                 if closed {let _=sink.send(Message::Close(None)).await;break;}

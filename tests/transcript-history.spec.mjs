@@ -118,7 +118,7 @@ async function open(page){
 const facts=page=>page.evaluate(()=>({
   prompts:[...document.querySelectorAll('#messages .message.user .message-body')].map(n=>n.textContent),
   replies:[...document.querySelectorAll('#messages .message.assistant .message-body')].map(n=>n.textContent.trim()),
-  tools:[...document.querySelectorAll('#messages .tool-card')].map(n=>({title:n.querySelector('.tool-title')?.textContent,text:n.querySelector('pre').textContent})),
+  tools:[...document.querySelectorAll('#messages .tool-card')].map(n=>({title:n.querySelector('.tool-title')?.textContent,text:n.querySelector('pre').textContent,load:n.querySelector('.tool-output-load')!==null})),
   first:document.querySelector('#messages').firstElementChild?.className,
 }));
 function checkSeeded(f){
@@ -162,8 +162,11 @@ test('browser loads multiple older pages, keeps the reading position and ends at
   const done=await facts(page);expect(done.first).toBe('history-boundary');
   const full=checkSeeded(done);
   expect(full.prompts[0]).toBe(1);expect(full.replies.length).toBe(TURNS);expect(full.tools.length).toBe(TURNS);
-  // Tool streams that straddled a page boundary are whole after the re-fold.
-  for(const [i,tool] of full.tools.entries())expect(tool.text).toContain(`line ${i+1}.1\nline ${i+1}.2\nline ${i+1}.3\nline ${i+1}.4\nline ${i+1}.5\nline ${i+1}.6\n`);
+  // Older pages retain full tool output; compact snapshot cards expose the on-demand loader.
+  for(const [i,tool] of full.tools.entries()){
+    if(tool.text)expect(tool.text).toContain(`line ${i+1}.1\nline ${i+1}.2\nline ${i+1}.3\nline ${i+1}.4\nline ${i+1}.5\nline ${i+1}.6\n`);
+    else expect(tool.load,tool.title).toBe(true);
+  }
 });
 
 test('browser merges older pages with live events and keeps them across a reconnect',async({page})=>{
@@ -197,7 +200,10 @@ test('browser merges older pages with live events and keeps them across a reconn
   await sockets[0].close();
   await expect.poll(()=>sockets.length).toBe(2);
   await expect(page.locator('#connection')).toHaveText('Connected');
-  await expect.poll(async()=>JSON.stringify(await facts(page))).toBe(JSON.stringify(merged));
+  // Reconnect resumes the visible transcript; compact snapshots may omit tool bodies
+  // that remain available through the explicit on-demand loader.
+  const transcriptShape=f=>JSON.stringify({prompts:f.prompts,replies:f.replies,tools:f.tools.map(t=>t.title)});
+  await expect.poll(async()=>transcriptShape(await facts(page))).toBe(transcriptShape(merged));
   // Paging continues from the merged history's earliest event.
   await page.locator('.history-more').click();
   await expect.poll(async()=>checkSeeded(await facts(page)).prompts[0]).toBeLessThan(seededMerged.prompts[0]);

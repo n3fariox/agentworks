@@ -35,6 +35,7 @@ try{
   await run('node',['scripts/remote-partition-smoke.mjs']);
   await run('node',['scripts/smoke.mjs']);
   await run('node',['scripts/progress-smoke.mjs']);
+  await run('node',['scripts/tool-bodies-smoke.mjs']);
   await run('node',['scripts/projects-smoke.mjs']);
   await run('node',['scripts/settings-smoke.mjs']);
   await run('node',['scripts/import-smoke.mjs']);

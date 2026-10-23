@@ -6,8 +6,9 @@
 //! on async request threads. Derived progress is temporary: it is published as
 //! unsequenced `tool_progress` events, included in snapshots, never persisted,
 //! and rebuilt from the retained event window after a restart. Inbox formatting
-//! uses the same thread and script installation lifecycle. Raw events and
-//! tool status remain authoritative; a parser failure only removes progress.
+//! uses the same thread and script installation lifecycle, as do tool card
+//! headers (`tool_headers`). Raw events and tool status remain authoritative; a
+//! parser failure only removes progress.
 
 use agentworks_starlark::engine::{
     Capability, Compiled, Diagnostic, Engine, HookInfo, content_hash,
@@ -19,6 +20,8 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, mpsc};
 use tokio::sync::broadcast;
+
+use crate::tool_headers::{HeaderTracker, Headers};
 
 pub const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS scripts(name TEXT PRIMARY KEY,capability TEXT NOT NULL,source TEXT NOT NULL,hash TEXT NOT NULL,enabled INTEGER NOT NULL,builtin INTEGER NOT NULL,updated INTEGER NOT NULL);";
 
@@ -33,6 +36,7 @@ const BUILTIN: &[(&str, &str)] = &[
         "inbox_message.star",
         agentworks_starlark::INBOX_MESSAGE_SCRIPT,
     ),
+    ("tool_header.star", agentworks_starlark::TOOL_HEADER_SCRIPT),
 ];
 
 /// Derived views retained per session; the oldest are dropped first.
@@ -285,11 +289,13 @@ impl Tracker {
 enum Message {
     Update {
         session: String,
+        provider: String,
+        cwd: String,
         seq: u64,
         data: Value,
         tx: broadcast::Sender<Value>,
     },
-    Reload(Vec<StarlarkParser>, Vec<Arc<Compiled>>),
+    Reload(Hooks),
     FormatInbox {
         messages: Vec<Value>,
         reply: mpsc::SyncSender<Vec<Option<String>>>,
@@ -303,14 +309,16 @@ pub struct Hub {
     engine: Arc<Engine>,
     tx: mpsc::Sender<Message>,
     views: Views,
+    headers: Headers,
 }
 
 impl Hub {
     pub fn new(engine: Arc<Engine>, parsers: Vec<StarlarkParser>) -> Self {
-        let views = Views::default();
+        let (views, headers) = (Views::default(), Headers::default());
         let (tx, rx) = mpsc::channel::<Message>();
         let mut formatters: Vec<Arc<Compiled>> = Vec::new();
         let mut tracker = Tracker::new(parsers, views.clone());
+        let mut header_tracker = HeaderTracker::new(engine.clone(), headers.clone());
         let interpreter = engine.clone();
         std::thread::Builder::new()
             .name("tool-progress".into())
@@ -319,6 +327,8 @@ impl Hub {
                     match message {
                         Message::Update {
                             session,
+                            provider,
+                            cwd,
                             seq,
                             data,
                             tx,
@@ -326,10 +336,21 @@ impl Hub {
                             if let Some(event) = tracker.update(&session, seq, &data) {
                                 let _ = tx.send(event);
                             }
+                            if let Some(event) = header_tracker.update(
+                                &session,
+                                &provider,
+                                &cwd,
+                                seq,
+                                &data,
+                                Some(&tx),
+                            ) {
+                                let _ = tx.send(event);
+                            }
                         }
-                        Message::Reload(parsers, next) => {
-                            tracker.parsers = parsers;
-                            formatters = next;
+                        Message::Reload(hooks) => {
+                            tracker.parsers = hooks.parsers;
+                            formatters = hooks.formatters;
+                            header_tracker.reload(hooks.headers);
                         }
                         Message::FormatInbox { messages, reply } => {
                             let formatted = messages
@@ -363,12 +384,20 @@ impl Hub {
                                 .collect();
                             let _ = reply.send(formatted);
                         }
-                        Message::Forget(session) => tracker.forget(&session),
+                        Message::Forget(session) => {
+                            tracker.forget(&session);
+                            header_tracker.forget(&session);
+                        }
                     }
                 }
             })
             .expect("spawn tool-progress thread");
-        Hub { engine, tx, views }
+        Hub {
+            engine,
+            tx,
+            views,
+            headers,
+        }
     }
 
     /// A hub with no parsers, for tests and fixtures.
@@ -377,13 +406,23 @@ impl Hub {
         Hub::new(Arc::new(Engine::new().expect("host preludes")), Vec::new())
     }
 
-    pub fn update(&self, session: &str, tx: &broadcast::Sender<Value>, seq: u64, data: &Value) {
+    /// `provider` and `cwd` describe the session for tool header hooks.
+    pub fn update(
+        &self,
+        session: &str,
+        (provider, cwd): (&str, &std::path::Path),
+        tx: &broadcast::Sender<Value>,
+        seq: u64,
+        data: &Value,
+    ) {
         if matches!(
             data["sessionUpdate"].as_str(),
             Some("tool_call" | "tool_call_update")
         ) {
             let _ = self.tx.send(Message::Update {
                 session: session.to_owned(),
+                provider: provider.to_owned(),
+                cwd: cwd.to_string_lossy().into_owned(),
                 seq,
                 data: data.clone(),
                 tx: tx.clone(),
@@ -414,6 +453,21 @@ impl Hub {
         Value::Object(map)
     }
 
+    /// Current tool card headers for a snapshot, keyed by `tool_headers::key`.
+    pub fn headers(&self, session: &str) -> HashMap<String, String> {
+        self.headers
+            .lock()
+            .unwrap()
+            .get(session)
+            .map(|tools| {
+                tools
+                    .iter()
+                    .map(|(k, (_, h))| (k.clone(), h.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Run message formatting on the interpreter thread, away from request threads.
     /// Timeout, disabled script or evaluation failure falls back to host-quoted JSON.
     pub fn format_inbox(&self, messages: &[Value]) -> Vec<Option<String>> {
@@ -439,29 +493,38 @@ impl Hub {
 
     /// Recompile enabled scripts from the store and swap them in.
     pub fn reload(&self, db: &Connection) -> rusqlite::Result<Vec<Diagnostic>> {
-        let (parsers, formatters, errors) = compile_hooks(&self.engine, db)?;
-        let _ = self.tx.send(Message::Reload(parsers, formatters));
+        let (hooks, errors) = compile_hooks(&self.engine, db)?;
+        let _ = self.tx.send(Message::Reload(hooks));
         Ok(errors)
     }
 }
 
+/// Enabled handlers by hook, in routing order.
+#[derive(Default)]
+struct Hooks {
+    parsers: Vec<StarlarkParser>,
+    formatters: Vec<Arc<Compiled>>,
+    headers: Vec<Arc<Compiled>>,
+}
+
 /// Compile enabled modules in filename order, then route their declarations in
-/// source order. One broken module contributes no handlers to either hook.
+/// source order. One broken module contributes no handlers to any hook.
 fn compile_hooks(
     engine: &Arc<Engine>,
     db: &Connection,
-) -> rusqlite::Result<(Vec<StarlarkParser>, Vec<Arc<Compiled>>, Vec<Diagnostic>)> {
-    let (mut parsers, mut formatters, mut errors) = (Vec::new(), Vec::new(), Vec::new());
+) -> rusqlite::Result<(Hooks, Vec<Diagnostic>)> {
+    let (mut hooks, mut errors) = (Hooks::default(), Vec::new());
     for script in list(db)?.into_iter().filter(|s| s.enabled) {
         match engine.compile_registered(&script.name, &script.source) {
             Ok(compiled) => {
                 for handler in &compiled.handlers {
                     match handler.capability {
-                        Capability::Parser => parsers.push(StarlarkParser {
+                        Capability::Parser => hooks.parsers.push(StarlarkParser {
                             engine: engine.clone(),
                             script: handler.clone(),
                         }),
-                        Capability::MessageFormatter => formatters.push(handler.clone()),
+                        Capability::MessageFormatter => hooks.formatters.push(handler.clone()),
+                        Capability::ToolHeader => hooks.headers.push(handler.clone()),
                         Capability::Workflow => {
                             unreachable!("workflow registrations are not exposed")
                         }
@@ -471,7 +534,7 @@ fn compile_hooks(
             Err(error) => errors.push(error),
         }
     }
-    Ok((parsers, formatters, errors))
+    Ok((hooks, errors))
 }
 
 #[cfg(test)]
@@ -479,8 +542,8 @@ fn compile_enabled(
     engine: &Arc<Engine>,
     db: &Connection,
 ) -> rusqlite::Result<(Vec<StarlarkParser>, Vec<Diagnostic>)> {
-    let (parsers, _, errors) = compile_hooks(engine, db)?;
-    Ok((parsers, errors))
+    let (hooks, errors) = compile_hooks(engine, db)?;
+    Ok((hooks.parsers, errors))
 }
 
 // HTTP API. Scripts are trusted (single-user host); validation guards mistakes.
@@ -760,11 +823,12 @@ mod tests {
                 Some("Other review".into())
             ]
         );
-        let (parsers, formatters, errors) = compile_hooks(&hub.engine, &db).unwrap();
+        let (hooks, errors) = compile_hooks(&hub.engine, &db).unwrap();
         assert!(errors.is_empty());
-        assert_eq!(parsers.len(), 2);
-        assert_eq!(formatters.len(), 2);
-        assert_eq!(parsers[0].script.name, "a_handlers.star");
+        assert_eq!(hooks.parsers.len(), 2);
+        assert_eq!(hooks.formatters.len(), 2);
+        assert_eq!(hooks.headers.len(), 1, "the built-in tool header script");
+        assert_eq!(hooks.parsers[0].script.name, "a_handlers.star");
         set_enabled(&db, "a_handlers.star", false).unwrap();
         hub.reload(&db).unwrap();
         assert_eq!(
@@ -830,7 +894,7 @@ mod tests {
     fn builtins_are_seeded_updated_disabled_and_user_owned_when_saved() {
         let db = db();
         let rows = list(&db).unwrap();
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), BUILTIN.len());
         assert!(rows[0].builtin && rows[0].enabled);
         db.execute("UPDATE scripts SET source='old',hash='old'", [])
             .unwrap();

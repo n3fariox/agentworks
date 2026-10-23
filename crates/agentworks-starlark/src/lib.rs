@@ -10,3 +10,6 @@ pub const BAZEL_PROGRESS_SCRIPT: &str = include_str!("../scripts/bazel_progress.
 
 /// Source of the bundled inbox message formatter.
 pub const INBOX_MESSAGE_SCRIPT: &str = include_str!("../scripts/inbox_message.star");
+
+/// Source of the bundled tool card header script.
+pub const TOOL_HEADER_SCRIPT: &str = include_str!("../scripts/tool_header.star");

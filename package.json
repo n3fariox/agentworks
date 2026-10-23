@@ -51,6 +51,7 @@
     "test:transcript-history": "playwright test tests/transcript-history.spec.mjs",
     "test:starlark": "cargo test --locked -p agentworks-starlark",
     "test:progress": "node --test tests/bazel-progress.test.mjs && node scripts/progress-smoke.mjs",
+    "test:tool-bodies": "node scripts/tool-bodies-smoke.mjs && playwright test tests/tool-bodies.spec.mjs",
     "test:subagents": "node tests/subagents.test.mjs && node tests/subagents-adapters.test.mjs && playwright test tests/subagents.spec.mjs",
     "test:attachments": "node tests/attachments-adapters.test.mjs && playwright test tests/attachments.spec.mjs"
   },

@@ -29,17 +29,25 @@ def format_message(ctx: MessageContext, message: PeerMessage) -> str:
 
 agent.register_formatter(format_message, message_type = "inbox.peer", text_pattern = "^Review")
 `;
-const TEMPLATES={progress:TEMPLATE,formatter:FORMATTER_TEMPLATE,both:TEMPLATE+'\n'+FORMATTER_TEMPLATE};
+export const HEADER_TEMPLATE=String.raw`load("@agentworks//tool.star", "ToolCall", "ToolContext")
+
+# Return the one-line tool card header, or None to keep the harness title.
+def tool_header(ctx: ToolContext, tool: ToolCall) -> str | None:
+    return tool.description
+
+agent.register_tool_header(tool_header, title_pattern = ".*")
+`;
+const TEMPLATES={progress:TEMPLATE,formatter:FORMATTER_TEMPLATE,header:HEADER_TEMPLATE,both:TEMPLATE+'\n'+FORMATTER_TEMPLATE};
 
 export function setupParserScripts({$,api,el}){
   const root=$('parser-script-controls');
   root.innerHTML=`<legend>Starlark scripts</legend>
-    <p class="field-note">Scripts register tool-progress and message-formatting hooks. Enabled handlers run in filename order, then registration order; the first matching handler for each hook wins. Each script can register both kinds. Changes apply to future output and inbox deliveries.</p>
+    <p class="field-note">Scripts register tool-progress, tool-header and message-formatting hooks. Enabled handlers run in filename order, then registration order; the first matching handler for each hook wins. Each script can register several kinds. Changes apply to future output and inbox deliveries; tool headers are recomputed for open sessions.</p>
     <div class="parser-script-list" role="list" data-list></div>
     <button type="button" class="text-button parser-script-new" data-new>＋ New script</button>
     <div class="field-note" role="status" data-note></div>
     <div class="parser-script-editor" data-editor hidden>
-      <label data-starter-label>Starter<select data-starter><option value="progress">Tool progress</option><option value="formatter">Inbox formatter</option><option value="both">Progress and inbox formatter</option></select></label>
+      <label data-starter-label>Starter<select data-starter><option value="progress">Tool progress</option><option value="formatter">Inbox formatter</option><option value="header">Tool header</option><option value="both">Progress and inbox formatter</option></select></label>
       <label>Name<input data-name spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="make_progress.star"></label>
       <div class="field-note" data-editor-note></div>
       <label>Source<textarea data-source spellcheck="false" autocomplete="off" autocapitalize="off" rows="16"></textarea></label>
@@ -81,7 +89,7 @@ export function setupParserScripts({$,api,el}){
       if(script.hooks?.length){
         const hooks=el('ul','parser-script-hooks');
         for(const hook of script.hooks){
-          const item=el('li');item.append(document.createTextNode(hook.hook==='progress'?'Tool progress · command: ':'Formatter · '+hook.message_type+' · text: '),el('code','',hook.pattern));hooks.append(item);
+          const item=el('li');item.append(document.createTextNode(hook.hook==='progress'?'Tool progress · command: ':hook.hook==='tool_header'?'Tool header · title: ':'Formatter · '+hook.message_type+' · text: '),el('code','',hook.pattern));hooks.append(item);
         }
         wrap.append(hooks);
       }
