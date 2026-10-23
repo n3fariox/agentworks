@@ -112,7 +112,7 @@ impl State {
 fn is_status_probe(provider: &str, commands: &Value, text: &str) -> bool {
     let command = match (provider, text.trim()) {
         ("codex" | "codex-rust" | "demo", "/status") => "status",
-        ("claude", "/usage") | ("demo", "/usage") => "usage",
+        ("claude" | "claude-rust" | "demo", "/usage") => "usage",
         _ => return false,
     };
     commands.as_array().is_some_and(|items| {
@@ -187,7 +187,9 @@ fn claude_evidence(update: &Value) -> Option<Evidence> {
 }
 pub fn error_evidence(provider: &str, error: &Value) -> Option<Evidence> {
     // No free-text interpretation: exact provider enum on the prompt RPC error only.
-    if matches!(provider, "claude" | "demo") && error["data"]["errorKind"] == "rate_limit" {
+    if matches!(provider, "claude" | "claude-rust" | "demo")
+        && error["data"]["errorKind"] == "rate_limit"
+    {
         return Some(Evidence {
             reset: None,
             source: "Claude ACP prompt error errorKind=rate_limit; reset unavailable".into(),
@@ -321,7 +323,7 @@ impl State {
     }
     /// Record structured usage evidence only while the caller owns an active turn.
     pub fn observe(&mut self, provider: &str, update: &Value) {
-        if !matches!(provider, "claude" | "demo") {
+        if !matches!(provider, "claude" | "claude-rust" | "demo") {
             return;
         }
         if let Some(evidence) = claude_evidence(update) {

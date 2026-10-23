@@ -358,8 +358,11 @@ pub fn apply(s: &Session, seed: Seed, child_cwd: &Path) -> Result<(), Error> {
     }
     next.lineage = lineage;
     next.lineage.truncated |= seed.body.len() > PRIMER_LIMIT;
+    // Native forks: both Codex harnesses, and the Rust Claude bridge, which copies the
+    // transcript itself.
     if s.provider != next.lineage.parent_provider.as_deref().unwrap_or("")
-        || agentworks_runtime::provider::cli_provider(&s.provider) != "codex"
+        || !(agentworks_runtime::provider::cli_provider(&s.provider) == "codex"
+            || s.provider == "claude-rust")
     {
         next.lineage.source_message_id = None;
     }

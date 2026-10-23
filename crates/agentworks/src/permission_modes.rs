@@ -22,7 +22,8 @@ pub fn initial_claude_default(
     external: bool,
     setting: Option<ClaudeDefault>,
 ) -> Option<ClaudeDefault> {
-    (provider == "claude" && !external).then(|| setting.unwrap_or_default())
+    (agentworks_runtime::provider::cli_provider(provider) == "claude" && !external)
+        .then(|| setting.unwrap_or_default())
 }
 
 /// Runs only for a new native session. Await adapter confirmation before

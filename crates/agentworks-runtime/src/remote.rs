@@ -52,7 +52,14 @@ const MAX_FRAME: usize = 64 * 1024 * 1024;
 /// earlier, such as output from the remote shell's startup files, is skipped.
 pub const READY: &str = "agentworks worker ready";
 const MAX_PREAMBLE: usize = 64 * 1024;
-pub const PROVIDERS: [&str; 5] = ["demo", "claude", "codex", "codex-rust", "opencode"];
+pub const PROVIDERS: [&str; 6] = [
+    "demo",
+    "claude",
+    "claude-rust",
+    "codex",
+    "codex-rust",
+    "opencode",
+];
 const PING_EVERY: Duration = Duration::from_secs(15);
 const SILENCE_LIMIT: Duration = Duration::from_secs(45);
 /// Covers the SSH handshake plus starting the remote binary.

@@ -117,7 +117,7 @@ export function latestQuota(sessions, observations, provider) {
     const [oldAt, oldCreated] = previous ? rank(previous.value, previous.session) : [-2, -1];
     if (!previous || at > oldAt || (at === oldAt && created > oldCreated)) chosen.set(key, {value, session});
   };
-  for (const session of sessions.filter(s => (s.provider === 'codex-rust' ? 'codex' : s.provider) === provider)) {
+  for (const session of sessions.filter(s => ({'claude-rust':'claude','codex-rust':'codex'}[s.provider] ?? s.provider) === provider)) {
     const state = observations.get(session.id)?.state;
     if (!state) continue;
     for (const [label, value] of Object.entries(state.quota)) consider(`claude:${label}`, value, session);
@@ -156,7 +156,7 @@ function renderQuotaMeters(root, provider, state) {
 function renderAccounts(status, sessions, observations) {
   const root = document.querySelector('#accounts'); root.replaceChildren();
   for (const id of ['claude','codex']) {
-    const configs = status?.providers.filter(p => p.id === id || (id === 'codex' && p.id === 'codex-rust')) || [];
+    const configs = status?.providers.filter(p => p.id === id || p.id === id + '-rust') || [];
     const provider = configs.find(p => p.installed) || configs[0];
     const card = el('article', undefined, 'card');
     const heading = el('div', undefined, 'card-heading'); heading.append(el('h3', id === 'claude' ? 'Claude' : 'Codex'), el('span', 'Quota report', 'badge'));
@@ -172,7 +172,7 @@ function renderAccounts(status, sessions, observations) {
     card.append(config);
     if (!sessions) card.append(el('h4', 'Quota unavailable', 'quota-state'), note('Session list could not be read; account cap and spend are unknown.'));
     else {
-      const matching = sessions.filter(s => s.provider === id || (id === 'codex' && s.provider === 'codex-rust'));
+      const matching = sessions.filter(s => s.provider === id || s.provider === id + '-rust');
       const latest = latestQuota(sessions, observations, id);
       card.append(note(`${matching.length} retained source session(s); latest report selected per quota window. Reports are not added together.`));
       const readable = matching.filter(s => observations.has(s.id)).length;
@@ -210,7 +210,7 @@ async function refresh({quotaOnly = false} = {}) {
     const observations = new Map();
     // Read bounded session histories with four workers. Do not retain transcripts,
     // probe account services, open event streams, or launch harness processes.
-    const queue = (sessions || []).filter(s => ['claude','codex','codex-rust'].includes(s.provider));
+    const queue = (sessions || []).filter(s => ['claude','claude-rust','codex','codex-rust'].includes(s.provider));
     let next = 0;
     await Promise.all(Array.from({length:Math.min(4,queue.length)}, async () => {
       while (next < queue.length) {

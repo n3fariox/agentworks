@@ -34,7 +34,7 @@ mod workspace;
 mod worktree_cleanup;
 mod worktrees;
 use agentworks_runtime::{
-    provider::{adapter_path, cli_provider, installed, key_present, runtime_root, use_api_key},
+    provider::{cli_provider, installed, key_present, runtime_root, use_api_key},
     worker as agent,
 };
 use agentworks_session::{SessionData, timeouts};
@@ -480,15 +480,16 @@ fn session(app: &App, id: &str) -> Result<Arc<Session>, (StatusCode, String)> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    if args.get(1).is_some_and(|a| a == "codex-acp") {
-        let code = match agentworks_codex_acp::run().await {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("agentworks codex-acp: {error}");
-                1
-            }
+    if let Some(bridge @ ("codex-acp" | "claude-acp")) = args.get(1).map(String::as_str) {
+        let result = if bridge == "codex-acp" {
+            agentworks_codex_acp::run().await
+        } else {
+            agentworks_claude_acp::run().await
         };
-        std::process::exit(code);
+        if let Err(error) = &result {
+            eprintln!("agentworks {bridge}: {error}");
+        }
+        std::process::exit(i32::from(result.is_err()));
     }
     if args.get(1).is_some_and(|a| a == "--service-protocol") {
         println!("{}", json!({"serviceProtocol":1}));
@@ -513,7 +514,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.get(1).is_some_and(|a| a == "--probe") {
         let provider = args.get(2).map(String::as_str).unwrap_or("demo");
         if !agentworks_runtime::remote::PROVIDERS.contains(&provider) {
-            return Err("Use --probe claude|codex|codex-rust|opencode|demo".into());
+            return Err("Use --probe claude|claude-rust|codex|codex-rust|opencode|demo".into());
         }
         agentworks_runtime::acp::probe(provider).await?;
         return Ok(());
@@ -1305,7 +1306,8 @@ async fn status(State(app): State<App>) -> Json<Value> {
     let defaults = app.catalog.lock().unwrap().data.settings.clone();
     let mut status = json!({"roots":effective_roots(&app),"defaultModels":defaults.default_models,"defaultCommunicationRole":defaults.default_communication_role.unwrap_or_default(),"providers":[
         {"id":"demo","name":"Demo agent","installed":true,"keyPresent":true},
-        {"id":"claude","name":"Claude","installed":adapter_path("claude").exists(),"keyPresent":key_present("claude"),"authMode":if use_api_key(){"api_key"}else{"existing"}},
+        {"id":"claude","name":"Claude","installed":installed("claude"),"keyPresent":key_present("claude"),"authMode":if use_api_key(){"api_key"}else{"existing"}},
+        {"id":"claude-rust","name":"Claude · Rust ACP","installed":installed("claude-rust"),"keyPresent":key_present("claude-rust"),"authMode":if use_api_key(){"api_key"}else{"existing"}},
         {"id":"codex","name":"Codex","installed":installed("codex"),"keyPresent":key_present("codex"),"authMode":if use_api_key(){"api_key"}else{"existing"}},
         {"id":"codex-rust","name":"Codex · Rust ACP","installed":installed("codex-rust"),"keyPresent":key_present("codex-rust"),"authMode":if use_api_key(){"api_key"}else{"existing"}},
         {"id":"opencode","name":"OpenCode · free models","installed":installed("opencode"),"keyPresent":true}
@@ -2237,6 +2239,9 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
                 }
                 "codex-rust" => {
                     "Native Codex is not installed on PATH. Install Codex or set CODEX_PATH."
+                }
+                "claude-rust" => {
+                    "Native Claude Code is not installed on PATH. Install Claude Code or set CLAUDE_CODE_EXECUTABLE."
                 }
                 _ => "ACP adapter missing. Run npm ci --ignore-scripts.",
             },

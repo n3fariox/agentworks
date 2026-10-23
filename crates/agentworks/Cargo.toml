@@ -24,4 +24,5 @@ agentworks-starlark = { path = "../agentworks-starlark" }
 agentworks-terminal = { path = "../agentworks-terminal" }
 agentworks-workspace = { path = "../agentworks-workspace" }
 agentworks-runtime = { path = "../agentworks-runtime" }
+agentworks-claude-acp = { path = "../agentworks-claude-acp" }
 agentworks-session = { path = "../agentworks-session" }

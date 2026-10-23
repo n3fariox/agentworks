@@ -228,7 +228,7 @@ pub(crate) fn diagnostic(app: &App, host: &str, provider: &str, message: &str) -
         .map(|h| h.destination.clone())
         .unwrap_or_else(|| host.into());
     let command = match provider {
-        "claude" => "claude auth login",
+        "claude" | "claude-rust" => "claude auth login",
         "codex" | "codex-rust" => "codex login",
         "opencode" => "opencode auth login",
         _ => return safe,

@@ -3,12 +3,12 @@ use agent_client_protocol::AcpAgentConfig;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
-/// Adapter identity stays distinct in sessions; both Codex adapters use the same CLI/account.
+/// Adapter identity stays distinct in sessions; each Rust adapter shares its CLI/account.
 pub fn cli_provider(provider: &str) -> &str {
-    if provider == "codex-rust" {
-        "codex"
-    } else {
-        provider
+    match provider {
+        "codex-rust" => "codex",
+        "claude-rust" => "claude",
+        _ => provider,
     }
 }
 
@@ -49,8 +49,13 @@ pub fn opencode_path() -> Option<PathBuf> {
     })
 }
 pub fn installed(provider: &str) -> bool {
-    if provider == "codex-rust" {
-        let executable = std::env::var_os("CODEX_PATH").unwrap_or_else(|| "codex".into());
+    if matches!(provider, "codex-rust" | "claude-rust") {
+        let (var, name) = if provider == "claude-rust" {
+            ("CLAUDE_CODE_EXECUTABLE", "claude")
+        } else {
+            ("CODEX_PATH", "codex")
+        };
+        let executable = std::env::var_os(var).unwrap_or_else(|| name.into());
         return std::path::Path::new(&executable).is_file()
             || std::env::var_os("PATH").is_some_and(|paths| {
                 std::env::split_paths(&paths).any(|p| p.join(&executable).is_file())
@@ -93,6 +98,8 @@ pub fn agent_config(provider: &str, api_key_mode: bool, host_profile: bool) -> A
     } else {
         let mut config = if provider == "codex-rust" {
             AcpAgentConfig::new(std::env::current_exe().expect("executable path")).arg("codex-acp")
+        } else if provider == "claude-rust" {
+            AcpAgentConfig::new(std::env::current_exe().expect("executable path")).arg("claude-acp")
         } else if let Some(node) = std::env::var_os("AGENTWORKS_NODE") {
             AcpAgentConfig::new(node).arg(adapter_path(provider).to_string_lossy())
         } else {
@@ -193,7 +200,7 @@ mod tests {
     use super::*;
     #[test]
     fn existing_signin_inherits_credential_locations_and_does_not_force_api_keys() {
-        for provider in ["claude", "codex", "codex-rust"] {
+        for provider in ["claude", "claude-rust", "codex", "codex-rust"] {
             let config = agent_config(provider, false, false);
             assert!(!config.environment().contains_key("CODEX_HOME"));
             assert!(!config.environment().contains_key("CLAUDE_CONFIG_DIR"));
@@ -262,5 +269,20 @@ mod tests {
             native.command(),
             agent_config("codex", true, false).command()
         );
+    }
+
+    #[test]
+    fn native_claude_is_a_distinct_adapter_with_shared_claude_authentication() {
+        let native = agent_config("claude-rust", true, false);
+        assert_eq!(native.command(), std::env::current_exe().unwrap());
+        assert_eq!(native.arguments(), &["claude-acp"]);
+        assert_eq!(
+            native.environment().get("CLAUDE_CONFIG_DIR"),
+            agent_config("claude", true, false)
+                .environment()
+                .get("CLAUDE_CONFIG_DIR")
+        );
+        assert!(!native.environment().contains_key("CODEX_HOME"));
+        assert_eq!(key_present("claude-rust"), key_present("claude"));
     }
 }

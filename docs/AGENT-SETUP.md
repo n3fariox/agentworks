@@ -25,9 +25,15 @@ Choose **Codex · Rust ACP** in the harness picker to use the experimental
 `codex-rust`; it requires a native `codex` executable on PATH (or `CODEX_PATH`).
 The existing **Codex** option uses the JavaScript adapter. Both share the host
 Codex sign-in; model defaults and session adapter identity stay separate.
-The Rust Codex execution path requires no Node or npm adapter. Claude and existing
-enrollment/build tooling still use npm. No adapter-selection environment variable
-is needed.
+The Rust Codex execution path requires no Node or npm adapter. No adapter-selection
+environment variable is needed.
+
+Choose **Claude · Rust ACP** in the harness picker to use the experimental
+[Rust Claude adapter](RUST-CLAUDE-ACP.md) included in the binary. Its provider ID is
+`claude-rust`; it requires a native `claude` executable on PATH (or
+`CLAUDE_CODE_EXECUTABLE`) and no Node or npm adapter. The existing **Claude** option
+uses the JavaScript adapter. Both share the host Claude sign-in; model defaults and
+session adapter identity stay separate. Existing enrollment/build tooling still uses npm.
 
 Codex uses the tracked local `2.2.2-agentworks.1` fork in `vendor/codex-acp` to attach cached subscription windows to genuine context usage events. The usage display preserves each window's source observation time separately from context. No extra account queries or polling are performed; quotas appear after native push notifications and a genuine usage event. See the [implemented metadata contract and limitations](CODEX-SUBSCRIPTION-QUOTA.md).
 

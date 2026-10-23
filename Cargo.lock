@@ -64,6 +64,7 @@ name = "agentworks"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
+ "agentworks-claude-acp",
  "agentworks-codex-acp",
  "agentworks-runtime",
  "agentworks-session",
@@ -81,6 +82,17 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite",
+ "uuid",
+]
+
+[[package]]
+name = "agentworks-claude-acp"
+version = "0.1.0"
+dependencies = [
+ "agent-client-protocol",
+ "libc",
+ "serde_json",
+ "tokio",
  "uuid",
 ]
 

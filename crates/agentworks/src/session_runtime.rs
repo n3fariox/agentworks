@@ -14,7 +14,9 @@ use agentworks_runtime::acp::initialize_on;
 #[cfg(test)]
 use agentworks_runtime::acp::initialize_request;
 use agentworks_runtime::provider::parse_model_config;
-use agentworks_runtime::provider::{agent_config, is_free_model, prepare, safe_error};
+use agentworks_runtime::provider::{
+    agent_config, cli_provider, is_free_model, prepare, safe_error,
+};
 use agentworks_runtime::subagents::{Notification, Sessions};
 use serde_json::{Value, json};
 use std::{
@@ -340,7 +342,7 @@ pub async fn run(
     let notify_replaying = replaying.clone();
     let initial_mode = {
         let data = s.data.lock().unwrap();
-        if s.provider == "claude" && data.provider_session_id.is_none() {
+        if cli_provider(&s.provider) == "claude" && data.provider_session_id.is_none() {
             data.initial_claude_permission_mode.map(|mode| mode.id())
         } else if s.provider == "codex" && data.provider_session_id.is_none() {
             data.initial_codex_permission_mode.map(|mode| mode.id())
