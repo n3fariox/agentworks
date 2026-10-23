@@ -29,7 +29,9 @@ older adapters retain their ordinary tool-call presentation.
 The bundled Codex SDK parser needs one local correction to preserve
 `clientCapabilities.subagents`; see its [modification notice](../vendor/codex-acp/AGENTWORKS.md).
 Canonical negotiation is used without identifying Agentworks as a JetBrains
-client. Claude's installed SDK already preserves the capability.
+client. Claude's installed SDK already preserves the capability. The Rust Claude
+harness (`claude-rust`) announces each Claude task as a current-draft child session;
+see [its notes](RUST-CLAUDE-ACP.md).
 
 Every persisted update carries `acpSessionId`; child updates also carry
 `parentSessionId`. Ownership comes from explicit announcements, never tool text.

@@ -35,12 +35,21 @@ subagent finishes. The prompt stays open through all of that, so subagent permis
 requests and Claude's follow-up answer belong to the turn that started them. CLIs
 without state events end the prompt at `result`, as before.
 
-Subagent output (`forwardSubagentText`) goes into the Agent tool card: its prompt,
-then the subagent's messages as they arrive, completed or failed on the task
-notification. It is kept out of the main transcript, so fork boundaries stay on
-Claude's own messages. The subagent's tool calls appear as their own cards with
-`_meta.claudeCode.parentToolUseId`. History replay does not include subagent
-transcripts.
+Subagents become [native ACP child sessions](SUBAGENTS.md) when the client
+advertises the `subagents` capability, as Agentworks does. Each Claude task is
+announced with `subagent_update` on the session that owns its Agent tool call (the
+root, or a parent subagent for nested agents), using the task ID as the child session
+ID, the task description as its title and the prompt as its description. The
+subagent's text, thinking, tool calls, permission requests and questions then use the
+child session, so they appear in its `Sub:` tab; the child is reported idle when the
+task finishes, or cancelled when the turn ends first. The Agent tool call stays on
+its owner, completing with the task summary.
+
+Clients without the capability get the subagent's text (`forwardSubagentText`) in
+the Agent tool card instead, and its tool calls as cards with
+`_meta.claudeCode.parentToolUseId`. Either way it is kept out of the main
+transcript, so fork boundaries stay on Claude's own messages. History replay does
+not include subagent transcripts.
 
 History comes from Claude's own transcripts in `$CLAUDE_CONFIG_DIR/projects` (default
 `~/.claude/projects`). Resume and load require the transcript in the project
@@ -67,7 +76,11 @@ Validation (no Node or inference needed):
 cargo build -p agentworks-claude-acp
 cargo test -p agentworks-claude-acp
 python3 tests/claude-acp.test.py -v
+node node_modules/@playwright/test/cli.js test tests/claude-rust-subagents.spec.mjs
 ```
+
+The browser test runs Agentworks with the `claude-rust` harness and the fake CLI,
+checking the `Sub:` tab, the child's approval, transcript separation and reload.
 
 The Python test uses a fake stream-json CLI and the built standalone binary. The Rust
 integration test uses the same typed ACP client as Agentworks, so every update kind

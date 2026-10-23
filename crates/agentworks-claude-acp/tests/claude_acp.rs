@@ -60,7 +60,7 @@ async fn native_bridge_works_with_typed_acp_client() {
             .connect_with(
                 AcpAgent::new(config),
                 move |cx: ConnectionTo<Agent>| async move {
-                    let init: InitializeRequest=serde_json::from_value(json!({"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}},"_meta":{"terminal_output":true,"terminal_output_delta":true}}}))?;
+                    let init: InitializeRequest=serde_json::from_value(json!({"protocolVersion":1,"clientCapabilities":{"subagents":{},"elicitation":{"form":{}},"_meta":{"terminal_output":true,"terminal_output_delta":true}}}))?;
                     cx.send_request(init).block_task().await?;
                     let session = cx.send_request(NewSessionRequest::new(cwd.clone())).block_task().await?;
                     let id = session.session_id.clone();
@@ -110,6 +110,7 @@ async fn native_bridge_works_with_typed_acp_client() {
         "current_mode_update",
         "config_option_update",
         "user_message_chunk",
+        "subagent_update",
     ] {
         assert!(
             kinds.iter().any(|k| k == kind),

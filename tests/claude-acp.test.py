@@ -150,7 +150,7 @@ def harness():
             # A background subagent: the first result ends Claude's own turn, then the
             # subagent works, then Claude continues by itself once it is notified.
             tool("Agent", "tool-a", dict(description="Look around", prompt="List the files", subagent_type="general-purpose"))
-            send(type="system", subtype="task_started", task_id="t1", tool_use_id="tool-a", is_backgrounded=True)
+            send(type="system", subtype="task_started", task_id="t1", tool_use_id="tool-a", is_backgrounded=True, description="Look around", prompt="List the files", subagent_type="general-purpose")
             send(type="user", parent_tool_use_id=None, message=dict(role="user", content=[dict(type="tool_result", tool_use_id="tool-a", content=[dict(type="text", text="Async agent launched successfully")])]))
             text("msg-a1", "Waiting for the agent")
             result()
@@ -474,6 +474,27 @@ class BridgeTests(unittest.TestCase):
         result = [u for u in self.updates("tool_call_update") if u["toolCallId"] == "tool-s"]
         self.assertTrue(all(u["_meta"]["claudeCode"]["parentToolUseId"] == "tool-a" for u in result))
         self.assertEqual(self.prompt("hello")["stopReason"], "end_turn")
+
+    def test_native_subagent_sessions_when_the_client_supports_them(self):
+        self.call("initialize", dict(protocolVersion=1, clientCapabilities=dict(subagents={}, elicitation=dict(form={}))))
+        self.session()
+        request_id = self.send("session/prompt", dict(sessionId=self.id, prompt=[dict(type="text", text="agent")]))
+        request = self.until(lambda v: v.get("method") == "session/request_permission")
+        self.assertEqual(request["params"]["sessionId"], "t1")  # the child's approval
+        self.write(dict(jsonrpc="2.0", id=request["id"], result=dict(outcome=dict(outcome="selected", optionId="allow-once"))))
+        self.assertEqual(self.response(request_id)["result"]["stopReason"], "end_turn")
+        notes = [v["params"] for v in self.seen if v.get("method") == "session/update"]
+        root = [n["update"] for n in notes if n["sessionId"] == self.id]
+        child = [n["update"] for n in notes if n["sessionId"] == "t1"]
+        lifecycle = [u for u in root if u["sessionUpdate"] == "subagent_update"]
+        self.assertEqual(lifecycle[0], dict(sessionUpdate="subagent_update", sessionId="t1", title="Look around", description="List the files", capabilities={}, state=dict(state="running")))
+        self.assertEqual(lifecycle[-1]["state"], dict(state="idle", stopReason="end_turn"))
+        announced = notes.index(next(n for n in notes if n["update"] is lifecycle[0]))
+        self.assertTrue(all(notes.index(n) > announced for n in notes if n["sessionId"] == "t1"))  # announced first
+        self.assertEqual([u["content"]["text"] for u in child if u["sessionUpdate"] == "agent_message_chunk"], ["Found 3 files", '"allow"'])
+        self.assertEqual([(u["sessionUpdate"], u["toolCallId"]) for u in child if u["sessionUpdate"].startswith("tool_call")], [("tool_call", "tool-s"), ("tool_call_update", "tool-s")])
+        self.assertEqual("".join(u["content"]["text"] for u in root if u["sessionUpdate"] == "agent_message_chunk"), "Waiting for the agentdone")
+        self.assertEqual([u["status"] for u in root if u.get("toolCallId") == "tool-a"][-1], "completed")
 
     def test_older_cli_without_state_events_ends_on_result(self):
         Path(self.cwd, "no-state-events").touch()

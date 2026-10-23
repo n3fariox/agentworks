@@ -130,6 +130,12 @@ struct SubAgent {
     log: String,
     background: bool,
     done: bool,
+    /// The ACP session showing the Agent tool call (the root, or a parent subagent).
+    owner: String,
+    /// The announced native ACP child session, when the client supports them.
+    child: Option<String>,
+    /// The child was reported idle.
+    ended: bool,
 }
 struct Session {
     id: String,
@@ -145,6 +151,7 @@ struct Session {
 struct Bridge {
     form: AtomicBool,
     terminal_output: AtomicBool,
+    subagents: AtomicBool,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
 }
 
@@ -287,7 +294,7 @@ impl Session {
                 let input = &r["input"];
                 let tool_id = r["tool_use_id"].as_str().unwrap_or_default();
                 if name == "AskUserQuestion" && bridge.form.load(Ordering::Relaxed) {
-                    return self.ask(input, tool_id, cx).await;
+                    return self.ask(input, tool_id, &self.requester(r), cx).await;
                 }
                 let suggestions = r["permission_suggestions"]
                     .as_array()
@@ -321,7 +328,7 @@ impl Session {
                 let response = cx
                     .send_request(message(
                         "session/request_permission",
-                        json!({"sessionId":self.id,"toolCall":tool,"options":options}),
+                        json!({"sessionId":self.requester(r),"toolCall":tool,"options":options}),
                     ))
                     .block_task()
                     .await?;
@@ -364,7 +371,7 @@ impl Session {
             }
             Some("elicitation") if bridge.form.load(Ordering::Relaxed) && r["mode"] != "url" => {
                 let response = cx
-                    .send_request(message("elicitation/create",json!({"sessionId":self.id,"mode":"form","message":r["message"],"requestedSchema":r["requested_schema"]})))
+                    .send_request(message("elicitation/create",json!({"sessionId":self.requester(r),"mode":"form","message":r["message"],"requestedSchema":r["requested_schema"]})))
                     .block_task()
                     .await?;
                 let mut result = json!({"action":response["action"]});
@@ -379,7 +386,13 @@ impl Session {
     }
 
     /// AskUserQuestion as an ACP form; answers go back as the tool's updated input.
-    async fn ask(&self, input: &Value, tool_id: &str, cx: &ConnectionTo<Client>) -> Result<Value> {
+    async fn ask(
+        &self,
+        input: &Value,
+        tool_id: &str,
+        session: &str,
+        cx: &ConnectionTo<Client>,
+    ) -> Result<Value> {
         let questions: Vec<&Value> = input["questions"]
             .as_array()
             .into_iter()
@@ -428,7 +441,7 @@ impl Session {
             "Please answer the following questions."
         };
         let response = cx
-            .send_request(message("elicitation/create",json!({"sessionId":self.id,"toolCallId":tool_id,"mode":"form","message":text,"requestedSchema":{"type":"object","properties":properties}})))
+            .send_request(message("elicitation/create",json!({"sessionId":session,"toolCallId":tool_id,"mode":"form","message":text,"requestedSchema":{"type":"object","properties":properties}})))
             .block_task()
             .await?;
         let mut answers = Map::new();
@@ -479,6 +492,26 @@ impl Session {
         Ok(json!({"behavior":"allow","updatedInput":updated,"toolUseID":tool_id}))
     }
 
+    /// The ACP session a CLI request belongs to: a subagent's child, or the root.
+    fn requester(&self, request: &Value) -> String {
+        let agent = request["agent_id"].as_str();
+        let s = self.state.lock().unwrap();
+        agent
+            .and_then(|a| {
+                s.agents
+                    .values()
+                    .find_map(|g| g.child.as_deref().filter(|c| *c == a))
+            })
+            .unwrap_or(&self.id)
+            .to_owned()
+    }
+    /// The ACP session for a message from the subagent of Agent call `parent`.
+    fn route(&self, parent: Option<&str>) -> String {
+        let s = self.state.lock().unwrap();
+        parent
+            .and_then(|p| s.agents.get(p)?.child.clone())
+            .unwrap_or_else(|| self.id.clone())
+    }
     fn supports_auto(&self) -> bool {
         let s = self.state.lock().unwrap();
         model_info(&s).is_some_and(|m| m["supportsAutoMode"] == true)
@@ -648,11 +681,27 @@ impl Session {
                                 json!({"sessionUpdate":kind,"messageId":message_id,"content":{"type":"text","text":text}}),
                             )?;
                         }
-                        Some("text") if parent.is_some() => self.agent_text(
-                            parent.unwrap(),
-                            block["text"].as_str().unwrap_or(""),
-                            cx,
-                        )?,
+                        Some(kind @ ("text" | "thinking")) if parent.is_some() => {
+                            let child = self.route(parent);
+                            if child != self.id {
+                                let (kind, text) = if kind == "text" {
+                                    ("agent_message_chunk", &block["text"])
+                                } else {
+                                    ("agent_thought_chunk", &block["thinking"])
+                                };
+                                update(
+                                    cx,
+                                    &child,
+                                    json!({"sessionUpdate":kind,"messageId":message_id,"content":{"type":"text","text":text}}),
+                                )?;
+                            } else if kind == "text" {
+                                self.agent_text(
+                                    parent.unwrap(),
+                                    block["text"].as_str().unwrap_or(""),
+                                    cx,
+                                )?;
+                            }
+                        }
                         Some("tool_use") => self.tool_use(block, parent, cx, bridge)?,
                         _ => {}
                     }
@@ -685,8 +734,20 @@ impl Session {
                 }
                 Some("task_started") => {
                     let tool = v["tool_use_id"].as_str().unwrap_or_default();
-                    if let Some(agent) = self.state.lock().unwrap().agents.get_mut(tool) {
-                        agent.background = v["is_backgrounded"] == true;
+                    let native = bridge.subagents.load(Ordering::Relaxed);
+                    let announce = {
+                        let mut s = self.state.lock().unwrap();
+                        s.agents.get_mut(tool).and_then(|agent| {
+                            agent.background = v["is_backgrounded"] == true;
+                            let task = v["task_id"].as_str().filter(|t| native && !t.is_empty() && agent.child.is_none())?;
+                            agent.child = Some(task.to_owned());
+                            let title = v["description"].as_str().or(v["subagent_type"].as_str()).unwrap_or("Subagent");
+                            let description = v["prompt"].as_str().or(agent.prompt.as_deref()).unwrap_or("");
+                            Some((agent.owner.clone(), json!({"sessionUpdate":"subagent_update","sessionId":task,"title":title,"description":description,"capabilities":{},"state":{"state":"running"}})))
+                        })
+                    };
+                    if let Some((owner, announcement)) = announce {
+                        update(cx, &owner, announcement)?;
                     }
                 }
                 Some("task_notification") => {
@@ -701,12 +762,17 @@ impl Session {
                             })
                         };
                         if known.is_some() {
-                            let status = if v["status"] == "completed" {
-                                "completed"
-                            } else {
-                                "failed"
-                            };
-                            self.agent_card(tool, status, cx)?;
+                            let completed = v["status"] == "completed";
+                            self.agent_card(
+                                tool,
+                                if completed { "completed" } else { "failed" },
+                                cx,
+                            )?;
+                            self.end_child(
+                                tool,
+                                if completed { "end_turn" } else { "cancelled" },
+                                cx,
+                            )?;
                         }
                     }
                 }
@@ -762,11 +828,12 @@ impl Session {
         let tool_id = block["id"].as_str().unwrap_or_default();
         let name = block["name"].as_str().unwrap_or_default();
         let input = &block["input"];
+        let session = self.route(parent);
         {
             let mut s = self.state.lock().unwrap();
             s.tools.insert(
                 tool_id.into(),
-                json!({"name":name,"input":input,"parent":parent}),
+                json!({"name":name,"input":input,"parent":parent,"session":session}),
             );
             s.open.push(tool_id.into());
         }
@@ -776,6 +843,7 @@ impl Session {
                 tool_id.into(),
                 SubAgent {
                     prompt,
+                    owner: session.clone(),
                     ..Default::default()
                 },
             );
@@ -784,7 +852,7 @@ impl Session {
         if let Some(parent) = parent {
             call["_meta"]["claudeCode"]["parentToolUseId"] = json!(parent);
         }
-        update(cx, &self.id, call)?;
+        update(cx, &session, call)?;
         if name == "TodoWrite" && parent.is_none() {
             let entries: Vec<Value> = input["todos"].as_array().into_iter().flatten().map(|t| {
                 let content = if t["status"] == "in_progress" { t["activeForm"].as_str().or(t["content"].as_str()) } else { t["content"].as_str() };
@@ -845,6 +913,15 @@ impl Session {
             // The launch acknowledgement; the subagent reports through task_notification.
             return self.agent_card(tool_id, "in_progress", cx);
         }
+        if !background {
+            let stop = if block["is_error"] == true {
+                "cancelled"
+            } else {
+                "end_turn"
+            };
+            self.end_child(tool_id, stop, cx)?;
+        }
+        let session = tool["session"].as_str().unwrap_or(&self.id).to_owned();
         if tool["name"] == "TaskCreate" && block["is_error"] != true {
             let text = text_of(&block["content"]);
             if let Some((task, _)) = text
@@ -868,7 +945,7 @@ impl Session {
             if let Some(parent) = tool["parent"].as_str() {
                 event["_meta"]["claudeCode"]["parentToolUseId"] = json!(parent);
             }
-            update(cx, &self.id, event)?;
+            update(cx, &session, event)?;
         }
         Ok(())
     }
@@ -968,10 +1045,22 @@ impl Session {
                 .filter(|(_, a)| a.background && !a.done)
                 .map(|(id, _)| id.clone())
                 .collect();
-            (s.turn.take(), std::mem::take(&mut s.open), agents)
+            let open: Vec<(String, String)> = std::mem::take(&mut s.open)
+                .into_iter()
+                .map(|t| {
+                    let session = s
+                        .tools
+                        .get(&t)
+                        .and_then(|t| t["session"].as_str())
+                        .unwrap_or(&self.id)
+                        .to_owned();
+                    (t, session)
+                })
+                .collect();
+            (s.turn.take(), open, agents)
         };
         let cancelled = turn.as_ref().is_some_and(|t| t.cancelled);
-        for tool in open {
+        for (tool, session) in open {
             let reason = if cancelled {
                 "The turn was cancelled before this tool call returned a result."
             } else {
@@ -979,12 +1068,16 @@ impl Session {
             };
             update(
                 cx,
-                &self.id,
+                &session,
                 json!({"sessionUpdate":"tool_call_update","toolCallId":tool,"status":"failed","content":[text_content(reason)]}),
             )?;
         }
         for agent in agents {
             self.agent_card(&agent, "failed", cx)?;
+        }
+        let running: Vec<String> = self.state.lock().unwrap().agents.keys().cloned().collect();
+        for agent in running {
+            self.end_child(&agent, "cancelled", cx)?;
         }
         self.state.lock().unwrap().agents.clear();
         for (_, task) in self.questions.lock().unwrap().drain() {
@@ -1018,23 +1111,46 @@ impl Session {
     }
     /// The Agent tool card: its prompt, then what the subagent has said so far.
     fn agent_card(&self, id: &str, status: &str, cx: &ConnectionTo<Client>) -> Result<()> {
-        let content: Vec<Value> = {
+        let (owner, content): (String, Vec<Value>) = {
             let s = self.state.lock().unwrap();
             let Some(agent) = s.agents.get(id) else {
                 return Ok(());
             };
-            agent
+            let content = agent
                 .prompt
                 .iter()
                 .chain(Some(&agent.log).filter(|l| !l.is_empty()))
                 .map(|t| text_content(t))
-                .collect()
+                .collect();
+            (agent.owner.clone(), content)
         };
         update(
             cx,
-            &self.id,
+            &owner,
             json!({"sessionUpdate":"tool_call_update","toolCallId":id,"status":status,"content":content}),
         )
+    }
+    /// Report a native child session idle once; it stays a readable tab.
+    fn end_child(&self, tool: &str, stop: &str, cx: &ConnectionTo<Client>) -> Result<()> {
+        let ended = {
+            let mut s = self.state.lock().unwrap();
+            s.agents.get_mut(tool).and_then(|a| {
+                a.done = true;
+                if a.ended {
+                    return None;
+                }
+                a.ended = true;
+                Some((a.owner.clone(), a.child.clone()?))
+            })
+        };
+        match ended {
+            Some((owner, child)) => update(
+                cx,
+                &owner,
+                json!({"sessionUpdate":"subagent_update","sessionId":child,"state":{"state":"idle","stopReason":stop}}),
+            ),
+            None => Ok(()),
+        }
     }
 }
 
@@ -1064,6 +1180,8 @@ impl Bridge {
                     .store(caps["elicitation"]["form"].is_object(), Ordering::Relaxed);
                 self.terminal_output
                     .store(caps["_meta"]["terminal_output"] == true, Ordering::Relaxed);
+                self.subagents
+                    .store(caps["subagents"].is_object(), Ordering::Relaxed);
                 Ok(
                     json!({"protocolVersion":1,"agentInfo":{"name":"agentworks-claude-acp","title":"Claude Agent","version":env!("CARGO_PKG_VERSION")},
                     "agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"embeddedContext":true},"mcpCapabilities":{"http":true,"sse":true},
@@ -2234,6 +2352,7 @@ pub async fn run() -> Result<()> {
     let bridge = Arc::new(Bridge {
         form: AtomicBool::new(false),
         terminal_output: AtomicBool::new(false),
+        subagents: AtomicBool::new(false),
         sessions: Mutex::default(),
     });
     let requests = bridge.clone();
