@@ -11,6 +11,9 @@ mkdirSync(stateDir,{recursive:true});
 function save(id){const file=join(stateDir,id+'.json');writeFileSync(file+'.tmp',JSON.stringify(sessions.get(id)),{mode:0o600});renameSync(file+'.tmp',file);}
 function commands(id){update(id,{sessionUpdate:'available_commands_update',availableCommands:[{name:'status',description:'Read-only demo status'},{name:'usage',description:'Read-only demo usage'},{name:'help',description:'Show demo help'},{name:'$demo-skill',description:'Example skill entry; no model is called'}]});}
 const sessions = new Map(), approvals = new Map(), mcpConfigs = new Map();
+// Like real harnesses, the client system prompt is held per connection, never saved.
+const systemPrompts = new Map();
+const systemPrompt=params=>params.systemPrompt?.content?.filter(b=>b.type==='text').map(b=>b.text).join('\n\n')||null;
 let elicitForm=false;
 const lifecycle=process.env.AGENTWORKS_DEMO_LIFECYCLE==='1';
 const activePrompts=new Map();
@@ -46,6 +49,8 @@ async function prompt(id, params) {
   const chunk=text=>update(params.sessionId,{sessionUpdate:'agent_message_chunk',content:{type:'text',text}});
   // U-07 fixture: `usage-status {json}` emits that usage_update deterministically; no model is called.
   if(text.startsWith('usage-status ')){update(params.sessionId,{sessionUpdate:'usage_update',...JSON.parse(text.slice(13))});chunk('usage reported');save(params.sessionId);reply(id,{stopReason:'end_turn'});return;}
+  // Roles fixture: `role?` reports the system prompt this connection received.
+  if(text==='role?'){chunk(systemPrompts.get(params.sessionId)??'No system prompt.');save(params.sessionId);reply(id,{stopReason:'end_turn'});return;}
   // U-05 fixture: `bazel demo` replays recorded Bazel tool output; no command is executed.
   if(text==='bazel demo'){
     const toolCallId=randomUUID();
@@ -156,9 +161,9 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   const {id,method,params={}}=message;
   if(!lifecycle&&process.env.AGENTWORKS_DEMO_TRACE==='1')trace(method,params.sessionId);
   switch(method){
-    case 'initialize': elicitForm=!!params.clientCapabilities?.elicitation?.form;reply(id,{protocolVersion:1,agentInfo:{name:'agentworks-demo',version:'0.1.0'},agentCapabilities:{loadSession:true,sessionCapabilities:{resume:{},list:{},...(lifecycle?{close:{},delete:{}}:{})},promptCapabilities:process.env.AGENTWORKS_DEMO_PROMPT_CAPS?JSON.parse(process.env.AGENTWORKS_DEMO_PROMPT_CAPS):{image:true,embeddedContext:true}},authMethods:[]});break;
+    case 'initialize': elicitForm=!!params.clientCapabilities?.elicitation?.form;reply(id,{protocolVersion:1,agentInfo:{name:'agentworks-demo',version:'0.1.0'},agentCapabilities:{loadSession:true,sessionCapabilities:{resume:{},list:{},systemPrompt:{},...(lifecycle?{close:{},delete:{}}:{})},promptCapabilities:process.env.AGENTWORKS_DEMO_PROMPT_CAPS?JSON.parse(process.env.AGENTWORKS_DEMO_PROMPT_CAPS):{image:true,embeddedContext:true}},authMethods:[]});break;
     case 'session/new':{
-      const sessionId=randomUUID();mcpConfigs.set(sessionId,params.mcpServers||[]);sessions.set(sessionId,{cwd:params.cwd,turn:0,cancelled:false,model:'demo/steady'});
+      const sessionId=randomUUID();mcpConfigs.set(sessionId,params.mcpServers||[]);systemPrompts.set(sessionId,systemPrompt(params));sessions.set(sessionId,{cwd:params.cwd,turn:0,cancelled:false,model:'demo/steady'});
       trace('session/new',sessionId);save(sessionId);reply(id,{sessionId,configOptions:modelConfig('demo/steady')});
       commands(sessionId);break;
     }
@@ -177,7 +182,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         if(!/^[a-f0-9-]{36}$/.test(params.sessionId))throw new Error('Invalid session ID');
         const session=JSON.parse(readFileSync(join(stateDir,params.sessionId+'.json'),'utf8'));
         if(session.cwd!==params.cwd)throw new Error('Directory mismatch');
-        session.cancelled=false;sessions.set(params.sessionId,session);mcpConfigs.set(params.sessionId,params.mcpServers||[]);
+        session.cancelled=false;sessions.set(params.sessionId,session);mcpConfigs.set(params.sessionId,params.mcpServers||[]);systemPrompts.set(params.sessionId,systemPrompt(params));
         if(method==='session/load')for(const update of session.history||[])send({method:'session/update',params:{sessionId:params.sessionId,update}});
         if(method==='session/load'&&session.failLoad){send({id,error:{code:-32603,message:'Demo history load failed'}});break;}
         // Deterministic native-opening race fixture; never delays ordinary demo sessions.

@@ -27,6 +27,7 @@
     "test:controller-archive": "node scripts/controller-archive-smoke.mjs",
     "test:controllers": "node scripts/controller-smoke.mjs",
     "test:fork": "node scripts/fork-smoke.mjs",
+    "test:roles": "node scripts/roles-smoke.mjs && playwright test tests/roles.spec.mjs",
     "test:worktree-ui": "playwright test tests/worktree-launch.spec.mjs",
     "test:limit-resume": "node scripts/limit-resume-smoke.mjs",
     "test:acp-lifecycle": "node scripts/acp-lifecycle-smoke.mjs",

@@ -78,7 +78,7 @@ let drawTimer=null, retryTimer=null, reconnectDelay=500, creating=false;
 const nodes=new Map();
 let pendingCreate=readStorage(sessionStorage,'agentworks-pending-create',null);
 // L-08: set only while the new-session dialog is pre-filled from an existing session.
-let forkSource=null,forkGeneration=0,modelPicked=false;
+let forkSource=null,forkGeneration=0,modelPicked=false,roleLibrary=[];
 const worktrees=setupWorktreeControls({$,api,onChange:()=>{if(config)providerNote();}});
 const policyEditor=setupPolicyEditor({$,api});
 const display=setupDisplayPreferences();display.mount($('display-preferences'));
@@ -105,11 +105,28 @@ function providerNote() {
   if(remote){
     const available=remote.status==='connected'&&remote.worker?.providers?.includes(p.id);
     $('provider-note').textContent=available?`Uses ${labels[p.id]} and sign-ins on ${remote.name}.`:`${labels[p.id]} is unavailable on ${remote.name}.`;
-    $('create-submit').disabled=!available||!remote.roots?.length||creating||worktrees.blocked();
+    $('create-submit').disabled=!available||!remote.roots?.length||creating||worktrees.blocked()||!!(forkSource?.role&&!p.roles);
     return;
   }
   $('provider-note').textContent=p.id==='demo'?'Local test agent. No model calls, API key, or file changes.':p.id==='opencode'?(p.installed?'Native ACP. Choose an advertised free model. Availability and limits may change.':'Install OpenCode on this host or set AGENTWORKS_OPENCODE_PATH.'):!p.installed?(p.id==='codex-rust'?'Install native Codex on this host or set CODEX_PATH.':'Adapter not installed. Run npm ci --ignore-scripts.'):p.authMode==='existing'?'Uses the existing agent sign-in on this host. If it has expired, sign in with the CLI and try again.':!p.keyPresent?`Set ${p.id==='claude'?'ANTHROPIC_API_KEY':'OPENAI_API_KEY or CODEX_API_KEY'} before starting the server.`:'API key available on the host. Messages use your provider account.';
-  $('create-submit').disabled=!p.installed||(p.authMode==='api_key'&&!p.keyPresent)||creating||worktrees.blocked();
+  $('create-submit').disabled=!p.installed||(p.authMode==='api_key'&&!p.keyPresent)||creating||worktrees.blocked()||!!(forkSource?.role&&!p.roles);
+}
+// Roles add instructions to the agent's system prompt; they never change Agentworks access.
+function renderRoles(){
+  const select=$('create-role'),previous=select.value;select.replaceChildren(new Option('No role',''));
+  for(const [label,builtin] of [['Built-in',true],['Custom',false]]){
+    const items=roleLibrary.filter(r=>r.builtin===builtin);if(!items.length)continue;
+    const group=document.createElement('optgroup');group.label=label;
+    for(const r of items)group.append(new Option(r.name,r.id));select.append(group);
+  }
+  select.value=roleLibrary.some(r=>r.id===previous)?previous:'';updateRoleNote();
+}
+function updateRoleNote(){
+  const select=$('create-role'),p=config.providers.find(p=>p.id===$('provider').value);
+  if(forkSource){select.disabled=true;select.value='';$('create-role-note').textContent=!forkSource.role?'The parent has no role.':p?.roles?`Forks keep the parent's role · ${forkSource.role.name}`:`${labels[p?.id]||'This agent'} cannot fork this session because it must keep the “${forkSource.role.name}” role.`;return;}
+  select.disabled=!p?.roles;if(!p?.roles)select.value='';
+  const role=roleLibrary.find(r=>r.id===select.value);
+  $('create-role-note').textContent=!p?.roles?`${labels[p?.id]||'This agent'} does not accept role instructions yet.`:role?(role.description||'Custom role.')+' Added to the agent\'s system prompt.':'Adds instructions to the agent\'s system prompt. Roles do not change Agentworks access.';
 }
 const communicationLabels={off:'Off',participant:'Participant',coordinator:'Coordinator'};
 function updateCommunicationDefault(){
@@ -127,10 +144,11 @@ function openCreate(context={}) {
   $('create-project').value=projectId||'';
   const locations=readStorage(localStorage,'agentworks-project-locations',{});
   $('create-resume-policy').checked=false;
+  $('create-role').value='';api('/api/roles').then(list=>{roleLibrary=Array.isArray(list)?list:[];renderRoles();}).catch(()=>{});
   $('create-agent-access').value='';updateCommunicationDefault();$('create-error').textContent='';$('directory').value=context.cwd||workspaceContext?.cwd||locations[projectId||'ungrouped']||(active?.hostId==='local'?active.cwd:null)||config.roots[0];$('session-title').value=context.title||'';
   if(context.provider&&$('provider').querySelector(`option[value="${context.provider}"]`))$('provider').value=context.provider;
   $('fork-boundary').replaceChildren(new Option('Latest completed turn at submission',''));$('fork-context').value='auto';$('fork-summary').value='';
-  renderForkHeader();fillCreateHosts(context.hostId||'local',context.cwd);providerNote();
+  renderForkHeader();fillCreateHosts(context.hostId||'local',context.cwd);providerNote();updateRoleNote();
   // Forking suggests its own worktree so the new session starts from this one's
   // position; the base revision is filled in from Git once the policy has loaded.
   worktrees.projectChanged(context.workspaceMode);
@@ -189,7 +207,7 @@ function applyForkModel(model){
 async function openFork(parent=active){
   if(!parent||!config)return;
   $('lifecycle-menu').open=false;
-  const generation=openCreate({fork:{id:parent.id,title:parent.title,provider:parent.provider,cwd:parent.cwd,model:(active?.id===parent.id?modelConfig?.currentValue:null)||parent.model||null,turns:0},
+  const generation=openCreate({fork:{id:parent.id,title:parent.title,provider:parent.provider,cwd:parent.cwd,model:(active?.id===parent.id?modelConfig?.currentValue:null)||parent.model||null,role:parent.role||null,turns:0},
     hostId:parent.hostId||'local',projectId:parent.projectId??null,cwd:parent.cwd,title:`${parent.title} (fork)`,provider:parent.provider,workspaceMode:'newWorktree'});
   const id=parent.id;
   try{
@@ -1033,7 +1051,8 @@ $('session-project').onchange=async event=>{
 };
 $('dismiss-create').onclick=()=>$('create-dialog').close();
 $('menu').onclick=()=>document.body.classList.toggle('menu-open');$('session-home').onclick=()=>{if(history.state?.agentworks==='chat')history.back();else showBrowser();};$('session-search').onclick=()=>$('palette-search').click();$('scrim').onclick=()=>document.body.classList.remove('menu-open');
-$('provider').onchange=()=>{providerNote();resetCreateModels();};
+$('provider').onchange=()=>{providerNote();resetCreateModels();updateRoleNote();};
+$('create-role').onchange=()=>updateRoleNote();
 $('directory').onchange=resetCreateModels;
 $('load-models').onclick=loadCreateModels;
 $('create-model').onchange=()=>{modelPicked=true;};
@@ -1058,7 +1077,7 @@ $('create-form').onsubmit=async event=>{
   event.preventDefault();if(creating||worktrees.blocked())return;creating=true;providerNote();$('create-error').textContent='';
   const fork=forkSource;
   try{
-    const payload={resumePolicy:{enabled:$('create-resume-policy').checked},provider:$('provider').value,...worktrees.submission(),title:$('session-title').value,projectId:$('create-project').value||null,hostId:$('create-host').value,model:$('create-model').value,...($('create-agent-access').value?{agentAccess:{communicate:$('create-agent-access').value!=='off',...Object.fromEntries(['startSessions','promptSessions','cancelSessions','runAutomations'].map(key=>[key,$('create-agent-access').value==='coordinator']))}}:{})};
+    const payload={resumePolicy:{enabled:$('create-resume-policy').checked},provider:$('provider').value,...worktrees.submission(),title:$('session-title').value,projectId:$('create-project').value||null,hostId:$('create-host').value,model:$('create-model').value,...(!fork&&$('create-role').value?{role:$('create-role').value}:{}),...($('create-agent-access').value?{agentAccess:{communicate:$('create-agent-access').value!=='off',...Object.fromEntries(['startSessions','promptSessions','cancelSessions','runAutomations'].map(key=>[key,$('create-agent-access').value==='coordinator']))}}:{})};
     if(fork)Object.assign(payload,{boundarySeq:$('fork-boundary').value?Number($('fork-boundary').value):null,context:$('fork-context').value,summary:$('fork-context').value==='summary'?$('fork-summary').value:null});
     const signature=JSON.stringify({source:fork?.id||null,payload});
     if(!pendingCreate||pendingCreate.signature!==signature)pendingCreate={signature,requestId:uuid()};

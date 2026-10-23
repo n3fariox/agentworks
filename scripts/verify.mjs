@@ -45,6 +45,7 @@ try{
   await run('node',['scripts/worktree-cleanup-smoke.mjs']);
   await run('node',['scripts/worktree-cleanup-smoke.mjs'],{AGENTWORKS_CLEANUP_REMOTE:'1'});
   await run('node',['scripts/limit-resume-smoke.mjs']);
+  await run('node',['scripts/roles-smoke.mjs']);
   await run('node',['scripts/lifecycle-smoke.mjs']);
   await run('node',['scripts/project-lifecycle-smoke.mjs']);
   await run('python3',['scripts/service/supervisor-test.py']);
