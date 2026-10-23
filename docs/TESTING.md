@@ -35,6 +35,8 @@ The browser flow is covered by `npx playwright test tests/hosts.spec.mjs`, inclu
 
 The smoke test uses the demo agent to exercise ACP streaming, multiple turns, disconnect survival, idempotency, approval allow/stale/invalid responses, cancellation, Markdown sanitization, and directory/origin checks. Workspace checks also cover file boundaries, manual automation runs, approval/concurrency handling, and retained run history. They make no paid model requests.
 
+Compact tool snapshots, tool bodies on demand, reconnect resume and tool headers: `npm run test:tool-bodies` (smoke against `AGENTWORKS_URL`, then an isolated browser check on port 4458).
+
 For browser checks:
 
 ```bash

@@ -34,6 +34,7 @@ pub const HOST_API_VERSION: u32 = 1;
 const PROGRESS_PRELUDE: &str = "@agentworks//progress.star";
 const MESSAGE_PRELUDE: &str = "@agentworks//message.star";
 const WORKFLOW_PRELUDE: &str = "@agentworks//workflow.star";
+const TOOL_PRELUDE: &str = "@agentworks//tool.star";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -44,6 +45,8 @@ pub enum Capability {
     Workflow,
     /// Formats peer message data as Markdown. No actions or I/O.
     MessageFormatter,
+    /// Chooses the one-line header shown for a tool card. Display only.
+    ToolHeader,
 }
 
 impl Capability {
@@ -52,6 +55,7 @@ impl Capability {
             Capability::Parser => (PROGRESS_PRELUDE, include_str!("../host/progress.star")),
             Capability::MessageFormatter => (MESSAGE_PRELUDE, include_str!("../host/message.star")),
             Capability::Workflow => (WORKFLOW_PRELUDE, include_str!("../host/workflow.star")),
+            Capability::ToolHeader => (TOOL_PRELUDE, include_str!("../host/tool.star")),
         }
     }
     fn entry(self) -> &'static str {
@@ -59,6 +63,7 @@ impl Capability {
             Capability::Parser => "on_line",
             Capability::Workflow => "on_event",
             Capability::MessageFormatter => "format_message",
+            Capability::ToolHeader => "tool_header",
         }
     }
     /// Host API v1 entry signature, as rendered by the starlark typechecker.
@@ -67,6 +72,7 @@ impl Capability {
             Capability::Parser => "def(ctx: LineContext, line: str) -> None | Progress",
             Capability::Workflow => "def(ctx: WorkflowContext, event: Event) -> list[Action]",
             Capability::MessageFormatter => "def(ctx: MessageContext, message: PeerMessage) -> str",
+            Capability::ToolHeader => "def(ctx: ToolContext, tool: ToolCall) -> None | str",
         }
     }
     /// Prelude record type for the hook's `ctx` argument.
@@ -75,6 +81,7 @@ impl Capability {
             Capability::Parser => "LineContext",
             Capability::Workflow => "WorkflowContext",
             Capability::MessageFormatter => "MessageContext",
+            Capability::ToolHeader => "ToolContext",
         }
     }
 }
@@ -122,7 +129,7 @@ impl Limits {
         match capability {
             Capability::Parser => Self::parser(),
             Capability::Workflow => Self::workflow(),
-            Capability::MessageFormatter => Self::parser(),
+            Capability::MessageFormatter | Capability::ToolHeader => Self::parser(),
         }
     }
 }
@@ -255,7 +262,7 @@ fn globals(capability: Capability) -> Globals {
             .with(parser_helpers)
             .with_namespace("agent", registration::registration_helpers)
             .build(),
-        Capability::MessageFormatter => builder
+        Capability::MessageFormatter | Capability::ToolHeader => builder
             .with_namespace("agent", registration::registration_helpers)
             .build(),
         Capability::Workflow => builder.build(),
@@ -311,9 +318,11 @@ pub struct Engine {
     parser_globals: Globals,
     workflow_globals: Globals,
     message_globals: Globals,
+    tool_globals: Globals,
     parser_prelude: Prelude,
     workflow_prelude: Prelude,
     message_prelude: Prelude,
+    tool_prelude: Prelude,
     cache: Mutex<HashMap<String, Arc<Compiled>>>,
     hook_globals: Globals,
     hook_cache: Mutex<HashMap<(String, String), Arc<RegisteredScript>>>,
@@ -325,6 +334,8 @@ impl Engine {
         let workflow_globals = globals(Capability::Workflow);
         let message_globals = globals(Capability::MessageFormatter);
         let message_prelude = prelude(Capability::MessageFormatter, &message_globals)?;
+        let tool_globals = globals(Capability::ToolHeader);
+        let tool_prelude = prelude(Capability::ToolHeader, &tool_globals)?;
         let parser_prelude = prelude(Capability::Parser, &parser_globals)?;
         let workflow_prelude = prelude(Capability::Workflow, &workflow_globals)?;
         Ok(Engine {
@@ -332,6 +343,8 @@ impl Engine {
             workflow_globals,
             message_globals,
             message_prelude,
+            tool_globals,
+            tool_prelude,
             parser_prelude,
             workflow_prelude,
             cache: Mutex::default(),
@@ -345,6 +358,7 @@ impl Engine {
             Capability::Parser => (&self.parser_globals, &self.parser_prelude),
             Capability::Workflow => (&self.workflow_globals, &self.workflow_prelude),
             Capability::MessageFormatter => (&self.message_globals, &self.message_prelude),
+            Capability::ToolHeader => (&self.tool_globals, &self.tool_prelude),
         }
     }
 
@@ -478,7 +492,9 @@ impl Engine {
                     })?;
                 (display, Some(Arc::new(regex)))
             }
-            Capability::Workflow | Capability::MessageFormatter => (install.name.clone(), None),
+            Capability::Workflow | Capability::MessageFormatter | Capability::ToolHeader => {
+                (install.name.clone(), None)
+            }
         };
         let compiled = Arc::new(Compiled {
             name: install.name.clone(),
@@ -646,6 +662,7 @@ fn cap_name(c: Capability) -> &'static str {
         Capability::Parser => "parser",
         Capability::Workflow => "workflow",
         Capability::MessageFormatter => "message_formatter",
+        Capability::ToolHeader => "tool_header",
     }
 }
 
@@ -670,6 +687,7 @@ fn prelude(capability: Capability, globals: &Globals) -> Result<Prelude, String>
     let event = match capability {
         Capability::Parser => None,
         Capability::MessageFormatter => Some(module.get("message_from_json").map_err(|e| e.to_string())?),
+        Capability::ToolHeader => Some(module.get("tool_from_json").map_err(|e| e.to_string())?),
         Capability::Workflow => Some(module.get("event_from_json").map_err(|e| e.to_string())?),
     };
     // The standalone typechecker does not evaluate `record(...)`, so names bound to
