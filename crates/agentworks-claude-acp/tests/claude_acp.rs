@@ -27,7 +27,6 @@ async fn native_bridge_works_with_typed_acp_client() {
         .env("CLAUDE_CONFIG_DIR", config_dir.to_string_lossy());
     let updates = Arc::new(Mutex::new(Vec::new()));
     let seen = updates.clone();
-    let projects = config_dir.join("projects");
     tokio::time::timeout(
         Duration::from_secs(10),
         Client
@@ -71,17 +70,12 @@ async fn native_bridge_works_with_typed_acp_client() {
                         assert_eq!(response.stop_reason, StopReason::EndTurn, "{text}");
                     }
                     cx.send_notification(CancelNotification::new(id.clone()))?;
-                    let fork = cx.send_request(ForkSessionRequest::new(id.clone(), cwd.clone())).block_task().await;
-                    // The fake CLI writes no transcript, so there is nothing to fork yet.
-                    assert!(fork.is_err());
+                    // The fake CLI persists prompts like Claude Code, so the session resumes.
                     cx.send_request(CloseSessionRequest::new(id.clone())).block_task().await?;
-                    let missing = cx.send_request(ResumeSessionRequest::new(id.clone(), cwd.clone())).block_task().await;
-                    assert!(missing.is_err());
-                    cx.send_request(ListSessionsRequest::new()).block_task().await?;
-                    let transcript = format!("{}\n", json!({"type":"user","uuid":"u1","parentUuid":null,"sessionId":id.to_string(),"cwd":cwd,"isSidechain":false,"message":{"role":"user","content":"hi"}}));
-                    let dir = projects.join(cwd.to_string_lossy().replace(|c: char| !c.is_ascii_alphanumeric(), "-"));
-                    std::fs::create_dir_all(&dir).unwrap();
-                    std::fs::write(dir.join(format!("{id}.jsonl")), transcript).unwrap();
+                    cx.send_request(ResumeSessionRequest::new(id.clone(), cwd.clone())).block_task().await?;
+                    let listed = cx.send_request(ListSessionsRequest::new()).block_task().await?;
+                    assert!(listed.sessions.iter().any(|s| s.session_id == id));
+                    cx.send_request(CloseSessionRequest::new(id.clone())).block_task().await?;
                     cx.send_request(LoadSessionRequest::new(id.clone(), cwd.clone())).block_task().await?;
                     let fork = cx.send_request(ForkSessionRequest::new(id.clone(), cwd.clone())).block_task().await?;
                     assert_ne!(fork.session_id, id);

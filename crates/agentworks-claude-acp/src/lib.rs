@@ -153,6 +153,9 @@ struct Bridge {
     terminal_output: AtomicBool,
     subagents: AtomicBool,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
+    /// A session's CLI exited on its own; the bridge then ends so the client sees it.
+    exited: tokio::sync::Notify,
+    exit_reason: Mutex<Option<String>>,
 }
 
 impl Session {
@@ -279,10 +282,43 @@ impl Session {
             s.turn.take()
         };
         self.pending.lock().unwrap().clear();
+        // Close and delete unregister the session before stopping its CLI, and a CLI
+        // that fails while opening is not registered yet: those are ordinary errors.
+        let unexpected = {
+            let mut sessions = bridge.sessions.lock().unwrap();
+            let registered = sessions
+                .get(&self.id)
+                .is_some_and(|s| Arc::ptr_eq(s, &self));
+            if registered {
+                sessions.remove(&self.id);
+            }
+            registered
+        };
+        let status = if unexpected {
+            let mut child = self.child.lock().await;
+            match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
+                Ok(Ok(status)) => format!(" ({status})"),
+                _ => {
+                    let _ = child.kill().await;
+                    String::new()
+                }
+            }
+        } else {
+            String::new()
+        };
         if let Some(turn) = turn {
             let mut error = Error::internal_error().data(json!({"errorKind":"transport_lost"}));
-            error.message = "Claude Code exited during the turn".into();
+            error.message = format!(
+                "Claude Code exited during this turn{status}. It was not retried; resume the session and check the last tool result before continuing."
+            );
             let _ = turn.done.send(Err(error));
+        }
+        if unexpected {
+            *bridge.exit_reason.lock().unwrap() = Some(format!(
+                "Claude Code exited unexpectedly{status} for session {}; resume the session to continue",
+                self.id
+            ));
+            bridge.exited.notify_one();
         }
     }
 
@@ -2441,8 +2477,11 @@ pub async fn run() -> Result<()> {
         terminal_output: AtomicBool::new(false),
         subagents: AtomicBool::new(false),
         sessions: Mutex::default(),
+        exited: tokio::sync::Notify::new(),
+        exit_reason: Mutex::default(),
     });
     let requests = bridge.clone();
+    let watcher = bridge.clone();
     let notifications = bridge.clone();
     let result = Agent
         .builder()
@@ -2487,8 +2526,14 @@ pub async fn run() -> Result<()> {
             agent_client_protocol::on_receive_notification!(),
         )
         .connect_with(Stdio::new(), move |cx: ConnectionTo<Client>| async move {
-            cx.incoming_closed().await;
-            Ok(())
+            tokio::select! {
+                _ = cx.incoming_closed() => Ok(()),
+                _ = watcher.exited.notified() => {
+                    // Let the failed prompt's response reach the client first.
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    Err(failure(watcher.exit_reason.lock().unwrap().take().unwrap_or_default()))
+                }
+            }
         })
         .await;
     let sessions: Vec<_> = bridge

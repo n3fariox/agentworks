@@ -84,3 +84,16 @@ test('importing a saved Claude conversation rebuilds its subagent tabs',async({p
   await page.reload();await expect(page.getByRole('tab',{name:'Sub: Nested',exact:true})).toBeVisible();
   expect(errors).toEqual([]);
 });
+
+test('a crashed Claude CLI is reported and the session resumes deliberately',async({page})=>{
+  const s=await api('/api/sessions',{provider:'claude-rust',cwd:dir});await state(s.id,'idle');
+  await api('/api/sessions/'+s.id+'/prompt',{text:'hello',requestId:'before-crash'});await state(s.id,'idle');
+  await api('/api/sessions/'+s.id+'/prompt',{text:'exit',requestId:'crash'});
+  await state(s.id,'error');
+  await page.goto(base);await page.evaluate(id=>localStorage.setItem('agentworks-session',id),s.id);await page.reload();
+  await expect(page.locator('#messages')).toContainText('not retried');
+  await api('/api/sessions/'+s.id+'/resume',{});await state(s.id,'idle');
+  await api('/api/sessions/'+s.id+'/prompt',{text:'hello',requestId:'after-resume'});await state(s.id,'idle');
+  const events=(await api('/api/sessions/'+s.id)).events||[];
+  expect(JSON.stringify(events)).toContain('Claude Code exited unexpectedly');
+});

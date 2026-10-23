@@ -67,11 +67,17 @@ with fresh message ids. Unknown boundaries fail rather than inheriting newer his
 Deletion removes the transcript and its sidecar directory.
 
 This is intentionally smaller than the npm adapter. Not implemented: the AIR/JetBrains
-extensions (native subagent child sessions, steering, async tasks, goals, file-change
+extensions (steering, async tasks, goals, file-change
 reports), fast mode, custom agents, provider routing/gateways, terminal login
 methods, MCP OAuth, plan clear-context, prompt suggestions, and session titles beyond
-those Claude stores. If the CLI exits, the active turn fails with
-`errorKind: transport_lost`; reopen the session to continue.
+those Claude stores.
+
+If a session's CLI exits on its own, nothing is respawned or retried. A running turn
+fails with `errorKind: transport_lost` and a message saying it was not retried, and
+the bridge then exits, reporting the CLI's exit status on stderr. Agentworks shows
+the session as failed; **Resume** reopens it with `session/resume`. Close, delete and
+a CLI that fails while a session is opening are ordinary errors and leave the bridge
+running.
 
 A remote worker offers `claude-rust` when it finds a native `claude` (or
 `CLAUDE_CODE_EXECUTABLE`), even without Node. Remote enrollment still installs the

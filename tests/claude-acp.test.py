@@ -92,6 +92,10 @@ def harness():
         if v["type"] == "user":
             content = v["message"]["content"]
             prompt = content[0]["text"]
+            # Like Claude Code, persist the conversation once it has a prompt.
+            project_dir(os.getcwd()).mkdir(parents=True, exist_ok=True)
+            with open(project_dir(os.getcwd()) / f"{session}.jsonl", "a") as transcript:
+                transcript.write(json.dumps(dict(type="user", uuid=f"u-{time.time_ns()}", parentUuid=None, sessionId=session, cwd=os.getcwd(), isSidechain=False, message=v["message"])) + "\n")
             if prompt == "exit":
                 sys.exit(0)
             if states:
@@ -103,6 +107,8 @@ def harness():
                 result("error_during_execution", True, output=0, errors=["interrupted"])
             if states:
                 send(type="system", subtype="session_state_changed", state="idle")
+            if prompt == "crash-when-idle":
+                sys.exit(3)
         return True
 
     def turn(prompt, content):
@@ -249,7 +255,10 @@ class BridgeTests(unittest.TestCase):
         self.assertTrue(all(k in caps["sessionCapabilities"] for k in ["resume", "fork", "list", "close", "delete"]))
 
     def close(self):
-        self.process.stdin.close()
+        try:
+            self.process.stdin.close()
+        except BrokenPipeError:  # the bridge already exited
+            pass
         try:
             self.process.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -564,12 +573,30 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(self.prompt("hello")["stopReason"], "end_turn")
         self.assertEqual(self.prompt("/usage")["stopReason"], "end_turn")
 
-    def test_cli_exit_fails_the_turn(self):
+    def exited(self):
+        """The bridge ends after a CLI crash, reporting it on stderr."""
+        self.assertEqual(self.process.wait(timeout=5), 1)
+        return self.process.stderr.read()
+
+    def test_cli_exit_fails_the_turn_and_ends_the_bridge(self):
         self.session()
         response = self.response(self.send("session/prompt", dict(sessionId=self.id, prompt=[dict(type="text", text="exit")])))
         self.assertEqual(response["error"]["data"]["errorKind"], "transport_lost")
-        response = self.response(self.send("session/prompt", dict(sessionId=self.id, prompt=[dict(type="text", text="hello")])))
-        self.assertIn("error", response)
+        self.assertIn("not retried", response["error"]["message"])
+        self.assertIn("Claude Code exited unexpectedly (exit status: 0) for session " + self.id, self.exited())
+
+    def test_cli_exit_while_idle_ends_the_bridge(self):
+        self.session()
+        self.assertEqual(self.prompt("crash-when-idle")["stopReason"], "end_turn")
+        self.assertIn("exit status: 3", self.exited())
+
+    def test_deliberate_close_keeps_the_bridge(self):
+        self.session()
+        self.call("session/close", dict(sessionId=self.id))
+        time.sleep(0.3)
+        self.assertIsNone(self.process.poll())
+        self.session()
+        self.assertEqual(self.prompt("hello")["stopReason"], "end_turn")
 
 
 if __name__ == "__main__":
