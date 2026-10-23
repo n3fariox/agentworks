@@ -1,8 +1,10 @@
 //! Exercise the bridge through the same typed ACP SDK the application uses.
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ContentBlock, CreateElicitationRequest, CreateElicitationResponse,
-    NewSessionRequest, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionNotification, StopReason,
+    CancelNotification, CloseSessionRequest, ContentBlock, CreateElicitationRequest,
+    CreateElicitationResponse, DeleteSessionRequest, ForkSessionRequest, InitializeRequest,
+    LoadSessionRequest, NewSessionRequest, PromptRequest, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    SessionConfigOptionValue, SessionNotification, SetSessionConfigOptionRequest, StopReason,
 };
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo};
 use serde_json::json;
@@ -44,12 +46,16 @@ async fn native_bridge_works_with_typed_acp_client() {
             .connect_with(
                 AcpAgent::new(config),
                 move |cx: ConnectionTo<Agent>| async move {
-                    agentworks_runtime::acp::initialize_on(&cx, "codex", false).await?;
+                    let init: InitializeRequest=serde_json::from_value(json!({"protocolVersion":1,"clientCapabilities":{"session":{"configOptions":{"boolean":{}}},"elicitation":{"form":{}}}}))?;
+                    let initialized=cx.send_request(init).block_task().await?;
+                    assert!(serde_json::to_value(initialized)?["agentCapabilities"]["sessionCapabilities"]["close"].is_object());
                     let session = cx
-                        .send_request(NewSessionRequest::new(root))
+                        .send_request(NewSessionRequest::new(root.clone()))
                         .block_task()
                         .await?;
                     assert!(!session.config_options.as_ref().unwrap().is_empty());
+                    let configured=cx.send_request(SetSessionConfigOptionRequest::new(session.session_id.clone(),"fast-mode",SessionConfigOptionValue::boolean(true))).block_task().await?;
+                    assert!(serde_json::to_value(configured)?["configOptions"].as_array().unwrap().iter().any(|o|o["id"]=="fast-mode" && o["currentValue"]==true));
                     for text in ["early", "normal", "approval", "question"] {
                         let response = cx
                             .send_request(PromptRequest::new(
@@ -64,12 +70,18 @@ async fn native_bridge_works_with_typed_acp_client() {
                     cx.send_notification(CancelNotification::new(session.session_id.clone()))?;
                     let response = cx
                         .send_request(PromptRequest::new(
-                            session.session_id,
+                            session.session_id.clone(),
                             vec![ContentBlock::from("normal")],
                         ))
                         .block_task()
                         .await?;
                     assert_eq!(response.stop_reason, StopReason::EndTurn);
+                    cx.send_request(CloseSessionRequest::new(session.session_id.clone())).block_task().await?;
+                    cx.send_request(LoadSessionRequest::new(session.session_id.clone(),root.clone())).block_task().await?;
+                    let fork=cx.send_request(ForkSessionRequest::new(session.session_id.clone(),root)).block_task().await?;
+                    assert_ne!(fork.session_id,session.session_id);
+                    cx.send_request(DeleteSessionRequest::new(fork.session_id)).block_task().await?;
+                    cx.send_request(DeleteSessionRequest::new(session.session_id)).block_task().await?;
                     Ok(())
                 },
             ),

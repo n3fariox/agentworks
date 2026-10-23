@@ -6,7 +6,7 @@ use std::{
     process::Stdio as ProcessStdio,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -45,8 +45,10 @@ fn update(cx: &ConnectionTo<Client>, id: &str, update: Value) -> Result<()> {
 
 #[derive(Default)]
 struct Session {
-    model: Value,
-    effort: Value,
+    settings: Value,
+    host_policy: Value,
+    roots: Vec<String>,
+    configuring: bool,
     active: Option<ActiveTurn>,
 }
 struct ActiveTurn {
@@ -61,6 +63,8 @@ struct Bridge {
     sessions: Mutex<HashMap<String, Session>>,
     // Dropping an SDK request sends $/cancel_request, withdrawing the client's UI.
     questions: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    boolean_config: AtomicBool,
+    limits: Mutex<Map<String, Value>>,
 }
 
 impl Bridge {
@@ -102,12 +106,16 @@ impl Bridge {
                 if p["protocolVersion"] != 1 {
                     return Err(invalid("Only ACP v1 is supported"));
                 }
+                self.boolean_config.store(
+                    p["clientCapabilities"]["session"]["configOptions"]["boolean"].is_object(),
+                    Ordering::Relaxed,
+                );
                 self.rpc("initialize", json!({"clientInfo":{"name":"agentworks","title":"Agentworks","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}})).await?;
                 self.write(json!({"method":"initialized","params":{}}))
                     .await?;
                 Ok(
                     json!({"protocolVersion":1,"agentInfo":{"name":"agentworks-codex-acp","version":env!("CARGO_PKG_VERSION")},
-                    "agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"embeddedContext":true},"mcpCapabilities":{"http":true},"sessionCapabilities":{"list":{}}},
+                    "agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"embeddedContext":true},"mcpCapabilities":{"http":true},"sessionCapabilities":{"list":{},"close":{},"delete":{},"fork":{},"additionalDirectories":{}}},
                     "authMethods":[{"id":"api-key","name":"API key"}]}),
                 )
             }
@@ -130,56 +138,100 @@ impl Bridge {
                     .await?;
                 Ok(json!({}))
             }
-            "session/new" | "session/load" => {
-                if p["additionalDirectories"]
-                    .as_array()
-                    .is_some_and(|v| !v.is_empty())
-                {
-                    return Err(invalid(
-                        "Additional workspace directories are not implemented",
-                    ));
-                }
-                if method == "session/load"
+            "session/new" | "session/load" | "session/fork" => {
+                let roots = workspace_roots(&p)?;
+                if method != "session/new"
                     && self
                         .sessions
                         .lock()
                         .unwrap()
                         .get(field(&p, "sessionId")?)
-                        .is_some_and(|s| s.active.is_some())
+                        .is_some_and(|s| s.active.is_some() || s.configuring)
                 {
-                    return Err(invalid("Cannot reload an active session"));
+                    return Err(invalid("Cannot load or fork an active session"));
                 }
-                let mut config = session_config(&p)?;
-                let mut params = json!({"cwd":field(&p,"cwd")?,"config":config.take()});
-                let native = if method == "session/load" {
+                let mut params = json!({"cwd":field(&p,"cwd")?,"config":session_config(&p)?,"runtimeWorkspaceRoots":roots});
+                let native = if method != "session/new" {
                     params["threadId"] = json!(field(&p, "sessionId")?);
-                    "thread/resume"
+                    params["excludeTurns"] = json!(true);
+                    if method == "session/fork" {
+                        let fork = &p["_meta"]["jetbrains"]["air"]["fork"];
+                        if !fork.is_null() {
+                            if fork["version"] != 1 {
+                                return Err(invalid("Unsupported fork boundary version"));
+                            }
+                            let boundary = field(fork, "messageId")?;
+                            let protocol_id = boundary
+                                .rsplit_once(":segment:")
+                                .filter(|(_, suffix)| {
+                                    !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())
+                                })
+                                .map_or(boundary, |(id, _)| id);
+                            let mut turn = None;
+                            self.history(field(&p, "sessionId")?, |turn_id, item| {
+                                if item["id"] == boundary || item["id"] == protocol_id {
+                                    turn = Some(turn_id.clone());
+                                }
+                                Ok(())
+                            })
+                            .await?;
+                            params["lastTurnId"] = turn.filter(|id|id.is_string()).ok_or_else(||invalid("Fork boundary was not found; refusing to fork newer history"))?;
+                        }
+                        "thread/fork"
+                    } else {
+                        "thread/resume"
+                    }
                 } else {
                     "thread/start"
                 };
                 let response = self.rpc(native, params).await?;
                 let id = field(&response["thread"], "id")?.to_owned();
+                if method == "session/fork" && p["sessionId"] == id {
+                    return Err(failure("Codex returned the parent thread as its fork"));
+                }
+                let settings = session_settings(&response);
                 self.sessions.lock().unwrap().insert(
                     id.clone(),
                     Session {
-                        model: response["model"].clone(),
-                        effort: response["reasoningEffort"].clone(),
+                        host_policy: policy(&settings),
+                        settings,
+                        roots,
+                        configuring: false,
                         active: None,
                     },
                 );
                 if method == "session/load" {
                     // History is replayed as ACP notifications; the app decides whether to display it.
-                    let history = self
-                        .rpc("thread/read", json!({"threadId":id,"includeTurns":true}))
+                    self.history(&id, |_, item| replay_item(cx, &id, item))
                         .await?;
-                    for turn in history["thread"]["turns"].as_array().into_iter().flatten() {
-                        for item in turn["items"].as_array().into_iter().flatten() {
-                            replay_item(cx, &id, item)?;
-                        }
-                    }
                 }
                 let options = self.config_options(&id).await?;
                 Ok(json!({"sessionId":id,"configOptions":options}))
+            }
+            "session/close" | "session/delete" => {
+                let id = field(&p, "sessionId")?;
+                if self
+                    .sessions
+                    .lock()
+                    .unwrap()
+                    .get(id)
+                    .is_some_and(|s| s.active.is_some() || s.configuring)
+                {
+                    return Err(invalid(
+                        "Cancel the active turn before closing or deleting its session",
+                    ));
+                }
+                self.rpc(
+                    if method == "session/close" {
+                        "thread/unsubscribe"
+                    } else {
+                        "thread/delete"
+                    },
+                    json!({"threadId":id}),
+                )
+                .await?;
+                self.sessions.lock().unwrap().remove(id);
+                Ok(json!({}))
             }
             "session/list" => {
                 let response = self
@@ -200,37 +252,99 @@ impl Bridge {
                     .collect();
                 Ok(json!({"sessions":sessions,"nextCursor":response["nextCursor"]}))
             }
-            "session/set_config_option" => {
+            "session/set_config_option" | "session/set_mode" => {
                 let id = field(&p, "sessionId")?;
-                let key = field(&p, "configId")?;
-                if !matches!(key, "model" | "reasoning_effort") {
-                    return Err(invalid("Unsupported config option"));
-                }
+                let key = if method == "session/set_mode" {
+                    "mode"
+                } else {
+                    field(&p, "configId")?
+                };
+                let value = if method == "session/set_mode" {
+                    &p["modeId"]
+                } else {
+                    &p["value"]
+                };
                 let options = self.config_options(id).await?;
                 if !options.as_array().unwrap().iter().any(|o| {
                     o["id"] == key
-                        && o["options"]
-                            .as_array()
-                            .is_some_and(|opts| opts.iter().any(|o| o["value"] == p["value"]))
+                        && ((o["type"] == "boolean" && value.is_boolean())
+                            || o["options"]
+                                .as_array()
+                                .is_some_and(|opts| opts.iter().any(|o| o["value"] == *value)))
                 }) {
                     return Err(invalid("Unknown config value"));
                 }
-                {
+                let mut settings = {
                     let mut sessions = self.sessions.lock().unwrap();
                     let s = sessions
                         .get_mut(id)
                         .ok_or_else(|| invalid("Unknown session"))?;
-                    if s.active.is_some() {
+                    if s.active.is_some() || s.configuring {
                         return Err(invalid("Cannot configure an active turn"));
                     }
-                    if key == "model" {
-                        s.model = p["value"].clone();
-                        s.effort = Value::Null;
-                    } else {
-                        s.effort = p["value"].clone();
+                    let mut patch = match key {
+                        "model" => json!({"model":value}),
+                        "reasoning_effort" => json!({"effort":value}),
+                        "fast-mode" => {
+                            json!({"serviceTier":if value==true || value=="on" {json!("fast")}else{Value::Null}})
+                        }
+                        "collaboration_mode" => {
+                            json!({"collaborationMode":{"mode":value,"settings":{"model":s.settings["model"],"reasoning_effort":s.settings["effort"],"developer_instructions":null}}})
+                        }
+                        "mode" => {
+                            if value == "host" {
+                                s.host_policy.clone()
+                            } else {
+                                mode_policy(value.as_str().unwrap(), &s.roots)?
+                            }
+                        }
+                        _ => return Err(invalid("Unsupported config option")),
+                    };
+                    if matches!(key, "model" | "reasoning_effort")
+                        && s.settings["collaborationMode"].is_object()
+                    {
+                        let mut collaboration = s.settings["collaborationMode"].clone();
+                        collaboration["settings"][if key == "model" {
+                            "model"
+                        } else {
+                            "reasoning_effort"
+                        }] = value.clone();
+                        patch["collaborationMode"] = collaboration;
+                    }
+                    s.configuring = true;
+                    patch
+                };
+                settings["threadId"] = json!(id);
+                let result = self.rpc("thread/settings/update", settings.clone()).await;
+                {
+                    let mut sessions = self.sessions.lock().unwrap();
+                    let s = sessions.get_mut(id).unwrap();
+                    s.configuring = false;
+                    if result.is_ok() {
+                        settings.as_object_mut().unwrap().remove("threadId");
+                        s.settings
+                            .as_object_mut()
+                            .unwrap()
+                            .extend(settings.as_object().unwrap().clone());
                     }
                 }
-                Ok(json!({"configOptions":self.config_options(id).await?}))
+                result?;
+                let options = self.config_options(id).await?;
+                update(
+                    cx,
+                    id,
+                    json!({"sessionUpdate":"config_option_update","configOptions":options}),
+                )?;
+                if method == "session/set_mode" {
+                    update(
+                        cx,
+                        id,
+                        json!({"sessionUpdate":"current_mode_update","currentModeId":value}),
+                    )?;
+                    Ok(json!({}))
+                } else {
+                    Ok(json!({"configOptions":options}))
+                }
             }
             "session/prompt" => self.prompt(p).await,
             _ => Err(Error::method_not_found()),
@@ -249,7 +363,7 @@ impl Bridge {
             .filter(|m| m["hidden"] != true)
             .map(|m| json!({"value":m["model"],"name":m["displayName"]}))
             .collect();
-        let current = models.iter().find(|m| m["model"] == s.model);
+        let current = models.iter().find(|m| m["model"] == s.settings["model"]);
         let efforts: Vec<_> = current
             .into_iter()
             .flat_map(|m| {
@@ -261,24 +375,83 @@ impl Bridge {
             .map(|e| json!({"value":e["reasoningEffort"],"name":e["reasoningEffort"]}))
             .collect();
         let mut result = vec![
-            json!({"id":"model","name":"Model","category":"model","type":"select","currentValue":s.model,"options":options}),
+            json!({"id":"model","name":"Model","category":"model","type":"select","currentValue":s.settings["model"],"options":options}),
         ];
         if !efforts.is_empty() {
-            result.push(json!({"id":"reasoning_effort","name":"Reasoning effort","category":"thought_level","type":"select","currentValue":s.effort.as_str().or_else(||current.and_then(|m|m["defaultReasoningEffort"].as_str())),"options":efforts}));
+            result.push(json!({"id":"reasoning_effort","name":"Reasoning effort","category":"thought_level","type":"select","currentValue":s.settings["effort"].as_str().or_else(||current.and_then(|m|m["defaultReasoningEffort"].as_str())),"options":efforts}));
+        }
+        let modes: Vec<_> = ["host","read-only","workspace-write","agent","agent-full-access"].iter().map(|id|json!({"value":id,"name":match *id {"host"=>"Host configuration","read-only"=>"Read-only","workspace-write"=>"Workspace access","agent"=>"Auto review",_=>"Full access"}})).collect();
+        result.push(json!({"id":"mode","name":"Permissions","category":"mode","type":"select","currentValue":policy_mode(&s.settings),"options":modes}));
+        result.push(json!({"id":"collaboration_mode","name":"Collaboration mode","category":"collaboration_mode","type":"select","currentValue":s.settings["collaborationMode"]["mode"].as_str().unwrap_or("default"),"options":[{"value":"default","name":"Default"},{"value":"plan","name":"Plan"}]}));
+        if current.is_some_and(|m| {
+            m["additionalSpeedTiers"]
+                .as_array()
+                .is_some_and(|v| v.iter().any(|v| v == "fast"))
+        }) {
+            let enabled = s.settings["serviceTier"] == "fast";
+            result.push(if self.boolean_config.load(Ordering::Relaxed) {
+                json!({"id":"fast-mode","name":"Fast mode","description":"Faster responses, increased usage","category":"model_config","type":"boolean","currentValue":enabled})
+            }else{json!({"id":"fast-mode","name":"Fast mode","description":"Faster responses, increased usage","category":"model_config","type":"select","currentValue":if enabled{"on"}else{"off"},"options":[{"value":"off","name":"Off"},{"value":"on","name":"On"}]})});
         }
         Ok(json!(result))
+    }
+
+    async fn history(
+        &self,
+        id: &str,
+        mut visit: impl FnMut(&Value, &Value) -> Result<()>,
+    ) -> Result<()> {
+        let metadata = self.rpc("thread/read", json!({"threadId":id})).await?;
+        if metadata["thread"]["historyMode"] == "paginated" {
+            let mut cursor = Value::Null;
+            let mut seen = std::collections::HashSet::new();
+            loop {
+                let page = self
+                    .rpc(
+                        "thread/items/list",
+                        json!({"threadId":id,"sortDirection":"asc","limit":100,"cursor":cursor}),
+                    )
+                    .await?;
+                for entry in page["data"]
+                    .as_array()
+                    .ok_or_else(|| failure("Malformed Codex history page"))?
+                {
+                    visit(&entry["turnId"], &entry["item"])?;
+                }
+                cursor = page["nextCursor"].clone();
+                if cursor.is_null() {
+                    break;
+                }
+                if !seen.insert(cursor.to_string()) {
+                    return Err(failure("Codex repeated a history cursor"));
+                }
+            }
+        } else {
+            let history = self
+                .rpc("thread/read", json!({"threadId":id,"includeTurns":true}))
+                .await?;
+            for turn in history["thread"]["turns"]
+                .as_array()
+                .ok_or_else(|| failure("Malformed Codex history"))?
+            {
+                for item in turn["items"].as_array().into_iter().flatten() {
+                    visit(&turn["id"], item)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn prompt(&self, p: Value) -> Result<Value> {
         let id = field(&p, "sessionId")?;
         let input = prompt_input(&p["prompt"])?;
         let (tx, rx) = oneshot::channel();
-        let (model, effort) = {
+        {
             let mut sessions = self.sessions.lock().unwrap();
             let s = sessions
                 .get_mut(id)
                 .ok_or_else(|| invalid("Unknown session"))?;
-            if s.active.is_some() {
+            if s.active.is_some() || s.configuring {
                 return Err(invalid("A turn is already running"));
             }
             s.active = Some(ActiveTurn {
@@ -286,13 +459,9 @@ impl Bridge {
                 cancelled: false,
                 done: tx,
             });
-            (s.model.clone(), s.effort.clone())
-        };
+        }
         let started = self
-            .rpc(
-                "turn/start",
-                json!({"threadId":id,"input":input,"model":model,"effort":effort}),
-            )
+            .rpc("turn/start", json!({"threadId":id,"input":input}))
             .await;
         let response = match started {
             Ok(v) => v,
@@ -376,6 +545,8 @@ impl Bridge {
                     {
                         task.abort();
                     }
+                } else if method == "account/rateLimits/updated" {
+                    observe_limits(&mut self.limits.lock().unwrap(), &v["params"]["rateLimits"]);
                 } else {
                     let p = &v["params"];
                     let id = p["threadId"].as_str().unwrap_or("");
@@ -390,7 +561,23 @@ impl Bridge {
                             let _ = active.done.send(Ok(p["turn"].clone()));
                         }
                     } else if self.sessions.lock().unwrap().contains_key(id) {
-                        if let Some(event) = event_update(method, p) {
+                        if method == "thread/settings/updated" {
+                            if let Some(s) = self.sessions.lock().unwrap().get_mut(id) {
+                                s.settings.as_object_mut().unwrap().extend(
+                                    session_settings(&p["threadSettings"])
+                                        .as_object()
+                                        .unwrap()
+                                        .clone(),
+                                );
+                            }
+                        }
+                        if let Some(mut event) = event_update(method, p) {
+                            if event["sessionUpdate"] == "usage_update" {
+                                let limits = self.limits.lock().unwrap();
+                                if !limits.is_empty() {
+                                    event["_meta"] = json!({"_codex/subscriptionLimits":{"version":1,"limits":limits.values().collect::<Vec<_>>()}});
+                                }
+                            }
                             update(&cx, id, event)?;
                         }
                     }
@@ -407,6 +594,121 @@ impl Bridge {
             }
         }
         Err(failure("Codex app-server exited"))
+    }
+}
+
+fn workspace_roots(p: &Value) -> Result<Vec<String>> {
+    let mut roots = vec![field(p, "cwd")?.to_owned()];
+    let extra = p
+        .get("additionalDirectories")
+        .or_else(|| p["_meta"].get("additionalRoots"));
+    if let Some(extra) = extra.filter(|v| !v.is_null()) {
+        for root in extra
+            .as_array()
+            .ok_or_else(|| invalid("additionalDirectories must be an array"))?
+        {
+            let root = root
+                .as_str()
+                .ok_or_else(|| invalid("Workspace roots must be paths"))?;
+            if !roots.iter().any(|r| r == root) {
+                roots.push(root.into());
+            }
+        }
+    }
+    if roots.iter().any(|r| !std::path::Path::new(r).is_absolute()) {
+        return Err(invalid("Workspace roots must be absolute"));
+    }
+    Ok(roots)
+}
+fn session_settings(response: &Value) -> Value {
+    let mut settings = Map::new();
+    for (key, native) in [
+        ("model", "model"),
+        ("effort", "reasoningEffort"),
+        ("sandboxPolicy", "sandbox"),
+        ("approvalPolicy", "approvalPolicy"),
+        ("approvalsReviewer", "approvalsReviewer"),
+        ("serviceTier", "serviceTier"),
+        ("collaborationMode", "collaborationMode"),
+    ] {
+        if let Some(v) = response.get(key).or_else(|| response.get(native)) {
+            settings.insert(key.into(), v.clone());
+        }
+    }
+    json!(settings)
+}
+fn policy(settings: &Value) -> Value {
+    json!(
+        settings
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(k, _)| matches!(
+                k.as_str(),
+                "sandboxPolicy" | "approvalPolicy" | "approvalsReviewer"
+            ))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect::<Map<_, _>>()
+    )
+}
+fn mode_policy(mode: &str, roots: &[String]) -> Result<Value> {
+    let sandbox = match mode {
+        "read-only" => json!({"type":"readOnly","networkAccess":false}),
+        "workspace-write" | "agent" => {
+            json!({"type":"workspaceWrite","writableRoots":roots,"networkAccess":false,"excludeTmpdirEnvVar":false,"excludeSlashTmp":false})
+        }
+        "agent-full-access" => json!({"type":"dangerFullAccess"}),
+        _ => return Err(invalid("Unknown permission mode")),
+    };
+    Ok(
+        json!({"sandboxPolicy":sandbox,"approvalPolicy":if mode=="agent-full-access"{"never"}else{"on-request"},"approvalsReviewer":if mode=="agent"{"auto_review"}else{"user"}}),
+    )
+}
+fn policy_mode(settings: &Value) -> &str {
+    match (
+        settings["sandboxPolicy"]["type"].as_str(),
+        settings["approvalPolicy"].as_str(),
+        settings["approvalsReviewer"].as_str(),
+    ) {
+        (Some("dangerFullAccess"), Some("never"), Some("user")) => "agent-full-access",
+        (Some("readOnly"), Some("on-request"), Some("user")) => "read-only",
+        (Some("workspaceWrite"), Some("on-request"), Some("auto_review")) => "agent",
+        (Some("workspaceWrite"), Some("on-request"), Some("user")) => "workspace-write",
+        _ => "host",
+    }
+}
+fn observe_limits(cache: &mut Map<String, Value>, snapshot: &Value) {
+    if !snapshot.is_object() {
+        return;
+    }
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let id = snapshot["limitId"].as_str().unwrap_or("codex");
+    let entry = cache.entry(id).or_insert_with(|| json!({"limitId":id}));
+    if let Some(name) = snapshot.get("limitName") {
+        entry["limitName"] = name.clone();
+    }
+    for key in ["primary", "secondary"] {
+        let Some(window) = snapshot.get(key) else {
+            continue;
+        };
+        if window.is_null() {
+            entry[key] = Value::Null;
+            continue;
+        }
+        if !window.is_object() {
+            continue;
+        }
+        if !entry[key].is_object() {
+            entry[key] = json!({});
+        }
+        for name in ["usedPercent", "windowDurationMins", "resetsAt"] {
+            if let Some(value) = window.get(name) {
+                entry[key][name] = json!({"value":value,"observedAtMs":timestamp});
+            }
+        }
     }
 }
 
@@ -460,7 +762,7 @@ fn event_update(method: &str, p: &Value) -> Option<Value> {
         "item/agentMessage/delta"
         | "item/reasoning/textDelta"
         | "item/reasoning/summaryTextDelta" => Some(
-            json!({"sessionUpdate":if method=="item/agentMessage/delta" {"agent_message_chunk"}else{"agent_thought_chunk"},"content":{"type":"text","text":p["delta"]}}),
+            json!({"sessionUpdate":if method=="item/agentMessage/delta" {"agent_message_chunk"}else{"agent_thought_chunk"},"messageId":p["itemId"],"content":{"type":"text","text":p["delta"]}}),
         ),
         "item/started" | "item/completed" => tool_update(&p["item"], method == "item/completed"),
         "item/commandExecution/outputDelta" => Some(
@@ -507,7 +809,7 @@ fn replay_item(cx: &ConnectionTo<Client>, id: &str, item: &Value) -> Result<()> 
         Some("agentMessage") => update(
             cx,
             id,
-            json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":item["text"]}}),
+            json!({"sessionUpdate":"agent_message_chunk","messageId":item["id"],"content":{"type":"text","text":item["text"]}}),
         ),
         Some("userMessage") => {
             for block in item["content"].as_array().into_iter().flatten() {
@@ -590,6 +892,8 @@ pub async fn run() -> Result<()> {
         pending: Mutex::default(),
         sessions: Mutex::default(),
         questions: Mutex::default(),
+        boolean_config: AtomicBool::new(false),
+        limits: Mutex::default(),
     });
     let requests = bridge.clone();
     let notifications = bridge.clone();

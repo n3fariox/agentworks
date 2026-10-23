@@ -21,9 +21,12 @@ def harness():
 
     turn = 0
     active = None
+    active_thread = "thread-1"
+    deleted = set()
+    settings = dict(model="test-model", reasoningEffort="medium", sandbox=dict(type="readOnly", networkAccess=False), approvalPolicy="on-request", approvalsReviewer="user", serviceTier=None)
 
     def notify(method, **params):
-        send(dict(method=method, params=dict(threadId="thread-1", **params)))
+        send(dict(method=method, params=dict(threadId=active_thread, **params)))
 
     def complete(status="completed", error=None):
         notify("turn/completed", turn=dict(id=active, status=status, error=error))
@@ -38,18 +41,53 @@ def harness():
             complete()
             continue
         result = {}
-        if method in ("thread/start", "thread/resume"):
+        if method in ("thread/start", "thread/resume", "thread/fork"):
             assert p["cwd"].startswith("/")
+            assert p["cwd"] in p["runtimeWorkspaceRoots"]
+            if method == "thread/resume" and p["threadId"] in deleted:
+                send(dict(id=v["id"], error=dict(code=-32602, message="Thread was deleted")))
+                continue
             if p.get("config", {}).get("mcp_servers"):
                 assert p["config"]["mcp_servers"]["agentworks"]["env"] == {"TOKEN": "test"}
-            result = dict(thread=dict(id="thread-1"), model="test-model", reasoningEffort="medium")
+            thread_id = "thread-2" if method == "thread/fork" else p.get("threadId", "thread-1")
+            if method == "thread/fork" and "lastTurnId" in p:
+                assert p["lastTurnId"] == "turn-old", "Wrong fork boundary"
+            result = dict(settings, thread=dict(id=thread_id))
         elif method == "model/list":
-            result = dict(data=[dict(model="test-model", displayName="Test Model", supportedReasoningEfforts=[dict(reasoningEffort="medium")], defaultReasoningEffort="medium")])
+            result = dict(data=[dict(model="test-model", displayName="Test Model", additionalSpeedTiers=["fast"], supportedReasoningEfforts=[dict(reasoningEffort="medium"), dict(reasoningEffort="high")], defaultReasoningEffort="medium")])
         elif method == "thread/list":
             result = dict(data=[dict(id="thread-1", cwd="/tmp", preview="Previous chat")], nextCursor=None)
         elif method == "thread/read":
-            result = dict(thread=dict(turns=[dict(items=[dict(type="userMessage", content=[dict(type="text", text="old prompt")]), dict(type="agentMessage", text="old answer")])]))
+            if p["threadId"] == "legacy":
+                result = dict(thread=dict(historyMode="legacy", turns=[dict(id="turn-old", items=[dict(id="old-user", type="userMessage", content=[dict(type="text", text="old prompt")]), dict(id="old-answer", type="agentMessage", text="old answer")])]))
+            else:
+                assert not p.get("includeTurns"), "Paginated history must not use full-history hydration"
+                result = dict(thread=dict(historyMode="paginated", turns=[]))
+        elif method == "thread/items/list":
+            assert p["sortDirection"] == "asc"
+            if p.get("cursor") is None:
+                result = dict(data=[dict(turnId="turn-old", item=dict(id="old-user", type="userMessage", content=[dict(type="text", text="old prompt")]))], nextCursor="page-2")
+            else:
+                assert p["cursor"] == "page-2"
+                result = dict(data=[dict(turnId="turn-old", item=dict(id="old-answer", type="agentMessage", text="old answer")), dict(turnId="turn-new", item=dict(id="new-answer", type="agentMessage", text="new answer"))], nextCursor=None)
+        elif method == "thread/settings/update":
+            if p.get("effort") == "high":
+                send(dict(id=v["id"], error=dict(code=-32602, message="Managed policy refuses high effort")))
+                continue
+            for key, value in p.items():
+                if key != "threadId":
+                    settings[dict(effort="reasoningEffort", sandboxPolicy="sandbox").get(key, key)] = value
+            if "sandboxPolicy" in p and p["sandboxPolicy"]["type"] == "workspaceWrite":
+                assert p["sandboxPolicy"]["writableRoots"], "Missing workspace roots"
+        elif method == "thread/unsubscribe":
+            assert p["threadId"] not in deleted, "Close must not delete the conversation"
+        elif method == "thread/delete":
+            if p["threadId"] == "refuse-delete":
+                send(dict(id=v["id"], error=dict(code=-32603, message="Delete failed")))
+                continue
+            deleted.add(p["threadId"])
         elif method == "turn/start":
+            active_thread = p["threadId"]
             turn += 1
             active = f"turn-{turn}"
             text = p["input"][0]["text"]
@@ -59,6 +97,15 @@ def harness():
             result = dict(turn=dict(id=active))
             if text == "exit":
                 return
+            if text == "settings":
+                notify("item/agentMessage/delta", delta=json.dumps(settings))
+            if text == "quota":
+                send(dict(method="account/rateLimits/updated", params=dict(rateLimits=dict(limitId="codex", primary=dict(usedPercent=15, windowDurationMins=300), secondary=dict(usedPercent=60, windowDurationMins=10080)))))
+                notify("thread/tokenUsage/updated", tokenUsage=dict(last=dict(totalTokens=123), modelContextWindow=10000))
+                time.sleep(.005)
+                send(dict(method="account/rateLimits/updated", params=dict(rateLimits=dict(primary=dict(resetsAt=1800000000), secondary=None))))
+                notify("thread/tokenUsage/updated", tokenUsage=dict(last=dict(totalTokens=124), modelContextWindow=10000))
+                send(dict(method="thread/tokenUsage/updated", params=dict(threadId="unknown-child", tokenUsage=dict(last=dict(totalTokens=999), modelContextWindow=10000))))
             if text == "early":
                 notify("item/agentMessage/delta", delta="early answer")
                 complete()  # deliberately before the turn/start response
@@ -104,7 +151,7 @@ class BridgeTests(unittest.TestCase):
             self.messages.put(None)
 
         threading.Thread(target=read, daemon=True).start()
-        init = self.call("initialize", dict(protocolVersion=1, clientCapabilities=dict(elicitation=dict(form={}))))
+        init = self.call("initialize", dict(protocolVersion=1, clientCapabilities=dict(elicitation=dict(form={}), session=dict(configOptions=dict(boolean={})))))
         self.assertTrue(init["agentCapabilities"]["loadSession"])
 
     def close(self):
@@ -206,6 +253,76 @@ class BridgeTests(unittest.TestCase):
         self.until(lambda v: v.get("id") == request_id and "method" not in v)
         chunks = [v["params"]["update"]["content"]["text"] for v in self.seen if v.get("method") == "session/update" and v["params"]["update"]["sessionUpdate"] == "agent_message_chunk"]
         self.assertEqual(json.loads("".join(chunks)), dict(decision="cancel"))
+
+    def test_native_settings_acknowledgement_and_rejection(self):
+        options = self.session()["configOptions"]
+        self.assertEqual(next(o for o in options if o["id"] == "fast-mode")["type"], "boolean")
+        for key, value in [("mode", "workspace-write"), ("collaboration_mode", "plan"), ("fast-mode", True)]:
+            result = self.call("session/set_config_option", dict(sessionId="thread-1", configId=key, value=value))
+            self.assertEqual(next(o for o in result["configOptions"] if o["id"] == key)["currentValue"], value)
+        self.call("session/set_mode", dict(sessionId="thread-1", modeId="read-only"))
+        request_id = self.send("session/set_config_option", dict(sessionId="thread-1", configId="reasoning_effort", value="high"))
+        response = self.until(lambda v: v.get("id") == request_id and "method" not in v)
+        self.assertIn("error", response)
+        result = self.call("session/set_config_option", dict(sessionId="thread-1", configId="fast-mode", value=False))
+        self.assertEqual(next(o for o in result["configOptions"] if o["id"] == "reasoning_effort")["currentValue"], "medium")
+        self.prompt("settings")
+        chunks = [v["params"]["update"]["content"]["text"] for v in self.seen if v.get("method") == "session/update" and v["params"]["update"]["sessionUpdate"] == "agent_message_chunk"]
+        native = json.loads(chunks[-2])
+        self.assertEqual(native["sandbox"]["type"], "readOnly")
+        self.assertEqual(native["collaborationMode"]["mode"], "plan")
+        self.assertIsNone(native["serviceTier"])
+
+    def test_close_preserves_history_and_delete_prevents_resume(self):
+        self.session()
+        self.call("session/close", dict(sessionId="thread-1"))
+        self.session("session/load")
+        self.call("session/delete", dict(sessionId="thread-1"))
+        self.call("session/delete", dict(sessionId="thread-1"))  # explicit retry is idempotent
+        request_id = self.send("session/load", dict(sessionId="thread-1", cwd="/tmp", mcpServers=[]))
+        response = self.until(lambda v: v.get("id") == request_id and "method" not in v)
+        self.assertIn("error", response)
+
+    def test_failed_delete_retains_live_session(self):
+        self.call("session/load", dict(sessionId="refuse-delete", cwd="/tmp", mcpServers=[]))
+        request_id = self.send("session/delete", dict(sessionId="refuse-delete"))
+        response = self.until(lambda v: v.get("id") == request_id and "method" not in v)
+        self.assertIn("error", response)
+        result = self.call("session/prompt", dict(sessionId="refuse-delete", prompt=[dict(type="text", text="normal")]))
+        self.assertEqual(result["stopReason"], "end_turn")
+
+    def test_paginated_fork_uses_requested_boundary(self):
+        self.session()
+        request = dict(sessionId="thread-1", cwd="/tmp", mcpServers=[], _meta=dict(jetbrains=dict(air=dict(fork=dict(version=1, messageId="old-answer:segment:2")))))
+        self.assertEqual(self.call("session/fork", request)["sessionId"], "thread-2")
+        request["_meta"]["jetbrains"]["air"]["fork"]["messageId"] = "missing"
+        request_id = self.send("session/fork", request)
+        response = self.until(lambda v: v.get("id") == request_id and "method" not in v)
+        self.assertIn("error", response)
+        self.assertEqual(self.prompt("normal")["stopReason"], "end_turn")
+
+    def test_legacy_history_still_replays(self):
+        self.call("session/load", dict(sessionId="legacy", cwd="/tmp", mcpServers=[]))
+        messages = [v["params"]["update"] for v in self.seen if v.get("method") == "session/update"]
+        self.assertEqual(messages[-1]["messageId"], "old-answer")
+
+    def test_sparse_quota_pushes_preserve_observation_times(self):
+        self.session()
+        self.prompt("quota")
+        updates = [v["params"]["update"] for v in self.seen if v.get("method") == "session/update" and v["params"]["update"]["sessionUpdate"] == "usage_update"]
+        self.assertEqual([u["used"] for u in updates], [123, 124])  # no child usage leak
+        first, second = [u["_meta"]["_codex/subscriptionLimits"]["limits"][0] for u in updates]
+        self.assertEqual(first["primary"]["usedPercent"], second["primary"]["usedPercent"])
+        self.assertGreater(second["primary"]["resetsAt"]["observedAtMs"], first["primary"]["usedPercent"]["observedAtMs"])
+        self.assertIsNone(second["secondary"])
+        self.assertEqual(first["secondary"]["usedPercent"]["value"], 60)
+
+    def test_additional_roots_are_used_for_workspace_mode(self):
+        self.call("session/new", dict(cwd="/tmp", additionalDirectories=["/tmp/extra"], mcpServers=[]))
+        self.call("session/set_mode", dict(sessionId="thread-1", modeId="workspace-write"))
+        self.prompt("settings")
+        chunks = [v["params"]["update"]["content"]["text"] for v in self.seen if v.get("method") == "session/update" and v["params"]["update"]["sessionUpdate"] == "agent_message_chunk"]
+        self.assertEqual(json.loads(chunks[-2])["sandbox"]["writableRoots"], ["/tmp", "/tmp/extra"])
 
     def test_native_errors_and_disconnect_do_not_hang(self):
         self.session()
