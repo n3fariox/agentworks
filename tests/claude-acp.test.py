@@ -36,6 +36,8 @@ def harness():
     threading.Thread(target=lambda: [lines.put(json.loads(l)) for l in sys.stdin] + [lines.put(None)], daemon=True).start()
     mode = "default"
     responses = {}
+    # Like Claude Code, report busy/idle only when asked; a marker file simulates an older CLI.
+    states = os.environ.get("CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS") == "1" and not Path("no-state-events").exists()
 
     def send(**value):
         print(json.dumps(value), flush=True)
@@ -92,11 +94,15 @@ def harness():
             prompt = content[0]["text"]
             if prompt == "exit":
                 sys.exit(0)
+            if states:
+                send(type="system", subtype="session_state_changed", state="running")
             try:
                 turn(prompt, content)
             except KeyboardInterrupt:
                 send(type="control_cancel_request", request_id="perm")
                 result("error_during_execution", True, output=0, errors=["interrupted"])
+            if states:
+                send(type="system", subtype="session_state_changed", state="idle")
         return True
 
     def turn(prompt, content):
@@ -139,6 +145,22 @@ def harness():
             send(type="user", parent_tool_use_id=None, message=dict(role="user", content=[dict(type="tool_result", tool_use_id="tool-t", content="Task #1 created successfully: Write tests")]))
             tool("TaskUpdate", "tool-u", dict(taskId="1", status="in_progress"))
             send(type="user", parent_tool_use_id=None, message=dict(role="user", content=[dict(type="tool_result", tool_use_id="tool-u", content="Updated task #1 status")]))
+            result()
+        elif prompt == "agent":
+            # A background subagent: the first result ends Claude's own turn, then the
+            # subagent works, then Claude continues by itself once it is notified.
+            tool("Agent", "tool-a", dict(description="Look around", prompt="List the files", subagent_type="general-purpose"))
+            send(type="system", subtype="task_started", task_id="t1", tool_use_id="tool-a", is_backgrounded=True)
+            send(type="user", parent_tool_use_id=None, message=dict(role="user", content=[dict(type="tool_result", tool_use_id="tool-a", content=[dict(type="text", text="Async agent launched successfully")])]))
+            text("msg-a1", "Waiting for the agent")
+            result()
+            send(type="assistant", parent_tool_use_id="tool-a", message=dict(id="sub-1", model="claude-haiku-test", content=[dict(type="text", text="Found 3 files")]))
+            send(type="assistant", parent_tool_use_id="tool-a", message=dict(id="sub-2", model="claude-haiku-test", content=[dict(type="tool_use", id="tool-s", name="Bash", input=dict(command="ls"))]))
+            answer = ask("perm", subtype="can_use_tool", tool_name="Bash", input=dict(command="ls"), tool_use_id="tool-s", agent_id="t1")
+            send(type="user", parent_tool_use_id="tool-a", message=dict(role="user", content=[dict(type="tool_result", tool_use_id="tool-s", content="a b c")]))
+            send(type="assistant", parent_tool_use_id="tool-a", message=dict(id="sub-3", model="claude-haiku-test", content=[dict(type="text", text=json.dumps(answer["behavior"]))]))
+            send(type="system", subtype="task_notification", task_id="t1", tool_use_id="tool-a", status="completed", summary="Found 3 files")
+            text("msg-a2", "done")
             result()
         elif prompt == "unfinished":
             tool("Read", "tool-r", dict(file_path=os.getcwd() + "/a.txt"))
@@ -434,6 +456,30 @@ class BridgeTests(unittest.TestCase):
         self.assertNotIn(rows[0]["uuid"], ["u1"])
         fork["_meta"]["jetbrains"]["air"]["fork"]["messageId"] = "missing"
         self.assertIn("error", self.response(self.send("session/fork", fork)))
+
+    def test_background_subagent_holds_the_turn_and_fills_its_card(self):
+        self.session()
+        request_id = self.send("session/prompt", dict(sessionId=self.id, prompt=[dict(type="text", text="agent")]))
+        # A subagent permission arrives after Claude's first result; the prompt is still open.
+        request = self.until(lambda v: v.get("method") == "session/request_permission" or (v.get("id") == request_id and "method" not in v))
+        self.assertEqual(request.get("method"), "session/request_permission")
+        self.write(dict(jsonrpc="2.0", id=request["id"], result=dict(outcome=dict(outcome="selected", optionId="allow-once"))))
+        self.assertEqual(self.response(request_id)["result"]["stopReason"], "end_turn")
+        self.assertEqual(self.answer_text(), "Waiting for the agentdone")  # subagent text stays out of the transcript
+        card = [u for u in self.updates("tool_call_update") if u["toolCallId"] == "tool-a"]
+        self.assertEqual([u["status"] for u in card], ["in_progress", "in_progress", "in_progress", "completed"])
+        self.assertEqual([c["content"]["text"] for c in card[-1]["content"]], ["List the files", 'Found 3 files\n\n"allow"'])
+        nested = next(u for u in self.updates("tool_call") if u["toolCallId"] == "tool-s")
+        self.assertEqual(nested["_meta"]["claudeCode"]["parentToolUseId"], "tool-a")
+        result = [u for u in self.updates("tool_call_update") if u["toolCallId"] == "tool-s"]
+        self.assertTrue(all(u["_meta"]["claudeCode"]["parentToolUseId"] == "tool-a" for u in result))
+        self.assertEqual(self.prompt("hello")["stopReason"], "end_turn")
+
+    def test_older_cli_without_state_events_ends_on_result(self):
+        Path(self.cwd, "no-state-events").touch()
+        self.session()
+        self.assertEqual(self.prompt("hello")["stopReason"], "end_turn")
+        self.assertEqual(self.prompt("/usage")["stopReason"], "end_turn")
 
     def test_cli_exit_fails_the_turn(self):
         self.session()

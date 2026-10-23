@@ -111,10 +111,25 @@ struct State {
     last_error: Option<String>,
     /// TaskCreate/TaskUpdate state published as the ACP plan.
     tasks: Vec<(String, Value)>,
+    /// Agent tool calls by id; their subagent's output is shown in the parent card.
+    agents: HashMap<String, SubAgent>,
+    /// The CLI reports idle; turns then end there, after any background subagents.
+    state_events: bool,
 }
 struct Turn {
     cancelled: bool,
+    /// The CLI went busy for this prompt, so its next idle ends it.
+    running: bool,
+    /// The latest `result`; a held turn may see several before idle.
+    outcome: Option<Result<Value>>,
     done: Reply,
+}
+#[derive(Default)]
+struct SubAgent {
+    prompt: Option<String>,
+    log: String,
+    background: bool,
+    done: bool,
 }
 struct Session {
     id: String,
@@ -633,6 +648,11 @@ impl Session {
                                 json!({"sessionUpdate":kind,"messageId":message_id,"content":{"type":"text","text":text}}),
                             )?;
                         }
+                        Some("text") if parent.is_some() => self.agent_text(
+                            parent.unwrap(),
+                            block["text"].as_str().unwrap_or(""),
+                            cx,
+                        )?,
                         Some("tool_use") => self.tool_use(block, parent, cx, bridge)?,
                         _ => {}
                     }
@@ -646,6 +666,50 @@ impl Session {
                 }
             }
             Some("system") => match v["subtype"].as_str() {
+                Some("session_state_changed") => {
+                    let settle = {
+                        let mut s = self.state.lock().unwrap();
+                        s.state_events = true;
+                        match (v["state"].as_str(), s.turn.as_mut()) {
+                            (Some("running"), Some(turn)) => {
+                                turn.running = true;
+                                false
+                            }
+                            (Some("idle"), turn) => turn.is_none_or(|t| t.running),
+                            _ => false,
+                        }
+                    };
+                    if settle {
+                        self.settle(cx)?;
+                    }
+                }
+                Some("task_started") => {
+                    let tool = v["tool_use_id"].as_str().unwrap_or_default();
+                    if let Some(agent) = self.state.lock().unwrap().agents.get_mut(tool) {
+                        agent.background = v["is_backgrounded"] == true;
+                    }
+                }
+                Some("task_notification") => {
+                    if let Some(tool) = v["tool_use_id"].as_str() {
+                        let known = {
+                            let mut s = self.state.lock().unwrap();
+                            s.agents.get_mut(tool).map(|a| {
+                                a.done = true;
+                                if a.log.is_empty() {
+                                    a.log = v["summary"].as_str().unwrap_or("").to_owned();
+                                }
+                            })
+                        };
+                        if known.is_some() {
+                            let status = if v["status"] == "completed" {
+                                "completed"
+                            } else {
+                                "failed"
+                            };
+                            self.agent_card(tool, status, cx)?;
+                        }
+                    }
+                }
                 Some("status") => {
                     if let Some(mode) = v["permissionMode"].as_str() {
                         self.set_mode_state(mode, cx)?;
@@ -700,9 +764,21 @@ impl Session {
         let input = &block["input"];
         {
             let mut s = self.state.lock().unwrap();
-            s.tools
-                .insert(tool_id.into(), json!({"name":name,"input":input}));
+            s.tools.insert(
+                tool_id.into(),
+                json!({"name":name,"input":input,"parent":parent}),
+            );
             s.open.push(tool_id.into());
+        }
+        if matches!(name, "Agent" | "Task") {
+            let prompt = input["prompt"].as_str().map(str::to_owned);
+            self.state.lock().unwrap().agents.insert(
+                tool_id.into(),
+                SubAgent {
+                    prompt,
+                    ..Default::default()
+                },
+            );
         }
         let mut call = tool_call(name, tool_id, input, &self.cwd, bridge);
         if let Some(parent) = parent {
@@ -758,6 +834,17 @@ impl Session {
             s.tools.get(tool_id).cloned()
         };
         let tool = tool.unwrap_or_else(|| json!({"name":""}));
+        let background = self
+            .state
+            .lock()
+            .unwrap()
+            .agents
+            .get(tool_id)
+            .is_some_and(|a| a.background && !a.done);
+        if background && block["is_error"] != true {
+            // The launch acknowledgement; the subagent reports through task_notification.
+            return self.agent_card(tool_id, "in_progress", cx);
+        }
         if tool["name"] == "TaskCreate" && block["is_error"] != true {
             let text = text_of(&block["content"]);
             if let Some((task, _)) = text
@@ -777,13 +864,17 @@ impl Session {
             structured,
             bridge.terminal_output.load(Ordering::Relaxed),
         ) {
+            let mut event = event;
+            if let Some(parent) = tool["parent"].as_str() {
+                event["_meta"]["claudeCode"]["parentToolUseId"] = json!(parent);
+            }
             update(cx, &self.id, event)?;
         }
         Ok(())
     }
 
     fn finish(&self, v: &Value, cx: &ConnectionTo<Client>) -> Result<()> {
-        let (turn, open, delivered, last_error) = {
+        let (cancelled, delivered, last_error) = {
             let mut s = self.state.lock().unwrap();
             let model = s.last_model.clone();
             if let Some(usage) = v["modelUsage"].as_object() {
@@ -800,8 +891,7 @@ impl Session {
             s.streamed.clear();
             let delivered = std::mem::take(&mut s.delivered);
             (
-                s.turn.take(),
-                std::mem::take(&mut s.open),
+                s.turn.as_ref().is_some_and(|t| t.cancelled),
                 delivered,
                 s.last_error.take(),
             )
@@ -826,23 +916,6 @@ impl Session {
                 )?;
             }
         }
-        let cancelled = turn.as_ref().is_some_and(|t| t.cancelled);
-        for tool in open {
-            let reason = if cancelled {
-                "The turn was cancelled before this tool call returned a result."
-            } else {
-                "Claude ended the turn without returning a result for this tool."
-            };
-            update(
-                cx,
-                &self.id,
-                json!({"sessionUpdate":"tool_call_update","toolCallId":tool,"status":"failed","content":[text_content(reason)]}),
-            )?;
-        }
-        for (_, task) in self.questions.lock().unwrap().drain() {
-            task.abort();
-        }
-        let Some(turn) = turn else { return Ok(()) };
         let text = v["result"].as_str().map(str::to_owned).unwrap_or_else(|| {
             v["errors"]
                 .as_array()
@@ -875,8 +948,93 @@ impl Session {
         } else {
             Ok(json!({"stopReason":"max_turn_requests"}))
         };
-        let _ = turn.done.send(outcome);
+        let settle = {
+            let mut s = self.state.lock().unwrap();
+            if let Some(turn) = s.turn.as_mut() {
+                turn.outcome = Some(outcome);
+            }
+            !s.state_events
+        };
+        if settle { self.settle(cx) } else { Ok(()) }
+    }
+
+    /// End the prompt: close what never finished and report the latest outcome.
+    fn settle(&self, cx: &ConnectionTo<Client>) -> Result<()> {
+        let (turn, open, agents) = {
+            let mut s = self.state.lock().unwrap();
+            let agents: Vec<String> = s
+                .agents
+                .iter()
+                .filter(|(_, a)| a.background && !a.done)
+                .map(|(id, _)| id.clone())
+                .collect();
+            (s.turn.take(), std::mem::take(&mut s.open), agents)
+        };
+        let cancelled = turn.as_ref().is_some_and(|t| t.cancelled);
+        for tool in open {
+            let reason = if cancelled {
+                "The turn was cancelled before this tool call returned a result."
+            } else {
+                "Claude ended the turn without returning a result for this tool."
+            };
+            update(
+                cx,
+                &self.id,
+                json!({"sessionUpdate":"tool_call_update","toolCallId":tool,"status":"failed","content":[text_content(reason)]}),
+            )?;
+        }
+        for agent in agents {
+            self.agent_card(&agent, "failed", cx)?;
+        }
+        self.state.lock().unwrap().agents.clear();
+        for (_, task) in self.questions.lock().unwrap().drain() {
+            task.abort();
+        }
+        if let Some(turn) = turn {
+            let outcome = match turn.outcome {
+                _ if cancelled => Ok(json!({"stopReason":"cancelled"})),
+                Some(outcome) => outcome,
+                None => Ok(json!({"stopReason":"end_turn"})),
+            };
+            let _ = turn.done.send(outcome);
+        }
         Ok(())
+    }
+
+    fn agent_text(&self, parent: &str, text: &str, cx: &ConnectionTo<Client>) -> Result<()> {
+        let known = {
+            let mut s = self.state.lock().unwrap();
+            s.agents.get_mut(parent).map(|a| {
+                if !a.log.is_empty() {
+                    a.log.push_str("\n\n");
+                }
+                a.log.push_str(text);
+            })
+        };
+        match known {
+            Some(()) if !text.is_empty() => self.agent_card(parent, "in_progress", cx),
+            _ => Ok(()),
+        }
+    }
+    /// The Agent tool card: its prompt, then what the subagent has said so far.
+    fn agent_card(&self, id: &str, status: &str, cx: &ConnectionTo<Client>) -> Result<()> {
+        let content: Vec<Value> = {
+            let s = self.state.lock().unwrap();
+            let Some(agent) = s.agents.get(id) else {
+                return Ok(());
+            };
+            agent
+                .prompt
+                .iter()
+                .chain(Some(&agent.log).filter(|l| !l.is_empty()))
+                .map(|t| text_content(t))
+                .collect()
+        };
+        update(
+            cx,
+            &self.id,
+            json!({"sessionUpdate":"tool_call_update","toolCallId":id,"status":status,"content":content}),
+        )
     }
 }
 
@@ -1048,6 +1206,8 @@ impl Bridge {
                     }
                     st.turn = Some(Turn {
                         cancelled: false,
+                        running: false,
+                        outcome: None,
                         done: tx,
                     });
                     st.delivered = false;
@@ -1140,6 +1300,7 @@ impl Bridge {
         let mut child = command
             .current_dir(&cwd)
             .env("CLAUDE_CODE_ENTRYPOINT", "sdk-rust")
+            .env("CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS", "1")
             .env_remove("CLAUDECODE")
             .stdin(ProcessStdio::piped())
             .stdout(ProcessStdio::piped())
@@ -1163,7 +1324,10 @@ impl Bridge {
             }),
         });
         tokio::spawn(session.clone().read(output, cx.clone(), self.clone()));
-        let init = match session.control("initialize", json!({})).await {
+        let init = match session
+            .control("initialize", json!({"forwardSubagentText":true}))
+            .await
+        {
             Ok(init) => init,
             Err(e) => {
                 session.kill().await;
@@ -2146,7 +2310,7 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        assert_eq!(name.len() > 201, true);
+        assert!(name.len() > 201);
         assert!(name.starts_with(&format!("-{}", "x".repeat(199))));
     }
     #[test]

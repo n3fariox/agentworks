@@ -28,6 +28,20 @@ Usage updates carry context occupancy, cost, `_claude/model` and the raw
 `rate_limit`) for limit-resume handling. Auto mode falls back to Accept edits for
 models without it, as in the npm adapter.
 
+Turns end when Claude Code reports idle (`CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS`),
+not at its first `result`. Claude Code runs subagents in the background: the Agent
+tool returns at once, Claude's own turn ends, and Claude continues by itself when the
+subagent finishes. The prompt stays open through all of that, so subagent permission
+requests and Claude's follow-up answer belong to the turn that started them. CLIs
+without state events end the prompt at `result`, as before.
+
+Subagent output (`forwardSubagentText`) goes into the Agent tool card: its prompt,
+then the subagent's messages as they arrive, completed or failed on the task
+notification. It is kept out of the main transcript, so fork boundaries stay on
+Claude's own messages. The subagent's tool calls appear as their own cards with
+`_meta.claudeCode.parentToolUseId`. History replay does not include subagent
+transcripts.
+
 History comes from Claude's own transcripts in `$CLAUDE_CONFIG_DIR/projects` (default
 `~/.claude/projects`). Resume and load require the transcript in the project
 directory of the requested cwd; a missing one is reported as not found. Claude writes
@@ -37,7 +51,7 @@ with fresh message ids. Unknown boundaries fail rather than inheriting newer his
 Deletion removes the transcript and its sidecar directory.
 
 This is intentionally smaller than the npm adapter. Not implemented: the AIR/JetBrains
-extensions (native subagent sessions, steering, async tasks, goals, file-change
+extensions (native subagent child sessions, steering, async tasks, goals, file-change
 reports), fast mode, custom agents, provider routing/gateways, terminal login
 methods, MCP OAuth, plan clear-context, prompt suggestions, and session titles beyond
 those Claude stores. If the CLI exits, the active turn fails with
