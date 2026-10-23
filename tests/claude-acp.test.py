@@ -190,6 +190,38 @@ def transcript(session="11111111-1111-4111-8111-111111111111", cwd="/tmp"):
     ]
 
 
+def subagent_history(config, cwd, session="33333333-3333-4333-8333-333333333333"):
+    """A saved conversation whose background subagent started a nested one."""
+    project = Path(config) / "projects" / re.sub(r"[^a-zA-Z0-9]", "-", cwd)
+    agents = project / session / "subagents"
+    agents.mkdir(parents=True, exist_ok=True)
+    def write(path, rows):
+        path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    def side(kind, uuid, parent, message):
+        return dict(entry(kind, uuid, parent, session, message, cwd), isSidechain=True)
+    write(project / f"{session}.jsonl", [
+        entry("user", "m1", None, session, dict(role="user", content="go"), cwd),
+        entry("assistant", "m2", "m1", session, dict(id="msg_root", role="assistant", content=[dict(type="tool_use", id="toolu_A", name="Agent", input=dict(description="Look", prompt="Inspect the code"))]), cwd),
+        entry("user", "m3", "m2", session, dict(role="user", content=[dict(type="tool_result", tool_use_id="toolu_A", content=[dict(type="text", text="Async agent launched successfully")])]), cwd),
+        entry("assistant", "m4", "m3", session, dict(id="msg_done", role="assistant", content=[dict(type="text", text="all done")]), cwd),
+    ])
+    (agents / "agent-aaa.meta.json").write_text(json.dumps(dict(toolUseId="toolu_A", description="Look", agentType="general-purpose")))
+    write(agents / "agent-aaa.jsonl", [
+        side("user", "c1", None, dict(role="user", content="Inspect the code")),
+        side("assistant", "c2", "c1", dict(id="msg_c2", role="assistant", content=[dict(type="text", text="Child says hi")])),
+        side("assistant", "c3", "c2", dict(id="msg_c3", role="assistant", content=[dict(type="tool_use", id="toolu_B", name="Agent", input=dict(description="Nested", prompt="Go deeper"))])),
+        side("user", "c4", "c3", dict(role="user", content=[dict(type="tool_result", tool_use_id="toolu_B", content="nested done")])),
+        side("assistant", "c5", "c4", dict(id="msg_c5", role="assistant", content=[dict(type="tool_use", id="toolu_R", name="Read", input=dict(file_path=cwd + "/a.txt"))])),
+        side("user", "c6", "c5", dict(role="user", content=[dict(type="tool_result", tool_use_id="toolu_R", content="file text")])),
+    ])
+    (agents / "agent-bbb.meta.json").write_text(json.dumps(dict(toolUseId="toolu_B", description="Nested", agentType="Explore")))
+    write(agents / "agent-bbb.jsonl", [
+        side("user", "n1", None, dict(role="user", content="Go deeper")),
+        side("assistant", "n2", "n1", dict(id="msg_n2", role="assistant", content=[dict(type="text", text="Nested says hi")])),
+    ])
+    return session
+
+
 class BridgeTests(unittest.TestCase):
     def setUp(self):
         root = Path(__file__).resolve().parents[1]
@@ -495,6 +527,36 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual([(u["sessionUpdate"], u["toolCallId"]) for u in child if u["sessionUpdate"].startswith("tool_call")], [("tool_call", "tool-s"), ("tool_call_update", "tool-s")])
         self.assertEqual("".join(u["content"]["text"] for u in root if u["sessionUpdate"] == "agent_message_chunk"), "Waiting for the agentdone")
         self.assertEqual([u["status"] for u in root if u.get("toolCallId") == "tool-a"][-1], "completed")
+
+    def test_load_replays_subagents_into_child_sessions(self):
+        self.call("initialize", dict(protocolVersion=1, clientCapabilities=dict(subagents={}, elicitation=dict(form={}))))
+        self.id = subagent_history(self.config.name, self.cwd)
+        self.call("session/load", dict(sessionId=self.id, cwd=self.cwd, mcpServers=[]))
+        notes = [(v["params"]["sessionId"], v["params"]["update"]) for v in self.seen if v.get("method") == "session/update"]
+        on = lambda sid, kind: [u for s, u in notes if s == sid and u["sessionUpdate"] == kind]
+        text = lambda sid: [u["content"]["text"] for u in on(sid, "agent_message_chunk")]
+        self.assertEqual([(u["sessionId"], u["title"], u["description"]) for u in on(self.id, "subagent_update") if "title" in u], [("aaa", "Look", "Inspect the code")])
+        self.assertEqual([(u["sessionId"], u["title"]) for u in on("aaa", "subagent_update") if "title" in u], [("bbb", "Nested")])  # nested under its parent
+        self.assertEqual(text("aaa"), ["Child says hi"])
+        self.assertEqual(text("bbb"), ["Nested says hi"])
+        self.assertEqual(text(self.id), ["all done"])
+        self.assertEqual([u["toolCallId"] for u in on("aaa", "tool_call")], ["toolu_B", "toolu_R"])
+        self.assertEqual([u["status"] for u in on("aaa", "tool_call_update") if u["toolCallId"] == "toolu_R"], ["completed"])
+        self.assertEqual([u["content"]["text"] for s, u in notes if u["sessionUpdate"] == "user_message_chunk"], ["go"])  # prompts stay descriptions
+        ended = [(s, u["sessionId"]) for s, u in notes if u["sessionUpdate"] == "subagent_update" and u.get("state", {}).get("state") == "idle"]
+        self.assertEqual(sorted(ended), sorted([("aaa", "bbb"), (self.id, "aaa")]))
+        first = {sid: next(i for i, (s, _) in enumerate(notes) if s == sid) for sid in ("aaa", "bbb")}
+        announced = {u["sessionId"]: i for i, (s, u) in enumerate(notes) if u["sessionUpdate"] == "subagent_update" and "title" in u}
+        self.assertTrue(all(announced[c] < first[c] for c in first))  # announced before their traffic
+        self.assertEqual(self.prompt("hello")["stopReason"], "end_turn")
+
+    def test_load_without_subagent_support_keeps_the_root_transcript(self):
+        self.id = subagent_history(self.config.name, self.cwd)
+        self.call("session/load", dict(sessionId=self.id, cwd=self.cwd, mcpServers=[]))
+        notes = [v["params"] for v in self.seen if v.get("method") == "session/update"]
+        self.assertTrue(all(n["sessionId"] == self.id for n in notes))
+        self.assertFalse(any(n["update"]["sessionUpdate"] == "subagent_update" for n in notes))
+        self.assertEqual(self.answer_text(), "all done")
 
     def test_older_cli_without_state_events_ends_on_result(self):
         Path(self.cwd, "no-state-events").touch()

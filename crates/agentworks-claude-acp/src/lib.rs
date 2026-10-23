@@ -734,20 +734,13 @@ impl Session {
                 }
                 Some("task_started") => {
                     let tool = v["tool_use_id"].as_str().unwrap_or_default();
-                    let native = bridge.subagents.load(Ordering::Relaxed);
-                    let announce = {
-                        let mut s = self.state.lock().unwrap();
-                        s.agents.get_mut(tool).and_then(|agent| {
-                            agent.background = v["is_backgrounded"] == true;
-                            let task = v["task_id"].as_str().filter(|t| native && !t.is_empty() && agent.child.is_none())?;
-                            agent.child = Some(task.to_owned());
-                            let title = v["description"].as_str().or(v["subagent_type"].as_str()).unwrap_or("Subagent");
-                            let description = v["prompt"].as_str().or(agent.prompt.as_deref()).unwrap_or("");
-                            Some((agent.owner.clone(), json!({"sessionUpdate":"subagent_update","sessionId":task,"title":title,"description":description,"capabilities":{},"state":{"state":"running"}})))
-                        })
-                    };
-                    if let Some((owner, announcement)) = announce {
-                        update(cx, &owner, announcement)?;
+                    if let Some(agent) = self.state.lock().unwrap().agents.get_mut(tool) {
+                        agent.background = v["is_backgrounded"] == true;
+                    }
+                    if bridge.subagents.load(Ordering::Relaxed) {
+                        let title = v["description"].as_str().or(v["subagent_type"].as_str());
+                        let task = v["task_id"].as_str().unwrap_or_default();
+                        self.announce(tool, task, title, v["prompt"].as_str(), cx)?;
                     }
                 }
                 Some("task_notification") => {
@@ -1129,6 +1122,33 @@ impl Session {
             &owner,
             json!({"sessionUpdate":"tool_call_update","toolCallId":id,"status":status,"content":content}),
         )
+    }
+    /// Announce the native child session for Agent call `tool`, once. Returns
+    /// whether it was announced now.
+    fn announce(
+        &self,
+        tool: &str,
+        task: &str,
+        title: Option<&str>,
+        prompt: Option<&str>,
+        cx: &ConnectionTo<Client>,
+    ) -> Result<bool> {
+        let announcement = {
+            let mut s = self.state.lock().unwrap();
+            s.agents.get_mut(tool).and_then(|agent| {
+                if task.is_empty() || agent.child.is_some() {
+                    return None;
+                }
+                agent.child = Some(task.to_owned());
+                let description = prompt.or(agent.prompt.as_deref()).unwrap_or("");
+                Some((agent.owner.clone(), json!({"sessionUpdate":"subagent_update","sessionId":task,"title":title.unwrap_or("Subagent"),"description":description,"capabilities":{},"state":{"state":"running"}})))
+            })
+        };
+        let Some((owner, announcement)) = announcement else {
+            return Ok(false);
+        };
+        update(cx, &owner, announcement)?;
+        Ok(true)
     }
     /// Report a native child session idle once; it stays a readable tab.
     fn end_child(&self, tool: &str, stop: &str, cx: &ConnectionTo<Client>) -> Result<()> {
@@ -2064,7 +2084,54 @@ fn replay(s: &Session, cx: &ConnectionTo<Client>, bridge: &Bridge) -> Result<()>
         .iter()
         .rev()
         .find(|e| is_message(e) && e["type"] != "system");
-    for e in chain(&entries, leaf) {
+    let agents = if bridge.subagents.load(Ordering::Relaxed) {
+        subagent_transcripts(&path.with_extension(""))
+    } else {
+        HashMap::new()
+    };
+    replay_entries(s, &chain(&entries, leaf), None, &agents, cx, bridge)?;
+    // Replayed calls that never got a result stay as they were recorded.
+    let mut st = s.state.lock().unwrap();
+    st.open.clear();
+    st.agents.clear();
+    Ok(())
+}
+
+/// Subagent transcripts by the Agent tool call that started them:
+/// `<session>/subagents/agent-<id>.jsonl` beside `agent-<id>.meta.json`.
+fn subagent_transcripts(session: &Path) -> HashMap<String, (String, Value, PathBuf)> {
+    let Ok(files) = std::fs::read_dir(session.join("subagents")) else {
+        return HashMap::new();
+    };
+    files
+        .flatten()
+        .filter_map(|f| {
+            let path = f.path();
+            let name = path.file_name()?.to_str()?;
+            let agent = name
+                .strip_prefix("agent-")?
+                .strip_suffix(".meta.json")?
+                .to_owned();
+            let meta: Value = serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
+            let tool = meta["toolUseId"].as_str()?.to_owned();
+            let transcript = path.with_file_name(format!("agent-{agent}.jsonl"));
+            Some((tool, (agent, meta, transcript)))
+        })
+        .collect()
+}
+
+/// Replay transcript entries on the root, or on the child session of Agent call
+/// `parent`, descending into the transcripts of the subagents they started.
+fn replay_entries(
+    s: &Session,
+    entries: &[&Value],
+    parent: Option<&str>,
+    agents: &HashMap<String, (String, Value, PathBuf)>,
+    cx: &ConnectionTo<Client>,
+    bridge: &Bridge,
+) -> Result<()> {
+    let target = s.route(parent);
+    for e in entries {
         let content = &e["message"]["content"];
         match e["type"].as_str() {
             Some("user") if e["isMeta"] != true && e["isCompactSummary"] != true => {
@@ -2075,7 +2142,8 @@ fn replay(s: &Session, cx: &ConnectionTo<Client>, bridge: &Bridge) -> Result<()>
                 };
                 for block in blocks {
                     match block["type"].as_str() {
-                        Some("text") => {
+                        // A subagent's first message is its prompt, already its description.
+                        Some("text") if parent.is_none() => {
                             let text = block["text"].as_str().unwrap_or("");
                             if [
                                 "<command-",
@@ -2090,14 +2158,16 @@ fn replay(s: &Session, cx: &ConnectionTo<Client>, bridge: &Bridge) -> Result<()>
                             }
                             update(
                                 cx,
-                                &s.id,
+                                &target,
                                 json!({"sessionUpdate":"user_message_chunk","messageId":e["uuid"],"content":{"type":"text","text":text}}),
                             )?;
                         }
-                        Some("image") if block["source"]["type"] == "base64" => {
+                        Some("image")
+                            if parent.is_none() && block["source"]["type"] == "base64" =>
+                        {
                             update(
                                 cx,
-                                &s.id,
+                                &target,
                                 json!({"sessionUpdate":"user_message_chunk","messageId":e["uuid"],"content":{"type":"image","data":block["source"]["data"],"mimeType":block["source"]["media_type"]}}),
                             )?;
                         }
@@ -2114,14 +2184,33 @@ fn replay(s: &Session, cx: &ConnectionTo<Client>, bridge: &Bridge) -> Result<()>
                         Some("text") => ("agent_message_chunk", &block["text"]),
                         Some("thinking") => ("agent_thought_chunk", &block["thinking"]),
                         Some("tool_use") => {
-                            s.tool_use(block, None, cx, bridge)?;
+                            s.tool_use(block, parent, cx, bridge)?;
+                            let tool = block["id"].as_str().unwrap_or_default();
+                            if let Some((agent, meta, transcript)) = agents.get(tool) {
+                                let title =
+                                    meta["description"].as_str().or(meta["agentType"].as_str());
+                                // Announced once, so a transcript cannot replay itself.
+                                if s.announce(
+                                    tool,
+                                    agent,
+                                    title,
+                                    block["input"]["prompt"].as_str(),
+                                    cx,
+                                )? {
+                                    let child = read_entries(transcript).unwrap_or_default();
+                                    let child: Vec<&Value> =
+                                        child.iter().filter(|e| e["uuid"].is_string()).collect();
+                                    replay_entries(s, &child, Some(tool), agents, cx, bridge)?;
+                                    s.end_child(tool, "end_turn", cx)?;
+                                }
+                            }
                             continue;
                         }
                         _ => continue,
                     };
                     update(
                         cx,
-                        &s.id,
+                        &target,
                         json!({"sessionUpdate":kind,"messageId":e["message"]["id"],"content":{"type":"text","text":text}}),
                     )?;
                 }
@@ -2129,8 +2218,6 @@ fn replay(s: &Session, cx: &ConnectionTo<Client>, bridge: &Bridge) -> Result<()>
             _ => {}
         }
     }
-    // Replayed calls that never got a result stay as they were recorded.
-    s.state.lock().unwrap().open.clear();
     Ok(())
 }
 

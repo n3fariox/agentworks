@@ -48,8 +48,15 @@ its owner, completing with the task summary.
 Clients without the capability get the subagent's text (`forwardSubagentText`) in
 the Agent tool card instead, and its tool calls as cards with
 `_meta.claudeCode.parentToolUseId`. Either way it is kept out of the main
-transcript, so fork boundaries stay on Claude's own messages. History replay does
-not include subagent transcripts.
+transcript, so fork boundaries stay on Claude's own messages.
+
+Loading a saved conversation (as Agentworks does when importing one) replays
+subagents too. Claude stores each in `<session>/subagents/agent-<id>.jsonl` with a
+`meta.json` naming the Agent tool call that started it. Replay announces that child
+where its Agent call appears, replays its transcript into it (descending into
+nested subagents), then reports it idle. Child IDs match the live task IDs. A
+subagent's opening prompt stays its description rather than a user message.
+Agentworks' own resumes do not need this: they rebuild tabs from saved events.
 
 History comes from Claude's own transcripts in `$CLAUDE_CONFIG_DIR/projects` (default
 `~/.claude/projects`). Resume and load require the transcript in the project
