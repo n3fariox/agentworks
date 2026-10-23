@@ -19,9 +19,9 @@ Names are 1–80 characters, descriptions up to 200 and instructions up to 16 KB
 
 A session stores the role's name, instructions and content hash when it is created. Editing or deleting the library entry later does not change existing sessions. Session metadata and snapshots expose `role: {id, name, hash}`; the instructions stay on the server.
 
-Harnesses do not persist a client system prompt, so Agentworks sends the stored role with every ACP `session/new`, `session/load`, `session/resume` and `session/fork`, including after a server restart. The prompt uses ACP's `append` mode, after the harness's own instructions.
+Harnesses do not persist a client system prompt, so Agentworks sends the stored role with every ACP `session/new`, `session/load`, `session/resume` and `session/fork`, including after a server restart. The prompt uses ACP's `append` mode, after the harness's own instructions. A small shared block identifies the current session and directs the agent to Agentworks MCP tools for peers, inbox, updates and completion, with stable request IDs for retries. This block is also sent for sessions without a role when the harness advertises system prompt support; MCP server instructions and tool descriptions carry the detailed guidance and live access.
 
-A fork keeps its parent's stored role. A fork to an agent that cannot accept roles starts without one, and New session says so. Child sessions started over MCP and automation runs have no role.
+A fork always keeps its parent's stored role. Forking to an agent that cannot accept that role is rejected before preparing a workspace. Child sessions started over MCP and automation runs have no role.
 
 ## Agent support
 

@@ -42,6 +42,18 @@ test('new session applies a chosen role; unsupported agents disable the picker',
   await page.locator('#prompt').fill('role?');await page.locator('#prompt').press('Enter');
   await expect(page.locator('#messages')).toContainText('Always tag the release.');
 
+  // A fork keeps its parent's snapshot and cannot select an unsupported agent.
+  await page.locator('#lifecycle-menu > summary').click();
+  await page.locator('#fork-session').click();
+  await expect(page.locator('#create-role')).toBeDisabled();
+  await expect(page.locator('#create-role-note')).toContainText("Forks keep the parent's role · Release captain");
+  await page.locator('#provider').selectOption('codex');
+  await expect(page.locator('#create-submit')).toBeDisabled();
+  await expect(page.locator('#create-role-note')).toContainText('must keep the “Release captain” role');
+  await page.locator('#provider').selectOption('demo');
+  await expect(page.locator('#create-role-note')).toContainText("Forks keep the parent's role · Release captain");
+  await page.locator('#dismiss-create').click();
+
   // Unsupported agents disable the picker instead of sending a role they would drop.
   await page.locator('#new-session').click();
   await page.locator('#create-role').selectOption({label:'Reviewer'});

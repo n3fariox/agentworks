@@ -69,17 +69,24 @@ fn role_prompt(
     s: &Session,
     init: &Value,
 ) -> Result<Option<SystemPrompt>, agent_client_protocol::Error> {
-    let Some(role) = s.data.lock().unwrap().role.clone() else {
-        return Ok(None);
-    };
+    let role = s.data.lock().unwrap().role.clone();
     if !init["agentCapabilities"]["sessionCapabilities"]["systemPrompt"].is_object() {
-        return Err(agent_client_protocol::Error::internal_error().data(format!(
-            "This agent does not accept role instructions, so the “{}” role cannot be applied. The transcript is preserved.",
-            role.name
-        )));
+        if let Some(role) = role {
+            return Err(agent_client_protocol::Error::internal_error().data(format!(
+                "This agent does not accept role instructions, so the “{}” role cannot be applied. The transcript is preserved.",
+                role.name
+            )));
+        }
+        return Ok(None);
     }
     Ok(Some(SystemPrompt::new(vec![ContentBlock::Text(
-        TextContent::new(crate::roles::system_prompt(&role)),
+        TextContent::new(format!(
+            "{}{}",
+            crate::roles::shared_context(&s.id),
+            role.as_ref()
+                .map(|r| format!("\n\n{}", crate::roles::system_prompt(r)))
+                .unwrap_or_default(),
+        )),
     )])))
 }
 

@@ -167,6 +167,16 @@ pub fn resolve(
     Ok(Some(snapshot(&role)))
 }
 
+/// Small shared context; live permissions and coordination state belong to MCP.
+pub fn shared_context(session_id: &str) -> String {
+    format!(
+        "# Agentworks\n\nYour session is agentworks://sessions/{session_id}. \
+         Use the Agentworks MCP tools when available to discover peers, read your inbox at useful checkpoints, \
+         send updates and report completion. Follow the MCP server instructions and tool descriptions; \
+         available tools reflect your current access. Reuse the same requestId when retrying an identical operation."
+    )
+}
+
 /// The text sent as the ACP system prompt for a session's role.
 pub fn system_prompt(role: &RoleSnapshot) -> String {
     format!(

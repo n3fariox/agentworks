@@ -1991,8 +1991,8 @@ async fn fork_session(
                 })
                 .flatten(),
             req.project_id.clone().or_else(|| data.project_id.clone()),
-            // The parent's role text carries over unchanged, to harnesses that accept it.
-            data.role.clone().filter(|_| roles::supported(&provider)),
+            // Every fork keeps the parent's exact role snapshot.
+            data.role.clone(),
         )
     };
     let result = create_session_inner(
@@ -2123,6 +2123,12 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             &req.provider,
         )?,
     };
+    if role.is_some() && !roles::supported(&req.provider) {
+        return Err(fail(
+            StatusCode::BAD_REQUEST,
+            "Forks must keep their parent's role. Choose an agent that accepts role instructions",
+        ));
+    }
     let remote_host = req.host_id.clone().filter(|id| id != "local");
     if remote_host.is_none() && use_api_key() && !key_present(&req.provider) {
         return Err(fail(

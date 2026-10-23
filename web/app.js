@@ -97,11 +97,11 @@ function providerNote() {
   if(remote){
     const available=remote.status==='connected'&&remote.worker?.providers?.includes(p.id);
     $('provider-note').textContent=available?`Uses ${labels[p.id]} and sign-ins on ${remote.name}.`:`${labels[p.id]} is unavailable on ${remote.name}.`;
-    $('create-submit').disabled=!available||!remote.roots?.length||creating||worktrees.blocked();
+    $('create-submit').disabled=!available||!remote.roots?.length||creating||worktrees.blocked()||!!(forkSource?.role&&!p.roles);
     return;
   }
   $('provider-note').textContent=p.id==='demo'?'Local test agent. No model calls, API key, or file changes.':p.id==='opencode'?(p.installed?'Native ACP. Choose an advertised free model. Availability and limits may change.':'Install OpenCode on this host or set AGENTWORKS_OPENCODE_PATH.'):!p.installed?'Adapter not installed. Run npm ci --ignore-scripts.':p.authMode==='existing'?'Uses the existing agent sign-in on this host. If it has expired, sign in with the CLI and try again.':!p.keyPresent?`Set ${p.id==='claude'?'ANTHROPIC_API_KEY':'OPENAI_API_KEY or CODEX_API_KEY'} before starting the server.`:'API key available on the host. Messages use your provider account.';
-  $('create-submit').disabled=!p.installed||(p.authMode==='api_key'&&!p.keyPresent)||creating||worktrees.blocked();
+  $('create-submit').disabled=!p.installed||(p.authMode==='api_key'&&!p.keyPresent)||creating||worktrees.blocked()||!!(forkSource?.role&&!p.roles);
 }
 // Roles add instructions to the agent's system prompt; they never change Agentworks access.
 function renderRoles(){
@@ -115,7 +115,7 @@ function renderRoles(){
 }
 function updateRoleNote(){
   const select=$('create-role'),p=config.providers.find(p=>p.id===$('provider').value);
-  if(forkSource){select.disabled=true;select.value='';$('create-role-note').textContent=!forkSource.role?'The parent has no role.':p?.roles?`Forks keep the parent's role · ${forkSource.role.name}`:`${labels[p?.id]||'This agent'} does not accept role instructions, so the fork starts without “${forkSource.role.name}”.`;return;}
+  if(forkSource){select.disabled=true;select.value='';$('create-role-note').textContent=!forkSource.role?'The parent has no role.':p?.roles?`Forks keep the parent's role · ${forkSource.role.name}`:`${labels[p?.id]||'This agent'} cannot fork this session because it must keep the “${forkSource.role.name}” role.`;return;}
   select.disabled=!p?.roles;if(!p?.roles)select.value='';
   const role=roleLibrary.find(r=>r.id===select.value);
   $('create-role-note').textContent=!p?.roles?`${labels[p?.id]||'This agent'} does not accept role instructions yet.`:role?(role.description||'Custom role.')+' Added to the agent\'s system prompt.':'Adds instructions to the agent\'s system prompt. Roles do not change Agentworks access.';

@@ -40,10 +40,14 @@ try{
 
   // Creation snapshots the role and the harness receives it.
   const plain=await create({title:'No role'});assert.equal(plain.role,null);
-  assert.equal(await received(plain.id),'No system prompt.');
+  const shared=await received(plain.id);
+  assert.match(shared,new RegExp('agentworks://sessions/'+plain.id));
+  assert.match(shared,/Use the Agentworks MCP tools/);
+  assert.doesNotMatch(shared,/Agentworks role:/);
   const s=await create({title:'Captain',role:custom.id});
   assert.equal(s.role.name,'Release captain');
   let text=await received(s.id);
+  assert.match(text,/Use the Agentworks MCP tools/);
   assert.match(text,/Agentworks role: Release captain/);assert.match(text,/Always tag the release\./);
 
   // Role validation happens before anything is created.
@@ -62,7 +66,18 @@ try{
   // A fork carries its parent's snapshot, not the edited library text.
   const fork=await api(`/api/sessions/${s.id}/fork`,'POST',{requestId:randomUUID(),title:'Captain fork'});
   assert.equal(fork.role.hash,s.role.hash);
-  assert.match(await received(fork.id),/Always tag the release\./);
+  // The first prompt includes carried transcript context, which the demo echoes.
+  // Query again to inspect the actual system prompt rather than echoed parent text.
+  await received(fork.id);
+  const forkText=await received(fork.id);
+  assert.match(forkText,/Always tag the release\./);
+  assert.match(forkText,new RegExp('agentworks://sessions/'+fork.id));
+  assert.doesNotMatch(forkText,new RegExp('agentworks://sessions/'+s.id));
+
+  // Forks cannot silently drop the parent's role on unsupported providers.
+  const count=(await api('/api/sessions')).length;
+  assert.match(await api(`/api/sessions/${s.id}/fork`,'POST',{requestId:randomUUID(),provider:'codex'},400),/Forks must keep their parent's role/);
+  assert.equal((await api('/api/sessions')).length,count);
 
   // A role never grants Agentworks access.
   const settings=await api('/api/settings');await api('/api/settings','PUT',{...settings,defaultCommunicationRole:'participant'});
