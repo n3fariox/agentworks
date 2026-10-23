@@ -148,7 +148,7 @@ export function usageView(state,{now=Date.now(),provider}={}){
   const quota=['5h','7d'].map(k=>{const w=state.quota[k];if(!w)return `${k} quota: not reported`;
     return `${k} quota (reported): ${pct(100-w.usedPercent)}% remaining${w.status?' · status '+w.status:''} · ${w.resetsAt?`${resetText(w.resetsAt,now)} (${new Date(w.resetsAt).toLocaleString()})`:'reset unknown'} · ${freshness(w,now).text}`;});
   const codex=codexWindows(state,now);
-  const quotaDetails=provider==='codex'?(codex.length?codex.map(w=>w.detail):['Subscription quota: not reported']):[...quota,...codex.map(w=>w.detail)];
+  const quotaDetails=['codex','codex-rust'].includes(provider)?(codex.length?codex.map(w=>w.detail):['Subscription quota: not reported']):[...quota,...codex.map(w=>w.detail)];
   const details=[
     c?`Context occupancy (current window): ${c.used!==undefined?c.used.toLocaleString():'unknown'} of ${c.size!==undefined?c.size.toLocaleString():'unknown'} tokens${c.percent!==undefined?` (${c.percent.toFixed(1)}%)`:''} · ${cf.text}`:'Context occupancy: not reported yet',
     c?.dropped?'Occupancy decreased since the previous report (cause not reported)':'',

@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 agent-client-protocol.workspace = true
+agentworks-codex-acp = { path = "../agentworks-codex-acp" }
 axum = { version = "0.8", features = ["ws"] }
 tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true, features = ["rc"] }

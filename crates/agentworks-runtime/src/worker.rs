@@ -644,6 +644,14 @@ fn available_providers(env: &HashMap<String, String>) -> Vec<&'static str> {
     PROVIDERS
         .into_iter()
         .filter(|provider| match *provider {
+            "codex-rust" => {
+                let executable = env
+                    .get("CODEX_PATH")
+                    .cloned()
+                    .or_else(|| std::env::var("CODEX_PATH").ok())
+                    .unwrap_or_else(|| "codex".into());
+                resolve(Path::new(&executable), env).is_some()
+            }
             "opencode" => {
                 let config = crate::provider::agent_config(provider, false, false);
                 resolve(config.command(), env).is_some()
@@ -748,6 +756,23 @@ fn hostname() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_codex_is_available_without_a_node_interpreter() {
+        let env = HashMap::from([
+            ("PATH".into(), "/nonexistent".into()),
+            (
+                "CODEX_PATH".into(),
+                std::env::current_exe()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        ]);
+        let providers = available_providers(&env);
+        assert!(providers.contains(&"codex-rust"));
+        assert!(!providers.contains(&"codex"));
+        assert!(!providers.contains(&"claude"));
+    }
     #[tokio::test]
     async fn replacement_waits_for_ownership_and_other_hosts_remain_independent() {
         let dir =

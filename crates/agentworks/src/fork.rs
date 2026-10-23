@@ -358,7 +358,8 @@ pub fn apply(s: &Session, seed: Seed, child_cwd: &Path) -> Result<(), Error> {
     }
     next.lineage = lineage;
     next.lineage.truncated |= seed.body.len() > PRIMER_LIMIT;
-    if s.provider != next.lineage.parent_provider.as_deref().unwrap_or("") || s.provider != "codex"
+    if s.provider != next.lineage.parent_provider.as_deref().unwrap_or("")
+        || agentworks_runtime::provider::cli_provider(&s.provider) != "codex"
     {
         next.lineage.source_message_id = None;
     }
