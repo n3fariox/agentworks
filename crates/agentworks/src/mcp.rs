@@ -345,6 +345,8 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
                     .map_err(|_| crate::fail(StatusCode::BAD_REQUEST, "Invalid workspace"))?,
                 request_id: None,
                 agent_access: None,
+                role: None,
+                inherited_role: None,
                 provider: field(&args, "provider")?,
                 cwd: field(&args, "cwd")?,
                 title: args["title"].as_str().map(str::to_owned),

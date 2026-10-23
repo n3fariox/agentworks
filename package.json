@@ -26,6 +26,7 @@
     "test:remote-worktree-cleanup": "AGENTWORKS_CLEANUP_REMOTE=1 node scripts/worktree-cleanup-smoke.mjs",
     "test:controllers": "node scripts/controller-smoke.mjs",
     "test:fork": "node scripts/fork-smoke.mjs",
+    "test:roles": "node scripts/roles-smoke.mjs && playwright test tests/roles.spec.mjs",
     "test:worktree-ui": "playwright test tests/worktree-launch.spec.mjs",
     "test:limit-resume": "node scripts/limit-resume-smoke.mjs",
     "test:lifecycle": "node scripts/lifecycle-smoke.mjs",

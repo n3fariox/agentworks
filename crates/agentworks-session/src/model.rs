@@ -72,4 +72,19 @@ pub struct SessionData {
     /// C-04b; present only when Agentworks created this session's worktree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<Owned>,
+    /// Role instructions captured at creation. Re-sent as the ACP system prompt
+    /// on every new/load/resume/fork, because harnesses do not persist it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<RoleSnapshot>,
+}
+
+/// The resolved text of a role at the time a session was created. Later edits
+/// to the library do not change it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoleSnapshot {
+    pub id: String,
+    pub name: String,
+    pub hash: String,
+    pub instructions: String,
 }

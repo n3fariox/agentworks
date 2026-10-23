@@ -44,6 +44,10 @@ Open **Workspace info** in a session to see its current Git branch, commit, repo
 
 **New session** can use a directory, create a new Git worktree, or discover an existing linked worktree. Project settings choose the default and can require isolated worktrees for new sessions, including MCP starts and automation runs. New worktrees use a committed revision; uncommitted source changes stay in the source directory. Existing sessions resume in their original directory. Deleting a session keeps worktree files and branches. Archiving a session removes a clean worktree that the session created (its branch is kept and restore recreates it), asks before deleting uncommitted changes, and refuses unsafe cleanup; nothing is ever merged. Workspace info shows ownership and dirty state. See [ownership and cleanup](WORKTREE-CLEANUP.md). Launch request IDs survive retries and tab reloads; interrupted preparation retains files and requires inspection before a deliberate fresh attempt. See [policy/API details](WORKTREE-POLICY.md) and [browser controls](WORKTREE-UI.md).
 
+## Session roles
+
+Choose a **Role** in New session to add instructions to the agent's system prompt, such as Reviewer or Coordinator. The session keeps the text it was created with, and forks keep their parent's role. Roles never change Agentworks access. Claude supports roles; Codex and OpenCode do not yet. See [roles](ROLES.md).
+
 ## Agent communication and MCP control
 
 Each normal chat session is connected to the native **Agentworks MCP** server (`agentworks mcp`). Claude, Codex, and OpenCode have each sent a real message through this connection. Temporary model-discovery/history-listing processes receive no Agentworks control connection. The MCP subprocess uses the official Rust SDK and a credential-protected loopback bridge to the running service; credentials rotate when the harness restarts and are not included in browser snapshots.

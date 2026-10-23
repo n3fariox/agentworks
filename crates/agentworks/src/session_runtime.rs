@@ -7,7 +7,7 @@ use agent_client_protocol::schema::v1::{
     ImageContent, LoadSessionRequest, NewSessionRequest, PromptRequest, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
     SelectedPermissionOutcome, SessionConfigOptionValue, SessionNotification,
-    SetSessionConfigOptionRequest, TextContent, TextResourceContents,
+    SetSessionConfigOptionRequest, SystemPrompt, TextContent, TextResourceContents,
 };
 use agent_client_protocol::{AcpAgent, Agent, Client, ConnectionTo, DynConnectTo};
 use agentworks_runtime::acp::initialize_on;
@@ -62,6 +62,27 @@ fn agent_for(provider: &str, host_profile: bool) -> AcpAgent {
     AcpAgent::new(agent_config(provider, use_api_key(), host_profile))
 }
 
+/// The session's role as an ACP system prompt. Harnesses do not persist it, so
+/// it accompanies every new/load/resume/fork request. A role is never dropped
+/// silently: a harness that does not advertise the capability is an error.
+fn role_prompt(
+    s: &Session,
+    init: &Value,
+) -> Result<Option<SystemPrompt>, agent_client_protocol::Error> {
+    let Some(role) = s.data.lock().unwrap().role.clone() else {
+        return Ok(None);
+    };
+    if !init["agentCapabilities"]["sessionCapabilities"]["systemPrompt"].is_object() {
+        return Err(agent_client_protocol::Error::internal_error().data(format!(
+            "This agent does not accept role instructions, so the “{}” role cannot be applied. The transcript is preserved.",
+            role.name
+        )));
+    }
+    Ok(Some(SystemPrompt::new(vec![ContentBlock::Text(
+        TextContent::new(crate::roles::system_prompt(&role)),
+    )])))
+}
+
 async fn open_session(
     connection: &ConnectionTo<Agent>,
     s: &Session,
@@ -75,6 +96,7 @@ async fn open_session(
     let caps = init["agentCapabilities"]["promptCapabilities"].clone();
     s.data.lock().unwrap().prompt_capabilities = if caps.is_object() { caps } else { json!({}) };
     s.emit("attachment_policy", crate::attachments::session_policy(s));
+    let system_prompt = role_prompt(s, &init)?;
     let saved = s.data.lock().unwrap().provider_session_id.clone();
     let Some(id) = saved else {
         let lineage = s.data.lock().unwrap().lineage.clone();
@@ -108,6 +130,7 @@ async fn open_session(
                 .send_request(
                     ForkSessionRequest::new(lineage.source_session_id.unwrap(), s.cwd.clone())
                         .mcp_servers(crate::mcp::configuration(s))
+                        .system_prompt(system_prompt.clone())
                         .meta(meta.as_object().unwrap().clone()),
                 )
                 .block_task()
@@ -153,7 +176,9 @@ async fn open_session(
         return Ok(serde_json::to_value(
             connection
                 .send_request(
-                    NewSessionRequest::new(s.cwd.clone()).mcp_servers(crate::mcp::configuration(s)),
+                    NewSessionRequest::new(s.cwd.clone())
+                        .mcp_servers(crate::mcp::configuration(s))
+                        .system_prompt(system_prompt.clone()),
                 )
                 .block_task()
                 .await?,
@@ -169,7 +194,8 @@ async fn open_session(
         connection
             .send_request(
                 LoadSessionRequest::new(id.clone(), s.cwd.clone())
-                    .mcp_servers(crate::mcp::configuration(s)),
+                    .mcp_servers(crate::mcp::configuration(s))
+                    .system_prompt(system_prompt.clone()),
             )
             .block_task()
             .await
@@ -178,7 +204,8 @@ async fn open_session(
         connection
             .send_request(
                 ResumeSessionRequest::new(id.clone(), s.cwd.clone())
-                    .mcp_servers(crate::mcp::configuration(s)),
+                    .mcp_servers(crate::mcp::configuration(s))
+                    .system_prompt(system_prompt.clone()),
             )
             .block_task()
             .await
@@ -187,7 +214,8 @@ async fn open_session(
         connection
             .send_request(
                 LoadSessionRequest::new(id.clone(), s.cwd.clone())
-                    .mcp_servers(crate::mcp::configuration(s)),
+                    .mcp_servers(crate::mcp::configuration(s))
+                    .system_prompt(system_prompt.clone()),
             )
             .block_task()
             .await
@@ -209,7 +237,8 @@ async fn open_session(
                 connection
                     .send_request(
                         NewSessionRequest::new(s.cwd.clone())
-                            .mcp_servers(crate::mcp::configuration(s)),
+                            .mcp_servers(crate::mcp::configuration(s))
+                            .system_prompt(system_prompt.clone()),
                     )
                     .block_task()
                     .await?,
@@ -781,6 +810,93 @@ for line in sys.stdin:
                 loaded[0].1.lineage.native_used,
                 !reject && host_id == source_host
             );
+            drop(session);
+            drop(store);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn role_is_sent_on_every_open_and_never_dropped_silently() {
+        for supports in [true, false] {
+            let dir = std::env::temp_dir().join(format!("agentworks-role-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let store = Arc::new(Mutex::new(
+                crate::store::Store::open(&dir.join("sessions.sqlite3")).unwrap(),
+            ));
+            let catalog = Arc::new(Mutex::new(
+                crate::Catalog::open(dir.join("catalog.json")).unwrap(),
+            ));
+            let mut data: crate::SessionData = serde_json::from_value(json!({
+                "status":"starting","seq":0,"requests":[],"models":null,"available_commands":[],"turn_active":false
+            }))
+            .unwrap();
+            data.role = Some(agentworks_session::model::RoleSnapshot {
+                id: "reviewer".into(),
+                name: "Reviewer".into(),
+                hash: "h".into(),
+                instructions: "Review only.".into(),
+            });
+            let (tx, _) = tokio::sync::broadcast::channel(16);
+            let session = Arc::new(Session {
+                id: Uuid::new_v4().to_string(),
+                provider: "claude".into(),
+                cwd: dir.clone(),
+                title: "Role".into(),
+                initial_model: None,
+                created: 1,
+                host_id: "local".into(),
+                location_id: "local".into(),
+                data: Mutex::new(data),
+                tx,
+                commands: Mutex::new(None),
+                store: store.clone(),
+                approvals: Mutex::new(HashMap::new()),
+                worker: Mutex::new(None),
+                mcp_endpoint: "127.0.0.1:1".parse().unwrap(),
+                mcp_token: Mutex::new("token".into()),
+                mcp_refresh_pending: AtomicBool::new(false),
+                notifications: crate::notifications::Hub::new(catalog),
+                progress: crate::tool_progress::Hub::empty(),
+            });
+            let script = r#"
+import sys,json
+caps={'resume':{}}
+if sys.argv[1]=='yes': caps['systemPrompt']={}
+for line in sys.stdin:
+ r=json.loads(line); m=r.get('method'); p=r.get('params',{})
+ if m=='initialize': out={'protocolVersion':1,'agentCapabilities':{'sessionCapabilities':caps},'authMethods':[]}
+ elif m in ('session/new','session/resume'):
+  assert sys.argv[1]=='yes', 'role must not open a session without the capability'
+  sp=p['systemPrompt']; assert sp['mode']=='append'
+  text=sp['content'][0]['text']; assert 'Agentworks role: Reviewer' in text and 'Review only.' in text
+  out={'sessionId':'native'} if m=='session/new' else {}
+ else: raise Exception('Unexpected method '+str(m))
+ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':out}),flush=True)
+"#;
+            let agent = AcpAgent::new(
+                AcpAgentConfig::new("python3")
+                    .arg("-c")
+                    .arg(script)
+                    .arg(if supports { "yes" } else { "no" }),
+            );
+            let s = session.clone();
+            Client
+                .builder()
+                .connect_with(agent, move |connection: ConnectionTo<Agent>| async move {
+                    let first = open_session(&connection, &s).await;
+                    if supports {
+                        assert_eq!(first.unwrap()["sessionId"], "native");
+                        // A reconnect resumes and must carry the role again.
+                        s.data.lock().unwrap().provider_session_id = Some("native".into());
+                        open_session(&connection, &s).await.unwrap();
+                    } else {
+                        assert!(first.unwrap_err().to_string().contains("Reviewer"));
+                    }
+                    Ok::<_, agent_client_protocol::Error>(())
+                })
+                .await
+                .unwrap();
             drop(session);
             drop(store);
             std::fs::remove_dir_all(dir).unwrap();

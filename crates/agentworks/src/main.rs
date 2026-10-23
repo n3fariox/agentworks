@@ -20,6 +20,7 @@ mod mcp;
 mod notifications;
 mod permission_modes;
 mod review_queue;
+mod roles;
 mod service_restart;
 mod session_runtime;
 mod store;
@@ -273,13 +274,13 @@ impl Session {
         });
         json!({"id":self.id,"provider":self.provider,"cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"model":model,
             "archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"created":self.created,"status":data.status,"turnRunning":data.turn_active,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"]),
-            "projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data)})
+            "projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data)})
     }
     fn snapshot(&self) -> Value {
         let approvals = self.approvals.lock().unwrap();
         let data = self.data.lock().unwrap();
         json!({"kind":"snapshot","seq":data.seq,"session":{"id":self.id,"provider":self.provider,
-            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"])},"events":data.events,
+            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"])},"events":data.events,
             "truncated":data.events.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
             "permissionModes":data.permission_modes,"models":data.models,"attachments":attachments::policy(&self.provider,&data.prompt_capabilities),"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|a.event(id)).collect::<Vec<_>>(),
@@ -414,6 +415,13 @@ impl Session {
     }
 }
 
+/// Name and version of the session's role; the instructions stay server-side.
+fn role_summary(data: &SessionData) -> Value {
+    data.role.as_ref().map_or(
+        Value::Null,
+        |r| json!({"id":r.id,"name":r.name,"hash":r.hash}),
+    )
+}
 fn worktree_summary(data: &SessionData) -> Value {
     data.worktree.as_ref().map_or(
         Value::Null,
@@ -908,6 +916,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/status", get(status))
         .route("/api/activity", get(activity))
         .route("/api/settings", get(get_settings).put(save_settings))
+        .route("/api/roles", get(roles::get_roles).post(roles::create))
+        .route(
+            "/api/roles/{id}",
+            axum::routing::put(roles::update).delete(roles::delete),
+        )
         .route("/api/scripts", get(tool_progress::get_scripts))
         .route(
             "/api/scripts/{name}",
@@ -1215,14 +1228,16 @@ fn allowed_host(host: &str, bind: IpAddr, port: u16) -> bool {
 }
 async fn status(State(app): State<App>) -> Json<Value> {
     let defaults = app.catalog.lock().unwrap().data.settings.clone();
-    Json(
-        json!({"roots":effective_roots(&app),"defaultModels":defaults.default_models,"defaultCommunicationRole":defaults.default_communication_role.unwrap_or_default(),"providers":[
-            {"id":"demo","name":"Demo agent","installed":true,"keyPresent":true},
-            {"id":"claude","name":"Claude","installed":adapter_path("claude").exists(),"keyPresent":key_present("claude"),"authMode":if use_api_key(){"api_key"}else{"existing"}},
-            {"id":"codex","name":"Codex","installed":adapter_path("codex").exists(),"keyPresent":key_present("codex"),"authMode":if use_api_key(){"api_key"}else{"existing"}},
-            {"id":"opencode","name":"OpenCode · free models","installed":installed("opencode"),"keyPresent":true}
-        ]}),
-    )
+    let mut status = json!({"roots":effective_roots(&app),"defaultModels":defaults.default_models,"defaultCommunicationRole":defaults.default_communication_role.unwrap_or_default(),"providers":[
+        {"id":"demo","name":"Demo agent","installed":true,"keyPresent":true},
+        {"id":"claude","name":"Claude","installed":adapter_path("claude").exists(),"keyPresent":key_present("claude"),"authMode":if use_api_key(){"api_key"}else{"existing"}},
+        {"id":"codex","name":"Codex","installed":adapter_path("codex").exists(),"keyPresent":key_present("codex"),"authMode":if use_api_key(){"api_key"}else{"existing"}},
+        {"id":"opencode","name":"OpenCode · free models","installed":installed("opencode"),"keyPresent":true}
+    ]});
+    for p in status["providers"].as_array_mut().unwrap() {
+        p["roles"] = json!(roles::supported(p["id"].as_str().unwrap_or_default()));
+    }
+    Json(status)
 }
 fn effective_roots(app: &App) -> Vec<PathBuf> {
     app.catalog
@@ -1591,6 +1606,8 @@ async fn import_session(State(app): State<App>, Json(req): Json<ImportSession>) 
             workspace: None,
             request_id: None,
             agent_access: None,
+            role: None,
+            inherited_role: None,
             provider: req.provider.clone(),
             cwd: req.cwd,
             title: req.title,
@@ -1956,7 +1973,7 @@ async fn fork_session(
         seed.lineage.source_session_id = None;
         seed.lineage.source_message_id = None;
     }
-    let (title, inherited_model, project_id) = {
+    let (title, inherited_model, project_id, inherited_role) = {
         let data = parent.data.lock().unwrap();
         (
             data.lifecycle
@@ -1974,6 +1991,8 @@ async fn fork_session(
                 })
                 .flatten(),
             req.project_id.clone().or_else(|| data.project_id.clone()),
+            // The parent's role text carries over unchanged, to harnesses that accept it.
+            data.role.clone().filter(|_| roles::supported(&provider)),
         )
     };
     let result = create_session_inner(
@@ -1984,6 +2003,8 @@ async fn fork_session(
             workspace: req.workspace,
             request_id: req.request_id,
             agent_access: req.agent_access,
+            role: None,
+            inherited_role,
             provider,
             cwd: req
                 .cwd
@@ -2025,6 +2046,12 @@ struct Create {
     request_id: Option<String>,
     #[serde(rename = "agentAccess")]
     agent_access: Option<communication::Access>,
+    /// Role library ID; its text is captured when the session is created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
+    /// A fork's copy of its parent's role; never set by a client.
+    #[serde(skip)]
+    inherited_role: Option<agentworks_session::model::RoleSnapshot>,
     provider: String,
     cwd: String,
     title: Option<String>,
@@ -2087,6 +2114,15 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
     if !["demo", "claude", "codex", "opencode"].contains(&req.provider.as_str()) {
         return Err(fail(StatusCode::BAD_REQUEST, "Unknown provider"));
     }
+    // Checked before any workspace is prepared, so a bad role leaves nothing behind.
+    let role = match req.inherited_role.clone() {
+        Some(role) => Some(role),
+        None => roles::resolve(
+            &app.store.lock().unwrap().connection,
+            req.role.as_deref(),
+            &req.provider,
+        )?,
+    };
     let remote_host = req.host_id.clone().filter(|id| id != "local");
     if remote_host.is_none() && use_api_key() && !key_present(&req.provider) {
         return Err(fail(
@@ -2279,6 +2315,7 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             carried_context: None,
             prompt_capabilities: Value::Null,
             worktree: owned_worktree,
+            role,
         }),
         tx,
         commands: Mutex::new(None),

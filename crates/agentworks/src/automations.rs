@@ -355,6 +355,8 @@ pub async fn run(
             workspace: None,
             request_id: None,
             agent_access: None,
+            role: None,
+            inherited_role: None,
             provider: def.provider,
             cwd: def.cwd,
             title: Some(format!("{} · Manual run", def.name)),
