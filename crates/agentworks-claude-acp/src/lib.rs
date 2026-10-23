@@ -1241,7 +1241,7 @@ impl Bridge {
                 Ok(
                     json!({"protocolVersion":1,"agentInfo":{"name":"agentworks-claude-acp","title":"Claude Agent","version":env!("CARGO_PKG_VERSION")},
                     "agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"embeddedContext":true},"mcpCapabilities":{"http":true,"sse":true},
-                        "sessionCapabilities":{"list":{},"resume":{},"close":{},"delete":{},"fork":{},"additionalDirectories":{}}},
+                        "sessionCapabilities":{"list":{},"resume":{},"close":{},"delete":{},"fork":{},"additionalDirectories":{},"systemPrompt":{"mode":{"override":{}}}}},
                     "authMethods":[]}),
                 )
             }
@@ -1461,6 +1461,10 @@ impl Bridge {
         for root in &roots[1..] {
             command.args(["--add-dir", root]);
         }
+        // Claude Code does not store the prompt, so every open request carries it.
+        if let Some((flag, text)) = system_prompt(&p["systemPrompt"])? {
+            command.args([flag, &text]);
+        }
         let servers = mcp_servers(&p)?;
         if !servers.is_empty() {
             command.args(["--mcp-config", &json!({"mcpServers":servers}).to_string()]);
@@ -1665,6 +1669,28 @@ fn commands(commands: &Value) -> Vec<Value> {
             Some(json!({"name":name,"description":c["description"].as_str().unwrap_or(""),"input":hint.map(|h|json!({"hint":h}))}))
         })
         .collect()
+}
+/// An ACP `systemPrompt` as the CLI flag that appends to or replaces Claude Code's own.
+fn system_prompt(prompt: &Value) -> Result<Option<(&'static str, String)>> {
+    if prompt.is_null() {
+        return Ok(None);
+    }
+    let flag = match prompt["mode"].as_str() {
+        Some("append") => "--append-system-prompt",
+        Some("override") => "--system-prompt",
+        _ => return Err(invalid("Unsupported systemPrompt mode")),
+    };
+    let text = prompt["content"]
+        .as_array()
+        .ok_or_else(|| invalid("systemPrompt content must be an array"))?
+        .iter()
+        .map(|b| match b["type"].as_str() {
+            Some("text") => field(b, "text"),
+            _ => Err(invalid("systemPrompt content must be text")),
+        })
+        .collect::<Result<Vec<_>>>()?
+        .join("\n\n");
+    Ok(Some((flag, text)))
 }
 fn mcp_servers(p: &Value) -> Result<Map<String, Value>> {
     let mut servers = Map::new();

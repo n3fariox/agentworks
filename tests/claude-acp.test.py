@@ -352,6 +352,24 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(seen["content"][2], dict(type="text", text="agentworks://notes"))
         self.assertIn('<context ref="agentworks://notes">\n# Notes\n</context>', seen["content"][3]["text"])
 
+    def test_system_prompt_reaches_the_cli(self):
+        caps = self.call("initialize", dict(protocolVersion=1, clientCapabilities={}))["agentCapabilities"]["sessionCapabilities"]
+        self.assertEqual(caps["systemPrompt"], dict(mode=dict(override={})))
+        content = [dict(type="text", text="Shared context"), dict(type="text", text="Role: reviewer")]
+        self.session(systemPrompt=dict(mode="append", content=content))
+        self.prompt("args")
+        args = json.loads(self.answer_text())["args"]
+        self.assertEqual(args[args.index("--append-system-prompt") + 1], "Shared context\n\nRole: reviewer")
+        self.assertNotIn("--system-prompt", args)
+        self.session(systemPrompt=dict(mode="override", content=[dict(type="text", text="Only this")]))
+        start = len(self.seen)
+        self.prompt("args")
+        text = "".join(v["params"]["update"]["content"]["text"] for v in self.seen[start:] if v.get("method") == "session/update" and v["params"]["update"]["sessionUpdate"] == "agent_message_chunk")
+        args = json.loads(text)["args"]
+        self.assertEqual(args[args.index("--system-prompt") + 1], "Only this")
+        bad = self.response(self.send("session/new", dict(cwd=self.cwd, mcpServers=[], systemPrompt=dict(mode="replace", content=[]))))
+        self.assertIn("error", bad)
+
     def test_permission_and_terminal_output(self):
         self.session()
         request_id = self.send("session/prompt", dict(sessionId=self.id, prompt=[dict(type="text", text="bash")]))

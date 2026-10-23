@@ -28,6 +28,11 @@ Usage updates carry context occupancy, cost, `_claude/model` and the raw
 `rate_limit`) for limit-resume handling. Auto mode falls back to Accept edits for
 models without it, as in the npm adapter.
 
+Agentworks [roles](ROLES.md) and its shared session context arrive as an ACP
+`systemPrompt` on every new, resume, load and fork request; Claude Code does not store
+them. `append` becomes `--append-system-prompt` and `override` becomes
+`--system-prompt`, so `claude-rust` accepts roles like the npm Claude harness.
+
 Turns end when Claude Code reports idle (`CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS`),
 not at its first `result`. Claude Code runs subagents in the background: the Agent
 tool returns at once, Claude's own turn ends, and Claude continues by itself when the

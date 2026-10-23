@@ -97,3 +97,13 @@ test('a crashed Claude CLI is reported and the session resumes deliberately',asy
   const events=(await api('/api/sessions/'+s.id)).events||[];
   expect(JSON.stringify(events)).toContain('Claude Code exited unexpectedly');
 });
+
+test('claude-rust accepts role instructions as an appended system prompt',async()=>{
+  const status=await api('/api/status');
+  expect(status.providers.find(p=>p.id==='claude-rust').roles).toBe(true);
+  const s=await api('/api/sessions',{provider:'claude-rust',cwd:dir,role:'reviewer'});await state(s.id,'idle');
+  await api('/api/sessions/'+s.id+'/prompt',{text:'args',requestId:'role-args'});await state(s.id,'idle');
+  const text=JSON.stringify((await api('/api/sessions/'+s.id)).events||[]);
+  expect(text).toContain('--append-system-prompt');
+  expect(text).toContain('You are reviewing changes');
+});
