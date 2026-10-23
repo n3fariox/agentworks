@@ -29,6 +29,7 @@
     "test:fork": "node scripts/fork-smoke.mjs",
     "test:worktree-ui": "playwright test tests/worktree-launch.spec.mjs",
     "test:limit-resume": "node scripts/limit-resume-smoke.mjs",
+    "test:acp-lifecycle": "node scripts/acp-lifecycle-smoke.mjs",
     "test:lifecycle": "node scripts/lifecycle-smoke.mjs",
     "test:project-lifecycle": "node scripts/project-lifecycle-smoke.mjs",
     "test:diff": "playwright test tests/diff.spec.mjs",

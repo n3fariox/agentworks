@@ -21,6 +21,7 @@ mod notifications;
 mod permission_modes;
 mod review_queue;
 mod service_restart;
+mod session_config;
 mod session_runtime;
 mod store;
 mod terminal;
@@ -274,15 +275,15 @@ impl Session {
         });
         json!({"id":self.id,"provider":self.provider,"cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"model":model,
             "archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"created":self.created,"status":data.status,"turnRunning":data.turn_active,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"]),
-            "projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data)})
+            "projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"providerCapabilities":data.agent_capabilities["sessionCapabilities"],"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None}})
     }
     fn snapshot(&self) -> Value {
         let approvals = self.approvals.lock().unwrap();
         let data = self.data.lock().unwrap();
         json!({"kind":"snapshot","seq":data.seq,"session":{"id":self.id,"provider":self.provider,
-            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"])},"events":data.events,
+            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None},"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"])},"events":data.events,
             "truncated":data.events.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
-            "permissionModes":data.permission_modes,"models":data.models,"attachments":attachments::policy(&self.provider,&data.prompt_capabilities),"commands":data.available_commands,"storageError":data.storage_error,
+            "providerCapabilities":data.agent_capabilities["sessionCapabilities"],"sessionConfig":data.session_config,"permissionModes":data.permission_modes,"models":data.models,"attachments":attachments::policy(&self.provider,&data.prompt_capabilities),"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|a.event(id)).collect::<Vec<_>>(),
             "toolProgress":self.progress.views(&self.id)})
     }
@@ -1074,6 +1075,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/{id}/suspend", post(lifecycle::suspend))
         .route("/api/sessions/{id}/resume", post(resume))
         .route("/api/sessions/{id}/model", post(set_model))
+        .route(
+            "/api/sessions/{id}/configuration",
+            get(session_config::get).post(session_config::set),
+        )
         .route("/api/sessions/{id}/fork", post(fork_session))
         .route(
             "/api/sessions/{id}/permission-mode",
@@ -1109,18 +1114,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     axum::serve(listener, router)
         .with_graceful_shutdown(async move {
+            #[cfg(unix)]
+            {
+                let mut terminate=tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("register SIGTERM handler");
+                tokio::select!{_ = tokio::signal::ctrl_c()=>{}, _ = terminate.recv()=>{}}
+            }
+            #[cfg(not(unix))]
             let _ = tokio::signal::ctrl_c().await;
             scheduler.abort();
             terminal::shutdown().await;
-            app.hosts.stop_all();
             let _ = scheduler.await;
             input_scheduler.abort();
             let _ = input_scheduler.await;
             inbox_scheduler.abort();
             let _=inbox_scheduler.await;
-            for s in app.sessions.lock().unwrap().values() {
-                if let Some(worker) = s.worker.lock().unwrap().take() { worker.abort(); }
-                *s.commands.lock().unwrap()=None;
+            service_restart::begin_shutdown(&app);
+            let _run=app.run_lock.lock().await;
+            let sessions=app.sessions.lock().unwrap().values().cloned().collect::<Vec<_>>();
+            futures::future::join_all(sessions.iter().map(|s| lifecycle::stop_worker(s))).await;
+            app.hosts.stop_all();
+            for s in &sessions {
                 if s.data.lock().unwrap().turn_active {s.emit("interrupted",json!({"message":"Server stopped during a turn; it was not automatically retried."}));}
                 s.clear_approvals();
                 s.status("suspended");
@@ -2268,6 +2281,10 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             last_prompt: None,
             models: Value::Null,
             permission_modes: Value::Null,
+            session_config: Value::Null,
+            agent_capabilities: Value::Null,
+            provider_history_deleted: false,
+            provider_history_delete_pending: false,
             initial_claude_permission_mode: permission_modes::initial_claude_default(
                 &req.provider,
                 req.external_id.is_some(),
@@ -2441,6 +2458,15 @@ async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
         return Err(fail(
             StatusCode::CONFLICT,
             "This session's worktree was removed on archive; unarchive it to recreate the worktree",
+        ));
+    }
+    if {
+        let data = s.data.lock().unwrap();
+        data.provider_history_deleted || data.provider_history_delete_pending
+    } {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "Provider-history deletion was requested; inspect or retry deletion before continuing",
         ));
     }
     if s.host_id == "local" {
@@ -2718,10 +2744,32 @@ async fn set_model(
     }
     Ok(Json(json!({"accepted":true})))
 }
-async fn delete_session(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DeleteOptions {
+    #[serde(default)]
+    provider_history: bool,
+}
+async fn delete_session(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Query(options): Query<DeleteOptions>,
+) -> ApiResult {
     let _gate = app.communication_lock.lock().await;
     let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
+    if options.provider_history {
+        // Stop the active adapter before asking a separate connection to delete
+        // its durable session, so it cannot rewrite history after deletion.
+        inbox_delivery::revoke_related(&app, &s, "Provider history deletion requested")?;
+        let _ = lifecycle::suspend_locked(&s).await?;
+        if let Err(error) = session_runtime::delete_provider_history(&s).await {
+            let message = agentworks_runtime::provider::safe_error(&error.to_string());
+            s.emit("session_updated", s.meta());
+            s.emit("provider_history_delete_failed", json!({"message":message}));
+            return Err(fail(StatusCode::BAD_GATEWAY, message));
+        }
+    }
     delete_session_locked(&app, &s).await?;
     Ok(Json(json!({"ok":true})))
 }

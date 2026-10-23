@@ -30,6 +30,14 @@ pub struct SessionData {
     pub models: Value,
     #[serde(default)]
     pub permission_modes: Value,
+    #[serde(default)]
+    pub session_config: Value,
+    #[serde(default)]
+    pub agent_capabilities: Value,
+    #[serde(default)]
+    pub provider_history_deleted: bool,
+    #[serde(default)]
+    pub provider_history_delete_pending: bool,
     // Captured at creation, never inferred for restored/imported sessions.
     // A native session ID prevents this default from overriding reconnect state.
     #[serde(default, skip_serializing_if = "Option::is_none")]

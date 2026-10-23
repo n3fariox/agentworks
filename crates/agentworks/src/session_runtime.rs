@@ -40,10 +40,15 @@ pub enum Command {
         text: String,
         owner: crate::inbox_delivery::Turn,
     },
+    Close(oneshot::Sender<Result<(), String>>),
     Cancel,
     CancelInbox(crate::inbox_delivery::Turn),
     Model(String),
     PermissionMode(String),
+    Config {
+        id: String,
+        value: Value,
+    },
 }
 
 impl Command {
@@ -67,12 +72,25 @@ async fn open_session(
     connection: &ConnectionTo<Agent>,
     s: &Session,
 ) -> Result<Value, agent_client_protocol::Error> {
+    if {
+        let data = s.data.lock().unwrap();
+        data.provider_history_deleted || data.provider_history_delete_pending
+    } {
+        return Err(agent_client_protocol::Error::invalid_params().data(
+            "Provider-history deletion was requested; inspect or retry deletion before continuing",
+        ));
+    }
     let init = initialize_on(
         connection,
         &s.provider,
         s.host_id == "local" && use_api_key(),
     )
     .await?;
+    s.data.lock().unwrap().agent_capabilities = init["agentCapabilities"].clone();
+    s.emit(
+        "provider_capabilities",
+        init["agentCapabilities"]["sessionCapabilities"].clone(),
+    );
     let caps = init["agentCapabilities"]["promptCapabilities"].clone();
     s.data.lock().unwrap().prompt_capabilities = if caps.is_object() { caps } else { json!({}) };
     s.emit("attachment_policy", crate::attachments::session_policy(s));
@@ -295,6 +313,7 @@ pub async fn run(
         }
     };
     let saved_permission_modes = s.data.lock().unwrap().permission_modes.clone();
+    let saved_config = s.data.lock().unwrap().session_config.clone();
     let import_pending = s.data.lock().unwrap().import_pending;
     let host_profile = s.data.lock().unwrap().opencode_host;
     let (transport, _spawn_guard): (DynConnectTo<Client>, _) = if s.host_id == "local" {
@@ -317,15 +336,14 @@ pub async fn run(
             let Some((update,is_child))=notify_sessions.lock().unwrap().route(notification) else {return Ok(());};
             if !is_child && update["sessionUpdate"]=="available_commands_update" {
                 notify_s.set_commands(update["availableCommands"].clone());
-            } else if !is_child && update["sessionUpdate"]=="config_option_update" {
-                if let Some(config)=parse_model_config(&update,notify_s.provider=="opencode") {notify_s.set_models(config);}
-                if let Some(config)=crate::permission_modes::parse(&update) {notify_s.set_permission_modes(config);}
+            } else if !is_child && matches!(update["sessionUpdate"].as_str(), Some("config_option_update"|"current_mode_update")) {
+                crate::session_config::publish(&notify_s, &update);
             }
-            if import_pending && notify_replaying.load(Ordering::SeqCst) && (is_child || !matches!(update["sessionUpdate"].as_str(),Some("available_commands_update"|"config_option_update"))) {
+            if import_pending && notify_replaying.load(Ordering::SeqCst) && (is_child || !matches!(update["sessionUpdate"].as_str(),Some("available_commands_update"|"config_option_update"|"current_mode_update"))) {
                 let mut staged=notify_history.lock().unwrap();staged.1+=update.to_string().len();
                 if staged.1>32*1024*1024 || staged.0.len()>=50000 {staged.2=true;}else{staged.0.push(update.clone());}
             }
-            if !notify_replaying.load(Ordering::SeqCst) || (!is_child && matches!(update["sessionUpdate"].as_str(),Some("available_commands_update"|"config_option_update"))) {
+            if !notify_replaying.load(Ordering::SeqCst) || (!is_child && matches!(update["sessionUpdate"].as_str(),Some("available_commands_update"|"config_option_update"|"current_mode_update"))) {
                 if !is_child {crate::limit_resume::observe(&notify_s, &update);}
                 crate::timeouts::observe(&notify_s.id,&update,crate::timeouts::now_ms());
                 notify_s.emit("acp",update);
@@ -420,6 +438,7 @@ pub async fn run(
                 data.provider_session_id=Some(provider_id.clone());desired
             };
             s.emit("provider_session",json!({"id":provider_id}));
+            crate::session_config::publish(&s, &created);
             let mut model_config=parse_model_config(&serde_json::to_value(&created).unwrap_or(Value::Null),s.provider=="opencode").unwrap_or(Value::Null);
             if model_config.is_null() {model_config=s.data.lock().unwrap().models.clone();}
             if s.provider=="opencode" && model_config.is_null() {
@@ -436,55 +455,71 @@ pub async fn run(
                     let request=SetSessionConfigOptionRequest::new(provider_id.clone(),model_config["configId"].as_str().unwrap().to_owned(),SessionConfigOptionValue::value_id(model_config["currentValue"].as_str().unwrap().to_owned()));
                     let selected=tokio::time::timeout(Duration::from_secs(30),connection.send_request(request).block_task())
                         .await.map_err(|_|agent_client_protocol::Error::internal_error().data("Model selection timed out"))??;
-                    if let Some(config)=parse_model_config(&serde_json::to_value(selected).unwrap_or(Value::Null),s.provider=="opencode") {model_config=config;}
+                    let selected=serde_json::to_value(selected).unwrap_or(Value::Null);
+                    crate::session_config::publish(&s, &selected);
+                    if let Some(config)=parse_model_config(&selected,s.provider=="opencode") {model_config=config;}
                 }
                 s.set_models(model_config.clone());
             }
-            let mut mode_config=crate::permission_modes::parse(&created).unwrap_or(Value::Null);
+            let mut mode_config=s.data.lock().unwrap().permission_modes.clone();
             if let Some(mode)=saved_permission_modes["currentValue"].as_str() {
                 if mode_config["options"].as_array().is_some_and(|items|items.iter().any(|o|o["value"]==mode)) {
-                    let request=SetSessionConfigOptionRequest::new(provider_id.clone(),mode_config["configId"].as_str().unwrap().to_owned(),SessionConfigOptionValue::value_id(mode.to_owned()));
-                    let selected=tokio::time::timeout(Duration::from_secs(30),connection.send_request(request).block_task()).await.map_err(|_|agent_client_protocol::Error::internal_error().data("Permission mode selection timed out"))??;
-                    mode_config=crate::permission_modes::parse(&serde_json::to_value(selected).unwrap_or(Value::Null)).ok_or_else(||agent_client_protocol::Error::internal_error().data("Harness did not confirm permission mode"))?;
+                    let config=s.data.lock().unwrap().session_config.clone();
+                    let selected=crate::session_config::select(&connection,&provider_id,&config,mode_config["configId"].as_str().unwrap(),json!(mode),crate::session_config::legacy_mode(&config)).await?;
+                    crate::session_config::publish(&s,&selected);
+                    mode_config=s.data.lock().unwrap().permission_modes.clone();
                 } else {
                     return Err(agent_client_protocol::Error::internal_error().data("Saved permission mode is no longer advertised; inspect session configuration"));
                 }
             } else if let Some(mode)=initial_mode {
-                mode_config=crate::permission_modes::apply_initial(mode_config,if s.provider=="codex" {"Codex"} else {"Claude"},mode,|config_id,mode| async {
-                    let request=SetSessionConfigOptionRequest::new(provider_id.clone(),config_id,SessionConfigOptionValue::value_id(mode));
-                    let selected=tokio::time::timeout(Duration::from_secs(30),connection.send_request(request).block_task()).await.map_err(|_|agent_client_protocol::Error::internal_error().data("Default permission mode selection timed out; no prompt was sent"))??;
-                    Ok(serde_json::to_value(selected).unwrap_or(Value::Null))
-                }).await?;
+                mode_config=crate::permission_modes::apply_initial(mode_config,if s.provider=="codex" {"Codex"} else {"Claude"},mode,|config_id,mode| {
+                    let connection=&connection;let provider_id=&provider_id;let s=&s;
+                    async move {
+                    let config=s.data.lock().unwrap().session_config.clone();
+                    let selected=crate::session_config::select(&connection,&provider_id,&config,&config_id,json!(mode),crate::session_config::legacy_mode(&config)).await?;
+                    crate::session_config::publish(&s,&selected);
+                    Ok(s.data.lock().unwrap().session_config.clone())
+                }}).await?;
             }
             s.set_permission_modes(mode_config.clone());
+            // Restore additional advertised settings after model and permission selection,
+            // as those selections can change the available settings and values.
+            let config=s.data.lock().unwrap().session_config.clone();
+            let restored=crate::session_config::restore(&connection,&provider_id,config.clone(),&saved_config).await?;
+            if restored!=config {crate::session_config::publish(&s,&restored);}
             crate::limit_resume::ready(&s);
             s.emit("ready",json!({"providerSessionId":provider_id,"configuration":serde_json::to_value(&created).unwrap_or(Value::Null)}));
             if !s.start_queued_prompt().map_err(|e|agent_client_protocol::Error::internal_error().data(e))? {s.status("idle");}
             while let Some(command)=commands.recv().await {
                 match command {
+                    Command::Close(reply)=>{
+                        let capabilities=s.data.lock().unwrap().agent_capabilities.clone();
+                        let result=agentworks_runtime::acp::close_session(&connection,&provider_id,&capabilities).await.map_err(|e|safe_error(&e.to_string()));
+                        let _=reply.send(result);return Ok(());
+                    },
                     Command::Cancel | Command::CancelInbox(_)=>{},
-                    Command::Model(model)=>{
-                        let request=SetSessionConfigOptionRequest::new(provider_id.clone(),model_config["configId"].as_str().unwrap_or("model").to_owned(),SessionConfigOptionValue::value_id(model.clone()));
-                        match tokio::time::timeout(Duration::from_secs(30),connection.send_request(request).block_task()).await {
-                            Ok(Ok(selected))=>{
-                                model_config["currentValue"]=json!(model);
-                                if let Some(config)=parse_model_config(&serde_json::to_value(selected).unwrap_or(Value::Null),s.provider=="opencode") {model_config=config;}
-                                s.set_models(model_config.clone());
+                    command @ (Command::Model(_) | Command::PermissionMode(_) | Command::Config{..})=>{
+                        // Read live configuration, including agent-initiated updates.
+                        let config=s.data.lock().unwrap().session_config.clone();
+                        let (id,value,legacy)=match command {
+                            Command::Model(model)=>{
+                                let model_config=s.data.lock().unwrap().models.clone();
+                                (model_config["configId"].as_str().unwrap_or("model").to_owned(),json!(model),false)
+                            },
+                            Command::PermissionMode(mode)=>{
+                                let mode_config=s.data.lock().unwrap().permission_modes.clone();
+                                (mode_config["configId"].as_str().unwrap_or("mode").to_owned(),json!(mode),crate::session_config::legacy_mode(&config))
+                            },
+                            Command::Config{id,value}=>(id,value,false),
+                            _=>unreachable!(),
+                        };
+                        match crate::session_config::select(&connection,&provider_id,&config,&id,value,legacy).await {
+                            Ok(selected)=>crate::session_config::publish(&s,&selected),
+                            Err(error)=>{
+                                // Close on timeout: the provider may have applied the change.
+                                if error.to_string().contains("configuration timed out") {return Err(error);}
+                                s.emit("error",json!({"message":safe_error(&error.to_string())}));
                             }
-                            Ok(Err(error))=>s.emit("error",json!({"message":safe_error(&error.to_string())})),
-                            Err(_)=>return Err(agent_client_protocol::Error::internal_error().data("Model selection timed out; session closed")),
-                        }
-                        s.status("idle");
-                    }
-                    Command::PermissionMode(mode)=>{
-                        let request=SetSessionConfigOptionRequest::new(provider_id.clone(),mode_config["configId"].as_str().unwrap_or("mode").to_owned(),SessionConfigOptionValue::value_id(mode));
-                        match tokio::time::timeout(Duration::from_secs(30),connection.send_request(request).block_task()).await {
-                            Ok(Ok(selected))=>{
-                                if let Some(config)=crate::permission_modes::parse(&serde_json::to_value(selected).unwrap_or(Value::Null)) {mode_config=config;s.set_permission_modes(mode_config.clone());}
-                                else {s.emit("error",json!({"message":"Harness did not confirm permission mode"}));}
-                            }
-                            Ok(Err(error))=>s.emit("error",json!({"message":safe_error(&error.to_string())})),
-                            Err(_)=>return Err(agent_client_protocol::Error::internal_error().data("Permission mode selection timed out; session closed")),
                         }
                         s.status("idle");
                     }
@@ -550,6 +585,12 @@ pub async fn run(
                                     break;
                                 }
                                 command=commands.recv()=>match command {
+                                    Some(Command::Close(reply))=>{
+                                        s.clear_approvals();
+                                        let capabilities=s.data.lock().unwrap().agent_capabilities.clone();
+                                        let result=agentworks_runtime::acp::close_session(&connection,&provider_id,&capabilities).await.map_err(|e|safe_error(&e.to_string()));
+                                        let _=reply.send(result);return Ok(());
+                                    },
                                     Some(command @ (Command::Cancel | Command::CancelInbox(_)))=>{
                                         if command.cancels(inbox_owner.as_ref()) && !cancelled {
                                             s.clear_approvals();
@@ -560,7 +601,7 @@ pub async fn run(
                                         }
                                     }
                                     Some(Command::Prompt(_) | Command::AttachedPrompt{..} | Command::InboxPrompt{..})=>{},
-                                    Some(Command::Model(_)|Command::PermissionMode(_))=>{},
+                                    Some(Command::Model(_)|Command::PermissionMode(_)|Command::Config{..})=>{},
                                     None=>return Ok(()),
                                 },
                                 _=tick.tick(),if !cancelled=>{
@@ -811,4 +852,61 @@ for line in sys.stdin:
             std::fs::remove_dir_all(dir).unwrap();
         }
     }
+}
+
+/// Uses the same execution host and adapter profile as the original session.
+/// No native resume/new/prompt occurs on this management connection.
+pub async fn delete_provider_history(
+    s: &Session,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if s.data.lock().unwrap().provider_history_deleted {
+        return Ok(());
+    }
+    let (id, host_profile) = {
+        let data = s.data.lock().unwrap();
+        (
+            data.provider_session_id.clone().ok_or(
+                "No provider session ID was recorded; the Agentworks transcript was retained",
+            )?,
+            data.opencode_host,
+        )
+    };
+    s.data.lock().unwrap().provider_history_delete_pending = true;
+    s.emit(
+        "provider_history_delete_requested",
+        json!({"providerSessionId":id}),
+    );
+    if s.data.lock().unwrap().storage_error.is_some() {
+        return Err(
+            "Could not persist provider-history deletion intent; no deletion request was sent"
+                .into(),
+        );
+    }
+    let (transport, _guard): (DynConnectTo<Client>, _) = if s.host_id == "local" {
+        prepare(&s.provider)?;
+        (
+            DynConnectTo::new(agent_for(&s.provider, host_profile)),
+            None,
+        )
+    } else {
+        let host = crate::hosts::registry()
+            .and_then(|hosts| hosts.live(&s.host_id))
+            .ok_or("The remote host is not connected; no history was deleted")?;
+        let (lines, guard) = host.spawn(&s.provider, &s.cwd.to_string_lossy(), host_profile)?;
+        (DynConnectTo::new(lines), Some(guard))
+    };
+    agentworks_runtime::acp::delete_session(
+        transport,
+        &s.provider,
+        &id,
+        s.host_id == "local" && use_api_key(),
+    )
+    .await?;
+    {
+        let mut data = s.data.lock().unwrap();
+        data.provider_history_deleted = true;
+        data.provider_history_delete_pending = false;
+    }
+    s.emit("provider_history_deleted", json!({"providerSessionId":id}));
+    Ok(())
 }

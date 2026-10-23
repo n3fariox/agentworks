@@ -4,7 +4,7 @@ import readline from 'node:readline';
 import {Client as McpClient} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import { randomUUID } from 'node:crypto';
-import {mkdirSync,writeFileSync,renameSync,readFileSync,readdirSync} from 'node:fs';
+import {mkdirSync,writeFileSync,renameSync,readFileSync,readdirSync,appendFileSync,unlinkSync} from 'node:fs';
 import {resolve,join} from 'node:path';
 const stateDir=process.env.AGENTWORKS_DEMO_STATE_DIR||resolve('.agentworks/demo');
 mkdirSync(stateDir,{recursive:true});
@@ -12,6 +12,20 @@ function save(id){const file=join(stateDir,id+'.json');writeFileSync(file+'.tmp'
 function commands(id){update(id,{sessionUpdate:'available_commands_update',availableCommands:[{name:'status',description:'Read-only demo status'},{name:'usage',description:'Read-only demo usage'},{name:'help',description:'Show demo help'},{name:'$demo-skill',description:'Example skill entry; no model is called'}]});}
 const sessions = new Map(), approvals = new Map(), mcpConfigs = new Map();
 let elicitForm=false;
+const lifecycle=process.env.AGENTWORKS_DEMO_LIFECYCLE==='1';
+const activePrompts=new Map();
+function trace(method,sessionId,phase='request'){
+  if(lifecycle||process.env.AGENTWORKS_DEMO_TRACE==='1')appendFileSync(join(stateDir,'lifecycle.jsonl'),JSON.stringify({method,sessionId,phase,pid:process.pid})+'\n');
+}
+async function closeSession(id,params){
+  trace('session/close',params.sessionId);
+  if(process.env.AGENTWORKS_DEMO_CLOSE==='hang')return;
+  if(process.env.AGENTWORKS_DEMO_CLOSE==='reject')return send({id,error:{code:-32603,message:'Demo close rejected'}});
+  const session=sessions.get(params.sessionId);if(session)session.cancelled=true;
+  for(const [key,a] of approvals)if(a.sessionId===params.sessionId){a.resolve(a.raw?{action:'cancel'}:{outcome:'cancelled'});approvals.delete(key);}
+  await activePrompts.get(params.sessionId);
+  sessions.delete(params.sessionId);trace('session/close',params.sessionId,'closed');reply(id,{});
+}
 const modelOptions=[{value:'demo/steady',name:'Steady (local demo)'},{value:'demo/quick',name:'Quick (local demo)'}];
 const modelConfig=(model,mode='default')=>[{id:'model',name:'Model',category:'model',type:'select',currentValue:model,options:modelOptions},...(process.env.AGENTWORKS_DEMO_MODES==='1'?[{id:'mode',name:'Mode',category:'mode',type:'select',currentValue:mode,options:[{value:'default',name:'Manual'},{value:'auto',name:'Auto'}]}]:[])];
 const send = value => process.stdout.write(JSON.stringify({jsonrpc:'2.0',...value})+'\n');
@@ -140,11 +154,12 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     return;
   }
   const {id,method,params={}}=message;
+  if(!lifecycle&&process.env.AGENTWORKS_DEMO_TRACE==='1')trace(method,params.sessionId);
   switch(method){
-    case 'initialize': elicitForm=!!params.clientCapabilities?.elicitation?.form;reply(id,{protocolVersion:1,agentInfo:{name:'agentworks-demo',version:'0.1.0'},agentCapabilities:{loadSession:true,sessionCapabilities:{resume:{},list:{}},promptCapabilities:process.env.AGENTWORKS_DEMO_PROMPT_CAPS?JSON.parse(process.env.AGENTWORKS_DEMO_PROMPT_CAPS):{image:true,embeddedContext:true}},authMethods:[]});break;
+    case 'initialize': elicitForm=!!params.clientCapabilities?.elicitation?.form;reply(id,{protocolVersion:1,agentInfo:{name:'agentworks-demo',version:'0.1.0'},agentCapabilities:{loadSession:true,sessionCapabilities:{resume:{},list:{},...(lifecycle?{close:{},delete:{}}:{})},promptCapabilities:process.env.AGENTWORKS_DEMO_PROMPT_CAPS?JSON.parse(process.env.AGENTWORKS_DEMO_PROMPT_CAPS):{image:true,embeddedContext:true}},authMethods:[]});break;
     case 'session/new':{
       const sessionId=randomUUID();mcpConfigs.set(sessionId,params.mcpServers||[]);sessions.set(sessionId,{cwd:params.cwd,turn:0,cancelled:false,model:'demo/steady'});
-      save(sessionId);reply(id,{sessionId,configOptions:modelConfig('demo/steady')});
+      trace('session/new',sessionId);save(sessionId);reply(id,{sessionId,configOptions:modelConfig('demo/steady')});
       commands(sessionId);break;
     }
     case 'session/list':{
@@ -157,6 +172,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     }
     case 'session/load':
     case 'session/resume':{
+      trace(method,params.sessionId);
       try{
         if(!/^[a-f0-9-]{36}$/.test(params.sessionId))throw new Error('Invalid session ID');
         const session=JSON.parse(readFileSync(join(stateDir,params.sessionId+'.json'),'utf8'));
@@ -176,7 +192,23 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
       if(!session||params.configId!=='model'||!modelOptions.some(o=>o.value===params.value)) {send({id,error:{code:-32602,message:'Unknown model'}});break;}
       session.model=params.value;save(params.sessionId);reply(id,{configOptions:modelConfig(session.model,session.mode)});break;
     }
-    case 'session/prompt':prompt(id,params).catch(error=>send({id,error:{code:-32603,message:error.message}}));break;
+    case 'session/close':
+      if(!lifecycle){send({id,error:{code:-32601,message:'Unsupported'}});break;}
+      closeSession(id,params).catch(error=>send({id,error:{code:-32603,message:error.message}}));break;
+    case 'session/delete':{
+      if(!lifecycle){send({id,error:{code:-32601,message:'Unsupported'}});break;}
+      trace(method,params.sessionId);
+      if(process.env.AGENTWORKS_DEMO_DELETE==='reject'){send({id,error:{code:-32603,message:'Demo delete rejected'}});break;}
+      if(!/^[a-f0-9-]{36}$/.test(params.sessionId)){send({id,error:{code:-32602,message:'Invalid session ID'}});break;}
+      try{unlinkSync(join(stateDir,params.sessionId+'.json'));if(process.env.AGENTWORKS_DEMO_DELETE==='drop')process.exit(1);reply(id,{});}
+      catch(error){send({id,error:{code:error.code==='ENOENT'?-32002:-32603,message:error.message}});}
+      break;
+    }
+    case 'session/prompt':{
+      trace(method,params.sessionId);
+      const running=prompt(id,params).catch(error=>send({id,error:{code:-32603,message:error.message}}));
+      activePrompts.set(params.sessionId,running);running.finally(()=>activePrompts.delete(params.sessionId));break;
+    }
     case 'session/cancel':{
       const session=sessions.get(params.sessionId);if(session)session.cancelled=true;
       for(const [key,a] of approvals){if(a.sessionId===params.sessionId){a.resolve(a.raw?{action:'cancel'}:{outcome:'cancelled'});approvals.delete(key);}}
