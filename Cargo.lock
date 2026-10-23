@@ -22,6 +22,7 @@ dependencies = [
  "agent-client-protocol-schema",
  "async-io",
  "async-process",
+ "blocking",
  "futures",
  "futures-concurrency",
  "rustc-hash",

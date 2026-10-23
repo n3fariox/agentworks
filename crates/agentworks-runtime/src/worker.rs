@@ -644,6 +644,14 @@ fn available_providers(env: &HashMap<String, String>) -> Vec<&'static str> {
     PROVIDERS
         .into_iter()
         .filter(|provider| match *provider {
+            "codex" if crate::provider::rust_codex(provider) => {
+                let executable = env
+                    .get("CODEX_PATH")
+                    .cloned()
+                    .or_else(|| std::env::var("CODEX_PATH").ok())
+                    .unwrap_or_else(|| "codex".into());
+                resolve(Path::new(&executable), env).is_some()
+            }
             "opencode" => {
                 let config = crate::provider::agent_config(provider, false, false);
                 resolve(config.command(), env).is_some()

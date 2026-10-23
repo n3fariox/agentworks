@@ -434,6 +434,16 @@ fn session(app: &App, id: &str) -> Result<Arc<Session>, (StatusCode, String)> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|a| a == "codex-acp") {
+        let code = match agentworks_runtime::codex_acp::run().await {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("agentworks codex-acp: {error}");
+                1
+            }
+        };
+        std::process::exit(code);
+    }
     if args.get(1).is_some_and(|a| a == "--service-protocol") {
         println!("{}", json!({"serviceProtocol":1}));
         return Ok(());

@@ -40,11 +40,22 @@ pub fn opencode_path() -> Option<PathBuf> {
     })
 }
 pub fn installed(provider: &str) -> bool {
+    if rust_codex(provider) {
+        let executable = std::env::var_os("CODEX_PATH").unwrap_or_else(|| "codex".into());
+        return std::path::Path::new(&executable).is_file()
+            || std::env::var_os("PATH").is_some_and(|paths| {
+                std::env::split_paths(&paths).any(|p| p.join(&executable).is_file())
+            });
+    }
     match provider {
         "demo" => true,
         "opencode" => opencode_path().is_some(),
         _ => adapter_path(provider).exists(),
     }
+}
+
+pub fn rust_codex(provider: &str) -> bool {
+    provider == "codex" && std::env::var("AGENTWORKS_CODEX_ADAPTER").is_ok_and(|v| v == "rust")
 }
 
 pub fn agent_config(provider: &str, api_key_mode: bool, host_profile: bool) -> AcpAgentConfig {
@@ -75,7 +86,9 @@ pub fn agent_config(provider: &str, api_key_mode: bool, host_profile: bool) -> A
             .env("CODEX_API_KEY", "")
             .env("ANTHROPIC_API_KEY", "")
     } else {
-        let mut config = if let Some(node) = std::env::var_os("AGENTWORKS_NODE") {
+        let mut config = if rust_codex(provider) {
+            AcpAgentConfig::new(std::env::current_exe().expect("executable path")).arg("codex-acp")
+        } else if let Some(node) = std::env::var_os("AGENTWORKS_NODE") {
             AcpAgentConfig::new(node).arg(adapter_path(provider).to_string_lossy())
         } else {
             AcpAgentConfig::new(adapter_path(provider))
