@@ -399,6 +399,10 @@ impl Store {
                 last_prompt: events.iter().rev().find(|e| e["kind"] == "user").cloned(),
                 models: snapshot["models"].clone(),
                 permission_modes: snapshot["permissionModes"].clone(),
+                session_config: snapshot["sessionConfig"].clone(),
+                agent_capabilities: Value::Null,
+                provider_history_deleted: false,
+                provider_history_delete_pending: false,
                 initial_claude_permission_mode: None,
                 available_commands: snapshot["commands"].clone(),
                 turn_active: false,
@@ -713,6 +717,10 @@ mod tests {
             ),
             models: Value::Null,
             permission_modes: Value::Null,
+            session_config: json!({"configOptions":[{"id":"fast-mode","type":"boolean","currentValue":true}]}),
+            agent_capabilities: Value::Null,
+            provider_history_deleted: false,
+            provider_history_delete_pending: false,
             initial_claude_permission_mode: None,
             available_commands: json!([]),
             turn_active: false,
@@ -757,6 +765,7 @@ mod tests {
             // The recovery source persists independently of the visible event
             // window, which may no longer include a long-running turn's user event.
             assert_eq!(loaded[0].1.last_prompt, state.last_prompt);
+            assert_eq!(loaded[0].1.session_config, state.session_config);
             assert_eq!(
                 loaded[0].1.last_prompt.as_ref().unwrap()["data"]["text"],
                 "  exact prompt\n\n  "

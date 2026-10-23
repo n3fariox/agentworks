@@ -143,6 +143,11 @@ fn save(app: &App, r: &Record) -> Result<(), (StatusCode, String)> {
 fn pending(r: &Record) -> bool {
     matches!(r.phase.as_str(), "draining" | "dispatching")
 }
+/// Fence admission before the process begins graceful adapter shutdown.
+pub fn begin_shutdown(app: &App) {
+    app.restart.blocked.store(true, Ordering::SeqCst);
+}
+
 pub fn allow_start(app: &App) -> Result<(), (StatusCode, String)> {
     if app.restart.blocked.load(Ordering::SeqCst) || app.restart.fault.lock().unwrap().is_some() {
         Err(fail(
@@ -508,9 +513,11 @@ async fn tick(app: &App) -> Result<(), (StatusCode, String)> {
                 app.restart.blocked.store(false, Ordering::SeqCst);
                 continue;
             }
+            // Close adapters concurrently so one bounded grace period covers
+            // the whole service, rather than multiplying it by session count.
+            futures::future::join_all(sessions.iter().map(|s| lifecycle::stop_worker(s))).await;
             for s in &sessions {
                 // Preserve policies/timers and explicit-suspend metadata. No automatic replay.
-                lifecycle::stop_worker(s).await;
                 s.clear_approvals();
                 if s.data.lock().unwrap().turn_active {
                     s.emit("interrupted",json!({"message":"Deliberate global service restart interrupted this turn; inspect results before continuing."}));

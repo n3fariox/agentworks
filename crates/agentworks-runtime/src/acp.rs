@@ -3,9 +3,10 @@ use crate::provider::parse_model_config;
 use agent_client_protocol::schema::{
     ProtocolVersion,
     v1::{
-        AuthenticateRequest, ClientCapabilities, ElicitationCapabilities,
-        ElicitationFormCapabilities, InitializeRequest, ListSessionsRequest, NewSessionRequest,
-        RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+        AuthenticateRequest, BooleanConfigOptionCapabilities, ClientCapabilities,
+        ClientSessionCapabilities, ElicitationCapabilities, ElicitationFormCapabilities,
+        InitializeRequest, ListSessionsRequest, NewSessionRequest, RequestPermissionOutcome,
+        RequestPermissionRequest, RequestPermissionResponse, SessionConfigOptionsCapabilities,
     },
 };
 use agent_client_protocol::{Agent, Client, ConnectionTo, DynConnectTo};
@@ -16,6 +17,12 @@ pub fn initialize_request() -> InitializeRequest {
     // Support ACP forms, but not URL elicitations that could send users to arbitrary sites.
     InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
         ClientCapabilities::new()
+            .session(
+                ClientSessionCapabilities::new().config_options(
+                    SessionConfigOptionsCapabilities::new()
+                        .boolean(BooleanConfigOptionCapabilities::new()),
+                ),
+            )
             .elicitation(ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()))
             .meta(
                 json!({"terminal_output": true, "terminal_output_delta": true})
@@ -59,15 +66,16 @@ async fn new_session(
     provider: &str,
     cwd: PathBuf,
     api_key: bool,
-) -> Result<Value, agent_client_protocol::Error> {
-    initialize_on(connection, provider, api_key).await?;
-    Ok(serde_json::to_value(
-        connection
-            .send_request(NewSessionRequest::new(cwd))
-            .block_task()
-            .await?,
-    )
-    .unwrap_or(Value::Null))
+) -> Result<(Value, Value), agent_client_protocol::Error> {
+    let init = initialize_on(connection, provider, api_key).await?;
+    let created = connection
+        .send_request(NewSessionRequest::new(cwd))
+        .block_task()
+        .await?;
+    Ok((
+        serde_json::to_value(created).unwrap_or(Value::Null),
+        init["agentCapabilities"].clone(),
+    ))
 }
 /// Ask a selected ACP transport for its model list without sending a prompt.
 pub async fn discover(
@@ -93,11 +101,14 @@ pub async fn discover(
             .connect_with(
                 transport,
                 move |connection: ConnectionTo<Agent>| async move {
-                    let created = new_session(&connection, &provider, cwd, api_key).await?;
-                    let config = parse_model_config(
-                        &serde_json::to_value(created).unwrap_or(Value::Null),
-                        free_only,
-                    );
+                    let (created, capabilities) =
+                        new_session(&connection, &provider, cwd, api_key).await?;
+                    let config = parse_model_config(&created, free_only);
+                    if capabilities["sessionCapabilities"]["close"].is_object() {
+                        if let Some(id) = created["sessionId"].as_str() {
+                            let _ = close_session(&connection, id, &capabilities).await;
+                        }
+                    }
                     Ok(config.unwrap_or(json!({"options":[]})))
                 },
             ),
@@ -158,4 +169,58 @@ pub async fn probe(provider: &str) -> Result<(), Box<dyn std::error::Error>> {
         Ok(Err(e)) => Err(crate::provider::safe_error(&e.to_string()).into()),
         Err(_) => Err("ACP initialization timed out after 30 seconds".into()),
     }
+}
+
+/// Gracefully release a live session when the agent advertises the operation.
+/// Closing never deletes the provider's durable conversation.
+pub async fn close_session(
+    connection: &ConnectionTo<Agent>,
+    session_id: &str,
+    capabilities: &Value,
+) -> Result<(), agent_client_protocol::Error> {
+    if !capabilities["sessionCapabilities"]["close"].is_object() {
+        return Err(agent_client_protocol::Error::invalid_params()
+            .data("This harness does not advertise graceful session close"));
+    }
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        connection
+            .send_request(agent_client_protocol::schema::v1::CloseSessionRequest::new(
+                session_id.to_owned(),
+            ))
+            .block_task(),
+    )
+    .await
+    .map_err(|_| {
+        agent_client_protocol::Error::internal_error().data("Graceful session close timed out")
+    })??;
+    Ok(())
+}
+
+/// Delete a specific durable provider session without loading or prompting it.
+/// Callers must stop any adapter that may still write to this session first.
+pub async fn delete_session(
+    transport: DynConnectTo<Client>,
+    provider: &str,
+    session_id: &str,
+    api_key: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let provider = provider.to_owned();
+    let session_id = session_id.to_owned();
+    tokio::time::timeout(Duration::from_secs(45), Client.builder().connect_with(
+        transport, move |connection: ConnectionTo<Agent>| async move {
+            let init = initialize_on(&connection, &provider, api_key).await?;
+            if !init["agentCapabilities"]["sessionCapabilities"]["delete"].is_object() {
+                return Err(agent_client_protocol::Error::invalid_params().data("This harness does not advertise provider-history deletion; the Agentworks transcript was retained"));
+            }
+            match connection.send_request(agent_client_protocol::schema::v1::DeleteSessionRequest::new(session_id)).block_task().await {
+                Ok(_) => Ok(()),
+                // An explicit retry after an uncertain response can find that
+                // the first request already removed the requested history.
+                Err(error) if error.code == agent_client_protocol::schema::v1::ErrorCode::ResourceNotFound => Ok(()),
+                Err(error) => Err(error),
+            }
+        }
+    )).await.map_err(|_| "Provider-history deletion timed out; its outcome is uncertain. The Agentworks transcript was retained; inspect provider history before retrying")??;
+    Ok(())
 }

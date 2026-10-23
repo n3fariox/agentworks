@@ -59,7 +59,7 @@ let transcript=[], tools=new Map(), approvals=new Map(), assistant=null, status=
 // L-05 hook: activity indicator and explicit queued inputs (server-owned state).
 const questions=setupQuestions({api,uuid:()=>uuid(),storage:localStorage,getActive:()=>active,isConnected:()=>connected,agentName:()=>labels[active?.provider]||'the agent'});
 const inputQueue=setupInputQueue({$,api,uuid:()=>uuid(),getActive:()=>active,getStatus:()=>status,toolActive:()=>[...tools.values()].some(t=>['pending','in_progress'].includes(t.status))});
-let permissionModes=null;
+let permissionModes=null,sessionConfig=null;
 const mentions=setupMentions({prompt:$('prompt'),list:$('mention-list'),getActive:()=>active,getSessions:()=>sessions});
 let replaying=false,workLogs=null,turnEnds=new Map();
 let modelConfig=null, availableCommands=[], commandsOpen=false;
@@ -500,7 +500,7 @@ function selectSession(s) {
   if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));scrollPositions.set(active.id,$('messages').scrollTop);}
   $('prompt').value=drafts[s.id]||'';restoreScroll=scrollPositions.get(s.id)??null;
   clearTimeout(retryTimer);generation++;socket?.close();socket=null;connected=false;
-  active=s;currentUserSeq=null;promptRecovery.render();status=s.status;modelConfig=null;permissionModes=null;availableCommands=[];commandsOpen=false;renderCommands();mentions.close();composerMenu.close();sessionMenu.close();resetTranscript();usageStatus.reset();inputQueue.reset();
+  active=s;currentUserSeq=null;promptRecovery.render();status=s.status;modelConfig=null;permissionModes=null;sessionConfig=null;availableCommands=[];commandsOpen=false;renderCommands();mentions.close();composerMenu.close();sessionMenu.close();resetTranscript();usageStatus.reset();inputQueue.reset();
   localStorage.setItem('agentworks-session',s.id);$('welcome').hidden=true;$('conversation').hidden=false;
   setTitle(s.title);$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;
   $('session-notice').hidden=true;document.body.classList.remove('menu-open');sidebarPin.close();sidebar();updateControls();connect(generation);
@@ -524,7 +524,8 @@ function connect(gen){
       for(const [id,view] of Object.entries(e.toolProgress||{}))applyToolProgress(tools.get(id),view,view.seq);
       Object.assign(active,e.session);setTitle(active.title);
       active.continuation=e.session.continuation;
-      approvals=new Map(e.approvals.map(a=>[a.id,a]));status=e.session.status;modelConfig=e.models;syncModelLabel();permissionModes=e.permissionModes;attachments.setPolicy(e.attachments);if(status==='suspended'&&!e.session.explicitlySuspended)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();inputQueue.set(e.session.inputQueue);inputQueue.observe(status,{live:false});
+      approvals=new Map(e.approvals.map(a=>[a.id,a]));status=e.session.status;modelConfig=e.models;syncModelLabel();permissionModes=e.permissionModes;sessionConfig=e.sessionConfig;active.providerCapabilities=e.providerCapabilities;attachments.setPolicy(e.attachments);if(status==='suspended'&&!e.session.explicitlySuspended&&!active.providerHistoryDeletion)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();inputQueue.set(e.session.inputQueue);inputQueue.observe(status,{live:false});
+      if(active.providerHistoryDeletion){$('session-notice').textContent=active.providerHistoryDeletion==='deleted'?'Provider history was deleted. This Agentworks transcript remains because local cleanup did not finish; retry Delete everywhere or delete this transcript.':'Provider-history deletion was not confirmed. This transcript is retained and resume is blocked; inspect provider history, then retry Delete everywhere or delete only this transcript.';$('session-notice').hidden=false;}
       if(e.storageError){$('session-notice').textContent=e.storageError;$('session-notice').hidden=false;}
       if(e.truncated){$('session-notice').textContent='Showing recent output. The full transcript is saved on this host.';$('session-notice').hidden=false;}
     }else consume(e,true);
@@ -659,6 +660,11 @@ function consume(e,live=false){
   else if(e.kind==='continuation'){renderContinuation();}
   else if(e.kind==='models'){modelConfig=d;syncModelLabel();}
   else if(e.kind==='permission_modes'){permissionModes=d;}
+  else if(e.kind==='session_config'){sessionConfig=d;}
+  else if(e.kind==='provider_capabilities'){active.providerCapabilities=d;}
+  else if(e.kind==='provider_history_delete_requested'){active.providerHistoryDeletion='pending';$('session-notice').textContent='Deleting provider history. This transcript is retained until deletion is confirmed.';$('session-notice').hidden=false;}
+  else if(e.kind==='provider_history_deleted'){active.providerHistoryDeletion='deleted';}
+  else if(e.kind==='provider_history_delete_failed'){$('session-notice').textContent='Provider-history deletion was not confirmed. The Agentworks transcript is retained. Inspect provider history, then retry Delete everywhere or delete only this transcript.';$('session-notice').hidden=false;}
   else if(e.kind==='attachment_policy'){attachments.setPolicy(d);}
   else if(e.kind==='commands'){availableCommands=Array.isArray(d)?d:[];renderCommands();}
   else if(e.kind==='user'){assistant=null;if(d.inboxDelivery)transcript.push({id:uuid(),type:'notice',text:'Automatic inbox turn authorized by you; peer messages are untrusted context.'});else if(d.initiatedBy)transcript.push({id:uuid(),type:'notice',text:d.initiatedBy.startsWith('controller:')?'Turn started by external controller '+(d.initiatorTitle||d.initiatedBy):'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});const message=addMessage('user',d.text);message.seq=e.seq;if(d.attachments?.length)message.attachments=d.attachments;}
@@ -722,15 +728,54 @@ function consume(e,live=false){
 async function resumeSession(id){
   try{await api(`/api/sessions/${id}/resume`,{method:'POST',body:'{}'});}catch(e){toast(e.message);}
 }
+// Additional settings come from the adapter, including unknown select categories.
+function renderSessionConfig(){
+  const root=$('session-config-fields');
+  const options=(sessionConfig?.configOptions||[]).filter(o=>['select','boolean'].includes(o.type)&&o.id!==modelConfig?.configId&&o.id!==permissionModes?.configId);
+  const signature=JSON.stringify(options);
+  if(root.dataset.config!==signature){
+    root.replaceChildren();root.dataset.config=signature;
+    for(const option of options){
+      const label=el('label','session-config-field');label.append(el('span','',option.name||option.id));
+      if(option.description)label.title=option.description;
+      let control;
+      if(option.type==='boolean'){
+        control=el('input');control.type='checkbox';control.checked=option.currentValue===true;
+      }else{
+        control=el('select');
+        for(const choice of option.options||[]){
+          if(Array.isArray(choice.options)){
+            const group=el('optgroup');group.label=choice.name||choice.group;
+            for(const item of choice.options){const node=el('option','',item.name||item.value);node.value=item.value;group.append(node);}control.append(group);
+          }else{const node=el('option','',choice.name||choice.value);node.value=choice.value;control.append(node);}
+        }
+        control.value=option.currentValue;
+      }
+      control.setAttribute('aria-label',option.name||option.id);
+      control.onchange=async()=>{
+        const id=active?.id;if(!id)return;
+        control.disabled=true;
+        try{await api(`/api/sessions/${id}/configuration`,{method:'POST',body:JSON.stringify({configId:option.id,value:option.type==='boolean'?control.checked:control.value})});}
+        catch(error){toast(error.message);delete root.dataset.config;updateControls();}
+      };
+      label.append(control);root.append(label);
+    }
+  }
+  $('session-config-options').hidden=!options.length;
+  for(const control of root.querySelectorAll('select,input'))control.disabled=!connected||status!=='idle';
+}
+
 function updateControls(){questions.refresh();
   $('archive-session').textContent=active?.archived?'Unarchive session':'Archive session';
   $('suspend-session').disabled=!connected||status==='suspended'||status==='closed';
   $('resume-session').hidden=!['suspended','error'].includes(status);
-  $('resume-session').disabled=!connected;
+  $('resume-session').disabled=!connected||!!active?.providerHistoryDeletion;
   $('show-commands').disabled=!connected||status!=='idle';
   const usage=availableCommands.find(c=>c.name===(active?.provider==='claude'?'usage':'status'));
   $('show-usage').hidden=!['claude','codex'].includes(active?.provider)||!usage;
   $('show-usage').disabled=!connected||status!=='idle';
+  $('delete-provider-history').hidden=!active?.providerCapabilities?.delete;
+  renderSessionConfig();
   const modePicker=$('permission-mode-picker');modePicker.hidden=!permissionModes?.options?.length;
   const modeSignature=JSON.stringify(permissionModes);
   if(modePicker.dataset.config!==modeSignature){
@@ -1004,17 +1049,21 @@ $('prompt').oninput=()=>{mentions.update();commandsOpen=/^[/\$]\S*$/.test($('pro
 $('prompt').onkeydown=event=>{if(mentions.keydown(event))return;if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault();$('composer').requestSubmit();}};
 $('resume-session').onclick=()=>{if(active)resumeSession(active.id);};
 $('stop').onclick=async()=>{if(!active)return;const sid=active.id,seq=currentUserSeq;$('stop').disabled=true;try{await api(`/api/sessions/${sid}/cancel${seq!=null?'?userSeq='+seq:''}`,{method:'POST',body:'{}'});}catch(e){toast(e.message);}finally{updateControls();}};
-async function deleteSession(session){
+async function deleteSession(session,providerHistory=false){
   if(!session)return;
-  if(!confirm(`Permanently delete “${session.title}” and its saved transcript? Its harness will stop. Worktree files and branches remain. This cannot be undone.`))return;
+  const question=providerHistory
+    ? `Permanently delete “${session.title}” from Agentworks and its provider’s conversation history? Its harness will stop. Worktree files and branches remain. This cannot be undone.`
+    : `Permanently delete “${session.title}” and its Agentworks transcript? Its harness will stop. Provider conversation history, worktree files and branches remain. This cannot be undone.`;
+  if(!confirm(question))return;
   const id=session.id;
   try{
-    await api(`/api/sessions/${id}`,{method:'DELETE'});
+    await api(`/api/sessions/${id}${providerHistory?'?providerHistory=true':''}`,{method:'DELETE'});
     if(active?.id===id)closeActive();
     await refreshSessions();
   }catch(e){toast(e.message);}
 }
 $('close-session').onclick=()=>deleteSession(active);
+$('delete-provider-history').onclick=()=>deleteSession(active,true);
 function closeActive(){generation++;socket?.close();clearTimeout(retryTimer);active=null;localStorage.removeItem('agentworks-session');$('conversation').hidden=true;$('welcome').hidden=false;setTitle('Overview');}
 function applyRoots(){
   $('project-roots').replaceChildren();

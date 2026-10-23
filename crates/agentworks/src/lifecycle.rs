@@ -112,10 +112,39 @@ pub async fn apply(s: &Session, title: Option<String>, archived: Option<bool>) -
 }
 pub async fn stop_worker(s: &Session) {
     let worker = s.worker.lock().unwrap().take();
-    *s.commands.lock().unwrap() = None;
-    if let Some(worker) = worker {
+    let commands = s.commands.lock().unwrap().take();
+    if let Some(mut worker) = worker {
+        let supports_close =
+            s.data.lock().unwrap().agent_capabilities["sessionCapabilities"]["close"].is_object();
+        if !worker.is_finished() && supports_close {
+            s.clear_approvals();
+            let (reply, result) = tokio::sync::oneshot::channel();
+            let sent = commands.as_ref().is_some_and(|tx| {
+                tx.try_send(crate::session_runtime::Command::Close(reply))
+                    .is_ok()
+            });
+            let outcome = if sent {
+                match tokio::time::timeout(std::time::Duration::from_secs(6), result).await {
+                    Ok(Ok(Ok(()))) => "closed",
+                    Ok(Ok(Err(_))) => "failed",
+                    Ok(Err(_)) => "disconnected",
+                    Err(_) => "timeout",
+                }
+            } else {
+                "unavailable"
+            };
+            s.emit("provider_close", json!({"outcome":outcome}));
+            if outcome == "closed"
+                && tokio::time::timeout(std::time::Duration::from_secs(1), &mut worker)
+                    .await
+                    .is_ok()
+            {
+                return;
+            }
+        }
         worker.abort();
-        // Acknowledge shutdown only after the old worker cannot publish ready/idle.
+        // Join before acknowledging shutdown: the old runtime must never
+        // publish a late ready/idle or rewrite provider history after delete.
         let _ = worker.await;
     }
 }

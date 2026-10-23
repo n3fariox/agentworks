@@ -57,18 +57,28 @@ where
 }
 
 pub fn parse(config: &Value) -> Option<Value> {
+    if !config["configOptions"].as_array().is_some_and(|options| {
+        options
+            .iter()
+            .any(|o| o["category"] == "mode" || o["id"] == "mode")
+    }) {
+        let modes = &config["modes"];
+        let current = modes["currentModeId"].as_str()?;
+        let options: Vec<Value> = modes["availableModes"].as_array()?.iter().filter_map(|o| {
+            Some(json!({"value":o["id"].as_str()?,"name":o["name"],"description":o["description"]}))
+        }).collect();
+        return options
+            .iter()
+            .any(|o| o["value"] == current)
+            .then(|| json!({"configId":"mode","currentValue":current,"options":options}));
+    }
     let option = config["configOptions"]
         .as_array()?
         .iter()
         .find(|o| o["category"] == "mode" || o["id"] == "mode")?;
     let id = option["id"].as_str()?;
     let current = option["currentValue"].as_str()?;
-    let options: Vec<Value> = option["options"]
-        .as_array()?
-        .iter()
-        .filter(|o| o["value"].is_string())
-        .cloned()
-        .collect();
+    let options = crate::session_config::choices(option);
     if !options.iter().any(|o| o["value"] == current) {
         return None;
     }
