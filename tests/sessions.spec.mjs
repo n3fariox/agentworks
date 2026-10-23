@@ -106,6 +106,17 @@ test('mobile: drawer, composer, image output, approval denial',async({page})=>{
   await expect(page.locator('#new-session')).toBeInViewport();
   await page.goForward();
   await expect(page.locator('#prompt')).toBeInViewport();
+  // A quota chip and the stop control can coexist with both composer buttons.
+  // Keep the essential stop action reachable even when its label is long.
+  await page.evaluate(()=>{
+    const info=document.querySelector('#composer-info');info.hidden=false;
+    info.textContent='Context 82% · 5h quota 74% · weekly quota 61%';
+    document.querySelector('#stop').hidden=false;
+  });
+  await expect(page.locator('#stop')).toBeInViewport();
+  expect(await page.locator('#stop').evaluate(el=>el.getBoundingClientRect().right<=innerWidth)).toBe(true);
+  await page.setViewportSize({width:320,height:844});
+  expect(await page.locator('#stop').evaluate(el=>el.getBoundingClientRect().right<=innerWidth)).toBe(true);
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
   await expect(page.locator('body')).not.toHaveClass(/menu-open/);
   await expect(page.locator('#messages')).toContainText('denied');
