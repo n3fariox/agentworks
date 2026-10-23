@@ -31,8 +31,8 @@ import {setupAttachments} from './attachments.js';
 const $ = id => document.getElementById(id);
 // randomUUID is unavailable on plain HTTP remote origins; getRandomValues is supported.
 const uuid = () => globalThis.crypto.randomUUID?.() ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
-const labels = {demo:'Demo agent',claude:'Claude',codex:'Codex',opencode:'OpenCode'};
-const icons = {demo:'◈',claude:'✳',codex:'⌘',opencode:'▣'};
+const labels = {demo:'Demo agent',claude:'Claude',codex:'Codex','codex-rust':'Codex · Rust ACP',opencode:'OpenCode'};
+const icons = {demo:'◈',claude:'✳',codex:'⌘','codex-rust':'⌘',opencode:'▣'};
 function readStorage(storage,key,fallback){try{return JSON.parse(storage.getItem(key))??fallback;}catch{return fallback;}}
 let workspace;
 let projects=[],hosts=[{id:'local',name:'Local',status:'connected'}];
@@ -100,7 +100,7 @@ function providerNote() {
     $('create-submit').disabled=!available||!remote.roots?.length||creating||worktrees.blocked();
     return;
   }
-  $('provider-note').textContent=p.id==='demo'?'Local test agent. No model calls, API key, or file changes.':p.id==='opencode'?(p.installed?'Native ACP. Choose an advertised free model. Availability and limits may change.':'Install OpenCode on this host or set AGENTWORKS_OPENCODE_PATH.'):!p.installed?'Adapter not installed. Run npm ci --ignore-scripts.':p.authMode==='existing'?'Uses the existing agent sign-in on this host. If it has expired, sign in with the CLI and try again.':!p.keyPresent?`Set ${p.id==='claude'?'ANTHROPIC_API_KEY':'OPENAI_API_KEY or CODEX_API_KEY'} before starting the server.`:'API key available on the host. Messages use your provider account.';
+  $('provider-note').textContent=p.id==='demo'?'Local test agent. No model calls, API key, or file changes.':p.id==='opencode'?(p.installed?'Native ACP. Choose an advertised free model. Availability and limits may change.':'Install OpenCode on this host or set AGENTWORKS_OPENCODE_PATH.'):!p.installed?(p.id==='codex-rust'?'Install native Codex on this host or set CODEX_PATH.':'Adapter not installed. Run npm ci --ignore-scripts.'):p.authMode==='existing'?'Uses the existing agent sign-in on this host. If it has expired, sign in with the CLI and try again.':!p.keyPresent?`Set ${p.id==='claude'?'ANTHROPIC_API_KEY':'OPENAI_API_KEY or CODEX_API_KEY'} before starting the server.`:'API key available on the host. Messages use your provider account.';
   $('create-submit').disabled=!p.installed||(p.authMode==='api_key'&&!p.keyPresent)||creating||worktrees.blocked();
 }
 const communicationLabels={off:'Off',participant:'Participant',coordinator:'Coordinator'};
@@ -729,7 +729,7 @@ function updateControls(){questions.refresh();
   $('resume-session').disabled=!connected;
   $('show-commands').disabled=!connected||status!=='idle';
   const usage=availableCommands.find(c=>c.name===(active?.provider==='claude'?'usage':'status'));
-  $('show-usage').hidden=!['claude','codex'].includes(active?.provider)||!usage;
+  $('show-usage').hidden=!['claude','codex','codex-rust'].includes(active?.provider)||!usage;
   $('show-usage').disabled=!connected||status!=='idle';
   const modePicker=$('permission-mode-picker');modePicker.hidden=!permissionModes?.options?.length;
   const modeSignature=JSON.stringify(permissionModes);
@@ -1169,7 +1169,7 @@ setupPalettes({
   $,labels,selectSession,
   fallbackFocus:()=>active?$('prompt'):null,
   state:()=>({active,status,connected,sessions,projects,hosts,commands:availableCommands,
-    usageAvailable:!!active&&['claude','codex'].includes(active.provider)&&!!usageCommand(),
+    usageAvailable:!!active&&['claude','codex','codex-rust'].includes(active.provider)&&!!usageCommand(),
     views:{files:()=>$('nav-files').click(),automations:()=>$('nav-automations').click()}}),
   handlers:{
     newSession:()=>openCreate(),

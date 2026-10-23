@@ -56,7 +56,7 @@ async fn native_bridge_works_with_typed_acp_client() {
                     assert!(!session.config_options.as_ref().unwrap().is_empty());
                     let configured=cx.send_request(SetSessionConfigOptionRequest::new(session.session_id.clone(),"fast-mode",SessionConfigOptionValue::boolean(true))).block_task().await?;
                     assert!(serde_json::to_value(configured)?["configOptions"].as_array().unwrap().iter().any(|o|o["id"]=="fast-mode" && o["currentValue"]==true));
-                    for text in ["early", "normal", "approval", "question"] {
+                    for text in ["early", "normal", "approval", "question", "/status", "/skills", "/compact", "/review"] {
                         let response = cx
                             .send_request(PromptRequest::new(
                                 session.session_id.clone(),

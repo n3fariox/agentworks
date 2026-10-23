@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""Application API smoke test for the selectable Rust harness; no inference or Node.
+
+Build with cargo build -p agentworks, then run python3 tests/codex-rust-harness.test.py.
+"""
+import json
+import os
+from pathlib import Path
+import socket
+import subprocess
+import tempfile
+import time
+import unittest
+from urllib.request import Request, urlopen
+from uuid import uuid4
+
+
+class HarnessTests(unittest.TestCase):
+    def setUp(self):
+        self.root=Path(__file__).resolve().parents[1]
+        self.fixture=tempfile.TemporaryDirectory(prefix="agentworks-rust-harness-")
+        self.addCleanup(self.fixture.cleanup)
+        self.cwd=Path(self.fixture.name)
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1",0))
+            port=sock.getsockname()[1]
+        self.base=f"http://127.0.0.1:{port}"
+        self.env=dict(os.environ, AGENTWORKS_PORT=str(port),AGENTWORKS_BIND="127.0.0.1",AGENTWORKS_ROOTS=str(self.cwd),AGENTWORKS_CATALOG_PATH=str(self.cwd/"catalog.json"),AGENTWORKS_DB_PATH=str(self.cwd/"sessions.sqlite3"),AGENTWORKS_AUTH_MODE="existing",AGENTWORKS_NODE="/nonexistent/node",CODEX_PATH=str(self.root/"tests/codex-acp.test.py"))
+        self.log=tempfile.TemporaryFile(mode="w+")
+        self.addCleanup(self.log.close)
+        self.start()
+        self.addCleanup(self.stop)
+        self.until(lambda:self.request("/api/status"))
+
+    def start(self):
+        self.process=subprocess.Popen([str(self.root/"target/debug/agentworks")],env=self.env,stdin=subprocess.DEVNULL,stdout=self.log,stderr=self.log)
+
+    def stop(self):
+        if self.process.poll() is None:
+            self.process.terminate()
+        try:
+            self.process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait()
+            self.fail("Fixture server failed to shut down")
+
+    def request(self,path,method="GET",body=None):
+        request=Request(self.base+path,method=method,data=None if body is None else json.dumps(body).encode(),headers={"Content-Type":"application/json","Origin":self.base})
+        with urlopen(request,timeout=10) as response:
+            return json.load(response)
+
+    def until(self,check):
+        deadline=time.monotonic()+15
+        while time.monotonic()<deadline:
+            if self.process.poll() is not None:
+                self.log.seek(0)
+                self.fail(self.log.read())
+            try:
+                value=check()
+                if value:return value
+            except OSError:
+                pass
+            time.sleep(.03)
+        self.log.seek(0)
+        self.fail("Timed out: "+self.log.read())
+
+    def test_selected_harness_discovers_models_and_handles_commands(self):
+        status=self.request("/api/status")
+        providers={p["id"]:p for p in status["providers"]}
+        self.assertIn("codex",providers)
+        self.assertIn("Rust ACP",providers["codex-rust"]["name"])
+        self.assertTrue(providers["codex-rust"]["installed"])
+        models=self.request("/api/models","POST",dict(provider="codex-rust",cwd=str(self.cwd)))
+        self.assertEqual(models["options"][0]["value"],"test-model")
+        settings=self.request("/api/settings")
+        settings["defaultModels"]["codex-rust"]="test-model"
+        self.request("/api/settings","PUT",settings)
+        automation=self.request("/api/automations","POST",dict(name="Rust recipe",provider="codex-rust",cwd=str(self.cwd),prompt="normal"))
+        self.assertEqual(automation["provider"],"codex-rust")
+        created=self.request("/api/sessions","POST",dict(provider="codex-rust",cwd=str(self.cwd),title="Rust harness test"))
+        path="/api/sessions/"+created["id"]
+        snapshot=self.until(lambda:(s if (s:=self.request(path))["session"]["status"]=="idle" else None))
+        self.assertEqual(snapshot["session"]["provider"],"codex-rust")
+        self.assertTrue(snapshot["attachments"]["image"])
+        self.assertIn("compact",[c["name"] for c in snapshot["commands"]])
+        for index,text in enumerate(["/status","/plan","/compact","/skills","/review"],1):
+            self.request(path+"/prompt","POST",dict(text=text,requestId=str(uuid4())))
+            snapshot=self.until(lambda:(s if (s:=self.request(path))["session"]["status"]=="idle" and len([e for e in s["events"] if e["kind"]=="turn_end"])>=index else None))
+        messages=[e["data"]["content"]["text"] for e in snapshot["events"] if e["kind"]=="acp" and e["data"]["sessionUpdate"]=="agent_message_chunk"]
+        self.assertTrue(any("Subscription quota: not reported" in text for text in messages))
+        self.assertTrue(any("$check" in text for text in messages))
+        # Restoring the application must retain which adapter owns the session.
+        self.stop()
+        self.start()
+        restored=self.until(lambda:self.request(path))
+        self.assertEqual(restored["session"]["provider"],"codex-rust")
+        self.assertEqual(self.request("/api/settings")["defaultModels"]["codex-rust"],"test-model")
+        self.assertEqual(restored["session"]["status"],"suspended")
+        self.request(path+"/resume","POST",{})
+        self.until(lambda:self.request(path)["session"]["status"]=="idle")
+
+
+if __name__=="__main__":
+    unittest.main()

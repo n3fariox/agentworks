@@ -4,6 +4,13 @@ import {sessionState, counts, usageMeters, activelyTurning, latestQuota, quotaAv
 import {emptyUsage, applyUsageEvent} from '../usage-status.js';
 
 const event = data => ({kind:'acp',seq:2,data:{sessionUpdate:'usage_update',...data}});
+test('both Codex harnesses contribute to one account quota without adding reports', () => {
+  const sessions=[{id:'js',provider:'codex',created:1},{id:'rust',provider:'codex-rust',created:2}];
+  const observation=(value,at)=>({state:applyUsageEvent(emptyUsage(),event({_meta:{'_codex/subscriptionLimits':{version:1,limits:[{limitId:'codex',primary:{usedPercent:{value,observedAtMs:at}}}]}}}))});
+  const result=latestQuota(sessions,new Map([['js',observation(30,1000)],['rust',observation(60,2000)]]),'codex');
+  assert.equal(result.state.codexQuota['["codex","primary"]'].usedPercent.value,60);
+  assert.equal(result.sources,1);
+});
 test('session states retain waiting, stopped and unknown rather than assuming idle', () => {
   for (const status of ['running','starting','resuming','configuring','cancelling']) assert.equal(sessionState({status}), 'running');
   for (const status of ['closed','suspended','error','stopped']) assert.equal(sessionState({status}), 'stopped');

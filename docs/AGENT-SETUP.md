@@ -20,10 +20,14 @@ Only this explicit API-key mode isolates provider configuration/authentication u
 
 The app uses pinned local ACP adapters installed by `npm ci`, without downloading an adapter at session creation. Claude wraps its SDK; Codex wraps app-server. Project-local agent instructions may be loaded by the harness. Run `npm ci --ignore-scripts` on each execution machine; the Rust binary alone does not contain Node/adapters/provider dependencies.
 
-An experimental [Rust Codex adapter](RUST-CODEX-ACP.md) is included in the binary.
-Set `AGENTWORKS_CODEX_ADAPTER=rust` before starting Agentworks to try it with a native
-`codex` executable on PATH (or `CODEX_PATH`). This Codex execution path requires no
-Node or npm adapter; Claude and existing enrollment/build tooling still use npm.
+Choose **Codex · Rust ACP** in the harness picker to use the experimental
+[Rust Codex adapter](RUST-CODEX-ACP.md) included in the binary. Its provider ID is
+`codex-rust`; it requires a native `codex` executable on PATH (or `CODEX_PATH`).
+The existing **Codex** option uses the JavaScript adapter. Both share the host
+Codex sign-in; model defaults and session adapter identity stay separate.
+The Rust Codex execution path requires no Node or npm adapter. Claude and existing
+enrollment/build tooling still use npm. No adapter-selection environment variable
+is needed.
 
 Codex uses the tracked local `2.2.2-agentworks.1` fork in `vendor/codex-acp` to attach cached subscription windows to genuine context usage events. The usage display preserves each window's source observation time separately from context. No extra account queries or polling are performed; quotas appear after native push notifications and a genuine usage event. See the [implemented metadata contract and limitations](CODEX-SUBSCRIPTION-QUOTA.md).
 

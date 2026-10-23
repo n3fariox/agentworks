@@ -1,6 +1,5 @@
 //! Provider launch configuration, ACP discovery, and SSH worker execution.
 pub mod acp;
-pub mod codex_acp;
 pub mod provider;
 pub mod remote;
 pub mod worker;

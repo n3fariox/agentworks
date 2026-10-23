@@ -30,8 +30,8 @@ const PENDING_TTL_MS: u64 = 24 * 3600 * 1000;
 const IMAGE_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
 /// Image input is enabled only where the harness passes image blocks to a model
 /// that reads them. OpenCode is limited to free models whose vision support is unverified.
-const IMAGE_PROVIDERS: &[&str] = &["claude", "codex", "demo"];
-const TEXT_PROVIDERS: &[&str] = &["claude", "codex", "opencode", "demo"];
+const IMAGE_PROVIDERS: &[&str] = &["claude", "codex", "codex-rust", "demo"];
+const TEXT_PROVIDERS: &[&str] = &["claude", "codex", "codex-rust", "opencode", "demo"];
 
 static ROOT: OnceLock<PathBuf> = OnceLock::new();
 

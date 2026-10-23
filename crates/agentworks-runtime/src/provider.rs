@@ -3,8 +3,17 @@ use agent_client_protocol::AcpAgentConfig;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
+/// Adapter identity stays distinct in sessions; both Codex adapters use the same CLI/account.
+pub fn cli_provider(provider: &str) -> &str {
+    if provider == "codex-rust" {
+        "codex"
+    } else {
+        provider
+    }
+}
+
 pub fn key_present(provider: &str) -> bool {
-    let keys: &[&str] = match provider {
+    let keys: &[&str] = match cli_provider(provider) {
         "claude" => &["ANTHROPIC_API_KEY"],
         "codex" => &["CODEX_API_KEY", "OPENAI_API_KEY"],
         _ => return true,
@@ -40,7 +49,7 @@ pub fn opencode_path() -> Option<PathBuf> {
     })
 }
 pub fn installed(provider: &str) -> bool {
-    if rust_codex(provider) {
+    if provider == "codex-rust" {
         let executable = std::env::var_os("CODEX_PATH").unwrap_or_else(|| "codex".into());
         return std::path::Path::new(&executable).is_file()
             || std::env::var_os("PATH").is_some_and(|paths| {
@@ -52,10 +61,6 @@ pub fn installed(provider: &str) -> bool {
         "opencode" => opencode_path().is_some(),
         _ => adapter_path(provider).exists(),
     }
-}
-
-pub fn rust_codex(provider: &str) -> bool {
-    provider == "codex" && std::env::var("AGENTWORKS_CODEX_ADAPTER").is_ok_and(|v| v == "rust")
 }
 
 pub fn agent_config(provider: &str, api_key_mode: bool, host_profile: bool) -> AcpAgentConfig {
@@ -86,7 +91,7 @@ pub fn agent_config(provider: &str, api_key_mode: bool, host_profile: bool) -> A
             .env("CODEX_API_KEY", "")
             .env("ANTHROPIC_API_KEY", "")
     } else {
-        let mut config = if rust_codex(provider) {
+        let mut config = if provider == "codex-rust" {
             AcpAgentConfig::new(std::env::current_exe().expect("executable path")).arg("codex-acp")
         } else if let Some(node) = std::env::var_os("AGENTWORKS_NODE") {
             AcpAgentConfig::new(node).arg(adapter_path(provider).to_string_lossy())
@@ -95,8 +100,10 @@ pub fn agent_config(provider: &str, api_key_mode: bool, host_profile: bool) -> A
         }
         .env("NO_BROWSER", "1");
         if api_key_mode {
-            let home = runtime_root().join(".agentworks").join(provider);
-            if provider == "codex" {
+            let home = runtime_root()
+                .join(".agentworks")
+                .join(cli_provider(provider));
+            if cli_provider(provider) == "codex" {
                 config = config
                     .env("CODEX_HOME", home.to_string_lossy())
                     .env("ANTHROPIC_API_KEY", "");
@@ -126,7 +133,11 @@ pub fn prepare(provider: &str) -> std::io::Result<()> {
             std::fs::create_dir_all(runtime_root().join(".agentworks/opencode").join(dir))?;
         }
     } else if provider != "demo" && use_api_key() {
-        std::fs::create_dir_all(runtime_root().join(".agentworks").join(provider))?;
+        std::fs::create_dir_all(
+            runtime_root()
+                .join(".agentworks")
+                .join(cli_provider(provider)),
+        )?;
     }
     Ok(())
 }
@@ -182,7 +193,7 @@ mod tests {
     use super::*;
     #[test]
     fn existing_signin_inherits_credential_locations_and_does_not_force_api_keys() {
-        for provider in ["claude", "codex"] {
+        for provider in ["claude", "codex", "codex-rust"] {
             let config = agent_config(provider, false, false);
             assert!(!config.environment().contains_key("CODEX_HOME"));
             assert!(!config.environment().contains_key("CLAUDE_CONFIG_DIR"));
@@ -233,5 +244,23 @@ mod tests {
         let claude = agent_config("claude", true, false);
         assert!(codex.environment()["CODEX_HOME"].ends_with(".agentworks/codex"));
         assert!(claude.environment()["CLAUDE_CONFIG_DIR"].ends_with(".agentworks/claude"));
+    }
+
+    #[test]
+    fn native_codex_is_a_distinct_adapter_with_shared_codex_authentication() {
+        let native = agent_config("codex-rust", true, false);
+        assert_eq!(native.command(), std::env::current_exe().unwrap());
+        assert_eq!(native.arguments(), &["codex-acp"]);
+        assert_eq!(
+            native.environment().get("CODEX_HOME"),
+            agent_config("codex", true, false)
+                .environment()
+                .get("CODEX_HOME")
+        );
+        assert!(!native.environment().contains_key("CLAUDE_CONFIG_DIR"));
+        assert_ne!(
+            native.command(),
+            agent_config("codex", true, false).command()
+        );
     }
 }

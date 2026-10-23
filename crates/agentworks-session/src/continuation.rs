@@ -111,7 +111,7 @@ impl State {
 // arbitrary slash command named similarly is never enough. Arguments are excluded.
 fn is_status_probe(provider: &str, commands: &Value, text: &str) -> bool {
     let command = match (provider, text.trim()) {
-        ("codex", "/status") | ("demo", "/status") => "status",
+        ("codex" | "codex-rust" | "demo", "/status") => "status",
         ("claude", "/usage") | ("demo", "/usage") => "usage",
         _ => return false,
     };
@@ -193,7 +193,7 @@ pub fn error_evidence(provider: &str, error: &Value) -> Option<Evidence> {
             source: "Claude ACP prompt error errorKind=rate_limit; reset unavailable".into(),
         });
     }
-    if matches!(provider, "codex" | "demo")
+    if matches!(provider, "codex" | "codex-rust" | "demo")
         && matches!(
             error["data"]["codexErrorInfo"].as_str(),
             Some("usageLimitExceeded" | "rateLimitExceeded")

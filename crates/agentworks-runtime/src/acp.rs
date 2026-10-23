@@ -40,7 +40,7 @@ pub async fn initialize_on(
             agent_client_protocol::Error::internal_error().data("Adapter did not negotiate ACP v1")
         );
     }
-    if provider == "codex"
+    if crate::provider::cli_provider(provider) == "codex"
         && api_key
         && init
             .auth_methods

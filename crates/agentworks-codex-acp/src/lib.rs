@@ -16,6 +16,8 @@ use tokio::{
     sync::{Mutex as AsyncMutex, oneshot},
 };
 
+mod commands;
+
 type Result<T> = std::result::Result<T, Error>;
 type Reply = oneshot::Sender<Result<Value>>;
 
@@ -49,11 +51,14 @@ struct Session {
     host_policy: Value,
     roots: Vec<String>,
     configuring: bool,
+    usage: Value,
+    last_completed: Option<String>,
     active: Option<ActiveTurn>,
 }
 struct ActiveTurn {
     id: Option<String>,
     cancelled: bool,
+    compaction: bool,
     done: Reply,
 }
 struct Bridge {
@@ -197,6 +202,8 @@ impl Bridge {
                         settings,
                         roots,
                         configuring: false,
+                        usage: Value::Null,
+                        last_completed: None,
                         active: None,
                     },
                 );
@@ -206,6 +213,11 @@ impl Bridge {
                         .await?;
                 }
                 let options = self.config_options(&id).await?;
+                update(
+                    cx,
+                    &id,
+                    json!({"sessionUpdate":"available_commands_update","availableCommands":commands::available()}),
+                )?;
                 Ok(json!({"sessionId":id,"configOptions":options}))
             }
             "session/close" | "session/delete" => {
@@ -346,7 +358,18 @@ impl Bridge {
                     Ok(json!({"configOptions":options}))
                 }
             }
-            "session/prompt" => self.prompt(p).await,
+            "session/prompt" => {
+                if let Some((name, args)) = commands::parse(&p["prompt"]) {
+                    if p["prompt"].as_array().is_some_and(|v| v.len() != 1) {
+                        return Err(invalid(
+                            "Send slash commands without attachments or extra context",
+                        ));
+                    }
+                    self.command(field(&p, "sessionId")?, name, args, cx).await
+                } else {
+                    self.prompt(p).await
+                }
+            }
             _ => Err(Error::method_not_found()),
         }
     }
@@ -445,6 +468,11 @@ impl Bridge {
     async fn prompt(&self, p: Value) -> Result<Value> {
         let id = field(&p, "sessionId")?;
         let input = prompt_input(&p["prompt"])?;
+        self.run_turn(id, "turn/start", json!({"threadId":id,"input":input}))
+            .await
+    }
+
+    async fn run_turn(&self, id: &str, method: &str, params: Value) -> Result<Value> {
         let (tx, rx) = oneshot::channel();
         {
             let mut sessions = self.sessions.lock().unwrap();
@@ -457,12 +485,11 @@ impl Bridge {
             s.active = Some(ActiveTurn {
                 id: None,
                 cancelled: false,
+                compaction: method == "thread/compact/start",
                 done: tx,
             });
         }
-        let started = self
-            .rpc("turn/start", json!({"threadId":id,"input":input}))
-            .await;
+        let started = self.rpc(method, params).await;
         let response = match started {
             Ok(v) => v,
             Err(e) => {
@@ -470,22 +497,29 @@ impl Bridge {
                 return Err(e);
             }
         };
-        let turn_id = field(&response["turn"], "id")?;
+        // Compaction acknowledges with {}; its turn ID arrives through turn/started.
+        let turn_id = response["turn"]["id"].as_str();
         let cancelled = {
             let mut sessions = self.sessions.lock().unwrap();
             if let Some(active) = sessions.get_mut(id).and_then(|s| s.active.as_mut()) {
-                active.id = Some(turn_id.into());
-                active.cancelled
+                if let Some(turn_id) = turn_id {
+                    active.id = Some(turn_id.into());
+                }
+                if active.id.is_some() && std::mem::take(&mut active.cancelled) {
+                    active.id.clone()
+                } else {
+                    None
+                }
             } else {
-                false
+                None
             }
         };
-        if cancelled {
-            self.rpc("turn/interrupt", json!({"threadId":id,"turnId":turn_id}))
+        if let Some(cancelled) = cancelled {
+            self.rpc("turn/interrupt", json!({"threadId":id,"turnId":cancelled}))
                 .await?;
         }
         let completed = rx.await.map_err(|_| failure("Codex turn disconnected"))??;
-        if completed["id"] != turn_id {
+        if turn_id.is_some_and(|id| completed["id"] != id) {
             return Err(failure("Codex completed an unexpected turn"));
         }
         match completed["status"].as_str() {
@@ -503,7 +537,7 @@ impl Bridge {
                 .get_mut(id)
                 .and_then(|s| s.active.as_mut())
                 .and_then(|a| {
-                    a.cancelled = true;
+                    a.cancelled = a.id.is_none();
                     a.id.clone()
                 })
         };
@@ -550,13 +584,56 @@ impl Bridge {
                 } else {
                     let p = &v["params"];
                     let id = p["threadId"].as_str().unwrap_or("");
+                    if method == "turn/started"
+                        || (method == "item/started"
+                            && matches!(
+                                p["item"]["type"].as_str(),
+                                Some("contextCompaction" | "enteredReviewMode")
+                            ))
+                    {
+                        let cancel = {
+                            let mut sessions = self.sessions.lock().unwrap();
+                            sessions
+                                .get_mut(id)
+                                .and_then(|s| s.active.as_mut())
+                                .and_then(|active| {
+                                    if let Some(turn) =
+                                        p["turn"]["id"].as_str().or_else(|| p["turnId"].as_str())
+                                    {
+                                        // Review also emits an internal turn/started ID. Its API
+                                        // response and item events retain the owning review ID.
+                                        active.id.get_or_insert_with(|| turn.to_owned());
+                                    }
+                                    if active.id.is_some() && std::mem::take(&mut active.cancelled)
+                                    {
+                                        active.id.clone()
+                                    } else {
+                                        None
+                                    }
+                                })
+                        };
+                        if let Some(turn) = cancel {
+                            let bridge = self.clone();
+                            let params = json!({"threadId":id,"turnId":turn});
+                            cx.spawn(async move {
+                                bridge.rpc("turn/interrupt", params).await.map(|_| ())
+                            })?;
+                        }
+                    }
                     if method == "turn/completed" {
-                        let active = self
-                            .sessions
-                            .lock()
-                            .unwrap()
-                            .get_mut(id)
-                            .and_then(|s| s.active.take());
+                        let active = self.sessions.lock().unwrap().get_mut(id).and_then(|s| {
+                            let completed = p["turn"]["id"].as_str()?;
+                            if s.last_completed.as_deref() == Some(completed)
+                                || s.active
+                                    .as_ref()
+                                    .and_then(|a| a.id.as_deref())
+                                    .is_some_and(|active| active != completed)
+                            {
+                                return None;
+                            }
+                            s.last_completed = Some(completed.into());
+                            s.active.take()
+                        });
                         if let Some(active) = active {
                             let _ = active.done.send(Ok(p["turn"].clone()));
                         }
@@ -573,12 +650,40 @@ impl Bridge {
                         }
                         if let Some(mut event) = event_update(method, p) {
                             if event["sessionUpdate"] == "usage_update" {
+                                if let Some(s) = self.sessions.lock().unwrap().get_mut(id) {
+                                    s.usage = event.clone();
+                                }
                                 let limits = self.limits.lock().unwrap();
                                 if !limits.is_empty() {
                                     event["_meta"] = json!({"_codex/subscriptionLimits":{"version":1,"limits":limits.values().collect::<Vec<_>>()}});
                                 }
                             }
                             update(&cx, id, event)?;
+                        }
+                        // Manual compaction can finish at an item boundary without turn/completed.
+                        // Automatic compaction inside a normal prompt must leave it running.
+                        let completed_item = if method == "thread/compacted" {
+                            Some("contextCompaction")
+                        } else if method == "item/completed" {
+                            p["item"]["type"].as_str()
+                        } else {
+                            None
+                        };
+                        if completed_item.is_some() {
+                            let mut sessions = self.sessions.lock().unwrap();
+                            let session = sessions.get_mut(id).unwrap();
+                            if session.active.as_ref().is_some_and(|a| a.compaction)
+                                && completed_item == Some("contextCompaction")
+                            {
+                                let active = session.active.take().unwrap();
+                                session.last_completed = active
+                                    .id
+                                    .clone()
+                                    .or_else(|| p["turnId"].as_str().map(str::to_owned));
+                                let _ = active
+                                    .done
+                                    .send(Ok(json!({"id":active.id,"status":"completed"})));
+                            }
                         }
                     }
                 }
@@ -759,6 +864,12 @@ fn prompt_input(blocks: &Value) -> Result<Vec<Value>> {
 }
 fn event_update(method: &str, p: &Value) -> Option<Value> {
     match method {
+        "item/completed" if p["item"]["type"] == "exitedReviewMode" => Some(
+            json!({"sessionUpdate":"agent_message_chunk","messageId":p["item"]["id"],"content":{"type":"text","text":p["item"]["review"]}}),
+        ),
+        "item/started" if p["item"]["type"] == "enteredReviewMode" => Some(
+            json!({"sessionUpdate":"agent_thought_chunk","messageId":p["item"]["id"],"content":{"type":"text","text":format!("Reviewing {}",p["item"]["review"].as_str().unwrap_or("changes"))}}),
+        ),
         "item/agentMessage/delta"
         | "item/reasoning/textDelta"
         | "item/reasoning/summaryTextDelta" => Some(
@@ -787,7 +898,7 @@ fn tool_update(item: &Value, done: bool) -> Option<Value> {
     let kind = match item["type"].as_str()? {
         "commandExecution" => "execute",
         "fileChange" => "edit",
-        "mcpToolCall" | "dynamicToolCall" => "other",
+        "mcpToolCall" | "dynamicToolCall" | "contextCompaction" => "other",
         "webSearch" => "search",
         "imageView" => "read",
         _ => return None,
@@ -806,10 +917,10 @@ fn tool_update(item: &Value, done: bool) -> Option<Value> {
 }
 fn replay_item(cx: &ConnectionTo<Client>, id: &str, item: &Value) -> Result<()> {
     match item["type"].as_str() {
-        Some("agentMessage") => update(
+        Some("agentMessage" | "exitedReviewMode") => update(
             cx,
             id,
-            json!({"sessionUpdate":"agent_message_chunk","messageId":item["id"],"content":{"type":"text","text":item["text"]}}),
+            json!({"sessionUpdate":"agent_message_chunk","messageId":item["id"],"content":{"type":"text","text":item.get("text").unwrap_or(&item["review"])}}),
         ),
         Some("userMessage") => {
             for block in item["content"].as_array().into_iter().flatten() {

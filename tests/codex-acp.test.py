@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Wire tests, with no Node or inference: python3 tests/codex-acp.test.py.
 
-Build first: cargo build -p agentworks-runtime --bin agentworks-codex-acp
+Build first: cargo build -p agentworks-codex-acp
 This file also acts as the fake native Codex executable (invoked with app-server).
 """
 import json
@@ -23,6 +23,7 @@ def harness():
     active = None
     active_thread = "thread-1"
     deleted = set()
+    late_compaction = None
     settings = dict(model="test-model", reasoningEffort="medium", sandbox=dict(type="readOnly", networkAccess=False), approvalPolicy="on-request", approvalsReviewer="user", serviceTier=None)
 
     def notify(method, **params):
@@ -41,6 +42,9 @@ def harness():
             complete()
             continue
         result = {}
+        if method in ("turn/start","review/start") and late_compaction:
+            notify("turn/completed",turn=dict(id=late_compaction,status="completed"))
+            late_compaction=None
         if method in ("thread/start", "thread/resume", "thread/fork"):
             assert p["cwd"].startswith("/")
             assert p["cwd"] in p["runtimeWorkspaceRoots"]
@@ -48,7 +52,11 @@ def harness():
                 send(dict(id=v["id"], error=dict(code=-32602, message="Thread was deleted")))
                 continue
             if p.get("config", {}).get("mcp_servers"):
-                assert p["config"]["mcp_servers"]["agentworks"]["env"] == {"TOKEN": "test"}
+                env=p["config"]["mcp_servers"]["agentworks"]["env"]
+                if "TOKEN" in env:
+                    assert env == {"TOKEN": "test"}
+                else:
+                    assert "AGENTWORKS_MCP_ENDPOINT" in env and "AGENTWORKS_MCP_TOKEN" in env
             thread_id = "thread-2" if method == "thread/fork" else p.get("threadId", "thread-1")
             if method == "thread/fork" and "lastTurnId" in p:
                 assert p["lastTurnId"] == "turn-old", "Wrong fork boundary"
@@ -86,11 +94,43 @@ def harness():
                 send(dict(id=v["id"], error=dict(code=-32603, message="Delete failed")))
                 continue
             deleted.add(p["threadId"])
+        elif method in ("thread/compact/start", "review/start"):
+            active_thread=p["threadId"]
+            turn+=1
+            active=f"command-{turn}"
+            if method == "review/start":
+                assert p["delivery"] == "inline"
+                send(dict(id=v["id"], result=dict(turn=dict(id=active), reviewThreadId=active_thread)))
+                notify("item/started",turnId=active,item=dict(id="entry-"+active,type="enteredReviewMode",review="fixture changes"))
+            notify("turn/started", turn=dict(id="internal-"+active if method=="review/start" else active))
+            if method=="thread/compact/start":
+                notify("item/started",turnId=active,item=dict(id=active,type="contextCompaction"))
+            if not os.environ.get("ACP_FIXTURE_HOLD_COMPACT") or method == "review/start":
+                notify("item/completed", item=dict(id=active, type="exitedReviewMode" if method=="review/start" else "contextCompaction",review=json.dumps(p.get("target"))))
+                if method=="review/start":complete()
+                else:late_compaction=active
+            if method == "thread/compact/start":
+                send(dict(id=v["id"], result={}))
+            continue
+        elif method == "skills/list":
+            assert p["cwds"]
+            result=dict(data=[dict(skills=[dict(name="check",description="Check the project")])])
+        elif method == "mcpServerStatus/list":
+            assert p["threadId"]
+            assert p["detail"] == "toolsAndAuthOnly"
+            if p.get("cursor") is None:
+                result=dict(data=[dict(name="one",authStatus="oAuth")],nextCursor="mcp-2")
+            else:
+                assert p["cursor"]=="mcp-2"
+                result=dict(data=[dict(name="two",authStatus="notLoggedIn")],nextCursor=None)
+        elif method == "thread/name/set":
+            assert p["name"]=="New conversation name"
         elif method == "turn/start":
             active_thread = p["threadId"]
             turn += 1
             active = f"turn-{turn}"
             text = p["input"][0]["text"]
+            assert not text.startswith('/'), "A slash command was incorrectly sent to the model"
             if text == "attachments":
                 assert p["input"][1] == dict(type="image", url="data:image/png;base64,iVBORw0KGgo=")
                 assert '<context ref="agentworks://notes">\n# Notes\n</context>' in p["input"][2]["text"]
@@ -120,6 +160,8 @@ def harness():
             elif text == "fail":
                 complete("failed", dict(message="Quota exhausted", codexErrorInfo="usageLimitExceeded"))
             elif text != "early":
+                if text=="automatic_compaction":
+                    notify("item/completed", item=dict(id="automatic",type="contextCompaction"))
                 item = dict(id="tool-1", type="commandExecution", command="echo hello", status="inProgress")
                 notify("item/started", item=item)
                 notify("item/commandExecution/outputDelta", itemId="tool-1", delta="hello\n")
@@ -139,7 +181,10 @@ class BridgeTests(unittest.TestCase):
     def setUp(self):
         root = Path(__file__).resolve().parents[1]
         binary = os.environ.get("CODEX_ACP_TEST_BIN", str(root / "target/debug/agentworks-codex-acp"))
-        self.process = subprocess.Popen([binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=dict(os.environ, CODEX_PATH=str(Path(__file__).resolve())))
+        env=dict(os.environ, CODEX_PATH=str(Path(__file__).resolve()))
+        if self._testMethodName=="test_cancel_native_compaction":
+            env["ACP_FIXTURE_HOLD_COMPACT"]="1"
+        self.process = subprocess.Popen([binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
         self.addCleanup(self.close)
         self.messages = queue.Queue()
         self.seen = []
@@ -303,7 +348,7 @@ class BridgeTests(unittest.TestCase):
 
     def test_legacy_history_still_replays(self):
         self.call("session/load", dict(sessionId="legacy", cwd="/tmp", mcpServers=[]))
-        messages = [v["params"]["update"] for v in self.seen if v.get("method") == "session/update"]
+        messages = [v["params"]["update"] for v in self.seen if v.get("method") == "session/update" and v["params"]["update"]["sessionUpdate"] == "agent_message_chunk"]
         self.assertEqual(messages[-1]["messageId"], "old-answer")
 
     def test_sparse_quota_pushes_preserve_observation_times(self):
@@ -323,6 +368,42 @@ class BridgeTests(unittest.TestCase):
         self.prompt("settings")
         chunks = [v["params"]["update"]["content"]["text"] for v in self.seen if v.get("method") == "session/update" and v["params"]["update"]["sessionUpdate"] == "agent_message_chunk"]
         self.assertEqual(json.loads(chunks[-2])["sandbox"]["writableRoots"], ["/tmp", "/tmp/extra"])
+
+    def test_advertised_commands_run_without_becoming_model_prompts(self):
+        self.session()
+        announced=[v["params"]["update"] for v in self.seen if v.get("method")=="session/update" and v["params"]["update"]["sessionUpdate"]=="available_commands_update"]
+        names={c["name"] for c in announced[-1]["availableCommands"]}
+        for command in ["/status","/model","/model test-model","/permissions","/permissions read-only","/plan","/fast on","/fast off","/skills","/mcp","/rename New conversation name","/compact","/review","/review check naming","/review-branch main","/review-commit abc123"]:
+            self.assertIn(command.split()[0][1:],names)
+            self.assertEqual(self.prompt(command)["stopReason"],"end_turn")
+        chunks=[v["params"]["update"]["content"]["text"] for v in self.seen if v.get("method")=="session/update" and v["params"]["update"]["sessionUpdate"]=="agent_message_chunk"]
+        self.assertTrue(any("Subscription quota: not reported" in c for c in chunks))
+        self.assertTrue(any("$check" in c for c in chunks))
+        self.assertTrue(any("one" in c and "two" in c for c in chunks))
+        self.assertIn(dict(type="baseBranch",branch="main"),[json.loads(c) for c in chunks if c.startswith('{')])
+        self.assertEqual(self.prompt("normal")["stopReason"],"end_turn")
+
+    def test_invalid_commands_fail_without_starting_a_model_turn(self):
+        self.session()
+        for command in ["/unknown","/compact unexpected","/rename","/review-branch","/review-commit","/fast faster"]:
+            request_id=self.send("session/prompt",dict(sessionId="thread-1",prompt=[dict(type="text",text=command)]))
+            response=self.until(lambda v:v.get("id")==request_id and "method" not in v)
+            self.assertIn("error",response)
+        self.assertEqual(self.prompt("normal")["stopReason"],"end_turn")
+
+    def test_cancel_native_compaction(self):
+        self.session()
+        request_id=self.send("session/prompt",dict(sessionId="thread-1",prompt=[dict(type="text",text="/compact")]))
+        self.until(lambda v:v.get("method")=="session/update" and v["params"]["update"]["sessionUpdate"]=="tool_call")
+        self.send("session/cancel",dict(sessionId="thread-1"),request=False)
+        response=self.until(lambda v:v.get("id")==request_id and "method" not in v)
+        self.assertEqual(response["result"]["stopReason"],"cancelled")
+        self.assertEqual(self.prompt("normal")["stopReason"],"end_turn")
+
+    def test_automatic_compaction_does_not_end_a_normal_prompt(self):
+        self.session()
+        self.assertEqual(self.prompt("automatic_compaction")["stopReason"],"end_turn")
+        self.assertTrue(any(v.get("method")=="session/update" and v["params"]["update"]["sessionUpdate"]=="agent_message_chunk" and v["params"]["update"]["content"]["text"]=="answer" for v in self.seen))
 
     def test_native_errors_and_disconnect_do_not_hang(self):
         self.session()

@@ -358,7 +358,10 @@ fn codex_reset(result: &Value) -> Option<u64> {
     if unknown { None } else { latest }
 }
 pub async fn enrich_codex(s: &Session, error: &Value) {
-    if s.host_id != "local" || s.provider != "codex" || error_evidence("codex", error).is_none() {
+    if s.host_id != "local"
+        || agentworks_runtime::provider::cli_provider(&s.provider) != "codex"
+        || error_evidence("codex", error).is_none()
+    {
         return;
     }
     let generation = s.data.lock().unwrap().continuation.generation;

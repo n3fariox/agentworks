@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/agentworks",
+    "crates/agentworks-codex-acp",
     "crates/agentworks-terminal",
     "crates/agentworks-runtime",
     "crates/agentworks-session",

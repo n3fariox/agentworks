@@ -29,7 +29,7 @@ mod workspace;
 mod worktree_cleanup;
 mod worktrees;
 use agentworks_runtime::{
-    provider::{adapter_path, installed, key_present, runtime_root, use_api_key},
+    provider::{adapter_path, cli_provider, installed, key_present, runtime_root, use_api_key},
     worker as agent,
 };
 use agentworks_session::{SessionData, timeouts};
@@ -435,7 +435,7 @@ fn session(app: &App, id: &str) -> Result<Arc<Session>, (StatusCode, String)> {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).is_some_and(|a| a == "codex-acp") {
-        let code = match agentworks_runtime::codex_acp::run().await {
+        let code = match agentworks_codex_acp::run().await {
             Ok(()) => 0,
             Err(error) => {
                 eprintln!("agentworks codex-acp: {error}");
@@ -466,8 +466,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.get(1).is_some_and(|a| a == "--probe") {
         let provider = args.get(2).map(String::as_str).unwrap_or("demo");
-        if !["claude", "codex", "opencode", "demo"].contains(&provider) {
-            return Err("Use --probe claude|codex|opencode|demo".into());
+        if !agentworks_runtime::remote::PROVIDERS.contains(&provider) {
+            return Err("Use --probe claude|codex|codex-rust|opencode|demo".into());
         }
         agentworks_runtime::acp::probe(provider).await?;
         return Ok(());
@@ -1229,7 +1229,8 @@ async fn status(State(app): State<App>) -> Json<Value> {
         json!({"roots":effective_roots(&app),"defaultModels":defaults.default_models,"defaultCommunicationRole":defaults.default_communication_role.unwrap_or_default(),"providers":[
             {"id":"demo","name":"Demo agent","installed":true,"keyPresent":true},
             {"id":"claude","name":"Claude","installed":adapter_path("claude").exists(),"keyPresent":key_present("claude"),"authMode":if use_api_key(){"api_key"}else{"existing"}},
-            {"id":"codex","name":"Codex","installed":adapter_path("codex").exists(),"keyPresent":key_present("codex"),"authMode":if use_api_key(){"api_key"}else{"existing"}},
+            {"id":"codex","name":"Codex","installed":installed("codex"),"keyPresent":key_present("codex"),"authMode":if use_api_key(){"api_key"}else{"existing"}},
+            {"id":"codex-rust","name":"Codex · Rust ACP","installed":installed("codex-rust"),"keyPresent":key_present("codex-rust"),"authMode":if use_api_key(){"api_key"}else{"existing"}},
             {"id":"opencode","name":"OpenCode · free models","installed":installed("opencode"),"keyPresent":true}
         ]}),
     )
@@ -1339,7 +1340,7 @@ async fn save_settings(State(app): State<App>, Json(mut settings): Json<Settings
         }
     }
     for (provider, model) in &settings.default_models {
-        if !["demo", "claude", "codex", "opencode"].contains(&provider.as_str())
+        if !agentworks_runtime::remote::PROVIDERS.contains(&provider.as_str())
             || model.is_empty()
             || model.len() > 256
         {
@@ -1452,7 +1453,7 @@ async fn discover_models(State(app): State<App>, Json(req): Json<ModelDiscovery>
     let _workspace = app.workspace_lock.lock().await;
     service_restart::allow_start(&app)?;
     let remote = req.host_id.as_deref().filter(|h| *h != "local");
-    if !["demo", "claude", "codex", "opencode"].contains(&req.provider.as_str())
+    if !agentworks_runtime::remote::PROVIDERS.contains(&req.provider.as_str())
         || (remote.is_none() && !installed(&req.provider))
     {
         return Err(fail(
@@ -1520,7 +1521,7 @@ async fn list_external_sessions(
 ) -> ApiResult {
     let host = req.host_id.as_deref().unwrap_or("local");
     let remote = host != "local";
-    if !["demo", "claude", "codex", "opencode"].contains(&req.provider.as_str())
+    if !agentworks_runtime::remote::PROVIDERS.contains(&req.provider.as_str())
         || (!remote && !installed(&req.provider))
     {
         return Err(fail(
@@ -1558,7 +1559,7 @@ async fn list_external_sessions(
         let mut item = item.clone();
         item["cwd"] = json!(path);
         if let Some(existing) = sessions.iter().find(|s| {
-            if s.provider != req.provider || s.host_id != host {
+            if cli_provider(&s.provider) != cli_provider(&req.provider) || s.host_id != host {
                 return false;
             }
             let data = s.data.lock().unwrap();
@@ -2094,7 +2095,7 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
     if req.model.as_ref().is_some_and(|m| m.len() > 256) {
         return Err(fail(StatusCode::BAD_REQUEST, "Model ID is too long"));
     }
-    if !["demo", "claude", "codex", "opencode"].contains(&req.provider.as_str()) {
+    if !agentworks_runtime::remote::PROVIDERS.contains(&req.provider.as_str()) {
         return Err(fail(StatusCode::BAD_REQUEST, "Unknown provider"));
     }
     let remote_host = req.host_id.clone().filter(|id| id != "local");
@@ -2107,10 +2108,14 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
     if remote_host.is_none() && !installed(&req.provider) {
         return Err(fail(
             StatusCode::CONFLICT,
-            if req.provider == "opencode" {
-                "OpenCode is not installed on PATH. Set AGENTWORKS_OPENCODE_PATH if needed."
-            } else {
-                "ACP adapter missing. Run npm ci --ignore-scripts."
+            match req.provider.as_str() {
+                "opencode" => {
+                    "OpenCode is not installed on PATH. Set AGENTWORKS_OPENCODE_PATH if needed."
+                }
+                "codex-rust" => {
+                    "Native Codex is not installed on PATH. Install Codex or set CODEX_PATH."
+                }
+                _ => "ACP adapter missing. Run npm ci --ignore-scripts.",
             },
         ));
     }
@@ -2138,7 +2143,7 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             .find(|s| {
                 let d = s.data.lock().unwrap();
                 s.host_id == remote_host.as_deref().unwrap_or("local")
-                    && s.provider == req.provider
+                    && cli_provider(&s.provider) == cli_provider(&req.provider)
                     && d.opencode_host == req.external_host
                     && d.provider_session_id.as_ref() == Some(external)
             })
@@ -2309,7 +2314,7 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
         let mut sessions = app.sessions.lock().unwrap();
         if let Some(id) = &req.external_id {
             if let Some(existing) = sessions.values().find(|s| {
-                if s.provider != req.provider
+                if cli_provider(&s.provider) != cli_provider(&req.provider)
                     || s.host_id != remote_host.as_deref().unwrap_or("local")
                 {
                     return false;

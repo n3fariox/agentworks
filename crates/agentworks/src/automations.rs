@@ -140,7 +140,7 @@ async fn definition(
             "Use a name up to 80 characters and instructions up to 32 KB",
         ));
     }
-    if !["demo", "claude", "codex", "opencode"].contains(&input.provider.as_str()) {
+    if !agentworks_runtime::remote::PROVIDERS.contains(&input.provider.as_str()) {
         return Err(fail(StatusCode::BAD_REQUEST, "Unknown harness"));
     }
     let model = input
