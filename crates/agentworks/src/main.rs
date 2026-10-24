@@ -189,7 +189,11 @@ impl Session {
                 serde_json::to_value(&state.continuation).unwrap_or(Value::Null);
         }
         state.seq += 1;
-        let event = json!({"seq":state.seq,"kind":kind,"data":data});
+        let time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let event = json!({"seq":state.seq,"kind":kind,"time":time,"data":data});
         if kind == "user" {
             state.last_prompt = Some(event.clone());
         }

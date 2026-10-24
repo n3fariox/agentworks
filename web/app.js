@@ -69,7 +69,7 @@ let replaying=false,workLogs=null,turnEnds=new Map();
 // page re-folds everything: a message or tool stream may straddle a page boundary.
 // `older.mode`: 'none' (snapshot is complete), 'more' (server reported truncation) or
 // 'begin' (the server confirmed there is nothing earlier).
-let storedEvents=[],older={mode:'none',loading:false,error:''},rebuilding=false,itemKey=null,itemCount=0;
+let storedEvents=[],older={mode:'none',loading:false,error:''},rebuilding=false,itemKey=null,itemCount=0,eventTime=null;
 let modelConfig=null, availableCommands=[], commandsOpen=false;
 let discoveryGeneration=0;
 let externalSessions=[], externalSelection=null, externalCursor=null, externalGeneration=0, externalLoading=false, externalImporting=false;
@@ -602,7 +602,8 @@ function connect(gen){
 }
 // Items get ids derived from their source event so a re-fold maps them onto the same DOM nodes.
 function itemId(){return itemKey?`${itemKey}:${itemCount++}`:uuid();}
-function addMessage(role,text){const message={id:itemId(),type:'message',role,text};transcript.push(message);return message;}
+function messageTime(at){const now=new Date(),clock=at.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});return at.toDateString()===now.toDateString()?clock:`${at.toLocaleDateString([],{month:'short',day:'numeric',...(at.getFullYear()===now.getFullYear()?{}:{year:'numeric'})})}, ${clock}`;}
+function addMessage(role,text){const message={id:itemId(),type:'message',role,text,time:eventTime};transcript.push(message);return message;}
 function replay(lastUserSeq){
   replaying=true;try{const latestUser=storedEvents.findLast(item=>item.kind==='user');for(const item of storedEvents)if(item.kind!=='session_updated'&&(item.kind!=='stop_requested'||item.data.userSeq===(lastUserSeq??latestUser?.seq)||(!lastUserSeq&&!latestUser)))consume(item);}finally{replaying=false;}
 }
@@ -781,7 +782,7 @@ function renderToolActivity(node,tool,sessionBusy){
 // End U-05 tool activity.
 
 function consume(e,live=false){
-  const d=e.data;itemKey=Number.isSafeInteger(e.seq)?`${active.id}:${e.seq}`:null;itemCount=0;
+  const d=e.data;itemKey=Number.isSafeInteger(e.seq)?`${active.id}:${e.seq}`:null;itemCount=0;eventTime=Number.isSafeInteger(e.time)?e.time:null;
   if(e.kind==='user')currentUserSeq=e.seq;
   // A re-fold only rebuilds the transcript; session state, drafts and usage are already current.
   if(!rebuilding){
@@ -838,7 +839,7 @@ function consume(e,live=false){
         assistant=null;if(d.content?.type==='text'){
           const last=transcript.at(-1);
           if(last?.replayed&&last.role==='user'&&last.providerMessageId===d.messageId)last.text+=d.content.text;
-          else{const message=addMessage('user',d.content.text);message.replayed=true;message.providerMessageId=d.messageId;message.seq=e.seq;}
+          else{const message=addMessage('user',d.content.text);message.replayed=true;message.time=null;message.providerMessageId=d.messageId;message.seq=e.seq;}
         }break;
       }
       case 'agent_message_chunk':{
@@ -984,7 +985,10 @@ function draw(){
     if(!node){
       if(item.type==='message'){
         node=el('article','message '+(item.inboxDelivery?'agentworks':item.role));node.dataset.messageId=item.id;node.tabIndex=0;node.append(el('div','avatar',item.inboxDelivery?'A':item.role==='user'?'Y':icons[active.provider]));
-        const content=el('div','message-content');content.append(el('div','message-label',item.inboxDelivery?'Agentworks':item.role==='user'?'You':labels[active.provider]),el('div','message-body'));node.append(content);
+        const content=el('div','message-content'),label=el('div','message-label',item.inboxDelivery?'Agentworks':item.role==='user'?'You':labels[active.provider]);
+        // Event time, not provider time; older stored events carry none.
+        if(item.time){const at=new Date(item.time),time=el('time','message-time',messageTime(at));time.dateTime=at.toISOString();time.title=at.toLocaleString();label.append(time);}
+        content.append(label,el('div','message-body'));node.append(content);
       }else if(item.type==='tool'){
         node=el('details','tool-card');node.append(el('summary'),el('pre'));
       }else if(item.type==='image'){
