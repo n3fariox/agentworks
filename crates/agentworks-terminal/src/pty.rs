@@ -1,5 +1,6 @@
-//! Platform PTY layer: an interactive shell on a Unix PTY or Windows ConPTY,
-//! with owned output/input workers and whole-session cleanup.
+//! Platform PTY layer: a process on a Unix PTY or Windows ConPTY, with owned
+//! output/input workers and whole-session cleanup. Used by the session
+//! terminal and by interactive SSH enrollment.
 //!
 //! Follows the shape of morsh's `portable-pty` integration (reader thread,
 //! bounded output channel, separate exit observation for ConPTY), with
@@ -10,7 +11,8 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::{
     io::{self, Read, Write},
-    path::PathBuf,
+    path::Path,
+    process::Command,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -19,23 +21,38 @@ use std::{
 };
 
 const READ_CHUNK: usize = 16384;
-// Read-ahead before the reader blocks; the child then blocks on a full PTY.
-const OUTPUT_CHUNKS: usize = 64;
 const INPUT_LIMIT: usize = 1024 * 1024;
 
-pub(crate) enum Event {
+pub enum Event {
     Output(Vec<u8>),
     /// The output side closed: every holder of the terminal has gone.
     Closed,
     Failed(String),
 }
 
-pub(crate) struct Shell {
+/// Where the output worker delivers events. A bounded channel makes the
+/// worker wait, and the child then blocks on a full PTY.
+pub trait Sink: Clone + Send + 'static {
+    /// Returns false once the receiver has gone.
+    fn deliver(&self, event: Event) -> bool;
+}
+impl Sink for mpsc::SyncSender<Event> {
+    fn deliver(&self, event: Event) -> bool {
+        self.send(event).is_ok()
+    }
+}
+impl Sink for tokio::sync::mpsc::Sender<Event> {
+    // Workers are plain threads, never inside the async runtime.
+    fn deliver(&self, event: Event) -> bool {
+        self.blocking_send(event).is_ok()
+    }
+}
+
+pub struct Pty {
     child: Box<dyn Child + Send + Sync>,
-    // Taken on Windows once the shell exits: closing the pseudoconsole flushes
+    // Taken on Windows once the child exits: closing the pseudoconsole flushes
     // and closes its output pipe, which ConPTY otherwise keeps open.
     master: Option<Box<dyn MasterPty + Send>>,
-    pub(crate) events: mpsc::Receiver<Event>,
     input: Option<mpsc::Sender<Vec<u8>>>,
     queued: Arc<AtomicUsize>,
     reaped: bool,
@@ -43,29 +60,41 @@ pub(crate) struct Shell {
     job: windows::Job,
 }
 
-pub(crate) fn spawn(cwd: PathBuf, cols: u16, rows: u16) -> io::Result<Shell> {
-    // CommandBuilder silently substitutes the home directory for a missing cwd.
-    if !cwd.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("{} is not a directory", cwd.display()),
-        ));
-    }
+/// Start `command` as the session leader of a new PTY. Its program, arguments,
+/// working directory and environment changes are used; stdio is the PTY.
+/// Without `echo`, input is neither echoed nor line-buffered from the start,
+/// before the program sets its own modes (Unix only; ConPTY leaves this to the
+/// program's console mode).
+pub fn spawn(
+    command: &Command,
+    cols: u16,
+    rows: u16,
+    echo: bool,
+    events: impl Sink,
+) -> io::Result<Pty> {
+    let command = builder(command)?;
     let pair = native_pty_system()
         .openpty(size(cols, rows))
         .map_err(io::Error::other)?;
-    let mut command = default_shell();
-    command.cwd(cwd);
-    for key in std::env::vars_os().map(|(key, _)| key) {
-        if transient_shell_variable(&key) {
-            command.env_remove(key);
+    #[cfg(unix)]
+    if !echo {
+        let fd = pair
+            .master
+            .as_raw_fd()
+            .ok_or_else(|| io::Error::other("The PTY has no descriptor"))?;
+        let mut term = unsafe { std::mem::zeroed::<libc::termios>() };
+        if unsafe { libc::tcgetattr(fd, &mut term) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        term.c_lflag &= !(libc::ECHO | libc::ICANON);
+        if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &term) } < 0 {
+            return Err(io::Error::last_os_error());
         }
     }
-    for (key, value) in SHELL_VARIABLES {
-        command.env(key, value);
-    }
+    #[cfg(windows)]
+    let _ = echo;
     // Acquire every handle before starting the child, so a setup failure
-    // never leaves a shell running without an owner.
+    // never leaves a process running without an owner.
     let mut reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
     let mut writer = pair.master.take_writer().map_err(io::Error::other)?;
     #[cfg(windows)]
@@ -76,30 +105,28 @@ pub(crate) fn spawn(cwd: PathBuf, cols: u16, rows: u16) -> io::Result<Shell> {
         .map_err(io::Error::other)?;
     // The child holds its own copy; ours would keep the output open forever.
     drop(pair.slave);
-    let (events, receiver) = mpsc::sync_channel(OUTPUT_CHUNKS);
     let failed = events.clone();
     let (input, chunks) = mpsc::channel::<Vec<u8>>();
     let queued = Arc::new(AtomicUsize::new(0));
-    // From here on, dropping the Shell cleans up after any failure.
-    let shell = Shell {
+    // From here on, dropping the Pty cleans up after any failure.
+    let pty = Pty {
         child,
         master: Some(pair.master),
-        events: receiver,
         input: Some(input),
         queued: queued.clone(),
         reaped: false,
         #[cfg(windows)]
         job,
     };
-    // Window: processes the shell starts before this call are outside the job.
+    // Window: processes the child starts before this call are outside the job.
     #[cfg(windows)]
-    if let Some(handle) = shell.child.as_raw_handle() {
-        shell.job.assign(handle)?;
+    if let Some(handle) = pty.child.as_raw_handle() {
+        pty.job.assign(handle)?;
     }
     // Not joined: a process that escapes the session can hold the PTY open,
     // and shutdown must not wait for it. The thread ends when the PTY closes.
     std::thread::Builder::new()
-        .name("terminal-output".into())
+        .name("pty-output".into())
         .spawn(move || {
             let mut buf = vec![0; READ_CHUNK];
             loop {
@@ -111,23 +138,56 @@ pub(crate) fn spawn(cwd: PathBuf, cols: u16, rows: u16) -> io::Result<Shell> {
                     Err(e) => Event::Failed(format!("Terminal read failed: {e}")),
                 };
                 let last = !matches!(event, Event::Output(_));
-                if events.send(event).is_err() || last {
+                if !events.deliver(event) || last {
                     return;
                 }
             }
         })?;
     std::thread::Builder::new()
-        .name("terminal-input".into())
+        .name("pty-input".into())
         .spawn(move || {
             for chunk in chunks {
                 if let Err(e) = writer.write_all(&chunk).and_then(|()| writer.flush()) {
-                    let _ = failed.send(Event::Failed(format!("Terminal write failed: {e}")));
+                    failed.deliver(Event::Failed(format!("Terminal write failed: {e}")));
                     return;
                 }
                 queued.fetch_sub(chunk.len(), Ordering::AcqRel);
             }
         })?;
-    Ok(shell)
+    Ok(pty)
+}
+
+fn builder(command: &Command) -> io::Result<CommandBuilder> {
+    let mut builder = CommandBuilder::new(command.get_program());
+    builder.args(command.get_args());
+    // CommandBuilder substitutes the home directory for an unset or missing
+    // directory; keep Command's meaning of both instead.
+    let cwd = match command.get_current_dir() {
+        Some(dir) => dir.to_path_buf(),
+        None => std::env::current_dir()?,
+    };
+    if !cwd.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{} is not a directory", cwd.display()),
+        ));
+    }
+    builder.cwd(cwd);
+    for (key, value) in command.get_envs() {
+        match value {
+            Some(value) => builder.env(key, value),
+            None => builder.env_remove(key),
+        }
+    }
+    Ok(builder)
+}
+
+/// The user's interactive shell in `cwd`, with launcher state removed.
+pub fn shell(cwd: &Path) -> Command {
+    let mut command = default_shell();
+    command.current_dir(cwd);
+    shell_environment(&mut command, std::env::vars_os().map(|(key, _)| key));
+    command
 }
 
 fn size(cols: u16, rows: u16) -> PtySize {
@@ -148,15 +208,15 @@ fn closed(error: &io::Error) -> bool {
     error.kind() == io::ErrorKind::BrokenPipe
 }
 
-impl Shell {
+impl Pty {
     #[cfg(target_os = "linux")]
     fn pid(&self) -> u32 {
         self.child.process_id().unwrap_or(0)
     }
 
-    /// Queue bytes for the shell in order. Writes happen on the input worker,
-    /// so a shell that stops reading cannot stall this thread.
-    pub(crate) fn write(&self, bytes: Vec<u8>) -> Result<(), String> {
+    /// Queue bytes for the child in order. Writes happen on the input worker,
+    /// so a child that stops reading cannot stall the caller.
+    pub fn write(&self, bytes: Vec<u8>) -> Result<(), String> {
         if bytes.is_empty() {
             return Ok(());
         }
@@ -170,7 +230,7 @@ impl Shell {
             .map_err(|_| "The terminal input has closed".to_string())
     }
 
-    pub(crate) fn resize(&self, cols: u16, rows: u16) -> Result<(), String> {
+    pub fn resize(&self, cols: u16, rows: u16) -> Result<(), String> {
         match &self.master {
             Some(master) => master.resize(size(cols, rows)).map_err(|e| e.to_string()),
             None => Ok(()),
@@ -178,7 +238,7 @@ impl Shell {
     }
 
     /// Observe exit without reaping where the platform allows it.
-    pub(crate) fn exited(&mut self) -> io::Result<bool> {
+    pub fn exited(&mut self) -> io::Result<bool> {
         #[cfg(target_os = "linux")]
         {
             // The shell PID/session ID stays reserved until cleanup has
@@ -209,9 +269,9 @@ impl Shell {
         }
     }
 
-    /// Stop everything the shell started, then collect its exit code. A shell
+    /// Stop everything the child started, then collect its exit code. A child
     /// ended by a signal has no exit code.
-    pub(crate) fn finish(&mut self) -> io::Result<Option<i32>> {
+    pub fn finish(&mut self) -> io::Result<Option<i32>> {
         self.kill_jobs();
         let status = self.child.wait()?;
         self.reaped = true;
@@ -275,30 +335,33 @@ impl Shell {
     }
 }
 
-impl Drop for Shell {
+impl Drop for Pty {
     fn drop(&mut self) {
         self.kill_jobs();
-        // Child owns an unreaped process. No negative PID or group kill is used.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // portable-pty's kill signals the numeric PID, which is only safe while
+        // the child is unreaped. No negative PID or group kill is used.
+        if !self.reaped {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
         // Close input last so its worker's end-of-file write reaches no shell.
         self.input = None;
     }
 }
 
 #[cfg(unix)]
-fn default_shell() -> CommandBuilder {
+fn default_shell() -> Command {
     let program = std::env::var("SHELL")
         .ok()
-        .filter(|s| s.starts_with('/') && std::path::Path::new(s).is_file())
+        .filter(|s| s.starts_with('/') && Path::new(s).is_file())
         .unwrap_or_else(|| "/bin/sh".into());
-    let mut command = CommandBuilder::new(program);
+    let mut command = Command::new(program);
     command.arg("-i");
     command
 }
 
 #[cfg(windows)]
-fn default_shell() -> CommandBuilder {
+fn default_shell() -> Command {
     // PowerShell 7 when installed, otherwise the Windows PowerShell every
     // supported Windows ships with.
     let pwsh = std::env::var_os("PATH").and_then(|path| {
@@ -306,8 +369,7 @@ fn default_shell() -> CommandBuilder {
             .map(|dir| dir.join("pwsh.exe"))
             .find(|candidate| candidate.is_file())
     });
-    let mut command =
-        CommandBuilder::new(pwsh.map_or_else(|| "powershell.exe".into(), PathBuf::into_os_string));
+    let mut command = Command::new(pwsh.unwrap_or_else(|| "powershell.exe".into()));
     command.arg("-NoLogo");
     command
 }
@@ -318,6 +380,15 @@ const SHELL_VARIABLES: [(&str, &str); 4] = [
     ("TERM_PROGRAM", "agentworks"),
     ("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION")),
 ];
+
+fn shell_environment(command: &mut Command, keys: impl IntoIterator<Item = std::ffi::OsString>) {
+    for key in keys {
+        if transient_shell_variable(&key) {
+            command.env_remove(key);
+        }
+    }
+    command.envs(SHELL_VARIABLES);
+}
 
 // A terminal is a new interactive context, even when its service was launched
 // by an agent, CI runner, desktop terminal or service manager. Keep the user's
@@ -489,7 +560,8 @@ mod tests {
     #[test]
     fn cleanup_pins_only_its_own_terminal_session_and_keeps_leader_unreaped() {
         let mut sentinel = Command::new("/bin/sleep").arg("30").spawn().unwrap();
-        let mut shell = spawn(std::env::temp_dir(), 80, 24).unwrap();
+        let (events, _output) = mpsc::sync_channel(64);
+        let mut shell = spawn(&shell(&std::env::temp_dir()), 80, 24, true, events).unwrap();
         let sid = shell.pid() as i32;
         assert_ne!(sid, unsafe { libc::getsid(0) });
         assert_eq!(unsafe { libc::getsid(sid) }, sid);
@@ -525,7 +597,8 @@ mod tests {
     #[test]
     fn missing_directory_is_an_error_not_the_home_directory() {
         let missing = std::env::temp_dir().join(format!("aw-missing-{}", std::process::id()));
-        assert!(spawn(missing, 80, 24).is_err());
+        let (events, _output) = mpsc::sync_channel(64);
+        assert!(spawn(&shell(&missing), 80, 24, true, events).is_err());
     }
 
     #[cfg(unix)]
@@ -588,13 +661,9 @@ mod tests {
         let keys = dropped
             .into_iter()
             .chain(kept.into_iter().map(|(key, _)| key))
-            .chain(["TERM", "COLORTERM", "TERM_PROGRAM"]);
-        for key in keys {
-            if transient_shell_variable(key.as_ref()) {
-                command.env_remove(key);
-            }
-        }
-        command.envs(SHELL_VARIABLES);
+            .chain(["TERM", "COLORTERM", "TERM_PROGRAM"])
+            .map(std::ffi::OsString::from);
+        shell_environment(&mut command, keys);
         let output = command.output().unwrap();
         assert!(output.status.success());
         let values: HashMap<_, _> = std::str::from_utf8(&output.stdout)

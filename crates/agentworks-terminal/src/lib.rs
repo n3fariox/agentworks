@@ -1,5 +1,5 @@
 //! PTY processes, terminal emulation, and incremental presentation frames.
-mod pty;
+pub mod pty;
 
 use libghostty_vt::{
     Terminal, TerminalOptions,
@@ -306,7 +306,9 @@ fn run(
     terminal
         .on_pty_write(move |_, bytes| reply_sink.borrow_mut().extend_from_slice(bytes))
         .map_err(|e| e.to_string())?;
-    let mut shell = pty::spawn(cwd, 80, 24).map_err(|e| e.to_string())?;
+    let (events, output) = std::sync::mpsc::sync_channel(64);
+    let mut shell =
+        pty::spawn(&pty::shell(&cwd), 80, 24, true, events).map_err(|e| e.to_string())?;
     let mut previous = Vec::new();
     let mut history_state = HistoryState::default();
     let mut dirty = true;
@@ -317,11 +319,7 @@ fn run(
     let mut next = None;
     loop {
         if stop.load(Ordering::Acquire) {
-            for event in next
-                .take()
-                .into_iter()
-                .chain(shell.events.try_iter().take(16))
-            {
+            for event in next.take().into_iter().chain(output.try_iter().take(16)) {
                 if let Event::Output(data) = event {
                     terminal.vt_write(&data);
                 }
@@ -358,7 +356,7 @@ fn run(
         }
         // Drain at most 16 chunks (256 KiB) per tick so chatty programs cannot starve input.
         for _ in 0..16 {
-            let Some(event) = next.take().or_else(|| shell.events.try_recv().ok()) else {
+            let Some(event) = next.take().or_else(|| output.try_recv().ok()) else {
                 break;
             };
             match event {
@@ -403,7 +401,7 @@ fn run(
         if eof {
             std::thread::sleep(Duration::from_millis(10));
         } else {
-            match shell.events.recv_timeout(Duration::from_millis(10)) {
+            match output.recv_timeout(Duration::from_millis(10)) {
                 Ok(event) => next = Some(event),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => eof = true,

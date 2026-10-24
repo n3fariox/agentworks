@@ -1,6 +1,7 @@
 //! Interactive SSH bootstrap. Credentials travel only through a local PTY and
 //! the browser WebSocket; neither terminal output nor input is persisted.
 use crate::{App, catalog::Host, hosts};
+use agentworks_terminal::pty;
 use axum::{
     extract::{
         State, WebSocketUpgrade,
@@ -13,18 +14,14 @@ use serde::Deserialize;
 use serde_json::json;
 use std::{
     fs::File,
-    io,
-    os::{
-        fd::{AsRawFd, FromRawFd},
-        unix::fs::PermissionsExt,
-    },
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Stdio,
     sync::OnceLock,
     time::Duration,
 };
 use tokio::{
-    io::{AsyncReadExt, unix::AsyncFd},
+    io::AsyncReadExt,
     process::Command,
     sync::{Semaphore, mpsc},
 };
@@ -400,145 +397,49 @@ async fn run(cmd: &mut Command, out: &Output) -> Result<()> {
     }
 }
 
-struct Pty(AsyncFd<File>);
-impl Pty {
-    fn open(cmd: &mut Command) -> io::Result<Self> {
-        let (mut master, mut slave) = (-1, -1);
-        let size = libc::winsize {
-            ws_row: 24,
-            ws_col: 80,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        if unsafe {
-            libc::openpty(
-                &mut master,
-                &mut slave,
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                &size,
-            )
-        } < 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        let master = unsafe { File::from_raw_fd(master) };
-        let slave = unsafe { File::from_raw_fd(slave) };
-        for file in [&master, &slave] {
-            if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
-                return Err(io::Error::last_os_error());
-            }
-        }
-        if unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // Keep terminal input unbuffered and unechoed even before ssh disables
-        // echo for a password prompt. Output keeps normal CRLF terminal handling.
-        let mut term = unsafe { std::mem::zeroed::<libc::termios>() };
-        if unsafe { libc::tcgetattr(slave.as_raw_fd(), &mut term) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        term.c_lflag &= !(libc::ECHO | libc::ICANON);
-        if unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &term) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        cmd.stdin(slave.try_clone()?)
-            .stdout(slave.try_clone()?)
-            .stderr(slave);
-        unsafe {
-            cmd.pre_exec(|| {
-                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-        // The master is owned exclusively here and all I/O goes through this registration.
-        Ok(Self(unsafe { AsyncFd::register(master)? }))
-    }
-    async fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        loop {
-            let mut ready = self.0.readable().await?;
-            match ready.try_io(|fd| {
-                let n = unsafe {
-                    libc::read(fd.get_ref().as_raw_fd(), buf.as_mut_ptr().cast(), buf.len())
-                };
-                if n < 0 {
-                    let e = io::Error::last_os_error();
-                    if e.raw_os_error() == Some(libc::EIO) {
-                        Ok(0)
-                    } else {
-                        Err(e)
-                    }
-                } else {
-                    Ok(n as usize)
-                }
-            }) {
-                Ok(r) => return r,
-                Err(_) => continue,
-            }
-        }
-    }
-    async fn write(&self, bytes: &[u8]) -> io::Result<()> {
-        let mut bytes = bytes;
-        while !bytes.is_empty() {
-            let mut ready = self.0.writable().await?;
-            match ready.try_io(|fd| {
-                let n = unsafe {
-                    libc::write(fd.get_ref().as_raw_fd(), bytes.as_ptr().cast(), bytes.len())
-                };
-                if n <= 0 {
-                    Err(io::Error::last_os_error())
-                } else {
-                    Ok(n as usize)
-                }
-            }) {
-                Ok(r) => bytes = &bytes[r?..],
-                Err(_) => continue,
-            }
-        }
-        Ok(())
-    }
-    fn resize(&self, cols: u16, rows: u16) {
-        let size = libc::winsize {
-            ws_row: rows.clamp(5, 100),
-            ws_col: cols.clamp(20, 240),
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        unsafe {
-            libc::ioctl(self.0.get_ref().as_raw_fd(), libc::TIOCSWINSZ as _, &size);
-        }
-    }
-}
 async fn interactive(
     cmd: &mut Command,
     out: &Output,
     input: &mut mpsc::Receiver<Input>,
 ) -> Result<()> {
-    let pty = Pty::open(cmd).map_err(|e| format!("Could not open SSH terminal: {e}"))?;
-    let mut child = cmd.kill_on_drop(true).spawn().map_err(|e| e.to_string())?;
-    // Drop Command's copies of the slave, so EOF arrives when ssh exits.
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let mut buf = [0; 8192];
+    let (events, mut terminal) = mpsc::channel(16);
+    // Input is unechoed and unbuffered even before ssh disables echo for a
+    // password prompt. Output keeps normal CRLF terminal handling.
+    let mut pty = pty::spawn(cmd.as_std(), 80, 24, false, events)
+        .map_err(|e| format!("Could not open SSH terminal: {e}"))?;
+    // Exit is polled: ConPTY only closes its output once the exit is seen.
+    let mut poll = tokio::time::interval(Duration::from_millis(100));
+    let mut exited = None;
     loop {
         tokio::select! {
-            result = pty.read(&mut buf) => { let n = result.map_err(|e| e.to_string())?; if n == 0 { break; } output(out, &buf[..n]).await?; }
+            event = terminal.recv() => match event {
+                Some(pty::Event::Output(data)) => output(out, &data).await?,
+                Some(pty::Event::Failed(e)) => return Err(e),
+                Some(pty::Event::Closed) | None => break,
+            },
             value = input.recv() => match value {
-                Some(Input::Input { data }) => pty.write(data.as_bytes()).await.map_err(|e| e.to_string())?,
-                Some(Input::Resize { cols, rows }) => pty.resize(cols, rows),
+                Some(Input::Input { data }) => pty.write(data.into_bytes())?,
+                Some(Input::Resize { cols, rows }) => pty.resize(cols.clamp(20, 240), rows.clamp(5, 100))?,
                 None => return Err("Terminal disconnected".into()),
+            },
+            _ = poll.tick() => {
+                if exited.is_none() && pty.exited().map_err(|e| e.to_string())? {
+                    exited = Some(tokio::time::Instant::now());
+                }
+                // A process ssh left behind can hold the terminal open.
+                if exited.is_some_and(|at| at.elapsed() > Duration::from_secs(1)) {
+                    break;
+                }
             }
         }
     }
-    let status = child.wait().await.map_err(|e| e.to_string())?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "SSH enrollment failed ({status}). Check the terminal output and try again."
-        ))
+    match pty.finish().map_err(|e| e.to_string())? {
+        Some(0) => Ok(()),
+        status => Err(format!(
+            "SSH enrollment failed ({}). Check the terminal output and try again.",
+            status.map_or("ended by a signal".into(), |code| format!(
+                "exit code {code}"
+            ))
+        )),
     }
 }
