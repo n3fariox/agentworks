@@ -2,6 +2,8 @@
 
 A small, local Rust prototype for running independent Claude, Codex, OpenCode, and demo chat sessions through **Agent Client Protocol (ACP)**. The interface is dark and responsive, with persistent sessions, session switching, streamed Markdown, image output, local file previews/downloads, tool activity, explicit approvals, and cancellation.
 
+![An agent session: the prompt is typed, tool calls stream into the work log, an edit waits for approval, tests run, and a Markdown summary with a table and diagram is streamed back](docs/media/walkthrough.gif)
+
 ## Run
 
 Requires Rust 1.90+, [mise](https://mise.jdx.dev/) and Node (use a current LTS supported by the adapters). The repository pins Zig 0.15.2 in `mise.toml`; the build and start commands install/select it through mise so Zig does not have to be added to your shell `PATH` manually. The first Rust build fetches Ghostty’s pinned native sources and Zig dependencies.
@@ -31,6 +33,39 @@ The prototype uses plain HTML/CSS/JavaScript so there is no frontend build step.
 Claude and Codex reuse the host CLI sign-in. Run Agentworks as the same OS user as those CLIs; refresh expired credentials with `codex login` or Claude’s `/login`. OpenCode requires its native CLI and is restricted to advertised free models. The demo needs no account.
 
 See [agent setup](docs/AGENT-SETUP.md) for authentication modes, model selection, commands, skills, and provider checks.
+
+## Agent messaging
+
+Sessions in the same project can message each other through the built-in Agentworks MCP server. Messages are stored, attributed to their sender, and never interrupt the recipient's current work. A recipient picks them up from its inbox, or you can let new messages start its next turn automatically, with limits you set. Below, one agent tells another about its change, the other updates the release notes and replies, and the reply waits in the first session's inbox.
+
+![One session sends a message to another through Agentworks MCP tools; the recipient's next turn starts from its inbox, it updates the release notes and replies, and the reply appears in the sender's inbox](docs/media/messaging.gif)
+
+See [agent communication](docs/AGENT-COMMUNICATION.md) for roles and permissions, and [inbox delivery](docs/INBOX-DELIVERY.md) for automatic turns.
+
+## Screenshots
+
+<table>
+  <tr>
+    <td><img src="docs/media/session.png" alt="Session with grouped projects in the sidebar and a work log of completed tool calls"></td>
+    <td><img src="docs/media/diff.png" alt="Diff side panel showing the agent's working-tree changes next to the conversation"></td>
+  </tr>
+  <tr>
+    <td align="center">Projects, sessions and a live work log</td>
+    <td align="center">Review the working-tree diff beside the chat</td>
+  </tr>
+  <tr>
+    <td><img src="docs/media/summary.png" alt="Streamed Markdown answer with a table, highlighted code and a rendered Mermaid diagram"></td>
+    <td><img src="docs/media/palette.png" alt="Command palette listing actions and session commands"></td>
+  </tr>
+  <tr>
+    <td align="center">Markdown, highlighted code and Mermaid diagrams</td>
+    <td align="center">Everything is one <kbd>Ctrl</kbd>/<kbd>⌘</kbd> <kbd>K</kbd> away</td>
+  </tr>
+</table>
+
+<p align="center"><img src="docs/media/mobile.png" alt="The same session on a phone" width="280"><br>Responsive down to phone screens</p>
+
+<sub>Media show the scripted local demo agent on sample projects; regenerate with `npm run readme:media` (see [testing](docs/TESTING.md#readme-media)).</sub>
 
 ## Documentation
 

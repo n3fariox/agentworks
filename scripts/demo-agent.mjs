@@ -14,6 +14,8 @@ const sessions = new Map(), approvals = new Map(), mcpConfigs = new Map();
 // Like real harnesses, the client system prompt is held per connection, never saved.
 const systemPrompts = new Map();
 const systemPrompt=params=>params.systemPrompt?.content?.filter(b=>b.type==='text').map(b=>b.text).join('\n\n')||null;
+// README media fixture: AGENTWORKS_DEMO_SCRIPT names a JSON file mapping exact prompts to scripted steps. No command is executed.
+const demoScript=process.env.AGENTWORKS_DEMO_SCRIPT?JSON.parse(readFileSync(process.env.AGENTWORKS_DEMO_SCRIPT,'utf8')):{};
 let elicitForm=false;
 const lifecycle=process.env.AGENTWORKS_DEMO_LIFECYCLE==='1';
 const activePrompts=new Map();
@@ -39,6 +41,27 @@ const update = (sessionId,update) => {
   send({method:'session/update',params:{sessionId,update}});
 };
 const delay = ms => new Promise(r=>setTimeout(r,ms));
+async function callMcp(spec,name,args){
+  let client;
+  try{
+    if(!spec)throw new Error('No Agentworks MCP configuration');
+    const transport=new StdioClientTransport({command:spec.command,args:spec.args,env:Object.fromEntries(spec.env.map(e=>[e.name,e.value])),stderr:'pipe'});
+    client=new McpClient({name:'agentworks-demo',version:'1.0.0'});
+    await client.connect(transport);
+    return name==='tools/list'?await client.listTools():await client.callTool({name,arguments:args});
+  }catch(e){return {isError:true,message:e.message};}
+  finally{await client?.close().catch(()=>{});}
+}
+// Script placeholders name runtime IDs by title: `$peer:<title>` from list_sessions, `$message-from:<title>` and `$sender:<title>` from read_inbox.
+function resolveRefs(value,seen){
+  if(Array.isArray(value))return value.map(v=>resolveRefs(v,seen));
+  if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).map(([k,v])=>[k,resolveRefs(v,seen)]));
+  const ref=typeof value==='string'&&/^\$(peer|message-from|sender):(.+)$/.exec(value);
+  if(!ref)return value;
+  const found=ref[1]==='peer'?seen.list_sessions?.sessions?.find(p=>p.title===ref[2])?.uri:seen.read_inbox?.messages?.findLast(m=>m.senderTitle===ref[2])?.[ref[1]==='sender'?'senderUri':'uri'];
+  if(!found)throw new Error(`Unresolved script reference ${value}`);
+  return found;
+}
 async function prompt(id, params) {
   const session = sessions.get(params.sessionId);
   if(!session) return send({id,error:{code:-32602,message:'Unknown session'}});
@@ -51,6 +74,36 @@ async function prompt(id, params) {
   if(text.startsWith('usage-status ')){update(params.sessionId,{sessionUpdate:'usage_update',...JSON.parse(text.slice(13))});chunk('usage reported');save(params.sessionId);reply(id,{stopReason:'end_turn'});return;}
   // Roles fixture: `role?` reports the system prompt this connection received.
   if(text==='role?'){chunk(systemPrompts.get(params.sessionId)??'No system prompt.');save(params.sessionId);reply(id,{stopReason:'end_turn'});return;}
+  // Keys starting with `^` match prompts by prefix, for prompts composed by Agentworks such as inbox delivery.
+  const scripted=Object.hasOwn(demoScript,text)?demoScript[text]:Object.entries(demoScript).find(([key])=>key.startsWith('^')&&text.startsWith(key.slice(1)))?.[1];
+  if(scripted){
+    // Steps: {say} streams Markdown, {wait} pauses, {approve} asks permission for an earlier tool call,
+    // {mcp} calls a real Agentworks MCP tool, anything else is an ACP update.
+    const seen={};
+    for(const step of scripted){
+      if(session.cancelled)break;
+      if(step.say!==undefined){for(const word of step.say.match(/\s*\S+\s*/g)||[]){if(session.cancelled)break;chunk(word);await delay(step.pace??18);}}
+      else if(step.wait!==undefined)await delay(step.wait);
+      else if(step.approve!==undefined){
+        const requestId=randomUUID();
+        const outcome=new Promise(resolve=>approvals.set(requestId,{resolve,sessionId:params.sessionId}));
+        send({id:requestId,method:'session/request_permission',params:{sessionId:params.sessionId,toolCall:{toolCallId:step.approve,title:step.title,kind:step.kind||'other',status:'pending'},
+          options:[{optionId:'allow',name:'Allow once',kind:'allow_once'},{optionId:'deny',name:'Deny',kind:'reject_once'}]}});
+        const decision=await outcome;
+        if(!(decision?.outcome==='selected'&&decision.optionId==='allow')){update(params.sessionId,{sessionUpdate:'tool_call_update',toolCallId:step.approve,status:'failed'});break;}
+      }else if(step.mcp!==undefined){
+        const toolCallId=randomUUID();let args,result;
+        try{args=resolveRefs(step.arguments||{},seen);}catch(e){args=step.arguments;result={isError:true,message:e.message};}
+        update(params.sessionId,{sessionUpdate:'tool_call',toolCallId,title:step.title||step.mcp,kind:step.kind||'other',status:'in_progress',rawInput:args});
+        result??=await callMcp(mcpConfigs.get(params.sessionId)?.find(s=>s.name==='agentworks'),step.mcp,args);
+        const text=result.content?.find(c=>c.type==='text')?.text;
+        try{seen[step.mcp]=result.structuredContent??JSON.parse(text);}catch{}
+        update(params.sessionId,{sessionUpdate:'tool_call_update',toolCallId,status:result.isError?'failed':'completed',rawOutput:result,content:[{type:'content',content:{type:'text',text:text??result.message??JSON.stringify(result)}}]});
+        await delay(step.after??300);
+      }else update(params.sessionId,step);
+    }
+    save(params.sessionId);reply(id,{stopReason:session.cancelled?'cancelled':'end_turn'});return;
+  }
   // U-05 fixture: `bazel demo` replays recorded Bazel tool output; no command is executed.
   if(text==='bazel demo'){
     const toolCallId=randomUUID();
@@ -90,15 +143,7 @@ async function prompt(id, params) {
     const spec=mcpConfigs.get(params.sessionId)?.find(s=>s.name==='agentworks');
     const match=/^mcp (\S+)(?: (.*))?$/s.exec(text);
     update(params.sessionId,{sessionUpdate:'tool_call',toolCallId,title:'Agentworks MCP',kind:'other',status:'in_progress'});
-    let client,transport;
-    try{
-      if(!spec)throw new Error('No Agentworks MCP configuration');
-      transport=new StdioClientTransport({command:spec.command,args:spec.args,env:Object.fromEntries(spec.env.map(e=>[e.name,e.value])),stderr:'pipe'});
-      client=new McpClient({name:'agentworks-demo',version:'1.0.0'});
-      await client.connect(transport);
-      result=match[1]==='tools/list'?await client.listTools():await client.callTool({name:match[1],arguments:JSON.parse(match[2]||'{}')});
-    }catch(e){result={isError:true,message:e.message};}
-    finally{await client?.close().catch(()=>{});}
+    result=await callMcp(spec,match[1],JSON.parse(match[2]||'{}'));
     update(params.sessionId,{sessionUpdate:'tool_call_update',toolCallId,status:result.isError?'failed':'completed',rawOutput:result,content:[{type:'content',content:{type:'text',text:JSON.stringify(result)}}]});
     chunk('```json\n'+JSON.stringify(result)+'\n```\n');save(params.sessionId);reply(id,{stopReason:'end_turn'});return;
   }

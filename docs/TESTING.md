@@ -72,3 +72,7 @@ To check native history import without new inference, reuse the populated test f
 AGENTWORKS_IMPORT_FIXTURE_DB=.cache/persistence-<run>/sessions.sqlite3 \
 AGENTWORKS_URL=http://127.0.0.1:4318 npm run test:import-capabilities
 ```
+
+## README media
+
+`npm run build && npm run readme:media` regenerates the screenshots and walkthrough GIF in `docs/media` (requires `ffmpeg`). It starts an isolated server on port 4391 (`AGENTWORKS_MEDIA_PORT`), builds throwaway sample repos under `/tmp/agentworks-readme`, and replays the scripted conversation in `scripts/readme-media/conversation.mjs` through the demo agent's `AGENTWORKS_DEMO_SCRIPT` hook; no model is called. Pass names to refresh only some outputs, for example `npm run readme:media -- walkthrough diff`.
