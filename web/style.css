@@ -164,7 +164,7 @@ body[data-code-wrap=scroll] .tool-card pre,body[data-code-wrap=scroll] .approval
   .send-button,.stop-button{min-height:36px}
   .send-button{width:36px;height:36px}
   .composer-bottom{gap:8px}
-  .composer-info{min-width:0;max-width:96px;overflow:hidden;text-overflow:ellipsis}
+  .composer-info{min-width:0;overflow:hidden;text-overflow:ellipsis}
   .send-button,.stop-button{flex:none;white-space:nowrap}
   .session-menu{display:none;position:absolute;z-index:6;overflow-y:auto;background:var(--panel);border:1px solid #3b3d46;border-radius:12px;padding:6px 12px;box-shadow:0 8px 28px #0008}
   .session-menu.open{display:block}
