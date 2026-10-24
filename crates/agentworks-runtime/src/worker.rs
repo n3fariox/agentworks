@@ -644,6 +644,7 @@ fn available_providers(env: &HashMap<String, String>) -> Vec<&'static str> {
     PROVIDERS
         .into_iter()
         .filter(|provider| match *provider {
+            "goose" => true,
             "codex-rust" => {
                 let executable = env
                     .get("CODEX_PATH")
@@ -778,6 +779,7 @@ mod tests {
         ]);
         let providers = available_providers(&env);
         assert!(providers.contains(&"codex-rust"));
+        assert!(providers.contains(&"goose"));
         assert!(!providers.contains(&"codex"));
         assert!(!providers.contains(&"claude"));
     }

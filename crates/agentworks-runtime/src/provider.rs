@@ -62,7 +62,7 @@ pub fn installed(provider: &str) -> bool {
             });
     }
     match provider {
-        "demo" => true,
+        "demo" | "goose" => true,
         "opencode" => opencode_path().is_some(),
         _ => adapter_path(provider).exists(),
     }
@@ -76,6 +76,23 @@ pub fn agent_config(provider: &str, api_key_mode: bool, host_profile: bool) -> A
                     .join("scripts/demo-agent.mjs")
                     .to_string_lossy(),
             )
+    } else if provider == "goose" {
+        // Goose owns provider authentication; retain its keys and endpoint settings
+        // independently of the Claude/Codex subscription-versus-key switch.
+        let mut config =
+            AcpAgentConfig::new(std::env::current_exe().expect("executable path")).arg("goose-acp");
+        if !host_profile && std::env::var_os("GOOSE_PATH_ROOT").is_none() {
+            let root = runtime_root().join(".agentworks/goose");
+            let root = if root.is_absolute() {
+                root
+            } else {
+                std::env::current_dir()
+                    .expect("working directory")
+                    .join(root)
+            };
+            config = config.env("GOOSE_PATH_ROOT", root.to_string_lossy());
+        }
+        config
     } else if provider == "opencode" {
         let home = runtime_root().join(".agentworks/opencode");
         let mut config =
@@ -139,7 +156,7 @@ pub fn prepare(provider: &str) -> std::io::Result<()> {
         for dir in ["data", "cache", "state", "config"] {
             std::fs::create_dir_all(runtime_root().join(".agentworks/opencode").join(dir))?;
         }
-    } else if provider != "demo" && use_api_key() {
+    } else if !matches!(provider, "demo" | "goose") && use_api_key() {
         std::fs::create_dir_all(
             runtime_root()
                 .join(".agentworks")
@@ -251,6 +268,34 @@ mod tests {
         let claude = agent_config("claude", true, false);
         assert!(codex.environment()["CODEX_HOME"].ends_with(".agentworks/codex"));
         assert!(claude.environment()["CLAUDE_CONFIG_DIR"].ends_with(".agentworks/claude"));
+    }
+
+    #[test]
+    fn embedded_goose_retains_provider_credentials_in_both_auth_modes() {
+        for api_key_mode in [false, true] {
+            let config = agent_config("goose", api_key_mode, false);
+            assert_eq!(config.command(), std::env::current_exe().unwrap());
+            assert_eq!(config.arguments(), &["goose-acp"]);
+            for key in [
+                "OPENAI_API_KEY",
+                "ANTHROPIC_API_KEY",
+                "GOOSE_PROVIDER",
+                "OPENAI_BASE_URL",
+            ] {
+                assert!(!config.environment().contains_key(key));
+            }
+            if std::env::var_os("GOOSE_PATH_ROOT").is_none() {
+                assert!(
+                    std::path::Path::new(&config.environment()["GOOSE_PATH_ROOT"]).is_absolute()
+                );
+            }
+        }
+        assert!(installed("goose"));
+        assert!(
+            !agent_config("goose", false, true)
+                .environment()
+                .contains_key("GOOSE_PATH_ROOT")
+        );
     }
 
     #[test]

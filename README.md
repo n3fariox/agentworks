@@ -1,12 +1,12 @@
 # Agentworks
 
-A small, local Rust prototype for running independent Claude, Codex, OpenCode, and demo chat sessions through **Agent Client Protocol (ACP)**. The interface is dark and responsive, with persistent sessions, session switching, streamed Markdown, image output, local file previews/downloads, tool activity, explicit approvals, and cancellation.
+A small, local Rust prototype for running independent Claude, Codex, Goose, OpenCode, and demo chat sessions through **Agent Client Protocol (ACP)**. The interface is dark and responsive, with persistent sessions, session switching, streamed Markdown, image output, local file previews/downloads, tool activity, explicit approvals, and cancellation.
 
 ![An agent session: the prompt is typed, tool calls stream into the work log, an edit waits for approval, tests run, and a Markdown summary with a table and diagram is streamed back](docs/media/walkthrough.gif)
 
 ## Run
 
-Requires Rust 1.90+, [mise](https://mise.jdx.dev/) and Node (use a current LTS supported by the adapters). The repository pins Zig 0.15.2 in `mise.toml`; the build and start commands install/select it through mise so Zig does not have to be added to your shell `PATH` manually. The first Rust build fetches Ghostty’s pinned native sources and Zig dependencies.
+Requires Rust 1.94.1+, [mise](https://mise.jdx.dev/) and Node (use a current LTS supported by the adapters). The repository pins Zig 0.15.2 in `mise.toml`; the build and start commands install/select it through mise so Zig does not have to be added to your shell `PATH` manually. The first Rust build fetches Ghostty’s pinned native sources and Zig dependencies.
 
 ```bash
 mise trust mise.toml # once per checkout, if mise asks

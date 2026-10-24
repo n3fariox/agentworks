@@ -480,6 +480,13 @@ fn session(app: &App, id: &str) -> Result<Arc<Session>, (StatusCode, String)> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|arg| arg == "goose-acp") {
+        let result = goose::acp::server::run(vec!["developer".into()], false).await;
+        if let Err(error) = &result {
+            eprintln!("agentworks goose-acp: {error}");
+        }
+        std::process::exit(i32::from(result.is_err()));
+    }
     if let Some(bridge @ ("codex-acp" | "claude-acp")) = args.get(1).map(String::as_str) {
         let result = if bridge == "codex-acp" {
             agentworks_codex_acp::run().await
@@ -514,7 +521,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.get(1).is_some_and(|a| a == "--probe") {
         let provider = args.get(2).map(String::as_str).unwrap_or("demo");
         if !agentworks_runtime::remote::PROVIDERS.contains(&provider) {
-            return Err("Use --probe claude|claude-rust|codex|codex-rust|opencode|demo".into());
+            return Err(
+                "Use --probe claude|claude-rust|codex|codex-rust|goose|opencode|demo".into(),
+            );
         }
         agentworks_runtime::acp::probe(provider).await?;
         return Ok(());
@@ -1310,6 +1319,7 @@ async fn status(State(app): State<App>) -> Json<Value> {
         {"id":"claude-rust","name":"Claude · Rust ACP","installed":installed("claude-rust"),"keyPresent":key_present("claude-rust"),"authMode":if use_api_key(){"api_key"}else{"existing"}},
         {"id":"codex","name":"Codex","installed":installed("codex"),"keyPresent":key_present("codex"),"authMode":if use_api_key(){"api_key"}else{"existing"}},
         {"id":"codex-rust","name":"Codex · Rust ACP","installed":installed("codex-rust"),"keyPresent":key_present("codex-rust"),"authMode":if use_api_key(){"api_key"}else{"existing"}},
+        {"id":"goose","name":"Goose · embedded","installed":true,"keyPresent":true,"authMode":"configured"},
         {"id":"opencode","name":"OpenCode · free models","installed":installed("opencode"),"keyPresent":true}
     ]});
     for p in status["providers"].as_array_mut().unwrap() {

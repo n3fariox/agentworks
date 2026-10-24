@@ -52,13 +52,14 @@ const MAX_FRAME: usize = 64 * 1024 * 1024;
 /// earlier, such as output from the remote shell's startup files, is skipped.
 pub const READY: &str = "agentworks worker ready";
 const MAX_PREAMBLE: usize = 64 * 1024;
-pub const PROVIDERS: [&str; 6] = [
+pub const PROVIDERS: [&str; 7] = [
     "demo",
     "claude",
     "claude-rust",
     "codex",
     "codex-rust",
     "opencode",
+    "goose",
 ];
 const PING_EVERY: Duration = Duration::from_secs(15);
 const SILENCE_LIMIT: Duration = Duration::from_secs(45);

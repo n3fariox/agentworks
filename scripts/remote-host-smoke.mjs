@@ -57,6 +57,7 @@ try{
   assert.equal(box.kind,'remote');
   const connected=await until(box.id,h=>h.status==='connected','Box never connected');
   assert.ok(connected.worker.providers.includes('demo'));
+  assert.ok(connected.worker.providers.includes('goose'),'linked Goose must be available on workers');
   assert.equal(connected.worker.version,'0.1.0');
   assert.equal(connected.worker.workspace,true);
   assert.equal(typeof connected.worker.tools,'object');

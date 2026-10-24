@@ -16,7 +16,7 @@ futures = "0.3"
 uuid = { workspace = true, features = ["serde"] }
 pulldown-cmark = "0.13"
 ammonia = "4"
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.39.0", features = ["bundled"] }
 rmcp = { version = "=3.5.1", default-features = false, features = ["server", "transport-io"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 libc.workspace = true
@@ -26,3 +26,4 @@ agentworks-workspace = { path = "../agentworks-workspace" }
 agentworks-runtime = { path = "../agentworks-runtime" }
 agentworks-claude-acp = { path = "../agentworks-claude-acp" }
 agentworks-session = { path = "../agentworks-session" }
+goose = { git = "https://github.com/aaif-goose/goose.git", rev = "2b17adc33a7176e701c2fef9578a5fc5834ea89a", version = "1.56.0", default-features = false, features = ["rustls-tls"] }

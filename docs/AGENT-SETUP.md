@@ -94,3 +94,7 @@ AGENTWORKS_TEST_OPENCODE=1 npm run test:browser
 ## Session permission modes
 
 Session permission modes advertised by the native harness appear beside the model picker while idle. Selecting Auto uses the harness's own review policy, and confirmed selection persists across reconnects. Unsupported modes remain hidden; any model-dependent fallback is shown as reported by the adapter. `GET /api/sessions/{id}/permission-mode` reads the configuration; `POST` with `{"mode":"auto"}` requests an advertised mode only while idle. This does not change Agentworks controller grants or automatically retry interrupted turns. Isolated acceptance: `PLAYWRIGHT_BROWSERS_PATH=$PWD/.cache/browsers node scripts/permission-modes-smoke.mjs` (set `AGENTWORKS_TEST_BINARY` to a built executable if needed).
+
+## Goose · embedded
+
+Goose is linked into the Agentworks binary and runs through its `goose-acp` entry point. Configure its provider, model, endpoint, and credentials on the execution host. See [embedded Goose setup](RUST-GOOSE-ACP.md) for OpenAI-compatible endpoints, storage, remote execution, and verification.
