@@ -24,6 +24,19 @@ export function sessionReference(href){
       ?url.pathname.slice(1).toLowerCase():null;
   }catch{return null;}
 }
+// User prompts keep their literal formatting, except for session links inserted
+// by the mention picker. Build DOM nodes so prompt text never becomes HTML.
+export function renderUserReferences(node,text){
+  node.replaceChildren();
+  let start=0;
+  for(const match of text.matchAll(/\[([^\]\n]+)\]\((agentworks:\/\/sessions\/[^\s)]+)\)/gi)){
+    if(!sessionReference(match[2]))continue;
+    node.append(document.createTextNode(text.slice(start,match.index)));
+    const link=document.createElement('a');link.textContent=match[1];link.setAttribute('href',match[2]);node.append(link);
+    start=match.index+match[0].length;
+  }
+  node.append(document.createTextNode(text.slice(start)));
+}
 export function setupChatReferences({getSession,getSessions,openSession,openFile,fileUrl,imageViewer}){
   return (node,base='')=>{
     const session=getSession();

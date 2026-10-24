@@ -9,7 +9,7 @@ import {setupGitContext} from './git-context.js';
 import {setupWorktreeOwnership} from './worktree-ownership.js';
 import {setupControllers} from './controllers.js';
 import {setupImageViewer} from './image-viewer.js';
-import {setupChatReferences} from './chat-references.js';
+import {setupChatReferences,renderUserReferences} from './chat-references.js';
 import {createWorkspace} from './workspace.js';
 import {setupCommunication} from './communication.js';
 import {setupPalettes} from './palettes.js';
@@ -999,7 +999,7 @@ function draw(){
     }else if(!node.isConnected)area.append(node);
     if(item.type==='message'){
       const body=node.querySelector('.message-body');
-      if(item.role==='user'&&!item.inboxDelivery){body.textContent=item.text;if(item.attachments&&!node.querySelector('.message-attachments')){const sent=el('div','message-attachments');attachments.renderSent(sent,active.id,item.attachments);for(const img of sent.querySelectorAll('img'))imageViewer.decorate(img);body.after(sent);}}else updateMarkdown(item,body);
+      if(item.role==='user'&&!item.inboxDelivery){renderUserReferences(body,item.text);decorateMarkdown(body);if(item.attachments&&!node.querySelector('.message-attachments')){const sent=el('div','message-attachments');attachments.renderSent(sent,active.id,item.attachments);for(const img of sent.querySelectorAll('img'))imageViewer.decorate(img);body.after(sent);}}else updateMarkdown(item,body);
     }else if(item.type==='tool'){
       renderToolActivity(node,item,['running','waiting','cancelling'].includes(status));
     }

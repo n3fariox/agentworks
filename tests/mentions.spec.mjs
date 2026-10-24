@@ -22,6 +22,20 @@ test.beforeAll(async()=>{
 });
 test.afterAll(async()=>{await stopChild(server);if(fixture)await rm(fixture,{recursive:true,force:true});});
 
+test('user references preserve literal prompt text and only link valid sessions',async({page})=>{
+  await page.goto('/');
+  const id='28d9887c-e7c3-4096-870c-8ccf6d4eb4ae';
+  const prefix='**literal** <img src=x onerror=alert(1)>\n';
+  const invalid='[invalid](agentworks://sessions/missing) [external](https://example.com)';
+  const result=await page.evaluate(async({id,prefix,invalid})=>{
+    const {renderUserReferences}=await import('/chat-references.js');
+    const body=document.createElement('div');
+    renderUserReferences(body,`${prefix}[@one](agentworks://sessions/${id}) and [@two](agentworks://sessions/${id}).\n${invalid}`);
+    return {text:body.textContent,links:[...body.querySelectorAll('a')].map(a=>a.getAttribute('href')),images:body.querySelectorAll('img').length};
+  },{id,prefix,invalid});
+  expect(result).toEqual({text:`${prefix}@one and @two.\n${invalid}`,links:[`agentworks://sessions/${id}`,`agentworks://sessions/${id}`],images:0});
+});
+
 test('unanchored @ fuzzy-picks project peers and resolves ids on send',async({page})=>{
   const project=await api('/api/projects',{name:'Mentions'});
   const create=(title,projectId=project.id)=>api('/api/sessions',{provider:'demo',cwd:fixture,title,projectId});
@@ -45,5 +59,12 @@ test('unanchored @ fuzzy-picks project peers and resolves ids on send',async({pa
   await prompt.pressSequentially(' @b');await expect(list).toBeVisible();await prompt.press('Escape');await expect(list).toBeHidden();
   await prompt.fill('Ping @frontend-reviewer.');await prompt.press('Enter');
   await expect(prompt).toHaveValue('');
-  await expect(page.locator('#messages')).toContainText(`Ping [@frontend-reviewer](agentworks://sessions/${reviewer.id}).`);
+  const message=page.locator('.message.user .message-body').last();
+  await expect(message).toHaveText('Ping @frontend-reviewer.');
+  const reference=message.getByRole('link',{name:'@frontend-reviewer',exact:true});
+  await expect(reference).toHaveAttribute('href',`agentworks://sessions/${reviewer.id}`);
+  await page.reload();
+  await expect(page.locator('.message.user .message-body').last()).toHaveText('Ping @frontend-reviewer.');
+  await page.locator('.message.user .message-body').last().getByRole('link',{name:'@frontend-reviewer',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>localStorage.getItem('agentworks-session'))).toBe(reviewer.id);
 });
