@@ -11,6 +11,7 @@ mod elicitation;
 mod enrollment;
 mod fork;
 mod git_context;
+mod goose_acp;
 mod hosting;
 mod hosts;
 mod inbox_delivery;
@@ -493,7 +494,7 @@ fn session(app: &App, id: &str) -> Result<Arc<Session>, (StatusCode, String)> {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).is_some_and(|arg| arg == "goose-acp") {
-        let result = goose::acp::server::run(vec!["developer".into()], false).await;
+        let result = goose_acp::run().await;
         if let Err(error) = &result {
             eprintln!("agentworks goose-acp: {error}");
         }

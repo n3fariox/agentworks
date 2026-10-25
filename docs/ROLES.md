@@ -31,6 +31,7 @@ Roles use the unstable ACP `sessionCapabilities.systemPrompt` capability (`unsta
 | --- | --- |
 | Claude (`claude-agent-acp`) | Supported. Appended to the `claude_code` preset prompt. |
 | Claude · Rust ACP (`claude-rust`) | Supported. Passed to Claude Code as `--append-system-prompt`. |
+| Goose · embedded | Supported. Appended through a managed Goose system-prompt entry, replaced on new/load/fork. |
 | Demo agent | Supported. `role?` replies with the received system prompt. |
 | Codex (`codex-acp`) | Not yet. The adapter does not accept `systemPrompt`. |
 | OpenCode | Not yet. |

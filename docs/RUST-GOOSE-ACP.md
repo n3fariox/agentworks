@@ -46,11 +46,15 @@ Remote workers include Goose in their available harnesses because it is linked i
 
 Goose is pinned to revision `2b17adc33a7176e701c2fef9578a5fc5834ea89a`. Only the `rustls-tls` feature is enabled; optional telemetry, GPU inference, voice, scheduler, and desktop tooling are disabled. Rust 1.94.1 or newer is required.
 
-The full Goose runtime has no stable public Rust API. The entry point deliberately uses its small ACP server surface. Agentworks retains ACP SDK 3.4.0 and schema 1.12.0 through local source copies; Goose uses its original SDK 2.2.0 and schema 1.9.1. The local schema source allows Cargo to resolve both exact schema pins without changing either protocol implementation. See [vendoring notes](../vendor/ACP-SOURCES.md).
+The full Goose runtime has no stable public Rust API. The entry point uses a small ACP compatibility bridge around its server and public session APIs. Agentworks retains ACP SDK 3.4.0 and schema 1.12.0 through local source copies; Goose uses its original SDK 2.2.0 and schema 1.9.1. The local schema source allows Cargo to resolve both exact schema pins without changing either protocol implementation. See [vendoring notes](../vendor/ACP-SOURCES.md).
 
 Both runtimes link SQLite. Agentworks uses rusqlite 0.39.0 to share `libsqlite3-sys` 0.37 with Goose's SQLx 0.9 and avoid conflicting native SQLite libraries. Database formats and application schemas are unchanged.
 
-Goose capabilities determine the available lifecycle and model controls. Provider-specific subscription quotas, native CLI history imports, and Agentworks role injection are not implemented for Goose.
+Agentworks advertises ACP system prompts in append mode and native forks through its compatibility bridge. Role instructions and shared Agentworks context occupy one managed entry in Goose's system prompt extras, replaced on each new/load/fork so reconnects do not duplicate instructions or retain a parent's session identity. Non-text content and unsupported prompt modes fail before changing native state; override mode is not advertised.
+
+Same-host, same-profile automatic forks copy Goose's native session, retain its configuration and conversation metadata, and trim the child through the selected message ID before activation. Exact IDs avoid timestamp collisions. Missing or invalid boundaries fail rather than including newer history. The parent is unchanged; the child retains its role snapshot and resumes independently. Cross-host/profile forks and explicit transcript/summary forks continue to use carried context.
+
+Goose capabilities determine the remaining lifecycle and model controls. Provider-specific subscription quotas and native CLI history imports are not implemented for Goose.
 
 ## Verification
 
@@ -60,6 +64,6 @@ target/debug/agentworks --probe goose
 npm run test:goose
 ```
 
-The smoke test uses a temporary server provider store and remote conversation store, a project, a database, and a loopback OpenAI-compatible fixture. It exercises shared provider/key management, host assignment and revocation, keyless isolation, model discovery without inference, streamed replies, a built-in shell permission request and execution, process restart with native conversation loading, cancellation, and profile-bound remote execution through a fake SSH worker. It does not use a paid provider. Set `AGENTWORKS_GOOSE_TEST_PORT` to change its default port 4497, or `AGENTWORKS_TEST_BINARY` to select another built binary.
+The smoke test uses a temporary server provider store and remote conversation store, a project, a database, and a loopback OpenAI-compatible fixture. It exercises shared provider/key management, host assignment and revocation, keyless isolation, model discovery without inference, streamed replies, a built-in shell permission request and execution, process restart with native conversation loading, cancellation, role persistence, exact native forks and profile-bound remote execution through a fake SSH worker. It does not use a paid provider. Set `AGENTWORKS_GOOSE_TEST_PORT` to change its default port 4497, or `AGENTWORKS_TEST_BINARY` to select another built binary.
 
 Provider settings and session selection have desktop/mobile browser checks: `npx playwright test tests/model-providers.spec.mjs`.

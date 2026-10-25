@@ -95,7 +95,7 @@ pub struct Input {
 /// Harnesses known to accept an ACP `systemPrompt`. The capability advertised
 /// at initialization is still checked before a session is opened.
 pub fn supported(provider: &str) -> bool {
-    matches!(provider, "claude" | "claude-rust" | "demo")
+    matches!(provider, "claude" | "claude-rust" | "goose" | "demo")
 }
 
 pub fn hash(instructions: &str) -> String {
