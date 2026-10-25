@@ -32,6 +32,7 @@ Start with the [quick start](../README.md). Commands in these documents run from
 - [Original architecture and phased roadmap](ROADMAP.md): historical planning reference.
 - [Rust/ACP integration assessment](RUST-INTEGRATION.md): original integration rationale and prototype evidence.
 - [Morsh terminal reuse assessment](MORSH-REUSE.md): original source review and reuse rationale.
+- [Retention and staged recovery (R-02)](RETENTION-RECOVERY.md) — explicit keep-count pruning, validated restore/upgrade rehearsal, and operator promotion boundaries.
 - [Starlark experiment](experiments/001-starlark.md): evaluation and adoption for typed progress parsing; workflow scripts remain a prototype.
 
 Keep durable usage instructions, contracts, and design rationale here. Session IDs, local rollout observations, batch journals, completion handoffs, and deployment receipts belong outside tracked documentation. Earlier working notes remain available in Git history.

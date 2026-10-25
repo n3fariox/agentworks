@@ -17,7 +17,7 @@ A definition's recipe trigger can be `manual` or a weekly `schedule`. Scheduled 
 
 ## Dispatch and deduplication
 
-A scheduler checks enabled scheduled definitions every 5 seconds, under the same `run_lock` as manual runs, edits and deletion. Durable state in SQLite (schema v10):
+A scheduler checks enabled scheduled definitions every 5 seconds, under the same `run_lock` as manual runs, edits and deletion. Durable state in SQLite (introduced in schema v10; preserved in the combined v11 retention/recovery release):
 
 - `automation_schedules.cursor`: occurrences at or before this instant have been handled.
 - `automation_slots`: one row per handled occurrence (`started`, `missed` or `skipped`, with an optional detail).

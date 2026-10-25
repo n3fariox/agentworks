@@ -8,6 +8,10 @@ use std::{
     time::Duration,
 };
 
+// v10 introduced A-01 schedules; v11 is the combined A-01/R-02 release marker.
+// Recovery adds no tables and preserves every v10 schedule/slot ledger row.
+pub const SCHEMA_VERSION: i64 = 11;
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 #[derive(Serialize, Deserialize)]
 pub struct Metadata {
@@ -47,13 +51,14 @@ impl Store {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
         }
         connection.busy_timeout(Duration::from_secs(5))?;
+        let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version > SCHEMA_VERSION {
+            return Err("Session database was created by a newer Agentworks version".into());
+        }
         connection.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
         )?;
-        let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 10 {
-            return Err("Session database was created by a newer Agentworks version".into());
-        }
+
         connection.execute_batch("BEGIN; CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, metadata TEXT NOT NULL, state TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS events(session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, seq INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(session_id,seq));
           CREATE TABLE IF NOT EXISTS terminal_snapshots(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, snapshot TEXT NOT NULL);
@@ -72,7 +77,7 @@ impl Store {
           COMMIT;")?;
         // C-01 controllers, C-05 review records, U-05 parser scripts, roles and A-01 schedules are additive schema migrations.
         connection.execute_batch(&format!(
-            "BEGIN; {} {} {} {} {} {} PRAGMA user_version=10; COMMIT;",
+            "BEGIN; {} {} {} {} {} {} PRAGMA user_version={SCHEMA_VERSION}; COMMIT;",
             crate::inbox_delivery::SCHEMA,
             crate::review_queue::SCHEMA,
             crate::controllers::SCHEMA,
@@ -611,7 +616,7 @@ mod tests {
                     .connection
                     .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                     .unwrap(),
-                10
+                SCHEMA_VERSION
             );
         }
         let state:SessionData=serde_json::from_value(json!({"status":"idle","seq":0,"requests":[],"models":null,"available_commands":[],"turn_active":false,"project_id":null,"provider_session_id":null})).unwrap();
@@ -641,7 +646,7 @@ mod tests {
             assert_eq!(
                 db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                     .unwrap(),
-                10
+                SCHEMA_VERSION
             );
             for (sql, expected) in [
                 (

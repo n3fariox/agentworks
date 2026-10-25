@@ -114,7 +114,7 @@ try{
  await api(path(id)+'/resume',{});await until(async()=>(await snap(id)).session.status==='error');await api(path(id)+'/inbox-delivery',{enabled:true,requestId:'unavailable',deadline:Date.now()+60000,maxTurns:1,cooldownSeconds:5,maxBatch:1},'PUT',409);await delay(1500);assert.equal((await policy(id)).policy.enabled,false);assert.equal(native(await snap(id)),originalNative);await writeFile(nativeFile,saved);
  // Deletion cascades policy/ledger, preserving historical peer messages.
  const doomed=await create('Deleted recipient');await authorize(doomed);await send(doomed);await api(path(doomed),undefined,'DELETE');assert.equal(sql(`SELECT count(*) FROM inbox_policies WHERE session_id='${doomed}'`)[0][0],0);assert.equal(sql(`SELECT count(*) FROM inbox_deliveries WHERE recipient='${doomed}'`)[0][0],0);
- assert.equal(sql('PRAGMA user_version')[0][0],9);
- console.log('PASS completion cancellation, accessible mobile enable/cancel, restart ambiguity/no replay, unavailable native context, deletion and schema v9');
+ assert.equal(sql('PRAGMA user_version')[0][0],11);
+ console.log('PASS completion cancellation, accessible mobile enable/cancel, restart ambiguity/no replay, unavailable native context, deletion and schema v11');
  console.log(`Fixture root: ${dir}`);
 }finally{if(browser)await browser.close();if(server)await stop();await removeFixture(dir);}

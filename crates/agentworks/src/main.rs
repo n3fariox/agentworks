@@ -22,6 +22,7 @@ mod mcp;
 mod model_providers;
 mod notifications;
 mod permission_modes;
+mod recovery;
 mod review_queue;
 mod roles;
 mod service_restart;
@@ -493,6 +494,9 @@ fn session(app: &App, id: &str) -> Result<Arc<Session>, (StatusCode, String)> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|arg| arg == "recovery") {
+        return recovery::run(&args[2..]).map_err(|e| e.to_string().into());
+    }
     if args.get(1).is_some_and(|arg| arg == "goose-acp") {
         let result = goose_acp::run().await;
         if let Err(error) = &result {

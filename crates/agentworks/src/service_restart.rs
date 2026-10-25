@@ -371,16 +371,23 @@ pub fn stop_requester(app: &App, id: &str) -> Result<(), (StatusCode, String)> {
     result
 }
 fn backup(app: &App, r: &Record) -> Result<(), String> {
-    let root = app
+    let backups = app
         .restart
         .control
         .as_ref()
         .ok_or("Missing supervisor")?
-        .join("backups")
-        .join(format!("{}-{}", now(), Uuid::new_v4()));
-    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+        .join("backups");
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&backups)
+        .map_err(|e| e.to_string())?;
+    let _maintenance = crate::recovery::lock(&backups).map_err(|e| e.to_string())?;
+    let root = backups.join(format!("{}-{}", now(), Uuid::new_v4()));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
         .map_err(|e| e.to_string())?;
     // Catalog + SQLite are captured under their guards after all producers have stopped.
     let catalog = app.catalog.lock().unwrap();
@@ -391,54 +398,8 @@ fn backup(app: &App, r: &Record) -> Result<(), String> {
         .execute("VACUUM INTO ?1", [destination.to_string_lossy().as_ref()])
         .map_err(|e| e.to_string())?;
     let copy = rusqlite::Connection::open(&destination).map_err(|e| e.to_string())?;
-    let integrity: String = copy
-        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
-        .map_err(|e| e.to_string())?;
-    if integrity != "ok" {
-        return Err(integrity);
-    }
-    for table in [
-        "sessions",
-        "terminal_snapshots",
-        "events",
-        "agent_access",
-        "agent_messages",
-        "automations",
-        "automation_runs",
-        "agent_audit",
-        "agent_starts",
-        "agent_completions",
-        "session_creations",
-        "service_restarts",
-    ] {
-        let query = format!("SELECT count(*) FROM {table}");
-        let original: i64 = store
-            .connection
-            .query_row(&query, [], |r| r.get(0))
-            .map_err(|e| e.to_string())?;
-        let saved: i64 = copy
-            .query_row(&query, [], |r| r.get(0))
-            .map_err(|e| e.to_string())?;
-        if original != saved {
-            return Err(format!("Backup preservation mismatch: {table}"));
-        }
-        let full = format!("SELECT * FROM {table} ORDER BY rowid");
-        let rows = |c: &rusqlite::Connection| -> rusqlite::Result<Vec<Vec<String>>> {
-            let mut q = c.prepare(&full)?;
-            let n = q.column_count();
-            q.query_map([], |r| {
-                (0..n)
-                    .map(|i| r.get_ref(i).map(|v| format!("{v:?}")))
-                    .collect()
-            })?
-            .collect()
-        };
-        if rows(&store.connection).map_err(|e| e.to_string())?
-            != rows(&copy).map_err(|e| e.to_string())?
-        {
-            return Err(format!("Backup content mismatch: {table}"));
-        }
-    }
+    crate::recovery::compare(&store.connection, &copy).map_err(|e| e.to_string())?;
+    drop(copy);
     let bytes = serde_json::to_vec_pretty(&catalog.data).map_err(|e| e.to_string())?;
     let _: catalog::CatalogData = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     std::fs::write(root.join("catalog.json"), bytes).map_err(|e| e.to_string())?;
@@ -451,6 +412,7 @@ fn backup(app: &App, r: &Record) -> Result<(), String> {
             .and_then(|f| f.sync_all())
             .map_err(|e| e.to_string())?;
     }
+    crate::recovery::publish(&root).map_err(|e| e.to_string())?;
     Ok(())
 }
 pub async fn scheduler(app: App) {

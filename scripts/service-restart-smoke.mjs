@@ -2,7 +2,7 @@ import {removeFixture} from '../tests/support/cleanup.mjs';
 // R-06 isolated process/native demo/MCP/browser acceptance. No paid inference or live data.
 import assert from 'node:assert/strict';
 import {spawn,execFileSync} from 'node:child_process';
-import {mkdtemp,mkdir,copyFile,chmod,writeFile,readFile,unlink} from 'node:fs/promises';
+import {mkdtemp,mkdir,copyFile,chmod,writeFile,readFile,unlink,readdir,stat} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {once} from 'node:events';
@@ -14,7 +14,7 @@ const delay=ms=>new Promise(r=>setTimeout(r,ms));
 async function api(path,body,method=body===undefined?'GET':'POST',code=200){const r=await fetch(base+path,{method,headers:{Origin:base,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(3000)});const text=await r.text();assert.equal(r.status,code,text);return code===200?JSON.parse(text):text;}
 async function until(fn,tries=160){for(let i=0;i<tries;i++){let r=await fn();if(r)return r;await delay(100);}throw Error('Restart fixture timed out');}
 async function up(){await until(async()=>{try{return await api('/api/service/restart');}catch{return false;}});}
-async function start(supervised=true){server=spawn(supervised?'/usr/bin/python3':join(releases,'v1'),supervised?[resolve('scripts/service/supervise.py'),'--release-dir',releases,'--release','v1','--control-dir',control,'--ready-timeout','8']:[],{env,stdio:['ignore','inherit','inherit']});await up();}
+async function start(supervised=true,extra={}){server=spawn(supervised?'/usr/bin/python3':join(releases,'v1'),supervised?[resolve('scripts/service/supervise.py'),'--release-dir',releases,'--release','v1','--control-dir',control,'--ready-timeout','8']:[],{env:{...env,...extra},stdio:['ignore','inherit','inherit']});await up();}
 async function stop(){if(!server)return;if(server.exitCode===null){const done=once(server,'exit');server.kill('SIGTERM');const timeout=setTimeout(()=>server.kill('SIGKILL'),7000);await done;clearTimeout(timeout);}server=null;}
 const path=id=>'/api/sessions/'+id,snap=id=>api(path(id)),idle=id=>until(async()=>{const s=await snap(id);return s.session.status==='idle'&&s;});
 const prompt=(id,text)=>api(path(id)+'/prompt',{text,requestId:crypto.randomUUID()});
@@ -72,5 +72,22 @@ p=sorted(glob.glob(sys.argv[1]+'/backups/*/sessions.sqlite3'))[-1];c=sqlite3.con
 if [ "$1" = "--service-protocol" ]; then echo '{"serviceProtocol":1}'; exit 0; fi
 exit 1
 `,{mode:0o700});await request(restart('failed-release',{release:'bad'}));await until(async()=>server.exitCode!==null);const outcome=JSON.parse(await readFile(join(control,'outcome.json')));assert.equal(outcome.phase,'failed');await stop();await start();assert.equal((await phase('failed-release','uncertain')).phase,'uncertain');
+ // R-02: explicit retention + staged restore from actual verified restart snapshots.
+ await stop();
+ const backups=join(control,'backups'),names=(await readdir(backups)).filter(n=>/^\d+-[0-9a-f-]+$/.test(n)).sort();
+ assert(names.length>=4);for(const name of names)assert.equal(JSON.parse(await readFile(join(backups,name,'manifest.json'))).format,1);
+ const recovery=(...args)=>JSON.parse(execFileSync(join(releases,'v2'),['recovery',...args],{env,encoding:'utf8'}));
+ const preview=recovery('retain',backups,'--keep','2');assert.equal(preview.applied,false);assert.equal(preview.remove.length,names.length-2);
+ for(const name of preview.remove)assert((await stat(join(backups,name))).isDirectory());
+ const pruned=recovery('retain',backups,'--keep','2','--apply');assert.deepEqual(pruned.remove,preview.remove);
+ const source=join(backups,names.at(-1)),staged=join(dir,'restored');
+ const originalDb=await readFile(env.AGENTWORKS_DB_PATH),sourceDb=await readFile(join(source,'sessions.sqlite3'));
+ const restored=recovery('restore',source,staged);assert(restored.sessions>=3);assert.equal(restored.schemaVersion,11);
+ assert.deepEqual(await readFile(env.AGENTWORKS_DB_PATH),originalDb);assert.deepEqual(await readFile(join(source,'sessions.sqlite3')),sourceDb);
+ assert.equal((await stat(staged)).mode&0o777,0o700);assert.equal((await stat(restored.database)).mode&0o777,0o600);
+ await start(false,{AGENTWORKS_CATALOG_PATH:restored.catalog,AGENTWORKS_DB_PATH:restored.database});
+ const recovered=await snap(a.id);assert.equal(recovered.session.title,'Restart coordinator');assert.equal(recovered.events.filter(e=>e.kind==='provider_session').at(-1).data.id,native);assert((await api(path(a.id)+'/agent-access')).restartService);
+ assert.equal(recovered.events.filter(e=>e.kind==='user'&&e.data.initiatedBy==='service-restart manager').length,1);
+ console.log('PASS R-02: completed manifests, preview/apply retention, private staged restore, untouched source/live store, restored server startup/history/native/grants, no handoff replay');
  console.log('PASS R-06: supervised process/release restart, durable identity/conflict, missing supervisor/release, drain/approval/start gates/cancel, MCP native handoff exactly once, history/native/grants/backup integrity, mobile dark/reconnect GET-only, bounded failed successor/uncertain recovery');
 }finally{if(browser)await browser.close();await stop();await removeFixture(dir);}
