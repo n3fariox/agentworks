@@ -148,7 +148,7 @@ An early run measured 36 µs per line. The cause was cloning `regex::Regex`, whi
 U-05 Bazel progress now runs on this engine. The crate moved to `crates/agentworks-starlark`, and the service depends on it.
 
 - **Trust and storage.** Scripts are trusted and run in-process on one dedicated parser thread, never on async request threads. Per-call tick, heap, wall-clock and size limits still apply. The worker process stays available but is unused. Scripts live in the SQLite `scripts` table (schema v9) and are compiled once; there is no reloading from disk. `bazel_progress.star` is seeded as a built-in.
-- **Routing and display.** Scripts register typed callbacks with `agent.register_progress` and `agent.register_formatter`. Routing uses filename order and then declaration order, with the first matching handler winning for each hook. Patterns and callback signatures are validated at installation.
+- **Routing and display.** Scripts register typed callbacks with `agent.register_progress` and `agent.register_formatter`. Routing uses the human-set script priority, then filename order, then declaration order, with the first matching handler winning for each hook (see [Routing order](#routing-order)). Patterns and callback signatures are validated at installation.
 - **Publishing.** Progress is derived on the server and published as unsequenced `tool_progress` events plus snapshot `toolProgress`. It is never stored and is rebuilt by replay after a restart. Rust keeps raw output only until a tool's command is known, because the service already stores raw events. It frees stream state when a tool finishes and keeps at most 1,000 views per session.
 - **Browser and tests.** The browser renders server views and no longer parses output. A golden file (`tests/fixtures/bazel-progress-events.json`), checked by a Rust test, feeds the browser unit and Playwright tests, so they replay exactly what the service publishes.
 
@@ -232,9 +232,8 @@ still receives a fresh heap and the existing evaluation limits. A selected
 progress handler returning `None` does not select another handler. A selected
 formatter failing or returning empty output uses the quoted host fallback.
 
-Enabled modules are routed in filename order and then declaration order; first
-match wins for each hook. Manual priority ordering is deferred. Disabling a script
-disables all of its hooks. Disabled source is not evaluated to render Settings;
+Enabled modules are routed in the order described in [Routing order](#routing-order);
+first match wins for each hook. Disabling a script disables all of its hooks. Disabled source is not evaluated to render Settings;
 previously cached registrations can still be shown.
 
 Settings displays each script's registered hooks and filters and offers progress,
@@ -244,3 +243,36 @@ custom source, ownership, enable state and timestamps. They remain in schema v9;
 the `capability` column identifies these modules as `hooks`. The older single-hook
 engine API remains for the experiment tests and supervised worker, while service
 routing uses registrations exclusively.
+
+### Routing order
+
+Precedence is total and deterministic. For each hook kind (progress, formatter,
+tool header), enabled handlers are tried in this order and the first whose filter
+matches is selected:
+
+1. **Script priority**, highest first. Priority is an integer from -1000 to 1000;
+   a script without one has priority 0. Built-ins start at 0 like user scripts.
+2. **Filename**, ascending by byte value (names are restricted to `a-z`, `0-9`,
+   `-` and `_`, so this is also ASCII order: `-` < digits < `_` < letters).
+3. **Declaration order** of `agent.register_*` calls within the module.
+
+`GET /api/scripts` returns scripts in this order, and Settings lists them the same
+way. The selected handler owns the event: a progress handler returning `None` or a
+formatter that fails does not fall through to a lower-precedence handler.
+
+Priority is a human routing setting, not part of the script. It is stored in the
+additive `script_order` table (schema version unchanged at 9; older binaries ignore
+it and fall back to filename order) and set with
+`PUT /api/scripts/{name}/priority {"priority": n}` or **⋯ → Set priority…** in
+Settings. Out-of-range or non-integer values are rejected with 400; unknown scripts
+return 404. Setting 0 removes the entry. Priority survives edits, disable/enable and
+restoring a modified built-in; deleting a user script forgets it. Script source
+cannot declare or change its own precedence, so a module cannot promote itself above
+the user's chosen handlers.
+
+Tests: `priority_then_filename_then_declaration_order_decides_precedence` and
+`parser_priority_selects_the_progress_handler` in `crates/agentworks/src/tool_progress.rs`,
+and the priority case in `tests/parser-scripts.spec.mjs`.
+
+Agents cannot write scripts. The proposed controlled path, and why it is not
+enabled yet, is in [Agent-proposed scripts](../SCRIPT-PROPOSALS.md).

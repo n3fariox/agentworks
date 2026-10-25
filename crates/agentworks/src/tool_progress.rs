@@ -23,7 +23,13 @@ use tokio::sync::broadcast;
 
 use crate::tool_headers::{HeaderTracker, Headers};
 
-pub const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS scripts(name TEXT PRIMARY KEY,capability TEXT NOT NULL,source TEXT NOT NULL,hash TEXT NOT NULL,enabled INTEGER NOT NULL,builtin INTEGER NOT NULL,updated INTEGER NOT NULL);";
+/// `script_order` holds human-set routing priorities. It is a separate additive
+/// table so the schema version stays at 9 and older binaries ignore it.
+pub const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS scripts(name TEXT PRIMARY KEY,capability TEXT NOT NULL,source TEXT NOT NULL,hash TEXT NOT NULL,enabled INTEGER NOT NULL,builtin INTEGER NOT NULL,updated INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS script_order(name TEXT PRIMARY KEY,priority INTEGER NOT NULL);";
+
+/// Accepted routing priorities; scripts without one use 0.
+pub const PRIORITY_RANGE: std::ops::RangeInclusive<i64> = -1000..=1000;
 
 /// Shipped scripts. A built-in follows the shipped source until a user saves
 /// their own version under the same name; it can be disabled but not deleted.
@@ -51,6 +57,8 @@ pub struct Script {
     pub source: String,
     pub hash: String,
     pub enabled: bool,
+    /// Routing priority: higher runs first, then filename, then declaration order.
+    pub priority: i64,
     /// Follows the shipped source (unmodified built-in).
     pub builtin: bool,
     /// The name of a shipped script, whether or not the user modified it.
@@ -132,9 +140,13 @@ pub fn seed(db: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// All scripts in routing order: priority descending, then filename by byte
+/// value. Hooks within a script keep declaration order.
 pub fn list(db: &Connection) -> rusqlite::Result<Vec<Script>> {
     let mut stmt = db.prepare(
-        "SELECT name,capability,source,hash,enabled,builtin,updated FROM scripts ORDER BY name",
+        "SELECT s.name,s.capability,s.source,s.hash,s.enabled,s.builtin,s.updated,COALESCE(o.priority,0) AS priority
+         FROM scripts s LEFT JOIN script_order o ON o.name=s.name
+         ORDER BY priority DESC, s.name COLLATE BINARY",
     )?;
     stmt.query_map([], |r| {
         Ok(Script {
@@ -144,6 +156,7 @@ pub fn list(db: &Connection) -> rusqlite::Result<Vec<Script>> {
             source: r.get(2)?,
             hash: r.get(3)?,
             enabled: r.get(4)?,
+            priority: r.get(7)?,
             builtin: r.get(5)?,
             shipped: false,
             updated: r.get(6)?,
@@ -172,6 +185,25 @@ pub fn set_enabled(db: &Connection, name: &str, enabled: bool) -> rusqlite::Resu
     )? == 1)
 }
 
+/// Set a script's routing priority. 0 removes the explicit entry.
+pub fn set_priority(db: &Connection, name: &str, priority: i64) -> rusqlite::Result<bool> {
+    let exists = db
+        .query_row("SELECT 1 FROM scripts WHERE name=?1", [name], |_| Ok(()))
+        .optional()?
+        .is_some();
+    if exists {
+        if priority == 0 {
+            db.execute("DELETE FROM script_order WHERE name=?1", [name])?;
+        } else {
+            db.execute(
+                "INSERT INTO script_order(name,priority) VALUES (?1,?2) ON CONFLICT(name) DO UPDATE SET priority=excluded.priority",
+                params![name, priority],
+            )?;
+        }
+    }
+    Ok(exists)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Removal {
     Missing,
@@ -183,6 +215,7 @@ pub enum Removal {
 }
 
 /// Delete a user script, or restore a modified built-in to its shipped source.
+/// Restoring keeps the priority; deleting forgets it.
 pub fn delete(db: &Connection, name: &str) -> rusqlite::Result<Removal> {
     let builtin: Option<bool> = db
         .query_row("SELECT builtin FROM scripts WHERE name=?1", [name], |r| {
@@ -201,7 +234,10 @@ pub fn delete(db: &Connection, name: &str) -> rusqlite::Result<Removal> {
             Removal::Restored
         }
         (Some(false), None) => {
-            db.execute("DELETE FROM scripts WHERE name=?1", [name])?;
+            let tx = db.unchecked_transaction()?;
+            tx.execute("DELETE FROM scripts WHERE name=?1", [name])?;
+            tx.execute("DELETE FROM script_order WHERE name=?1", [name])?;
+            tx.commit()?;
             Removal::Deleted
         }
     })
@@ -507,8 +543,9 @@ struct Hooks {
     headers: Vec<Arc<Compiled>>,
 }
 
-/// Compile enabled modules in filename order, then route their declarations in
-/// source order. One broken module contributes no handlers to any hook.
+/// Compile enabled modules in `list` order (priority, then filename), then route
+/// their declarations in source order. One broken module contributes no handlers
+/// to any hook.
 fn compile_hooks(
     engine: &Arc<Engine>,
     db: &Connection,
@@ -556,6 +593,12 @@ pub struct Source {
 #[derive(serde::Deserialize)]
 pub struct Enabled {
     enabled: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Priority {
+    priority: i64,
 }
 
 fn db_error(e: rusqlite::Error) -> (axum::http::StatusCode, String) {
@@ -634,6 +677,26 @@ pub async fn put_enabled(
             axum::http::StatusCode::NOT_FOUND,
             "Script not found",
         ));
+    }
+    reloaded(&app, &store.connection)
+}
+
+/// Human-only routing control; scripts cannot set their own precedence.
+pub async fn put_priority(
+    axum::extract::State(app): axum::extract::State<crate::App>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    axum::Json(body): axum::Json<Priority>,
+) -> crate::ApiResult {
+    use axum::http::StatusCode;
+    if !PRIORITY_RANGE.contains(&body.priority) {
+        return Err(crate::fail(
+            StatusCode::BAD_REQUEST,
+            "Script priority must be an integer from -1000 to 1000",
+        ));
+    }
+    let store = app.store.lock().unwrap();
+    if !set_priority(&store.connection, &name, body.priority).map_err(db_error)? {
+        return Err(crate::fail(StatusCode::NOT_FOUND, "Script not found"));
     }
     reloaded(&app, &store.connection)
 }
@@ -841,6 +904,120 @@ mod tests {
         set_enabled(&db, "a_handlers.star", true).unwrap();
         hub.reload(&db).unwrap();
         assert_eq!(hub.format_inbox(&[message("Special review")]), vec![None]);
+    }
+
+    #[test]
+    fn priority_then_filename_then_declaration_order_decides_precedence() {
+        let db = db();
+        let formatter = |label: &str| {
+            agentworks_starlark::INBOX_MESSAGE_SCRIPT
+                .replace("format_message", &format!("format_{label}"))
+                .replace(
+                    "text = message.text",
+                    &format!("text = \"{label}: \" + message.text"),
+                )
+        };
+        // Two formatters in one module: declaration order breaks the final tie.
+        let pair = format!("{}\n{}", formatter("first"), formatter("second"));
+        save(&db, "b_fmt.star", &pair).unwrap();
+        save(&db, "a_fmt.star", &formatter("a")).unwrap();
+        let hub = start(&db).unwrap();
+        let message = [json!({"id":1,"sender":"peer","senderTitle":"Peer","text":"hi"})];
+        let winner = |hub: &Hub| hub.format_inbox(&message).remove(0).unwrap();
+        let order = |db: &Connection| {
+            list(db)
+                .unwrap()
+                .into_iter()
+                .map(|s| (s.name, s.priority))
+                .collect::<Vec<_>>()
+        };
+        // Default priority 0: byte-wise filename order, regardless of insertion.
+        assert!(winner(&hub).starts_with("a: hi"));
+        assert_eq!(order(&db)[0], ("a_fmt.star".into(), 0));
+
+        assert!(set_priority(&db, "b_fmt.star", 5).unwrap());
+        hub.reload(&db).unwrap();
+        assert!(winner(&hub).starts_with("first: hi"));
+        assert_eq!(order(&db)[0], ("b_fmt.star".into(), 5));
+
+        // A built-in can be raised above user scripts and lowered below them.
+        set_priority(&db, "inbox_message.star", 10).unwrap();
+        hub.reload(&db).unwrap();
+        assert_eq!(winner(&hub), "hi");
+        set_priority(&db, "inbox_message.star", -1).unwrap();
+        // Equal priorities fall back to filename order.
+        set_priority(&db, "a_fmt.star", 5).unwrap();
+        hub.reload(&db).unwrap();
+        assert!(winner(&hub).starts_with("a: hi"));
+        let names: Vec<_> = order(&db).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(
+            names,
+            [
+                "a_fmt.star",
+                "b_fmt.star",
+                "bazel_progress.star",
+                "tool_header.star",
+                "inbox_message.star"
+            ]
+        );
+        let (hooks, _) = compile_hooks(&hub.engine, &db).unwrap();
+        let routed: Vec<_> = hooks.formatters.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            routed,
+            [
+                "a_fmt.star",
+                "b_fmt.star",
+                "b_fmt.star",
+                "inbox_message.star"
+            ]
+        );
+
+        // Disabling keeps the priority; deleting forgets it; restoring keeps it.
+        set_enabled(&db, "a_fmt.star", false).unwrap();
+        hub.reload(&db).unwrap();
+        assert!(winner(&hub).starts_with("first: hi"));
+        set_enabled(&db, "a_fmt.star", true).unwrap();
+        assert_eq!(order(&db)[0], ("a_fmt.star".into(), 5));
+        assert_eq!(delete(&db, "a_fmt.star").unwrap(), Removal::Deleted);
+        save(&db, "a_fmt.star", &formatter("a")).unwrap();
+        assert!(order(&db).contains(&("a_fmt.star".into(), 0)));
+        save(&db, "inbox_message.star", &formatter("custom")).unwrap();
+        assert_eq!(
+            delete(&db, "inbox_message.star").unwrap(),
+            Removal::Restored
+        );
+        assert!(order(&db).contains(&("inbox_message.star".into(), -1)));
+        // Setting 0 clears the explicit entry; unknown scripts are not created.
+        set_priority(&db, "b_fmt.star", 0).unwrap();
+        let rows: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM script_order WHERE name='b_fmt.star'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0);
+        assert!(!set_priority(&db, "missing.star", 3).unwrap());
+        assert!(order(&db).iter().all(|(n, _)| n != "missing.star"));
+    }
+
+    #[test]
+    fn parser_priority_selects_the_progress_handler() {
+        let db = db();
+        let other = agentworks_starlark::BAZEL_PROGRESS_SCRIPT
+            .replace("DISPLAY_NAME = \"Bazel\"", "DISPLAY_NAME = \"Other\"");
+        assert_ne!(other, agentworks_starlark::BAZEL_PROGRESS_SCRIPT);
+        save(&db, "z_bazel.star", &other).unwrap();
+        let engine = Arc::new(Engine::new().unwrap());
+        let first = |db: &Connection| {
+            compile_enabled(&engine, db).unwrap().0[0]
+                .script
+                .display_name
+                .clone()
+        };
+        assert_eq!(first(&db), "Bazel");
+        set_priority(&db, "z_bazel.star", 1).unwrap();
+        assert_eq!(first(&db), "Other");
     }
 
     #[test]

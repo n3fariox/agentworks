@@ -34,5 +34,6 @@ Start with the [quick start](../README.md). Commands in these documents run from
 - [Morsh terminal reuse assessment](MORSH-REUSE.md): original source review and reuse rationale.
 - [Retention and staged recovery (R-02)](RETENTION-RECOVERY.md) — explicit keep-count pruning, validated restore/upgrade rehearsal, and operator promotion boundaries.
 - [Starlark experiment](experiments/001-starlark.md): evaluation and adoption for typed progress parsing; workflow scripts remain a prototype.
+- [Agent-proposed scripts](SCRIPT-PROPOSALS.md): proposed review and authorization rules for agent script writes; not implemented.
 
 Keep durable usage instructions, contracts, and design rationale here. Session IDs, local rollout observations, batch journals, completion handoffs, and deployment receipts belong outside tracked documentation. Earlier working notes remain available in Git history.

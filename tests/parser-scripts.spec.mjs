@@ -46,7 +46,10 @@ const row=(panel,name)=>panel.locator(`.parser-script[data-script="${name}"]`);
 test('built-in parser can be disabled and enabled; Settings stays open',async({page})=>{
   const panel=await openPanel(page),builtin=row(panel,BUILTIN);
   await expect(builtin.locator('.parser-script-badge')).toHaveText('Built-in');
-  await expect(builtin.locator('.parser-script-more')).toHaveCount(0);
+  // Built-ins cannot be deleted; their ⋯ menu offers only routing priority.
+  await builtin.locator('.parser-script-more').click();
+  await expect(panel.getByRole('menuitem')).toHaveText(['Set priority…']);
+  await page.keyboard.press('Escape');
   const box=builtin.getByRole('checkbox',{name:`Enable ${BUILTIN}`});
   await expect(box).toBeChecked();
   await box.uncheck();await expect(panel.locator('[data-note]')).toContainText('disabled');
@@ -148,6 +151,29 @@ test('modified built-in can be restored; user scripts can be deleted from the �
   await panel.getByRole('menuitem',{name:'Delete…'}).click();
   await expect(row(panel,'make_progress.star')).toHaveCount(0);
   expect(await script('make_progress.star')).toBeUndefined();
+});
+
+test('priority reorders routing and the list; invalid values are rejected',async({page})=>{
+  await api('/api/scripts/a_progress.star',{source:(await script(BUILTIN)).source.replace('DISPLAY_NAME = "Bazel"','DISPLAY_NAME = "Early"')});
+  const panel=await openPanel(page);
+  const names=async()=>(await api('/api/scripts')).scripts.map(s=>s.name);
+  expect((await names()).indexOf('a_progress.star')).toBeLessThan((await names()).indexOf(BUILTIN));
+  page.once('dialog',d=>d.accept('7'));
+  await row(panel,BUILTIN).getByRole('button',{name:`More actions for ${BUILTIN}`}).click();
+  await panel.getByRole('menuitem',{name:'Set priority…'}).click();
+  await expect(row(panel,BUILTIN).locator('.parser-script-badge',{hasText:'Priority 7'})).toBeVisible();
+  expect((await names())[0]).toBe(BUILTIN);
+  await expect(panel.locator('.parser-script-entry').first()).toHaveAttribute('data-script-entry',BUILTIN);
+  page.once('dialog',d=>d.accept('5000'));
+  await row(panel,BUILTIN).getByRole('button',{name:`More actions for ${BUILTIN}`}).click();
+  await panel.getByRole('menuitem',{name:'Set priority…'}).click();
+  await expect(panel.locator('[data-note]')).toContainText('-1000 to 1000');
+  expect((await script(BUILTIN)).priority).toBe(7);
+  const rejected=await fetch(base+'/api/scripts/'+BUILTIN+'/priority',{method:'PUT',headers:{Origin:base,'Content-Type':'application/json'},body:JSON.stringify({priority:1001})});
+  expect(rejected.status).toBe(400);
+  await api('/api/scripts/'+BUILTIN+'/priority',{priority:0});
+  await expect(row(await openPanel(page),BUILTIN).locator('.parser-script-badge')).toHaveText('Built-in');
+  await api('/api/scripts/a_progress.star',undefined,'DELETE');
 });
 
 test('an enabled script that no longer compiles shows its diagnostic',async({page})=>{

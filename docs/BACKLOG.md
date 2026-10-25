@@ -13,6 +13,6 @@ Chat attachments (L-03) are implemented. L-06 is considered covered by the exist
 | Authentication and isolation (R-03) | Stronger human authentication and process boundaries beyond the existing trusted-user/private-network model. |
 | Remote hosts (H-01/H-02) | Worker-side file browsing, Git views/diffs, and MCP relay. Remote chat, worktree launch/cleanup, queued inputs, continuation, and inbox turns are implemented; see [supported scope](REMOTE-HOSTS.md#supported-scope-and-verification). |
 | Portability | Native Windows delivery and host-specific validation. Linux remains the supported deployment. |
-| Experiment E-01 | Starlark was adopted for typed U-05 progress parsing. Workflow interpretation remains prototype-only; see the [experiment record](experiments/001-starlark.md). |
+| Experiment E-01 | Starlark was adopted for typed U-05 progress parsing, with explicit [routing order](experiments/001-starlark.md#routing-order) (priority, filename, declaration). Agent script writes need the decisions in [agent-proposed scripts](SCRIPT-PROPOSALS.md) first. Workflow interpretation remains prototype-only; see the [experiment record](experiments/001-starlark.md). |
 
 A frontend framework rewrite, managed public hosting, team accounts, a full browser IDE, and PDF rendering remain outside the initial Linux release requirements.

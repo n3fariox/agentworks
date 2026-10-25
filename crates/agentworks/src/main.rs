@@ -1041,6 +1041,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/scripts/{name}/enabled",
             axum::routing::put(tool_progress::put_enabled),
         )
+        .route(
+            "/api/scripts/{name}/priority",
+            axum::routing::put(tool_progress::put_priority),
+        )
         .route("/api/timeouts", get(get_timeouts).put(save_timeouts))
         .route(
             "/api/notifications",

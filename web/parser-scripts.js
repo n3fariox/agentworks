@@ -42,7 +42,7 @@ const TEMPLATES={progress:TEMPLATE,formatter:FORMATTER_TEMPLATE,header:HEADER_TE
 export function setupParserScripts({$,api,el}){
   const root=$('parser-script-controls');
   root.innerHTML=`<legend>Starlark scripts</legend>
-    <p class="field-note">Scripts register tool-progress, tool-header and message-formatting hooks. Enabled handlers run in filename order, then registration order; the first matching handler for each hook wins. Each script can register several kinds. Changes apply to future output and inbox deliveries; tool headers are recomputed for open sessions.</p>
+    <p class="field-note">Scripts register tool-progress, tool-header and message-formatting hooks. Enabled handlers run by priority (higher first, default 0), then filename, then registration order; the first matching handler for each hook wins. The list is shown in that order. Each script can register several kinds. Changes apply to future output and inbox deliveries; tool headers are recomputed for open sessions.</p>
     <div class="parser-script-list" role="list" data-list></div>
     <button type="button" class="text-button parser-script-new" data-new>＋ New script</button>
     <div class="field-note" role="status" data-note></div>
@@ -78,13 +78,14 @@ export function setupParserScripts({$,api,el}){
       const label=el('span','parser-script-name',script.name);label.title=script.name;row.append(label);
       if(script.builtin)row.append(el('span','parser-script-badge','Built-in'));
       else if(script.shipped)row.append(el('span','parser-script-badge','Modified'));
+      if(script.priority)row.append(el('span','parser-script-badge',`Priority ${script.priority}`));
       if(script.error)row.append(el('span','parser-script-badge error','Error'));
       const toggle=el('label','parser-script-toggle');const box=el('input');box.type='checkbox';box.checked=script.enabled;
       box.setAttribute('aria-label',`Enable ${script.name}`);box.onchange=()=>setEnabled(script,box.checked,box);
       toggle.append(box,el('span','','On'));row.append(toggle);
       const edit=el('button','text-button','Edit');edit.type='button';edit.setAttribute('aria-label',`Edit ${script.name}`);edit.onclick=()=>open(script);row.append(edit);
-      const actions=script.builtin?[]:script.shipped?[['Restore shipped version',()=>remove(script,'restore')]]:[['Delete…',()=>remove(script,'delete'),true]];
-      if(actions.length){const more=el('button','text-button parser-script-more','⋯');more.type='button';more.setAttribute('aria-label',`More actions for ${script.name}`);more.setAttribute('aria-haspopup','menu');more.setAttribute('aria-expanded','false');more.onclick=()=>popover.hidden||trigger!==more?openPopover(more,actions):closePopover();row.append(more);}else row.append(el('span','parser-script-more-slot'));
+      const actions=[['Set priority…',()=>setPriority(script)],...script.builtin?[]:script.shipped?[['Restore shipped version',()=>remove(script,'restore')]]:[['Delete…',()=>remove(script,'delete'),true]]];
+      {const more=el('button','text-button parser-script-more','⋯');more.type='button';more.setAttribute('aria-label',`More actions for ${script.name}`);more.setAttribute('aria-haspopup','menu');more.setAttribute('aria-expanded','false');more.onclick=()=>popover.hidden||trigger!==more?openPopover(more,actions):closePopover();row.append(more);}
       const wrap=el('div','parser-script-entry');wrap.dataset.scriptEntry=script.name;wrap.setAttribute('role','listitem');row.removeAttribute('role');wrap.append(row);
       if(script.hooks?.length){
         const hooks=el('ul','parser-script-hooks');
@@ -106,6 +107,14 @@ export function setupParserScripts({$,api,el}){
     box.disabled=true;
     try{render((await api(path(script.name)+'/enabled',{method:'PUT',body:JSON.stringify({enabled})})).scripts);note.textContent=`${script.name} ${enabled?'enabled':'disabled'}. Applies to future output and inbox deliveries.`;}
     catch(e){box.checked=!enabled;box.disabled=false;note.textContent='Not changed: '+e.message;}
+  }
+  async function setPriority(script){
+    const value=prompt(`Priority for ${script.name} (-1000 to 1000; higher runs first, 0 is the default):`,String(script.priority||0));
+    if(value===null)return;
+    const priority=Number(value.trim());
+    if(!Number.isInteger(priority)||priority<-1000||priority>1000){note.textContent='Not changed: priority must be an integer from -1000 to 1000.';return;}
+    try{render((await api(path(script.name)+'/priority',{method:'PUT',body:JSON.stringify({priority})})).scripts);note.textContent=`${script.name} priority set to ${priority}. Applies to future output and inbox deliveries.`;}
+    catch(e){note.textContent='Not changed: '+e.message;}
   }
   async function remove(script,kind){
     if(kind==='delete'&&!confirm(`Delete ${script.name}? Its registered hooks stop running.`))return;
