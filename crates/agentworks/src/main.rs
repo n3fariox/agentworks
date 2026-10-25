@@ -17,6 +17,7 @@ mod input_queue;
 mod lifecycle;
 mod limit_resume;
 mod mcp;
+mod model_providers;
 mod notifications;
 mod permission_modes;
 mod review_queue;
@@ -284,7 +285,7 @@ impl Session {
         });
         json!({"id":self.id,"provider":self.provider,"cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"model":model,
             "archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"created":self.created,"status":data.status,"turnRunning":data.turn_active,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"]),
-            "projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"providerCapabilities":data.agent_capabilities["sessionCapabilities"],"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None}})
+            "projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"modelProvider":data.model_provider,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"providerCapabilities":data.agent_capabilities["sessionCapabilities"],"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None}})
     }
     /// Full snapshot for the HTTP API, with every retained event as stored.
     fn snapshot(&self) -> Value {
@@ -318,7 +319,7 @@ impl Session {
         let data = self.data.lock().unwrap();
         let (events, resumed) = events(&data.events, data.seq);
         json!({"kind":"snapshot","seq":data.seq,"resumed":resumed,"session":{"id":self.id,"provider":self.provider,
-            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None},"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"])} ,"events":events,
+            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"modelProvider":data.model_provider,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None},"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"])} ,"events":events,
             "truncated":data.events.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
             "providerCapabilities":data.agent_capabilities["sessionCapabilities"],"sessionConfig":data.session_config,"permissionModes":data.permission_modes,"models":data.models,"attachments":attachments::policy(&self.provider,&data.prompt_capabilities),"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|a.event(id)).collect::<Vec<_>>(),
@@ -789,6 +790,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route(
+            "/model-providers.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/model-providers.js"),
+                )
+            }),
+        )
+        .route(
             "/attachments.js",
             get(|| async {
                 (
@@ -1009,6 +1019,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             axum::routing::put(save_session_timeouts),
         )
         .route("/api/models", post(discover_models))
+        .route(
+            "/api/model-providers",
+            get(model_providers::list).post(model_providers::update),
+        )
         .route("/api/external-sessions", post(list_external_sessions))
         .route("/api/sessions/import", post(import_session))
         .route("/api/catalog", get(get_catalog))
@@ -1540,6 +1554,8 @@ fn persist_settings(
 #[derive(Deserialize)]
 struct ModelDiscovery {
     provider: String,
+    #[serde(default, rename = "modelProvider")]
+    model_provider: Option<String>,
     cwd: String,
     #[serde(default, rename = "hostId")]
     host_id: Option<String>,
@@ -1585,19 +1601,32 @@ async fn discover_models(State(app): State<App>, Json(req): Json<ModelDiscovery>
             })
         })
         .transpose()?;
-    let models = session_runtime::discover_on(&req.provider, cwd, link)
-        .await
-        .map_err(|e| {
-            fail(
-                StatusCode::BAD_GATEWAY,
-                hosts::diagnostic(
-                    &app,
-                    remote.unwrap_or("local"),
-                    &req.provider,
-                    &e.to_string(),
-                ),
-            )
-        })?;
+    model_providers::selected(
+        &app,
+        remote.unwrap_or("local"),
+        &req.provider,
+        req.model_provider.as_deref(),
+    )
+    .await?;
+    let models = session_runtime::discover_on(
+        &req.provider,
+        cwd,
+        link,
+        req.model_provider.as_deref(),
+        remote.unwrap_or("local"),
+    )
+    .await
+    .map_err(|e| {
+        fail(
+            StatusCode::BAD_GATEWAY,
+            hosts::diagnostic(
+                &app,
+                remote.unwrap_or("local"),
+                &req.provider,
+                &e.to_string(),
+            ),
+        )
+    })?;
     Ok(Json(models))
 }
 #[derive(Deserialize)]
@@ -1703,6 +1732,7 @@ async fn import_session(State(app): State<App>, Json(req): Json<ImportSession>) 
             cwd: req.cwd,
             title: req.title,
             model: Some(String::new()),
+            model_provider: None,
             project_id: req.project_id,
             host_id: req.host_id,
             external_id: Some(req.provider_session_id),
@@ -2004,6 +2034,8 @@ struct Fork {
     title: Option<String>,
     provider: Option<String>,
     model: Option<String>,
+    #[serde(default, rename = "modelProvider", deserialize_with = "profile_choice")]
+    model_provider: Option<Option<String>>,
     #[serde(rename = "projectId")]
     project_id: Option<String>,
     #[serde(rename = "hostId")]
@@ -2016,6 +2048,12 @@ struct Fork {
     request_id: Option<String>,
     #[serde(rename = "resumePolicy")]
     resume_policy: Option<limit_resume::PolicyInput>,
+}
+
+fn profile_choice<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 async fn fork_session(
@@ -2071,9 +2109,20 @@ async fn fork_session(
         .provider
         .clone()
         .unwrap_or_else(|| parent.provider.clone());
+    let parent_profile = parent.data.lock().unwrap().model_provider.clone();
+    let model_provider = req.model_provider.clone().unwrap_or_else(|| {
+        if provider == parent.provider && target_host == parent.host_id {
+            parent_profile.clone()
+        } else {
+            None
+        }
+    });
     // Native history belongs to one host/provider. Cross-host/provider forks
     // retain the recorded transcript/summary and open a fresh native session.
-    if target_host != parent.host_id || provider != parent.provider {
+    if target_host != parent.host_id
+        || provider != parent.provider
+        || model_provider != parent_profile
+    {
         seed.lineage.source_session_id = None;
         seed.lineage.source_message_id = None;
     }
@@ -2109,7 +2158,7 @@ async fn fork_session(
             agent_access: req.agent_access,
             role: None,
             inherited_role,
-            provider,
+            provider: provider.clone(),
             cwd: req
                 .cwd
                 .unwrap_or_else(|| parent.cwd.to_string_lossy().into_owned()),
@@ -2121,6 +2170,7 @@ async fn fork_session(
                     .collect(),
             ),
             model: req.model.or(inherited_model),
+            model_provider,
             project_id,
             host_id: Some(target_host),
             external_id: None,
@@ -2160,6 +2210,8 @@ struct Create {
     cwd: String,
     title: Option<String>,
     model: Option<String>,
+    #[serde(default, rename = "modelProvider")]
+    model_provider: Option<String>,
     #[serde(rename = "projectId")]
     project_id: Option<String>,
     #[serde(rename = "hostId")]
@@ -2218,6 +2270,13 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
     if !agentworks_runtime::remote::PROVIDERS.contains(&req.provider.as_str()) {
         return Err(fail(StatusCode::BAD_REQUEST, "Unknown provider"));
     }
+    let model_profile = model_providers::selected(
+        app,
+        req.host_id.as_deref().unwrap_or("local"),
+        &req.provider,
+        req.model_provider.as_deref(),
+    )
+    .await?;
     // Checked before any workspace is prepared, so a bad role leaves nothing behind.
     let role = match req.inherited_role.clone() {
         Some(role) => Some(role),
@@ -2381,22 +2440,28 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
         location_id: location.id,
         cwd,
         title,
-        initial_model: req
-            .model
-            .or_else(|| {
-                catalog
-                    .data
-                    .settings
-                    .default_models
-                    .get(&req.provider)
-                    .cloned()
-            })
-            .filter(|m| !m.is_empty()),
+        initial_model: if let Some(profile) = &model_profile {
+            req.model
+                .filter(|m| !m.is_empty())
+                .or_else(|| profile["defaultModel"].as_str().map(str::to_owned))
+        } else {
+            req.model
+                .or_else(|| {
+                    catalog
+                        .data
+                        .settings
+                        .default_models
+                        .get(&req.provider)
+                        .cloned()
+                })
+                .filter(|m| !m.is_empty())
+        },
         created: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64,
         data: Mutex::new(SessionData {
+            model_provider: req.model_provider,
             lifecycle: Default::default(),
             inbox_turn: None,
             status: "starting".into(),
@@ -2575,6 +2640,11 @@ async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     let _run = app.run_lock.lock().await;
     service_restart::allow_start(&app)?;
     let s = session(&app, &id)?;
+    if let Some(profile) = s.data.lock().unwrap().model_provider.as_deref() {
+        agentworks_runtime::model_providers::authorize(profile, &s.host_id)
+            .map_err(|e| fail(StatusCode::FORBIDDEN, e))?;
+    }
+
     if s.data
         .lock()
         .unwrap()
@@ -2719,6 +2789,10 @@ fn accept_prompt(
         let mut data = s.data.lock().unwrap();
         if data.requests.contains(&request_id) {
             return Ok(Json(json!({"accepted":true,"duplicate":true})));
+        }
+        if let Some(profile) = data.model_provider.as_deref() {
+            agentworks_runtime::model_providers::authorize(profile, &s.host_id)
+                .map_err(|e| fail(StatusCode::FORBIDDEN, e))?;
         }
         if data.status != "idle" {
             return Err(fail(

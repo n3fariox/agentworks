@@ -79,4 +79,4 @@ AGENTWORKS_URL=http://127.0.0.1:4318 npm run test:import-capabilities
 
 ## Embedded Goose
 
-After building, `npm run test:goose` runs the linked Goose harness against a loopback OpenAI-compatible fixture with temporary stores. It covers discovery, streaming, shell approvals, native resume after restart, and cancellation without a paid model call. See [Goose setup](RUST-GOOSE-ACP.md).
+After building, `npm run test:goose` runs the linked Goose harness against a loopback OpenAI-compatible fixture with temporary stores. It covers shared profiles, host assignments/revocation, ephemeral remote credentials, private keys, discovery, streaming, shell approvals, native resume after restart, and cancellation without a paid model call. `npx playwright test tests/model-providers.spec.mjs` checks the Settings editor and session picker on desktop and mobile. See [Goose setup](RUST-GOOSE-ACP.md).

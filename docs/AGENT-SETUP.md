@@ -97,4 +97,4 @@ Session permission modes advertised by the native harness appear beside the mode
 
 ## Goose · embedded
 
-Goose is linked into the Agentworks binary and runs through its `goose-acp` entry point. Configure its provider, model, endpoint, and credentials on the execution host. See [embedded Goose setup](RUST-GOOSE-ACP.md) for OpenAI-compatible endpoints, storage, remote execution, and verification.
+Goose is linked into the Agentworks binary and runs through its `goose-acp` entry point. Use **Settings → Model providers** to add an OpenAI-compatible connection once and choose its **Available on hosts**, then select it when creating a Goose session. Host environment configuration remains available. See [embedded Goose setup](RUST-GOOSE-ACP.md) for OpenAI-compatible endpoints, storage, remote execution, and verification.

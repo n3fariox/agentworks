@@ -160,6 +160,10 @@ pub(crate) async fn validate_session(
     app: &App,
     s: &crate::Session,
 ) -> Result<(), (StatusCode, String)> {
+    if let Some(profile) = s.data.lock().unwrap().model_provider.as_deref() {
+        agentworks_runtime::model_providers::authorize(profile, &s.host_id)
+            .map_err(|e| fail(StatusCode::FORBIDDEN, e))?;
+    }
     if s.host_id == "local" && !crate::installed(&s.provider) {
         return Err(fail(StatusCode::CONFLICT, "Harness is unavailable"));
     }

@@ -179,7 +179,7 @@ fn tools(a: &mail::Access, session: bool) -> Value {
         tools.push(tool("restart_service", "GLOBAL service restart. Explicit human restartService grant required. Returns durable identity immediately. wait drains all sessions; interrupt stops all harnesses. Optional handoff resumes only your saved native context once, after finishing this turn.", json!({"requestId":{"type":"string"},"mode":{"type":"string","enum":["wait","interrupt"]},"expiresInSeconds":{"type":"integer","minimum":5,"maximum":900},"release":{"type":"string"},"handoff":{"type":"boolean"},"handoffDeadline":{"type":"integer"}}), &["requestId","mode","expiresInSeconds"]));
     }
     if a.start_sessions {
-        tools.push(tool("start_session","Start a session using the project's configured communication role; no grants are copied from the caller. Does not submit a prompt. Reuse requestId on retry.",json!({"provider":{"type":"string","enum":agentworks_runtime::remote::PROVIDERS},"cwd":{"type":"string"},"inheritResumePolicy":{"type":"boolean","default":false},"title":{"type":"string"},"model":{"type":"string"},"requestId":{"type":"string","maxLength":50},"workspace":{"type":"object","properties":{"mode":{"type":"string","enum":["directory","newWorktree","existingWorktree"]},"branch":{"type":"string"},"baseRef":{"type":"string"},"path":{"type":"string"}},"required":["mode"],"additionalProperties":false}}),&["provider","cwd","requestId"]));
+        tools.push(tool("start_session","Start a session using the project's configured communication role; no grants are copied from the caller. Does not submit a prompt. Reuse requestId on retry.",json!({"provider":{"type":"string","enum":agentworks_runtime::remote::PROVIDERS},"cwd":{"type":"string"},"inheritResumePolicy":{"type":"boolean","default":false},"title":{"type":"string"},"model":{"type":"string"},"modelProvider":{"type":"string"},"requestId":{"type":"string","maxLength":50},"workspace":{"type":"object","properties":{"mode":{"type":"string","enum":["directory","newWorktree","existingWorktree"]},"branch":{"type":"string"},"baseRef":{"type":"string"},"path":{"type":"string"}},"required":["mode"],"additionalProperties":false}}),&["provider","cwd","requestId"]));
     }
     if a.prompt_sessions {
         tools.push(tool("prompt_session","Submit a new turn to an idle session in this project; starts model work. Reuse requestId on retry.",json!({"sessionId":{"type":"string","description":"Session ID or agentworks://sessions/<id> URI, passed exactly as given in list_sessions or a prompt."},"text":{"type":"string"},"requestId":{"type":"string","maxLength":50}}),&["sessionId","text","requestId"]));
@@ -360,6 +360,7 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
                 cwd: field(&args, "cwd")?,
                 title: args["title"].as_str().map(str::to_owned),
                 model: args["model"].as_str().map(str::to_owned),
+                model_provider: args["modelProvider"].as_str().map(str::to_owned),
                 project_id: Some(scope),
                 host_id: Some(
                     a.session

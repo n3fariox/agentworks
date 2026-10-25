@@ -63,11 +63,25 @@ impl Command {
     }
 }
 
-fn agent(provider: &str) -> AcpAgent {
-    agent_for(provider, false)
-}
 fn agent_for(provider: &str, host_profile: bool) -> AcpAgent {
     AcpAgent::new(agent_config(provider, use_api_key(), host_profile))
+}
+
+fn profile_agent(
+    provider: &str,
+    host_profile: bool,
+    profile: Option<&str>,
+) -> Result<AcpAgent, String> {
+    let config = agent_config(provider, use_api_key(), host_profile);
+    let config = if let Some(id) = profile {
+        if provider != "goose" {
+            return Err("Model profiles require Goose".into());
+        }
+        agentworks_runtime::model_providers::configure(config, id)?
+    } else {
+        config
+    };
+    Ok(AcpAgent::new(config))
 }
 
 /// The session's role as an ACP system prompt. Harnesses do not persist it, so
@@ -283,14 +297,23 @@ pub async fn discover_on(
     provider: &str,
     cwd: PathBuf,
     host: Option<Arc<crate::hosts::Live>>,
+    profile: Option<&str>,
+    host_id: &str,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let api_key = host.is_none() && use_api_key();
     let (transport, _guard): (DynConnectTo<Client>, _) = if let Some(host) = host {
-        let (lines, guard) = host.spawn(provider, &cwd.to_string_lossy(), false)?;
+        let connection = profile
+            .map(|id| agentworks_runtime::model_providers::connection(id, host_id))
+            .transpose()?;
+        let (lines, guard) =
+            host.spawn_profile(provider, &cwd.to_string_lossy(), false, connection.as_ref())?;
         (DynConnectTo::new(lines), Some(guard))
     } else {
         prepare(provider)?;
-        (DynConnectTo::new(agent(provider)), None)
+        (
+            DynConnectTo::new(profile_agent(provider, false, profile)?),
+            None,
+        )
     };
     agentworks_runtime::acp::discover(transport, provider, cwd, api_key).await
 }
@@ -356,14 +379,28 @@ pub async fn run(
     let host_profile = s.data.lock().unwrap().opencode_host;
     let (transport, _spawn_guard): (DynConnectTo<Client>, _) = if s.host_id == "local" {
         (
-            DynConnectTo::new(agent_for(&s.provider, host_profile)),
+            DynConnectTo::new(profile_agent(
+                &s.provider,
+                host_profile,
+                s.data.lock().unwrap().model_provider.as_deref(),
+            )?),
             None,
         )
     } else {
         let live = crate::hosts::registry()
             .and_then(|hosts| hosts.live(&s.host_id))
             .ok_or("The remote host is not connected.")?;
-        let (lines, guard) = live.spawn(&s.provider, &s.cwd.to_string_lossy(), host_profile)?;
+        let id = s.data.lock().unwrap().model_provider.clone();
+        let connection = id
+            .as_deref()
+            .map(|id| agentworks_runtime::model_providers::connection(id, &s.host_id))
+            .transpose()?;
+        let (lines, guard) = live.spawn_profile(
+            &s.provider,
+            &s.cwd.to_string_lossy(),
+            host_profile,
+            connection.as_ref(),
+        )?;
         // Keep the worker process alive until this runtime returns or is cancelled.
         (DynConnectTo::new(lines), Some(guard))
     };
@@ -1010,14 +1047,28 @@ pub async fn delete_provider_history(
     let (transport, _guard): (DynConnectTo<Client>, _) = if s.host_id == "local" {
         prepare(&s.provider)?;
         (
-            DynConnectTo::new(agent_for(&s.provider, host_profile)),
+            DynConnectTo::new(profile_agent(
+                &s.provider,
+                host_profile,
+                s.data.lock().unwrap().model_provider.as_deref(),
+            )?),
             None,
         )
     } else {
         let host = crate::hosts::registry()
             .and_then(|hosts| hosts.live(&s.host_id))
             .ok_or("The remote host is not connected; no history was deleted")?;
-        let (lines, guard) = host.spawn(&s.provider, &s.cwd.to_string_lossy(), host_profile)?;
+        let id = s.data.lock().unwrap().model_provider.clone();
+        let connection = id
+            .as_deref()
+            .map(|id| agentworks_runtime::model_providers::connection(id, &s.host_id))
+            .transpose()?;
+        let (lines, guard) = host.spawn_profile(
+            &s.provider,
+            &s.cwd.to_string_lossy(),
+            host_profile,
+            connection.as_ref(),
+        )?;
         (DynConnectTo::new(lines), Some(guard))
     };
     agentworks_runtime::acp::delete_session(

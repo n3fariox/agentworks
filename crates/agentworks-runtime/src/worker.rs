@@ -56,6 +56,8 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         "providers": providers,
         "tools": discovered_tools(&base).await,
         "workspace": true,
+        "modelProviders": true,
+        "sharedModelProviders": true,
         "worktreeCleanup": true,
         "terminal": true,
         "home": home(),
@@ -251,6 +253,18 @@ pub async fn run(args: &[String]) -> Result<(), String> {
                             let _ = out.send(Message::text(reply.to_string())).await;
                         });
                     }
+                    Some("modelProviders") => {
+                        let out = out.clone();
+                        workspace_tasks.spawn(async move {
+                            let result = crate::model_providers::execute(&request).await;
+                            let mut reply = json!({"type":"reply","request":request["request"]});
+                            match result {
+                                Ok(value) => reply["result"] = value,
+                                Err(error) => reply["error"] = json!(error),
+                            }
+                            let _ = out.send(Message::text(reply.to_string())).await;
+                        });
+                    }
                     Some("checkDir") => {
                         let out = out.clone();
                         tokio::spawn(async move {
@@ -402,6 +416,18 @@ async fn run_process(
         false,
         request["hostProfile"].as_bool().unwrap_or(false),
     );
+    let config = if request["modelConnection"].is_object() {
+        if provider != "goose" {
+            return Err("Model profiles require the Goose harness".into());
+        }
+        let connection = serde_json::from_value(request["modelConnection"].clone())
+            .map_err(|_| "Invalid model provider connection")?;
+        crate::model_providers::configure_connection(config, connection)?
+    } else if request["modelProvider"].is_string() {
+        return Err("Update the server to use shared model providers".into());
+    } else {
+        config
+    };
     let program = resolve(config.command(), &env).ok_or_else(|| {
         format!(
             "{} was not found on this host's PATH (including mise).",
