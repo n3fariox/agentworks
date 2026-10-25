@@ -1,10 +1,10 @@
 // Real SSH and PTY integration, isolated HOME/authorized_keys/known_hosts.
-// mise/npm are deterministic fixtures: this check makes no downloads/sign-ins.
+// The remote has no Node, npm or mise: this check makes no downloads/sign-ins.
 import assert from 'node:assert/strict';
 import {spawn,execFileSync} from 'node:child_process';
 import {once} from 'node:events';
 import {mkdtemp,mkdir,writeFile,readFile,readdir,stat,rm,symlink} from 'node:fs/promises';
-import {resolve,join,dirname} from 'node:path';
+import {resolve,join} from 'node:path';
 import {tmpdir,userInfo} from 'node:os';
 import {createServer} from 'node:net';
 import WebSocket from 'ws';
@@ -17,27 +17,11 @@ const secret='enrollment-test-passphrase';
 const seed=join(dir,'seed'),hostkey=join(dir,'hostkey');
 for(const [file,pass]of [[seed,secret],[hostkey,'']])execFileSync('ssh-keygen',['-q','-t','ed25519','-N',pass,'-f',file]);
 await writeFile(join(home,'.ssh/authorized_keys'),await readFile(seed+'.pub'),{mode:0o600});
-const node=process.execPath,modules=resolve('node_modules');
-await writeFile(join(bin,'mise'),`#!/bin/sh
-set -eu
-printf '%s\\n' "$*" >> ${q(join(dir,'mise.log'))}
-if [ "\${1:-}" = '-C' ]; then cd "$2"; shift 2; fi
-case "$1" in
-trust|install) exit 0 ;;
-which) printf '%s\\n' ${q(node)} ;;
-env) printf '{"PATH":"%s"}\\n' "$PATH" ;;
-exec) shift; [ "$1" = '--' ] && shift
-  if [ "$1" = npm ]; then
-    [ "$2" = ci ]; echo "$*" | grep -q -- --ignore-scripts; echo "$*" | grep -q -- --omit=dev
-    ln -s ${q(modules)} node_modules; exit 0
-  fi
-  exec "$@" ;;
-*) exit 2 ;;
-esac
-`,{mode:0o700});
+// The remote home has neither mise nor Node: the worker must install and run without them.
+if(realMise)await symlink(process.env.AGENTWORKS_TEST_MISE||join(userInfo().homedir,'.local/bin/mise'),join(bin,'mise'));
 await writeFile(join(dir,'remote-shell'),`#!/bin/sh
 export HOME=${q(home)}
-export PATH=${q(bin+':'+dirname(node)+':/usr/bin:/bin')}
+export PATH=${q(bin+':/usr/bin:/bin')}
 export AGENTWORKS_DEMO_STATE_DIR=${q(join(dir,'demo'))}
 exec /bin/sh -c "$SSH_ORIGINAL_COMMAND"
 `,{mode:0o700});
@@ -102,21 +86,15 @@ try{
  const rejected=new WebSocket(base.replace('http','ws')+'/api/hosts/enroll/events',{headers:{Origin:'https://other.example'}});
  const code=await new Promise(r=>{rejected.on('unexpected-response',(_,res)=>{res.resume();r(res.statusCode);});rejected.on('error',()=>{});});assert.equal(code,403);
  assert.equal((await enroll('Invalid','-oProxyCommand=sh')).type,'error');
- const miseFixture=await readFile(join(bin,'mise'));
  const destination=`ssh://${userInfo().username}@127.0.0.1:${sshPort}`;
  const cancelled=await enroll('Cancelled',destination,{cancel:true});assert(cancelled.cancelled);
  await delay(200);assert.equal((await api('/api/catalog',undefined,'GET')).hosts.length,1);
  assert.deepEqual(await readdir(join(dir,'host-keys')),[]);
- // A missing mise produces a useful failure and installs no public key.
- await rm(join(bin,'mise'));const missing=await enroll('Missing mise',destination);assert.equal(missing.type,'error');assert.match(missing.text,/mise is required/);
- if(realMise)await symlink(process.env.AGENTWORKS_TEST_MISE||join(userInfo().homedir,'.local/bin/mise'),join(bin,'mise'));
- else await writeFile(join(bin,'mise'),miseFixture,{mode:0o700});
  const installed=await enroll('Installed',destination);assert.equal(installed.type,'complete',installed.text+'\n'+installed.message);assert.equal(installed.host.status,'connected');assert(installed.host.managed);assert(installed.host.worker.providers.includes('demo'));
  const stored=JSON.parse(await readFile(catalog));const host=stored.hosts[0];
  assert.equal((await stat(host.identityFile)).mode&0o777,0o600);assert.equal((await stat(resolve(host.identityFile,'..'))).mode&0o777,0o700);
  assert(!('identityFile' in installed.host));assert(!('knownHostsFile' in installed.host));
  const keys=await readFile(join(home,'.ssh/authorized_keys'),'utf8');assert.match(keys,/restrict ssh-ed25519 .* agentworks:/);
- if(!realMise)assert.match(await readFile(join(dir,'mise.log'),'utf8'),/exec -- npm ci --ignore-scripts --omit=dev/);
  for(let n=0;n<100;n++){const files=(await readdir(resolve(host.identityFile,'..'))).sort();if(files.join(',')==='id_ed25519,id_ed25519.pub,known_hosts')break;if(n===99)assert.fail('Temporary bundle not cleaned: '+files);await delay(50);}
  await api(`/api/hosts/${host.id}/roots`,{roots:[home]},'PUT');
  const session=await api('/api/sessions',{provider:'demo',cwd:home,hostId:host.id,title:'Enrolled host'});
@@ -134,6 +112,6 @@ try{
  await api(`/api/sessions/${session.id}`,undefined,'DELETE');await api(`/api/hosts/${host.id}`,undefined,'DELETE');
  await assert.rejects(stat(host.identityFile),{code:'ENOENT'});
  assert(!(await readFile(catalog,'utf8')).includes(secret));assert(!log.includes(secret));
- console.log('PASS: real SSH enrollment, hidden passphrase input, host-key confirmation, cancellation, missing mise, isolated install, remote demo, and restart with managed key'+(realMise?' (real mise/npm install)':''));
+ console.log('PASS: real SSH enrollment, hidden passphrase input, host-key confirmation, cancellation, isolated install without Node or mise, remote demo, and restart with managed key'+(realMise?' (launched through real mise)':''));
 }catch(error){console.error(log);throw error;}
 finally{for(const ws of sockets)ws.close();await stop(server);await stop(sshd);await rm(dir,{recursive:true,force:true});}

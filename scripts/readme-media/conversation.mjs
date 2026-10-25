@@ -1,5 +1,5 @@
-// Scripted demo-agent turns for README media. Each prompt maps to steps replayed by
-// scripts/demo-agent.mjs (AGENTWORKS_DEMO_SCRIPT); nothing here runs a model or a command.
+// Scripted demo agent turns for README media. Each prompt maps to steps replayed by
+// the built-in demo agent, `agentworks demo-acp` (AGENTWORKS_DEMO_SCRIPT); nothing here runs a model or a command.
 // The capture script makes the matching file edits itself so Files and Diff show real Git state.
 
 export const HERO_PROMPT='Add rate limiting to POST /login: 5 attempts per minute per IP. Cover it with tests.';

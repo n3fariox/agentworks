@@ -187,10 +187,10 @@ for(const mobile of [false,true])test(`guided enrollment terminal ${mobile?'mobi
 
 test('enrollment error allows retry and close cancels the terminal',async({page})=>{
  await fixture(page);let count=0,closed=false;
- await page.routeWebSocket('**/api/hosts/enroll/events',ws=>{ws.onClose(()=>closed=true);ws.onMessage(data=>{if(JSON.parse(data).destination){count++;if(count===1)ws.send(JSON.stringify({type:'error',message:'mise is required on this host'}));else ws.send(JSON.stringify({type:'stage',message:'Connecting…'}));}});});
+ await page.routeWebSocket('**/api/hosts/enroll/events',ws=>{ws.onClose(()=>closed=true);ws.onMessage(data=>{if(JSON.parse(data).destination){count++;if(count===1)ws.send(JSON.stringify({type:'error',message:'tar is required on this host'}));else ws.send(JSON.stringify({type:'stage',message:'Connecting…'}));}});});
  await page.locator('#view-hosts').click();await page.getByRole('button',{name:'Add host'}).click();
  await page.locator('#host-name').fill('Box');await page.locator('#host-destination').fill('dev@box');await page.locator('#save-host').click();
- await expect(page.locator('#host-error')).toContainText('mise is required');await expect(page.locator('#save-host')).toBeEnabled();
+ await expect(page.locator('#host-error')).toContainText('tar is required');await expect(page.locator('#save-host')).toBeEnabled();
  await page.locator('#save-host').click();await expect(page.locator('#host-stage')).toContainText('Connecting');
  closed=false;await page.locator('#dismiss-host').click();await expect.poll(()=>closed).toBe(true);await expect(page.locator('#host-dialog')).toBeHidden();
 });

@@ -361,6 +361,7 @@ pub async fn run(
             cwd: def.cwd,
             title: Some(format!("{} · Manual run", def.name)),
             model: def.model,
+            model_provider: None,
             project_id: def.project_id,
             host_id: Some(def.host_id),
             external_id: None,

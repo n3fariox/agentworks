@@ -24,6 +24,8 @@ def harness():
     active_thread = "thread-1"
     deleted = set()
     late_compaction = None
+    child_history = {}
+    child_pending = False
     settings = dict(model="test-model", reasoningEffort="medium", sandbox=dict(type="readOnly", networkAccess=False), approvalPolicy="on-request", approvalsReviewer="user", serviceTier=None)
 
     def notify(method, **params):
@@ -37,6 +39,12 @@ def harness():
         method, p = v.get("method"), v.get("params", {})
         if method is None:  # approval or question response
             result = v.get("result", {})
+            if child_pending:
+                activity = dict(id="child-finished",type="subAgentActivity",kind="completed",agentThreadId="child-b",agentPath="/root/research/reviewer")
+                send(dict(method="item/started",params=dict(threadId="child-a",item=activity)))
+                send(dict(method="turn/completed", params=dict(threadId="child-b", turn=dict(id="child-turn", status="completed"))))
+                send(dict(method="item/completed",params=dict(threadId="child-a",item=activity)))
+                child_pending = False
             notify("item/agentMessage/delta", delta=json.dumps(result))
             notify("serverRequest/resolved", requestId="approval")
             complete()
@@ -66,6 +74,9 @@ def harness():
         elif method == "thread/list":
             result = dict(data=[dict(id="thread-1", cwd="/tmp", preview="Previous chat")], nextCursor=None)
         elif method == "thread/read":
+            if p["threadId"] == "child-b" and os.environ.get("ACP_FIXTURE_MISSING_CHILD"):
+                send(dict(id=v["id"],error=dict(code=-32602,message="Child history was deleted")))
+                continue
             if p["threadId"] == "legacy":
                 result = dict(thread=dict(historyMode="legacy", turns=[dict(id="turn-old", items=[dict(id="old-user", type="userMessage", content=[dict(type="text", text="old prompt")]), dict(id="old-answer", type="agentMessage", text="old answer")])]))
             else:
@@ -73,7 +84,9 @@ def harness():
                 result = dict(thread=dict(historyMode="paginated", turns=[]))
         elif method == "thread/items/list":
             assert p["sortDirection"] == "asc"
-            if p.get("cursor") is None:
+            if p["threadId"] in child_history:
+                result = dict(data=[dict(turnId="child-turn", item=item) for item in child_history[p["threadId"]]], nextCursor=None)
+            elif p.get("cursor") is None:
                 result = dict(data=[dict(turnId="turn-old", item=dict(id="old-user", type="userMessage", content=[dict(type="text", text="old prompt")]))], nextCursor="page-2")
             else:
                 assert p["cursor"] == "page-2"
@@ -150,7 +163,27 @@ def harness():
                 notify("item/agentMessage/delta", delta="early answer")
                 complete()  # deliberately before the turn/start response
             send(dict(id=v["id"], result=result))
-            if text == "approval":
+            if text.startswith("subagents"):
+                child_pending = True
+                legacy = dict(id="spawn-a", type="collabAgentToolCall", tool="spawnAgent", status="completed", senderThreadId=active_thread, receiverThreadIds=["child-a"], prompt="Inspect the project", agentsStates={"child-a":dict(status="running")})
+                modern = dict(id="spawn-b", type="subAgentActivity", kind="started", agentThreadId="child-b", agentPath="/root/research/reviewer")
+                child_history = {
+                    active_thread:[legacy],
+                    "child-a":[modern,dict(id="same-message",type="agentMessage",text="Child answer")],
+                    "child-b":[dict(id="same-message",type="agentMessage",text="Nested answer")],
+                }
+                notify("item/completed", item=legacy)
+                send(dict(method="thread/started", params=dict(thread=dict(id="child-a",parentThreadId=active_thread,agentNickname="Researcher",agentRole="explorer"))))
+                send(dict(method="item/started", params=dict(threadId="child-a", item=modern)))
+                # An unrelated relationship notification cannot reparent an existing child.
+                send(dict(method="thread/started",params=dict(thread=dict(id="child-a",parentThreadId="child-b"))))
+                for sid, text in [(active_thread,"Root answer"),("child-a","Child answer"),("child-b","Nested answer"),("unknown-child","Must not leak")]:
+                    send(dict(method="item/agentMessage/delta", params=dict(threadId=sid,itemId="same-message",delta=text)))
+                    send(dict(method="item/started", params=dict(threadId=sid,item=dict(id="tool-1",type="commandExecution",command="echo fixture",status="inProgress"))))
+                send(dict(method="turn/completed", params=dict(threadId="child-a",turn=dict(id=active,status="completed"))))
+                send(dict(method="thread/status/changed",params=dict(threadId="child-b",status=dict(type="active",activeFlags=["waitingOnApproval"]))))
+                send(dict(id="approval",method="item/commandExecution/requestApproval",params=dict(threadId="child-b",turnId="child-turn",itemId="tool-1",command="echo child",availableDecisions=["accept","decline"])))
+            elif text == "approval":
                 send(dict(id="approval", method="item/commandExecution/requestApproval", params=dict(threadId="thread-1", turnId=active, itemId="tool-1", command="echo hello", availableDecisions=["accept", "decline", "cancel"])))
             elif text == "question":
                 send(dict(id="approval", method="item/tool/requestUserInput", params=dict(threadId="thread-1", turnId=active, itemId="tool-1", questions=[dict(id="color", header="Color", question="Choose a color", options=[dict(label="Blue"), dict(label="Red")])])))
@@ -171,6 +204,9 @@ def harness():
             continue
         elif method == "turn/interrupt":
             assert p["turnId"] == active
+            if child_pending:
+                send(dict(method="turn/completed",params=dict(threadId="child-b",turn=dict(id="child-turn",status="interrupted"))))
+                child_pending = False
             notify("serverRequest/resolved", requestId="approval")
             complete("interrupted")
         if "id" in v:
@@ -184,6 +220,8 @@ class BridgeTests(unittest.TestCase):
         env=dict(os.environ, CODEX_PATH=str(Path(__file__).resolve()))
         if self._testMethodName=="test_cancel_native_compaction":
             env["ACP_FIXTURE_HOLD_COMPACT"]="1"
+        if self._testMethodName=="test_subagents_missing_child_history_keeps_parent_loadable":
+            env["ACP_FIXTURE_MISSING_CHILD"]="1"
         self.process = subprocess.Popen([binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
         self.addCleanup(self.close)
         self.messages = queue.Queue()
@@ -196,7 +234,10 @@ class BridgeTests(unittest.TestCase):
             self.messages.put(None)
 
         threading.Thread(target=read, daemon=True).start()
-        init = self.call("initialize", dict(protocolVersion=1, clientCapabilities=dict(elicitation=dict(form={}), session=dict(configOptions=dict(boolean={})))))
+        capabilities = dict(elicitation=dict(form={}), session=dict(configOptions=dict(boolean={})))
+        if self._testMethodName != "test_subagents_without_client_capability":
+            capabilities["subagents"] = {}
+        init = self.call("initialize", dict(protocolVersion=1, clientCapabilities=capabilities))
         self.assertTrue(init["agentCapabilities"]["loadSession"])
 
     def close(self):
@@ -267,6 +308,74 @@ class BridgeTests(unittest.TestCase):
         chunks = str(self.seen)
         self.assertIn("accept", chunks)
         self.assertIn("Blue", chunks)
+
+    def subagent_prompt(self):
+        self.session()
+        request_id = self.send("session/prompt", dict(sessionId="thread-1", prompt=[dict(type="text", text="subagents")]))
+        approval = self.until(lambda v:v.get("method")=="session/request_permission")
+        self.assertFalse(any(v.get("id")==request_id and "method" not in v for v in self.seen), "Child completion ended parent prompt")
+        return request_id, approval
+
+    def finish_subagents(self, request_id, approval):
+        self.write(dict(jsonrpc="2.0",id=approval["id"],result=dict(outcome=dict(outcome="selected",optionId="accept"))))
+        response=self.until(lambda v:v.get("id")==request_id and "method" not in v)
+        self.assertEqual(response["result"]["stopReason"],"end_turn")
+
+    def test_subagents_route_nested_traffic_and_approvals(self):
+        request_id, approval = self.subagent_prompt()
+        self.assertEqual(approval["params"]["sessionId"], "child-b")
+        announcements = set()
+        for v in self.seen:
+            if v.get("method") != "session/update": continue
+            p=v["params"];u=p["update"]
+            if u["sessionUpdate"]=="subagent_update":
+                if p["sessionId"]!="thread-1": self.assertIn(p["sessionId"],announcements)
+                announcements.add(u["sessionId"])
+                if u["sessionId"]=="child-a": self.assertEqual(p["sessionId"],"thread-1")
+                self.assertNotIn("prompt",u.get("capabilities",{}))
+            elif p["sessionId"]!="thread-1": self.assertIn(p["sessionId"],announcements)
+            self.assertNotEqual(p["sessionId"],"unknown-child")
+        self.assertEqual(announcements,{"child-a","child-b"})
+        for sid in ["thread-1","child-a","child-b"]:
+            self.assertTrue(any(v.get("params",{}).get("sessionId")==sid and v.get("params",{}).get("update",{}).get("toolCallId")=="tool-1" for v in self.seen))
+        self.assertTrue(any(v.get("params",{}).get("update",{}).get("state")=={"state":"requires_action"} for v in self.seen))
+        rejected=self.send("session/prompt",dict(sessionId="child-b",prompt=[dict(type="text",text="not allowed")]))
+        self.assertIn("error",self.until(lambda v:v.get("id")==rejected))
+        self.finish_subagents(request_id,approval)
+        self.assertEqual(self.prompt("normal")["stopReason"],"end_turn")
+
+    def test_subagents_without_client_capability(self):
+        request_id, approval = self.subagent_prompt()
+        self.assertEqual(approval["params"]["sessionId"],"thread-1")
+        self.assertFalse(any(v.get("params",{}).get("sessionId") in ["child-a","child-b"] for v in self.seen))
+        self.assertFalse(any(v.get("params",{}).get("update",{}).get("sessionUpdate")=="subagent_update" for v in self.seen))
+        self.finish_subagents(request_id,approval)
+
+    def test_subagents_history_replays_after_close(self):
+        request_id, approval = self.subagent_prompt()
+        self.finish_subagents(request_id,approval)
+        self.call("session/close",dict(sessionId="thread-1"))
+        self.seen.clear()
+        self.session("session/load")
+        for sid,text in [("child-a","Child answer"),("child-b","Nested answer")]:
+            self.assertTrue(any(v.get("params",{}).get("sessionId")==sid and v.get("params",{}).get("update",{}).get("content",{}).get("text")==text for v in self.seen if isinstance(v.get("params",{}).get("update",{}).get("content"),dict)))
+
+    def test_subagents_parent_cancel_with_child_approval(self):
+        request_id, _ = self.subagent_prompt()
+        self.send("session/cancel",dict(sessionId="thread-1"),request=False)
+        response=self.until(lambda v:v.get("id")==request_id and "method" not in v)
+        self.assertEqual(response["result"]["stopReason"],"cancelled")
+        self.assertTrue(any(v.get("params",{}).get("update",{}).get("state")=={"state":"idle","stopReason":"cancelled"} for v in self.seen))
+        self.assertEqual(self.prompt("normal")["stopReason"],"end_turn")
+
+    def test_subagents_missing_child_history_keeps_parent_loadable(self):
+        request_id, approval = self.subagent_prompt()
+        self.finish_subagents(request_id,approval)
+        self.call("session/close",dict(sessionId="thread-1"))
+        self.seen.clear()
+        self.session("session/load")
+        self.assertTrue(any(v.get("params",{}).get("update",{}).get("sessionId")=="child-b" and v["params"]["update"].get("state")=={"state":"unknown"} for v in self.seen))
+        self.assertEqual(self.prompt("normal")["stopReason"],"end_turn")
 
     def test_cancel_with_pending_approval_then_continue(self):
         self.session()

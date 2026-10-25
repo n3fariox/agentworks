@@ -223,6 +223,12 @@ pub async fn set(
                 "Choose session settings while the session is idle",
             ));
         }
+        if data.model_provider.is_some() && req.config_id == "provider" {
+            return Err(fail(
+                StatusCode::CONFLICT,
+                "This session uses its saved model provider profile. Choose another profile in a new session",
+            ));
+        }
         let advertised = option(&data.session_config, &req.config_id)
             .filter(|o| valid(o, &req.value))
             .ok_or_else(|| {

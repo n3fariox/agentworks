@@ -30,7 +30,7 @@ impl Role {
             run_automations: self == Self::Coordinator,
             restart_service: false,
             manage_review_queue: false,
-            archive_sessions: false,
+            archive_sessions: self == Self::Coordinator,
         }
     }
 }
@@ -162,7 +162,19 @@ impl crate::store::Store {
 }
 
 pub fn access(app: &App, s: &Session) -> Result<Access> {
-    app.store.lock().unwrap().access(&s.id)
+    app.store
+        .lock()
+        .unwrap()
+        .access(&s.id)
+        .map(imply_coordinator_archive)
+}
+fn imply_coordinator_archive(mut access: Access) -> Access {
+    // Coordinator grants already include same-project session management. Let
+    // older saved coordinator grants use the same safe archive path too.
+    if coordinator(&access) {
+        access.archive_sessions = true;
+    }
+    access
 }
 pub fn project(s: &Session) -> Option<String> {
     s.data.lock().unwrap().project_id.clone()
@@ -209,7 +221,12 @@ impl Actor {
 /// Grants are reread on every call, so revocation applies to existing connections.
 pub fn actor_access(app: &App, a: &Actor) -> Result<Access> {
     if a.session.is_some() {
-        return app.store.lock().unwrap().access(&a.id);
+        return app
+            .store
+            .lock()
+            .unwrap()
+            .access(&a.id)
+            .map(imply_coordinator_archive);
     }
     let id =
         a.id.strip_prefix(crate::controllers::ACTOR_PREFIX)
@@ -246,7 +263,12 @@ fn not_granted(capability: &str) -> (StatusCode, String) {
 }
 pub fn require_actor(app: &App, a: &Actor, capability: &str) -> Result<Access> {
     let access = actor_access(app, a)?;
-    if !permitted(&access, capability) {
+    let allowed = if capability == "archive_sessions" && a.session.is_some() {
+        coordinator(&access)
+    } else {
+        permitted(&access, capability)
+    };
+    if !allowed {
         return Err(not_granted(capability));
     }
     Ok(access)
@@ -457,6 +479,7 @@ pub async fn set_access(
 ) -> ApiResult {
     let _gate = app.communication_lock.lock().await;
     let s = session(&app, &id)?;
+    let req = imply_coordinator_archive(req);
     if !req.communicate {
         crate::inbox_delivery::revoke_related(&app, &s, "Communication grant revoked")?;
     }
@@ -548,4 +571,25 @@ pub async fn audit_log(State(app): State<App>, Path(id): Path<String>) -> ApiRes
     let mut q=store.connection.prepare("SELECT a.actor,a.action,a.target,a.outcome,a.created,c.name FROM agent_audit a LEFT JOIN agent_controllers c ON a.actor='controller:'||c.id WHERE a.actor=?1 OR a.target=?1 ORDER BY a.id DESC LIMIT 100").map_err(db_error)?;
     let events=q.query_map([id],|r|Ok(json!({"actor":r.get::<_,String>(0)?,"action":r.get::<_,String>(1)?,"target":r.get::<_,String>(2)?,"outcome":r.get::<_,String>(3)?,"created":r.get::<_,i64>(4)?,"actorTitle":r.get::<_,Option<String>>(5)?}))).map_err(db_error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?;
     Ok(Json(json!({"events":events})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saved_coordinator_grants_imply_archive_but_participants_do_not() {
+        let legacy_coordinator = Access {
+            communicate: true,
+            start_sessions: true,
+            prompt_sessions: true,
+            cancel_sessions: true,
+            run_automations: true,
+            ..Default::default()
+        };
+        assert!(!legacy_coordinator.archive_sessions);
+        assert!(imply_coordinator_archive(legacy_coordinator).archive_sessions);
+        assert!(!imply_coordinator_archive(Role::Participant.access()).archive_sessions);
+        assert!(Role::Coordinator.access().archive_sessions);
+    }
 }

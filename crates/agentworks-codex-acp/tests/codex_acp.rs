@@ -8,11 +8,17 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo};
 use serde_json::json;
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 #[tokio::test]
 async fn native_bridge_works_with_typed_acp_client() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let updates = Arc::new(Mutex::new(Vec::new()));
+    let received = updates.clone();
     let config = AcpAgentConfig::new(env!("CARGO_BIN_EXE_agentworks-codex-acp")).env(
         "CODEX_PATH",
         root.join("tests/codex-acp.test.py").to_string_lossy(),
@@ -22,7 +28,10 @@ async fn native_bridge_works_with_typed_acp_client() {
         Client
             .builder()
             .on_receive_notification(
-                async |_: SessionNotification, _cx| Ok(()),
+                async move |p: SessionNotification, _cx| {
+                    received.lock().unwrap().push(serde_json::to_value(p)?);
+                    Ok(())
+                },
                 agent_client_protocol::on_receive_notification!(),
             )
             .on_receive_request(
@@ -46,7 +55,7 @@ async fn native_bridge_works_with_typed_acp_client() {
             .connect_with(
                 AcpAgent::new(config),
                 move |cx: ConnectionTo<Agent>| async move {
-                    let init: InitializeRequest=serde_json::from_value(json!({"protocolVersion":1,"clientCapabilities":{"session":{"configOptions":{"boolean":{}}},"elicitation":{"form":{}}}}))?;
+                    let init: InitializeRequest=serde_json::from_value(json!({"protocolVersion":1,"clientCapabilities":{"subagents":{},"session":{"configOptions":{"boolean":{}}},"elicitation":{"form":{}}}}))?;
                     let initialized=cx.send_request(init).block_task().await?;
                     assert!(serde_json::to_value(initialized)?["agentCapabilities"]["sessionCapabilities"]["close"].is_object());
                     let session = cx
@@ -56,7 +65,7 @@ async fn native_bridge_works_with_typed_acp_client() {
                     assert!(!session.config_options.as_ref().unwrap().is_empty());
                     let configured=cx.send_request(SetSessionConfigOptionRequest::new(session.session_id.clone(),"fast-mode",SessionConfigOptionValue::boolean(true))).block_task().await?;
                     assert!(serde_json::to_value(configured)?["configOptions"].as_array().unwrap().iter().any(|o|o["id"]=="fast-mode" && o["currentValue"]==true));
-                    for text in ["early", "normal", "approval", "question", "/status", "/skills", "/compact", "/review"] {
+                    for text in ["early", "normal", "approval", "question", "subagents", "/status", "/skills", "/compact", "/review"] {
                         let response = cx
                             .send_request(PromptRequest::new(
                                 session.session_id.clone(),
@@ -89,4 +98,12 @@ async fn native_bridge_works_with_typed_acp_client() {
     .await
     .expect("bridge timed out")
     .unwrap();
+    let updates = updates.lock().unwrap();
+    assert!(updates.iter().any(|p| p["sessionId"] == "child-a"
+        && p["update"]["sessionUpdate"] == "subagent_update"
+        && p["update"]["sessionId"] == "child-b"));
+    assert!(updates.iter().any(|p| p["sessionId"] == "child-a"
+        && p["update"]["sessionUpdate"] == "subagent_update"
+        && p["update"]["sessionId"] == "child-b"
+        && p["update"]["state"]["stopReason"] == "end_turn"));
 }

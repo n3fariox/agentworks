@@ -30,7 +30,7 @@ async function create(project,agentAccess){return api('/api/sessions',{provider:
 async function access(s){return api(`/api/sessions/${s.id}/agent-access`);}
 const off={communicate:false,startSessions:false,promptSessions:false,cancelSessions:false,runAutomations:false,restartService:false,manageReviewQueue:false,archiveSessions:false};
 const participant={...off,communicate:true};
-const coordinator={...participant,startSessions:true,promptSessions:true,cancelSessions:true,runAutomations:true};
+const coordinator={...participant,startSessions:true,promptSessions:true,cancelSessions:true,runAutomations:true,archiveSessions:true};
 test.beforeAll(async()=>{await mkdir('.cache',{recursive:true});fixture=await mkdtemp(resolve('.cache/communication-defaults-'));await start();});
 test.beforeEach(async({},info)=>{if(!info.title.startsWith('unconfigured'))await setGlobal('off');});
 test.afterEach(async()=>{

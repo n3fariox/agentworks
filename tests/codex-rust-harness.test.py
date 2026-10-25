@@ -100,6 +100,20 @@ class HarnessTests(unittest.TestCase):
         self.request(path+"/resume","POST",{})
         self.until(lambda:self.request(path)["session"]["status"]=="idle")
 
+    def test_native_subagents_reach_application_routing(self):
+        created=self.request("/api/sessions","POST",dict(provider="codex-rust",cwd=str(self.cwd),title="Native child test"))
+        path="/api/sessions/"+created["id"]
+        self.until(lambda:self.request(path)["session"]["status"]=="idle")
+        self.request(path+"/prompt","POST",dict(text="subagents",requestId=str(uuid4())))
+        snapshot=self.until(lambda:(s if (s:=self.request(path))["session"]["status"]=="waiting" else None))
+        approval=snapshot["approvals"][0]
+        self.assertEqual(approval["request"]["sessionId"],"child-b")
+        events=[e["data"] for e in snapshot["events"] if e["kind"]=="acp"]
+        self.assertTrue(any(e.get("acpSessionId")=="child-a" and e.get("sessionId")=="child-b" and e.get("sessionUpdate")=="subagent_update" for e in events))
+        self.assertTrue(any(e.get("acpSessionId")=="child-b" and e.get("parentSessionId")=="child-a" and e.get("content",{}).get("text")=="Nested answer" for e in events if isinstance(e.get("content"),dict)))
+        self.request(path+"/approvals/"+approval["id"],"POST",dict(optionId="accept"))
+        self.until(lambda:self.request(path)["session"]["status"]=="idle")
+
 
 if __name__=="__main__":
     unittest.main()

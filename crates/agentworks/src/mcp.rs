@@ -179,12 +179,12 @@ fn tools(a: &mail::Access, session: bool) -> Value {
         tools.push(tool("restart_service", "GLOBAL service restart. Explicit human restartService grant required. Returns durable identity immediately. wait drains all sessions; interrupt stops all harnesses. Optional handoff resumes only your saved native context once, after finishing this turn.", json!({"requestId":{"type":"string"},"mode":{"type":"string","enum":["wait","interrupt"]},"expiresInSeconds":{"type":"integer","minimum":5,"maximum":900},"release":{"type":"string"},"handoff":{"type":"boolean"},"handoffDeadline":{"type":"integer"}}), &["requestId","mode","expiresInSeconds"]));
     }
     if a.start_sessions {
-        tools.push(tool("start_session","Start a session using the project's configured communication role; no grants are copied from the caller. Does not submit a prompt. Reuse requestId on retry.",json!({"provider":{"type":"string","enum":agentworks_runtime::remote::PROVIDERS},"cwd":{"type":"string"},"inheritResumePolicy":{"type":"boolean","default":false},"title":{"type":"string"},"model":{"type":"string"},"requestId":{"type":"string","maxLength":50},"workspace":{"type":"object","properties":{"mode":{"type":"string","enum":["directory","newWorktree","existingWorktree"]},"branch":{"type":"string"},"baseRef":{"type":"string"},"path":{"type":"string"}},"required":["mode"],"additionalProperties":false}}),&["provider","cwd","requestId"]));
+        tools.push(tool("start_session","Start a session using the project's configured communication role; no grants are copied from the caller. Does not submit a prompt. Reuse requestId on retry.",json!({"provider":{"type":"string","enum":agentworks_runtime::remote::PROVIDERS},"cwd":{"type":"string"},"inheritResumePolicy":{"type":"boolean","default":false},"title":{"type":"string"},"model":{"type":"string"},"modelProvider":{"type":"string"},"requestId":{"type":"string","maxLength":50},"workspace":{"type":"object","properties":{"mode":{"type":"string","enum":["directory","newWorktree","existingWorktree"]},"branch":{"type":"string"},"baseRef":{"type":"string"},"path":{"type":"string"}},"required":["mode"],"additionalProperties":false}}),&["provider","cwd","requestId"]));
     }
     if a.prompt_sessions {
         tools.push(tool("prompt_session","Submit a new turn to an idle session in this project; starts model work. Reuse requestId on retry.",json!({"sessionId":{"type":"string","description":"Session ID or agentworks://sessions/<id> URI, passed exactly as given in list_sessions or a prompt."},"text":{"type":"string"},"requestId":{"type":"string","maxLength":50}}),&["sessionId","text","requestId"]));
     }
-    if a.archive_sessions && !session {
+    if (session && mail::coordinator(a)) || (!session && a.archive_sessions) {
         tools.push(tool("archive_session", "Archive a session in this controller’s project. Stops its terminal. Default worktree cleanup removes only safe, clean owned worktrees and retains dirty, busy or unsafe worktrees. Does not merge or delete branches. No unarchive or cleanup override is available.", json!({"sessionId":{"type":"string","minLength":1,"description":"Session ID or agentworks://sessions/<id> URI."}}), &["sessionId"]));
     }
     if a.cancel_sessions {
@@ -360,6 +360,7 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
                 cwd: field(&args, "cwd")?,
                 title: args["title"].as_str().map(str::to_owned),
                 model: args["model"].as_str().map(str::to_owned),
+                model_provider: args["modelProvider"].as_str().map(str::to_owned),
                 project_id: Some(scope),
                 host_id: Some(
                     a.session
@@ -407,12 +408,6 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
             .map(|j| j.0)
         }
         "archive_session" => {
-            if a.session.is_some() {
-                return Err(crate::fail(
-                    StatusCode::FORBIDDEN,
-                    "Only external controllers can archive sessions",
-                ));
-            }
             mail::require_actor(app, a, "archive_sessions")?;
             let req: ArchiveSession = serde_json::from_value(args).map_err(|_| {
                 crate::fail(StatusCode::BAD_REQUEST, "Invalid archive request fields")
@@ -544,12 +539,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn archive_requires_explicit_controller_grant_without_other_tools() {
-        for role in [
-            mail::Role::Off,
-            mail::Role::Participant,
-            mail::Role::Coordinator,
-        ] {
+    fn coordinators_and_explicit_controllers_can_archive_sessions() {
+        for role in [mail::Role::Off, mail::Role::Participant] {
             let access = role.access();
             assert!(!access.archive_sessions);
             for session in [true, false] {
@@ -561,6 +552,17 @@ mod tests {
                         .any(|t| t["name"] == "archive_session")
                 );
             }
+        }
+        let coordinator = mail::Role::Coordinator.access();
+        assert!(coordinator.archive_sessions);
+        for session in [true, false] {
+            assert!(
+                tools(&coordinator, session)["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|t| t["name"] == "archive_session")
+            );
         }
         let old: mail::Access = serde_json::from_value(json!({"communicate":true})).unwrap();
         assert!(!old.archive_sessions);

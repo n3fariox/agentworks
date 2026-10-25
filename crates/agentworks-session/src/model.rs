@@ -27,6 +27,8 @@ pub struct SessionData {
     /// Most recent submitted prompt survives the bounded in-memory event window.
     #[serde(default)]
     pub last_prompt: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider: Option<String>,
     pub models: Value,
     #[serde(default)]
     pub permission_modes: Value,

@@ -7,6 +7,7 @@
     "test:smoke": "node scripts/smoke.mjs",
     "test:browser": "playwright test",
     "verify": "node scripts/verify.mjs",
+    "test:goose": "node scripts/goose-smoke.mjs",
     "test:opencode": "node scripts/opencode-smoke.mjs",
     "test:signin": "node scripts/signin-smoke.mjs",
     "test:capabilities": "node scripts/capabilities-smoke.mjs",

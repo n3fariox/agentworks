@@ -52,13 +52,14 @@ const MAX_FRAME: usize = 64 * 1024 * 1024;
 /// earlier, such as output from the remote shell's startup files, is skipped.
 pub const READY: &str = "agentworks worker ready";
 const MAX_PREAMBLE: usize = 64 * 1024;
-pub const PROVIDERS: [&str; 6] = [
+pub const PROVIDERS: [&str; 7] = [
     "demo",
     "claude",
     "claude-rust",
     "codex",
     "codex-rust",
     "opencode",
+    "goose",
 ];
 const PING_EVERY: Duration = Duration::from_secs(15);
 const SILENCE_LIMIT: Duration = Duration::from_secs(45);
@@ -622,6 +623,14 @@ impl Live {
         let result = self.request(request).await?;
         serde_json::from_str(&result).map_err(|_| "Invalid workspace reply".into())
     }
+    pub async fn model_providers(&self, mut request: Value) -> Result<Value, String> {
+        if self.worker["modelProviders"] != true {
+            return Err("Update this host's worker to configure model providers".into());
+        }
+        request["type"] = json!("modelProviders");
+        let result = self.request(request).await?;
+        serde_json::from_str(&result).map_err(|_| "Invalid model provider reply".into())
+    }
     async fn request(&self, mut request: Value) -> Result<String, String> {
         // Lifecycle operations perform several bounded Git checks plus adapter
         // shutdown. Directory validation retains its shorter deadline.
@@ -662,6 +671,18 @@ impl Live {
         cwd: &str,
         host_profile: bool,
     ) -> Result<(RemoteLines, Spawned), String> {
+        self.spawn_profile(provider, cwd, host_profile, None)
+    }
+    pub fn spawn_profile(
+        self: &Arc<Self>,
+        provider: &str,
+        cwd: &str,
+        host_profile: bool,
+        model_provider: Option<&crate::model_providers::Connection>,
+    ) -> Result<(RemoteLines, Spawned), String> {
+        if model_provider.is_some() && self.worker["sharedModelProviders"] != true {
+            return Err("Update this host's worker to use model provider profiles".into());
+        }
         let channel = self.next_channel.fetch_add(1, Ordering::Relaxed) + 1;
         let (incoming_tx, incoming) = unbounded();
         {
@@ -671,7 +692,7 @@ impl Live {
             }
             channels.insert(channel, incoming_tx);
         }
-        let spawn = json!({"type":"spawn","channel":channel,"provider":provider,"cwd":cwd,"hostProfile":host_profile});
+        let spawn = json!({"type":"spawn","channel":channel,"provider":provider,"cwd":cwd,"hostProfile":host_profile,"modelConnection":model_provider});
         if self.out.try_send(Message::text(spawn.to_string())).is_err() {
             self.channels.lock().unwrap().remove(&channel);
             return Err("The host disconnected.".into());
@@ -846,6 +867,8 @@ fn check_hello(hello: &Value) -> Result<Value, String> {
         "providers": providers,
         "tools": hello["tools"],
         "workspace": hello["workspace"] == true,
+        "modelProviders": hello["modelProviders"] == true,
+        "sharedModelProviders": hello["sharedModelProviders"] == true,
         "worktreeCleanup": hello["worktreeCleanup"] == true,
         "terminal": hello["terminal"].as_bool().unwrap_or(false),
         "home": text("home", 4096),

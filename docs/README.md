@@ -4,6 +4,7 @@ Start with the [quick start](../README.md). Commands in these documents run from
 
 ## Guides
 
+- [Embedded Goose harness](RUST-GOOSE-ACP.md): provider configuration and the linked ACP runtime.
 - [Agent setup](AGENT-SETUP.md): credentials, models, permission modes, commands, skills, and OpenCode.
 - [User guide](USER-GUIDE.md): sessions, terminals, files, automations, workspaces, and communication.
 - [Operations](OPERATIONS.md): local/remote hosts, directories, network access, persistence, and restarts.

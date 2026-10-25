@@ -72,9 +72,19 @@ Review reports also arrive through native review-mode items. The adapter preserv
 the review API's owning turn ID when Codex emits an internal turn-start ID, and
 waits for the owning turn's completion before accepting the next prompt.
 
-This is intentionally smaller than the upstream adapter. Native
-subagent sessions, other optional AIR extensions, and automatic app-server crash
-recovery remain unimplemented. Fork boundaries use stable native item IDs (including
+Native subagents use ACP's negotiated `subagents` extension. The bridge announces
+children before forwarding their text, reasoning, tools, plans, usage, and approval
+requests under the child's session ID. It handles both `subAgentActivity` and older
+`collabAgentToolCall` records, including nested ownership and state updates. Loading
+a parent replays its recorded child tree using read-only history requests; missing
+or deleted child history does not prevent the parent from loading. Child mutations
+are not advertised: send instructions and cancellation through the parent, leaving
+execution to Codex. Clients without the extension receive ordinary collaboration
+tool calls and child approvals on the root session instead of child traffic.
+
+This is intentionally smaller than the upstream adapter. Other optional AIR
+extensions and automatic app-server crash recovery remain unimplemented.
+Fork boundaries use stable native item IDs (including
 Agentworks' visible segment suffix); unknown boundaries fail rather than inheriting
 newer history. Fingerprint-only boundary recovery is not implemented.
 

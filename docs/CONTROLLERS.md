@@ -17,7 +17,7 @@ Each controller belongs to exactly one project and is created by a human in **Pr
 | `communicate` | `read_inbox`, `send_message`, `acknowledge_message` |
 | `startSessions` | `start_session` in its project; started sessions inherit no grants and record the controller as initiator |
 | `promptSessions` / `cancelSessions` | `prompt_session` / `cancel_session` on same-project sessions |
-| `archiveSessions` | `archive_session {sessionId}` on same-project sessions, including non-messaging sessions |
+| `archiveSessions` | `archive_session {sessionId}` on same-project sessions, including non-messaging sessions. Controller grant remains explicit. |
 | `runAutomations` | `list_automations`, `run_automation` for project automations |
 
 These are never available to controllers, regardless of stored grants:
@@ -27,7 +27,7 @@ These are never available to controllers, regardless of stored grants:
 - `inheritResumePolicy`;
 - any human-only operation: grants, settings, deletion, explicit worktree removal and harness approvals.
 
-`archiveSessions` is default-off for existing grants and every session role. Only external controllers can call `archive_session`; other grants do not authorize it. It accepts a bare session ID or session URI and rejects all additional fields. The tool uses the HTTP lifecycle archive path with default (`auto`) cleanup: clean, safe owned worktrees may be removed (branch retained), while dirty, busy, shared, locked or unsafe worktrees are retained. Terminal shutdown, persistence and events are unchanged. It cannot rename, unarchive, force removal or confirm dirty deletion. Repeating a call on an already archived session returns its metadata without rerunning cleanup. Every call, including retries, checks current grants and project scope and is audited.
+For session-based MCP callers, coordinator grants also enable `archive_session`; a participant cannot gain it by setting only an `archiveSessions` field. Older saved coordinator grants gain archive access through the same coordinator capability check. External controllers still require the explicit `archiveSessions` grant. The tool accepts a bare session ID or session URI and rejects all additional fields. It uses the HTTP lifecycle archive path with default (`auto`) cleanup: clean, safe owned worktrees may be removed (branch retained), while dirty, busy, shared, locked or unsafe worktrees are retained. Terminal shutdown, persistence and events are unchanged. It cannot rename, unarchive, force removal or confirm dirty deletion. Repeating a call on an already archived session returns its metadata without rerunning cleanup. Every call, including retries, checks current grants and project scope and is audited.
 
 Project boundaries are enforced in every handler, including for known IDs, retries and reply targets.
 
