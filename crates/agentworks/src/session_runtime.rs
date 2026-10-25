@@ -367,7 +367,7 @@ pub async fn run(
         let data = s.data.lock().unwrap();
         if cli_provider(&s.provider) == "claude" && data.provider_session_id.is_none() {
             data.initial_claude_permission_mode.map(|mode| mode.id())
-        } else if s.provider == "codex" && data.provider_session_id.is_none() {
+        } else if cli_provider(&s.provider) == "codex" && data.provider_session_id.is_none() {
             data.initial_codex_permission_mode.map(|mode| mode.id())
         } else {
             None
@@ -547,7 +547,7 @@ pub async fn run(
                     return Err(agent_client_protocol::Error::internal_error().data("Saved permission mode is no longer advertised; inspect session configuration"));
                 }
             } else if let Some(mode)=initial_mode {
-                mode_config=crate::permission_modes::apply_initial(mode_config,if s.provider=="codex" {"Codex"} else {"Claude"},mode,|config_id,mode| {
+                mode_config=crate::permission_modes::apply_initial(mode_config,if cli_provider(&s.provider)=="codex" {"Codex"} else {"Claude"},mode,|config_id,mode| {
                     let connection=&connection;let provider_id=&provider_id;let s=&s;
                     async move {
                     let config=s.data.lock().unwrap().session_config.clone();

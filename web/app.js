@@ -9,7 +9,7 @@ import {setupGitContext} from './git-context.js';
 import {setupWorktreeOwnership} from './worktree-ownership.js';
 import {setupControllers} from './controllers.js';
 import {setupImageViewer} from './image-viewer.js';
-import {setupChatReferences} from './chat-references.js';
+import {setupChatReferences,renderUserReferences} from './chat-references.js';
 import {createWorkspace} from './workspace.js';
 import {setupCommunication} from './communication.js';
 import {setupPalettes} from './palettes.js';
@@ -70,7 +70,7 @@ let replaying=false,workLogs=null,turnEnds=new Map();
 // page re-folds everything: a message or tool stream may straddle a page boundary.
 // `older.mode`: 'none' (snapshot is complete), 'more' (server reported truncation) or
 // 'begin' (the server confirmed there is nothing earlier).
-let storedEvents=[],older={mode:'none',loading:false,error:''},rebuilding=false,itemKey=null,itemCount=0;
+let storedEvents=[],older={mode:'none',loading:false,error:''},rebuilding=false,itemKey=null,itemCount=0,eventTime=null;
 let modelConfig=null, availableCommands=[], commandsOpen=false;
 let discoveryGeneration=0;
 let externalSessions=[], externalSelection=null, externalCursor=null, externalGeneration=0, externalLoading=false, externalImporting=false;
@@ -603,7 +603,8 @@ function connect(gen){
 }
 // Items get ids derived from their source event so a re-fold maps them onto the same DOM nodes.
 function itemId(){return itemKey?`${itemKey}:${itemCount++}`:uuid();}
-function addMessage(role,text){const message={id:itemId(),type:'message',role,text};transcript.push(message);return message;}
+function messageTime(at){const now=new Date(),clock=at.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});return at.toDateString()===now.toDateString()?clock:`${at.toLocaleDateString([],{month:'short',day:'numeric',...(at.getFullYear()===now.getFullYear()?{}:{year:'numeric'})})}, ${clock}`;}
+function addMessage(role,text){const message={id:itemId(),type:'message',role,text,time:eventTime};transcript.push(message);return message;}
 function replay(lastUserSeq){
   replaying=true;try{const latestUser=storedEvents.findLast(item=>item.kind==='user');for(const item of storedEvents)if(item.kind!=='session_updated'&&(item.kind!=='stop_requested'||item.data.userSeq===(lastUserSeq??latestUser?.seq)||(!lastUserSeq&&!latestUser)))consume(item);}finally{replaying=false;}
 }
@@ -782,7 +783,7 @@ function renderToolActivity(node,tool,sessionBusy){
 // End U-05 tool activity.
 
 function consume(e,live=false){
-  const d=e.data;itemKey=Number.isSafeInteger(e.seq)?`${active.id}:${e.seq}`:null;itemCount=0;
+  const d=e.data;itemKey=Number.isSafeInteger(e.seq)?`${active.id}:${e.seq}`:null;itemCount=0;eventTime=Number.isSafeInteger(e.time)?e.time:null;
   if(e.kind==='user')currentUserSeq=e.seq;
   // A re-fold only rebuilds the transcript; session state, drafts and usage are already current.
   if(!rebuilding){
@@ -839,7 +840,7 @@ function consume(e,live=false){
         assistant=null;if(d.content?.type==='text'){
           const last=transcript.at(-1);
           if(last?.replayed&&last.role==='user'&&last.providerMessageId===d.messageId)last.text+=d.content.text;
-          else{const message=addMessage('user',d.content.text);message.replayed=true;message.providerMessageId=d.messageId;message.seq=e.seq;}
+          else{const message=addMessage('user',d.content.text);message.replayed=true;message.time=null;message.providerMessageId=d.messageId;message.seq=e.seq;}
         }break;
       }
       case 'agent_message_chunk':{
@@ -985,7 +986,10 @@ function draw(){
     if(!node){
       if(item.type==='message'){
         node=el('article','message '+(item.inboxDelivery?'agentworks':item.role));node.dataset.messageId=item.id;node.tabIndex=0;node.append(el('div','avatar',item.inboxDelivery?'A':item.role==='user'?'Y':icons[active.provider]));
-        const content=el('div','message-content');content.append(el('div','message-label',item.inboxDelivery?'Agentworks':item.role==='user'?'You':labels[active.provider]),el('div','message-body'));node.append(content);
+        const content=el('div','message-content'),label=el('div','message-label',item.inboxDelivery?'Agentworks':item.role==='user'?'You':labels[active.provider]);
+        // Event time, not provider time; older stored events carry none.
+        if(item.time){const at=new Date(item.time),time=el('time','message-time',messageTime(at));time.dateTime=at.toISOString();time.title=at.toLocaleString();label.append(time);}
+        content.append(label,el('div','message-body'));node.append(content);
       }else if(item.type==='tool'){
         node=el('details','tool-card');node.append(el('summary'),el('pre'));
       }else if(item.type==='image'){
@@ -996,7 +1000,7 @@ function draw(){
     }else if(!node.isConnected)area.append(node);
     if(item.type==='message'){
       const body=node.querySelector('.message-body');
-      if(item.role==='user'&&!item.inboxDelivery){body.textContent=item.text;if(item.attachments&&!node.querySelector('.message-attachments')){const sent=el('div','message-attachments');attachments.renderSent(sent,active.id,item.attachments);for(const img of sent.querySelectorAll('img'))imageViewer.decorate(img);body.after(sent);}}else updateMarkdown(item,body);
+      if(item.role==='user'&&!item.inboxDelivery){renderUserReferences(body,item.text);decorateMarkdown(body);if(item.attachments&&!node.querySelector('.message-attachments')){const sent=el('div','message-attachments');attachments.renderSent(sent,active.id,item.attachments);for(const img of sent.querySelectorAll('img'))imageViewer.decorate(img);body.after(sent);}}else updateMarkdown(item,body);
     }else if(item.type==='tool'){
       renderToolActivity(node,item,['running','waiting','cancelling'].includes(status));
     }
@@ -1266,7 +1270,10 @@ async function openSettings(){
     const settings=await api('/api/settings');$('settings-roots').replaceChildren();for(const root of settings.roots)addRoot(root);$('settings-error').textContent='';$('settings-saved').textContent='Save applies global defaults and host settings. Display, notifications, model providers and parsers save immediately.';
     $('default-communication-role').value=settings.defaultCommunicationRole||'participant';
     const fields=$('default-model-fields');fields.replaceChildren();
+    // Node and Rust harnesses for one CLI share its permission default; show the picker once per CLI.
+    const modeFamilies=new Set();
     for(const provider of config.providers.filter(p=>p.id!=='demo')){
+      const family=provider.id.replace(/-rust$/,''),firstOfFamily=!modeFamilies.has(family);modeFamilies.add(family);
       const id='default-model-'+provider.id,label=el('label','',provider.name+' default model');label.htmlFor=id;
       const input=el('input');input.id=id;input.dataset.provider=provider.id;input.value=settings.defaultModels[provider.id]||'';input.placeholder='Harness default';input.maxLength=256;
       const list=el('datalist');list.id=id+'-options';input.setAttribute('list',list.id);
@@ -1281,24 +1288,24 @@ async function openSettings(){
         }catch(e){$('settings-error').textContent=e.message;}finally{load.disabled=false;load.textContent='Load models';}
       };
       const row=el('div','model-field');row.append(input,load);fields.append(label,row,list);
-      if(provider.id==='codex'){
+      if(family==='codex'&&firstOfFamily){
         const modeLabel=el('label','','Codex default sandbox / permission mode');modeLabel.htmlFor='codex-default-permission-mode';
         const mode=el('select');mode.id='codex-default-permission-mode';
         for(const [value,name] of [['agent-full-access','Full access'],['read-only','Read-only'],['workspace-write','Workspace access'],['agent','Auto review']]){
           const option=el('option','',name);option.value=value;mode.append(option);
         }
         mode.value=settings.codexDefaultPermissionMode||'agent-full-access';
-        const note=el('div','field-note',"Applies only to new Codex sessions. Full access allows unrestricted file and network access in the Codex harness. Existing sessions keep their saved mode. If the adapter does not advertise your choice, its current mode is kept and a note appears in Session options. This does not change Agentworks MCP/controller grants or host controls.");
+        const note=el('div','field-note',"Applies only to new Codex sessions, in both the Node and Rust harnesses. Full access allows unrestricted file and network access in the Codex harness. Existing sessions keep their saved mode. If the adapter does not advertise your choice, its current mode is kept and a note appears in Session options. This does not change Agentworks MCP/controller grants or host controls.");
         fields.append(modeLabel,mode,note);
       }
-      if(provider.id==='claude'){
+      if(family==='claude'&&firstOfFamily){
         const modeLabel=el('label','','Claude default permission mode');modeLabel.htmlFor='claude-default-permission-mode';
         const mode=el('select');mode.id='claude-default-permission-mode';
         for(const [value,name] of [['auto','Auto'],['default','Default'],['acceptEdits','Accept edits'],['plan','Plan']]){
           const option=el('option','',name);option.value=value;mode.append(option);
         }
         mode.value=settings.claudeDefaultPermissionMode||'auto';
-        const note=el('div','field-note',"Applies only to new Claude sessions. Auto uses Claude’s normal Auto mode. If the adapter does not advertise your choice, its current permission mode is kept and a note appears in Session options. Reconnected sessions keep their saved mode.");
+        const note=el('div','field-note',"Applies only to new Claude sessions, in both the Node and Rust harnesses. Auto uses Claude’s normal Auto mode. If the adapter does not advertise your choice, its current permission mode is kept and a note appears in Session options. Reconnected sessions keep their saved mode.");
         fields.append(modeLabel,mode,note);
       }
     }

@@ -118,6 +118,7 @@ dependencies = [
  "agent-client-protocol 3.4.0",
  "agentworks-claude-acp",
  "agentworks-codex-acp",
+ "agentworks-demo-acp",
  "agentworks-runtime",
  "agentworks-session",
  "agentworks-starlark",
@@ -156,6 +157,16 @@ dependencies = [
  "agent-client-protocol 3.4.0",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "agentworks-demo-acp"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

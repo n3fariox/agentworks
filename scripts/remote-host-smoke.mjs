@@ -42,7 +42,7 @@ async function agents(cwd){
   const found=[];
   for(const pid of await readdir('/proc').catch(()=>[])){
     if(!/^\d+$/.test(pid))continue;
-    try{if((await readlink(`/proc/${pid}/cwd`))===cwd&&execFileSync('cat',[`/proc/${pid}/cmdline`]).toString().includes('demo-agent'))found.push(pid);}catch{}
+    try{if((await readlink(`/proc/${pid}/cwd`))===cwd&&execFileSync('cat',[`/proc/${pid}/cmdline`]).toString().includes('demo-acp'))found.push(pid);}catch{}
   }
   return found;
 }

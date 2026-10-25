@@ -18,7 +18,7 @@ AGENTWORKS_AUTH_MODE=api_key mise exec -- cargo run --locked
 
 Only this explicit API-key mode isolates provider configuration/authentication under `.agentworks/claude` and `.agentworks/codex`, keeping it separate from the host CLI login store.
 
-The app uses pinned local ACP adapters installed by `npm ci`, without downloading an adapter at session creation. Claude wraps its SDK; Codex wraps app-server. Project-local agent instructions may be loaded by the harness. Run `npm ci --ignore-scripts` on each execution machine; the Rust binary alone does not contain Node/adapters/provider dependencies.
+The JavaScript **Claude** and **Codex** options use pinned local ACP adapters installed by `npm ci`, without downloading an adapter at session creation. Claude wraps its SDK; Codex wraps app-server. Project-local agent instructions may be loaded by the harness. Run `npm ci --ignore-scripts` on each execution machine that should offer them. The binary itself includes the demo agent and the Rust adapters, which need no Node.
 
 Choose **Codex · Rust ACP** in the harness picker to use the experimental
 [Rust Codex adapter](RUST-CODEX-ACP.md) included in the binary. Its provider ID is
@@ -33,7 +33,8 @@ Choose **Claude · Rust ACP** in the harness picker to use the experimental
 `claude-rust`; it requires a native `claude` executable on PATH (or
 `CLAUDE_CODE_EXECUTABLE`) and no Node or npm adapter. The existing **Claude** option
 uses the JavaScript adapter. Both share the host Claude sign-in; model defaults and
-session adapter identity stay separate. Existing enrollment/build tooling still uses npm.
+session adapter identity stay separate. Guided host enrollment installs no Node or npm
+packages, so enrolled hosts offer only the Rust adapters.
 
 Codex uses the tracked local `2.2.2-agentworks.1` fork in `vendor/codex-acp` to attach cached subscription windows to genuine context usage events. The usage display preserves each window's source observation time separately from context. No extra account queries or polling are performed; quotas appear after native push notifications and a genuine usage event. See the [implemented metadata contract and limitations](CODEX-SUBSCRIPTION-QUOTA.md).
 

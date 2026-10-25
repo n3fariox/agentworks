@@ -35,7 +35,7 @@ mod workspace;
 mod worktree_cleanup;
 mod worktrees;
 use agentworks_runtime::{
-    provider::{cli_provider, installed, key_present, runtime_root, use_api_key},
+    provider::{cli_provider, installed, key_present, use_api_key},
     worker as agent,
 };
 use agentworks_session::{SessionData, timeouts};
@@ -190,7 +190,11 @@ impl Session {
                 serde_json::to_value(&state.continuation).unwrap_or(Value::Null);
         }
         state.seq += 1;
-        let event = json!({"seq":state.seq,"kind":kind,"data":data});
+        let time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let event = json!({"seq":state.seq,"kind":kind,"time":time,"data":data});
         if kind == "user" {
             state.last_prompt = Some(event.clone());
         }
@@ -496,6 +500,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         if let Err(error) = &result {
             eprintln!("agentworks {bridge}: {error}");
+        }
+        std::process::exit(i32::from(result.is_err()));
+    }
+    if args.get(1).is_some_and(|a| a == "demo-acp") {
+        let result = agentworks_demo_acp::run().await;
+        if let Err(error) = &result {
+            eprintln!("agentworks demo-acp: {error}");
         }
         std::process::exit(i32::from(result.is_err()));
     }
@@ -3319,6 +3330,7 @@ mod tests {
         let coordinator = initial_agent_access(None, false, communication::Role::Coordinator)
             .expect("explicit project coordinator role should be materialized");
         assert!(coordinator.start_sessions);
+        assert!(coordinator.archive_sessions);
         assert!(!coordinator.restart_service);
         assert!(!coordinator.manage_review_queue);
 

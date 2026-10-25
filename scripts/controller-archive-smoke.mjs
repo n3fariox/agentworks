@@ -77,10 +77,17 @@ try{
  assert.equal((await archiver.call('archive_session',{sessionId:moved.id})).error.status,403);
  assert.equal((await snap(moved.id)).session.archived,false);
  const audit=await api(`/api/controllers/${archiver.id}/audit`);assert(audit.events.some(e=>e.action==='archive_session'&&e.outcome==='accepted'&&e.target===clean.id));assert(audit.events.some(e=>e.action==='archive_session'&&e.outcome==='rejected'&&e.target===other.id));
- // Session identity cannot use the tool even if a human stores the grant on it.
+ // Only coordinator session identities may archive; a standalone explicit flag
+ // on a participant does not elevate its role.
  const session=await create(p.id);await api(`/api/sessions/${session.id}/agent-access`,'PUT',{archiveSessions:true});await idle(session.id);
  await api(`/api/sessions/${session.id}/prompt`,'POST',{text:`mcp archive_session ${JSON.stringify({sessionId:guest.id})}`,requestId:'session-denial'});
- const denied=await idle(session.id);assert(JSON.stringify(denied.events).includes('Only external controllers can archive sessions'));
+ const denied=await idle(session.id);assert(JSON.stringify(denied.events).includes('Agentworks capability not granted: archive_sessions'));
+ // A coordinator session uses the same project-scoped MCP archive path as an external controller.
+ const coordinator=await api('/api/sessions','POST',{provider:'demo',cwd:repo,projectId:p.id,agentAccess:{communicate:true,startSessions:true,promptSessions:true,cancelSessions:true,runAutomations:true}});await idle(coordinator.id);
+ const coordinatorTarget=await create(p.id);
+ await api(`/api/sessions/${coordinator.id}/prompt`,'POST',{text:`mcp archive_session ${JSON.stringify({sessionId:coordinatorTarget.id})}`,requestId:'coordinator-archive'});
+ const archived=await idle(coordinator.id);assert(!JSON.stringify(archived.events).includes('capability not granted'));
+ assert.equal((await snap(coordinatorTarget.id)).session.archived,true,'A coordinator session can archive a same-project session');
  await api(`/api/controllers/${archiver.id}/revoke`,'POST',{});
  assert.equal((await archiver.call('archive_session',{sessionId:other.id})).error.status,401);
  assert.equal((await snap(other.id)).session.archived,false);
