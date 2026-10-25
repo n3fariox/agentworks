@@ -34,7 +34,7 @@ mod workspace;
 mod worktree_cleanup;
 mod worktrees;
 use agentworks_runtime::{
-    provider::{cli_provider, installed, key_present, runtime_root, use_api_key},
+    provider::{cli_provider, installed, key_present, use_api_key},
     worker as agent,
 };
 use agentworks_session::{SessionData, timeouts};
@@ -492,6 +492,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         if let Err(error) = &result {
             eprintln!("agentworks {bridge}: {error}");
+        }
+        std::process::exit(i32::from(result.is_err()));
+    }
+    if args.get(1).is_some_and(|a| a == "demo-acp") {
+        let result = agentworks_demo_acp::run().await;
+        if let Err(error) = &result {
+            eprintln!("agentworks demo-acp: {error}");
         }
         std::process::exit(i32::from(result.is_err()));
     }

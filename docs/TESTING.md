@@ -23,11 +23,11 @@ npx playwright test tests/terminal.spec.mjs
 npm run test:remote-partitions # ~50s: silent transport and replacement ownership
 ```
 
-Guided enrollment has an isolated real-SSH check (requires `sshd`, `ssh`, and `ssh-keygen`). It creates temporary host keys, a passphrase-protected bootstrap identity, an isolated remote home and authorization file, and a loopback SSH server. By default mise/npm are deterministic fixtures, with no downloads or provider calls:
+Guided enrollment has an isolated real-SSH check (requires `sshd`, `ssh`, and `ssh-keygen`). It creates temporary host keys, a passphrase-protected bootstrap identity, an isolated remote home and authorization file, and a loopback SSH server. The remote home has no mise or Node, so the check proves the worker installs and runs the demo agent without them; nothing is downloaded and no provider is called:
 
 ```bash
 npm run test:host-enrollment
-# Also exercise real mise, Node download and locked npm installation in that temporary home:
+# Also launch the worker through a real mise in that temporary home:
 AGENTWORKS_ENROLL_REAL_MISE=1 npm run test:host-enrollment
 ```
 

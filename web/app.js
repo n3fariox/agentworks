@@ -1267,7 +1267,10 @@ async function openSettings(){
     const settings=await api('/api/settings');$('settings-roots').replaceChildren();for(const root of settings.roots)addRoot(root);$('settings-error').textContent='';$('settings-saved').textContent='Save applies global defaults and host settings. Display, notifications and parsers save immediately.';
     $('default-communication-role').value=settings.defaultCommunicationRole||'participant';
     const fields=$('default-model-fields');fields.replaceChildren();
+    // Node and Rust harnesses for one CLI share its permission default; show the picker once per CLI.
+    const modeFamilies=new Set();
     for(const provider of config.providers.filter(p=>p.id!=='demo')){
+      const family=provider.id.replace(/-rust$/,''),firstOfFamily=!modeFamilies.has(family);modeFamilies.add(family);
       const id='default-model-'+provider.id,label=el('label','',provider.name+' default model');label.htmlFor=id;
       const input=el('input');input.id=id;input.dataset.provider=provider.id;input.value=settings.defaultModels[provider.id]||'';input.placeholder='Harness default';input.maxLength=256;
       const list=el('datalist');list.id=id+'-options';input.setAttribute('list',list.id);
@@ -1282,24 +1285,24 @@ async function openSettings(){
         }catch(e){$('settings-error').textContent=e.message;}finally{load.disabled=false;load.textContent='Load models';}
       };
       const row=el('div','model-field');row.append(input,load);fields.append(label,row,list);
-      if(provider.id==='codex'){
+      if(family==='codex'&&firstOfFamily){
         const modeLabel=el('label','','Codex default sandbox / permission mode');modeLabel.htmlFor='codex-default-permission-mode';
         const mode=el('select');mode.id='codex-default-permission-mode';
         for(const [value,name] of [['agent-full-access','Full access'],['read-only','Read-only'],['workspace-write','Workspace access'],['agent','Auto review']]){
           const option=el('option','',name);option.value=value;mode.append(option);
         }
         mode.value=settings.codexDefaultPermissionMode||'agent-full-access';
-        const note=el('div','field-note',"Applies only to new Codex sessions. Full access allows unrestricted file and network access in the Codex harness. Existing sessions keep their saved mode. If the adapter does not advertise your choice, its current mode is kept and a note appears in Session options. This does not change Agentworks MCP/controller grants or host controls.");
+        const note=el('div','field-note',"Applies only to new Codex sessions, in both the Node and Rust harnesses. Full access allows unrestricted file and network access in the Codex harness. Existing sessions keep their saved mode. If the adapter does not advertise your choice, its current mode is kept and a note appears in Session options. This does not change Agentworks MCP/controller grants or host controls.");
         fields.append(modeLabel,mode,note);
       }
-      if(provider.id==='claude'){
+      if(family==='claude'&&firstOfFamily){
         const modeLabel=el('label','','Claude default permission mode');modeLabel.htmlFor='claude-default-permission-mode';
         const mode=el('select');mode.id='claude-default-permission-mode';
         for(const [value,name] of [['auto','Auto'],['default','Default'],['acceptEdits','Accept edits'],['plan','Plan']]){
           const option=el('option','',name);option.value=value;mode.append(option);
         }
         mode.value=settings.claudeDefaultPermissionMode||'auto';
-        const note=el('div','field-note',"Applies only to new Claude sessions. Auto uses Claude’s normal Auto mode. If the adapter does not advertise your choice, its current permission mode is kept and a note appears in Session options. Reconnected sessions keep their saved mode.");
+        const note=el('div','field-note',"Applies only to new Claude sessions, in both the Node and Rust harnesses. Auto uses Claude’s normal Auto mode. If the adapter does not advertise your choice, its current permission mode is kept and a note appears in Session options. Reconnected sessions keep their saved mode.");
         fields.append(modeLabel,mode,note);
       }
     }

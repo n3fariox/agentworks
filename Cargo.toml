@@ -6,6 +6,7 @@ members = [
     "crates/agentworks-terminal",
     "crates/agentworks-runtime",
     "crates/agentworks-claude-acp",
+    "crates/agentworks-demo-acp",
     "crates/agentworks-session",
     "crates/agentworks-workspace",
     "crates/agentworks-starlark",

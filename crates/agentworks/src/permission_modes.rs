@@ -14,7 +14,8 @@ pub fn initial_codex_default(
     external: bool,
     setting: Option<CodexDefault>,
 ) -> Option<CodexDefault> {
-    (provider == "codex" && !external).then(|| setting.unwrap_or_default())
+    (agentworks_runtime::provider::cli_provider(provider) == "codex" && !external)
+        .then(|| setting.unwrap_or_default())
 }
 
 pub fn initial_claude_default(
@@ -165,7 +166,12 @@ mod tests {
         for provider in ["claude", "opencode", "demo"] {
             assert_eq!(initial_codex_default(provider, false, None), None);
         }
+        assert_eq!(
+            initial_codex_default("codex-rust", false, Some(CodexDefault::Agent)),
+            Some(CodexDefault::Agent)
+        );
         assert_eq!(initial_codex_default("codex", true, None), None);
+        assert_eq!(initial_codex_default("codex-rust", true, None), None);
         let state: crate::SessionData = serde_json::from_value(json!({"status":"suspended","seq":0,"requests":[],"models":null,"available_commands":[],"turn_active":false,"project_id":null,"provider_session_id":"native-saved","permission_modes":{"currentValue":"read-only"}})).unwrap();
         assert!(state.initial_codex_permission_mode.is_none());
         assert_eq!(state.permission_modes["currentValue"], "read-only");
@@ -242,6 +248,10 @@ mod tests {
                 None
             );
         }
+        assert_eq!(
+            initial_claude_default("claude-rust", false, Some(ClaudeDefault::Plan)),
+            Some(ClaudeDefault::Plan)
+        );
         assert_eq!(
             initial_claude_default("claude", true, Some(ClaudeDefault::Auto)),
             None

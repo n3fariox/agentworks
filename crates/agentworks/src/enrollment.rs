@@ -239,7 +239,7 @@ async fn enroll(
         .map_err(|e| e.to_string())?;
     let public = format!("restrict {}", public.trim());
     let bootstrap = format!(
-        "set -eu; {} command -v tar >/dev/null; mise_bin=$(command -v mise || true); if [ -z \"$mise_bin\" ]; then mise_bin=\"$HOME/.local/bin/mise\"; fi; test -x \"$mise_bin\" || {{ echo 'mise is required. Install it on this host: https://mise.jdx.dev/getting-started.html' >&2; exit 1; }}; umask 077; mkdir -p \"$HOME/.ssh\"; chmod 700 \"$HOME/.ssh\"; touch \"$HOME/.ssh/authorized_keys\"; chmod 600 \"$HOME/.ssh/authorized_keys\"; grep -qxF {} \"$HOME/.ssh/authorized_keys\" || printf '\\n%s\\n' {} >> \"$HOME/.ssh/authorized_keys\"; printf '\\nDedicated key installed.\\n'",
+        "set -eu; {} command -v tar >/dev/null; umask 077; mkdir -p \"$HOME/.ssh\"; chmod 700 \"$HOME/.ssh\"; touch \"$HOME/.ssh/authorized_keys\"; chmod 600 \"$HOME/.ssh/authorized_keys\"; grep -qxF {} \"$HOME/.ssh/authorized_keys\" || printf '\\n%s\\n' {} >> \"$HOME/.ssh/authorized_keys\"; printf '\\nDedicated key installed.\\n'",
         platform_check(),
         quote(&public),
         quote(&public)
@@ -278,7 +278,7 @@ async fn enroll(
         dir.file_name().unwrap().to_string_lossy()
     );
     let remote = format!("\"$HOME/{release}\"");
-    stage(out, "Preparing and copying worker and adapter packages…").await?;
+    stage(out, "Preparing and copying the worker…").await?;
     let bundle = bundle(&dir, out).await?;
     let command = format!("umask 077; mkdir -p {remote} && cat > {remote}/bundle.tar.gz");
     let mut upload = managed(&host, &command);
@@ -289,11 +289,7 @@ async fn enroll(
     let checksum = tokio::task::spawn_blocking(move || crate::sha256::hex(&bytes))
         .await
         .map_err(|e| e.to_string())?;
-    stage(
-        out,
-        "Installing Node with mise and locked adapter dependencies…",
-    )
-    .await?;
+    stage(out, "Installing the worker…").await?;
     let install = format!(
         "set -eu; cd {remote}; if command -v sha256sum >/dev/null; then actual=$(sha256sum bundle.tar.gz); else actual=$(shasum -a 256 bundle.tar.gz); fi; test \"${{actual%% *}}\" = {checksum} || {{ echo 'Bundle checksum mismatch' >&2; exit 1; }}; tar -xzf bundle.tar.gz; rm bundle.tar.gz; sh install.sh"
     );
@@ -330,7 +326,6 @@ async fn enroll(
 }
 
 async fn bundle(dir: &Path, out: &Output) -> Result<PathBuf> {
-    let root = crate::runtime_root();
     let staging = dir.join("runtime");
     tokio::fs::create_dir_all(&staging)
         .await
@@ -342,10 +337,6 @@ async fn bundle(dir: &Path, out: &Output) -> Result<PathBuf> {
     .await
     .map_err(|e| e.to_string())?;
     for (file, bytes) in [
-        (
-            "mise.toml",
-            include_bytes!("../../../scripts/remote-runtime/mise.toml").as_slice(),
-        ),
         (
             "launch",
             include_bytes!("../../../scripts/remote-runtime/launch").as_slice(),
@@ -366,16 +357,7 @@ async fn bundle(dir: &Path, out: &Output) -> Result<PathBuf> {
             .arg(&archive)
             .arg("-C")
             .arg(&staging)
-            .args(["agentworks", "mise.toml", "launch", "install.sh"])
-            .arg("-C")
-            .arg(&root)
-            .args([
-                "package.json",
-                "package-lock.json",
-                "vendor/codex-acp",
-                "scripts/demo-agent.mjs",
-                "scripts/discover-native-tools.mjs",
-            ]),
+            .args(["agentworks", "launch", "install.sh"]),
         out,
     )
     .await?;

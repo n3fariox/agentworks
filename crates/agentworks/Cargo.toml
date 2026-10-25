@@ -25,4 +25,5 @@ agentworks-terminal = { path = "../agentworks-terminal" }
 agentworks-workspace = { path = "../agentworks-workspace" }
 agentworks-runtime = { path = "../agentworks-runtime" }
 agentworks-claude-acp = { path = "../agentworks-claude-acp" }
+agentworks-demo-acp = { path = "../agentworks-demo-acp" }
 agentworks-session = { path = "../agentworks-session" }

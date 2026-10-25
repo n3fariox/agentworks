@@ -54,7 +54,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         "hostname": hostname().unwrap_or_default(),
         "providers": providers,
-        "tools": discovered_tools(&base).await,
+        "tools": discovered_tools(&base),
         "workspace": true,
         "worktreeCleanup": true,
         "terminal": true,
@@ -504,7 +504,7 @@ async fn run_process(
     Ok(())
 }
 
-async fn discovered_tools(env: &HashMap<String, String>) -> Value {
+fn discovered_tools(env: &HashMap<String, String>) -> Value {
     let mut tools = serde_json::Map::new();
     for (provider, override_var) in [
         ("codex", "CODEX_PATH"),
@@ -517,31 +517,6 @@ async fn discovered_tools(env: &HashMap<String, String>) -> Value {
             .or_else(|| std::env::var(override_var).ok());
         let path = resolve(Path::new(configured.as_deref().unwrap_or(provider)), env);
         tools.insert(provider.into(), json!(path));
-    }
-    let node = std::env::var_os("AGENTWORKS_NODE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| "node".into());
-    if let Some(node) = resolve(&node, env) {
-        let output = tokio::time::timeout(
-            Duration::from_secs(5),
-            Command::new(node)
-                .arg(crate::provider::runtime_root().join("scripts/discover-native-tools.mjs"))
-                .arg(crate::provider::runtime_root())
-                .envs(env)
-                .stdin(Stdio::null())
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await;
-        if let Ok(Ok(output)) = output {
-            if let Ok(bundled) = serde_json::from_slice::<HashMap<String, String>>(&output.stdout) {
-                for (provider, path) in bundled {
-                    if let Some(path) = resolve(Path::new(&path), env) {
-                        tools.insert(provider, json!(path));
-                    }
-                }
-            }
-        }
     }
     Value::Object(tools)
 }
@@ -664,11 +639,7 @@ fn available_providers(env: &HashMap<String, String>) -> Vec<&'static str> {
                 let config = crate::provider::agent_config(provider, false, false);
                 resolve(config.command(), env).is_some()
             }
-            "demo" => {
-                node && crate::provider::runtime_root()
-                    .join("scripts/demo-agent.mjs")
-                    .is_file()
-            }
+            "demo" => true,
             _ => node && crate::provider::adapter_path(provider).is_file(),
         })
         .collect()

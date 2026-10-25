@@ -70,12 +70,7 @@ pub fn installed(provider: &str) -> bool {
 
 pub fn agent_config(provider: &str, api_key_mode: bool, host_profile: bool) -> AcpAgentConfig {
     let config = if provider == "demo" {
-        AcpAgentConfig::new(std::env::var_os("AGENTWORKS_NODE").unwrap_or_else(|| "node".into()))
-            .arg(
-                runtime_root()
-                    .join("scripts/demo-agent.mjs")
-                    .to_string_lossy(),
-            )
+        AcpAgentConfig::new(std::env::current_exe().expect("executable path")).arg("demo-acp")
     } else if provider == "opencode" {
         let home = runtime_root().join(".agentworks/opencode");
         let mut config =
