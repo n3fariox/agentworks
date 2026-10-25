@@ -2,8 +2,9 @@
 
 Agentworks negotiates the optional, versioned AIR `asyncTasks` ACP extension with
 compatible adapters. The installed JavaScript Claude adapter and bundled Codex
-adapter implement it. The Rust Claude and Rust Codex adapters do not currently
-advertise it. Ordinary tool activity remains available for other harnesses.
+adapter implement it, as does the [Rust Codex adapter](RUST-CODEX-ACP.md).
+See the [Rust Claude notes](RUST-CLAUDE-ACP.md) for its adapter-specific support.
+Ordinary tool activity remains available for other harnesses.
 
 **Background jobs** appears above the composer when the session has reported jobs.
 Expand it to inspect their names, status, reported summaries/progress, and output

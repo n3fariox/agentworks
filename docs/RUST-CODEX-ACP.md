@@ -82,6 +82,31 @@ are not advertised: send instructions and cancellation through the parent, leavi
 execution to Codex. Clients without the extension receive ordinary collaboration
 tool calls and child approvals on the root session instead of child traffic.
 
+The optional AIR `asyncTasks` extension exposes Codex background terminals in the
+shared [Background jobs](BACKGROUND-JOBS.md) dropdown. It is negotiated only when
+the client advertises versioned `asyncTasks` support. A native command's process ID
+alone does not announce a background job: the bridge confirms it against paginated
+`thread/backgroundTerminals/list` snapshots. Discovery runs on session load and
+relevant command/turn events, without a polling timer or model prompt. Child jobs
+retain their child session and use thread-qualified task IDs; clients without
+subagent support receive those jobs on the root with distinct IDs.
+
+Command completion publishes the job's terminal outcome, including nonzero exits.
+A complete list snapshot can resolve a disappeared job as stopped; malformed,
+incomplete, or repeated-cursor responses do not alter existing jobs. Per-thread
+reads are serialized, completion/stop tombstones reject stale list entries, and
+session generations fence responses from before a reload or close. Loading a
+session rechecks its live terminals after announcing its recorded child tree.
+
+`_session/async_task/stop` takes the root ACP session and the reported task ID. It
+uses the stored native thread/process IDs with
+`thread/backgroundTerminals/terminate`, without interrupting a model turn. Unknown,
+foreign-session, completed, or already-stopping jobs return `stopped: false`.
+Rejected/failed stops leave the observation live. If native completion wins the
+race with termination, its outcome is preserved. Older Codex builds that reject
+the background-list method keep ordinary ACP functionality. No new background
+notifications or native background-API calls are made without client negotiation.
+
 This is intentionally smaller than the upstream adapter. Other optional AIR
 extensions and automatic app-server crash recovery remain unimplemented.
 Fork boundaries use stable native item IDs (including
@@ -113,6 +138,12 @@ model defaults, automation definitions, attachment capabilities, command
 execution, and persistence/resume with a deliberately unavailable Node interpreter.
 The Rust integration test uses the
 same typed ACP client as Agentworks, so schema compatibility is checked too.
+Background-job fixtures cover discovery, child routing with and without subagent
+support, paging, late completion, list/stop races, reload fencing, failed stops,
+malformed snapshots, and unsupported native methods. The application smoke also
+checks Rust Codex job tracking and individual child-job termination through the
+shared Agentworks API. These cases use the fake app-server; live native background
+terminal behavior has not yet been exercised.
 
 The installed native Codex also passed initialization/model discovery, live
 text turns, permission/reasoning/planning/fast-mode settings, close/resume with

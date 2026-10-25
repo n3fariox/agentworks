@@ -16,6 +16,7 @@ use tokio::{
     sync::{Mutex as AsyncMutex, oneshot},
 };
 
+mod async_tasks;
 mod commands;
 mod subagents;
 
@@ -73,6 +74,7 @@ struct Bridge {
     subagents: AtomicBool,
     children: Mutex<HashMap<String, String>>,
     limits: Mutex<Map<String, Value>>,
+    async_tasks: Mutex<async_tasks::Tasks>,
 }
 
 impl Bridge {
@@ -133,11 +135,11 @@ impl Bridge {
                 self.rpc("initialize", json!({"clientInfo":{"name":"agentworks","title":"Agentworks","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}})).await?;
                 self.write(json!({"method":"initialized","params":{}}))
                     .await?;
-                Ok(
-                    json!({"protocolVersion":1,"agentInfo":{"name":"agentworks-codex-acp","version":env!("CARGO_PKG_VERSION")},
+                let mut response = json!({"protocolVersion":1,"agentInfo":{"name":"agentworks-codex-acp","version":env!("CARGO_PKG_VERSION")},
                     "agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"embeddedContext":true},"mcpCapabilities":{"http":true},"sessionCapabilities":{"list":{},"close":{},"delete":{},"fork":{},"additionalDirectories":{},"subagents":{}}},
-                    "authMethods":[{"id":"api-key","name":"API key"}]}),
-                )
+                    "authMethods":[{"id":"api-key","name":"API key"}]});
+                self.negotiate_tasks(&p, &mut response);
+                Ok(response)
             }
             "authenticate" => {
                 if p["methodId"] != "api-key" {
@@ -204,7 +206,20 @@ impl Bridge {
                 } else {
                     "thread/start"
                 };
-                let response = self.rpc(native, params).await?;
+                if method == "session/load" {
+                    self.close_tasks(field(&p, "sessionId")?);
+                }
+                let response = match self.rpc(native, params).await {
+                    Ok(response) => response,
+                    Err(error) => {
+                        if method == "session/load" {
+                            let id = field(&p, "sessionId")?;
+                            self.open_tasks(id);
+                            self.restore_tasks(cx, id).await;
+                        }
+                        return Err(error);
+                    }
+                };
                 let id = field(&response["thread"], "id")?.to_owned();
                 if method == "session/fork" && p["sessionId"] == id {
                     return Err(failure("Codex returned the parent thread as its fork"));
@@ -222,6 +237,7 @@ impl Bridge {
                         active: None,
                     },
                 );
+                self.open_tasks(&id);
                 if method == "session/load" {
                     // History is replayed as ACP notifications; the app decides whether to display it.
                     self.replay_tree(cx, &id).await?;
@@ -232,6 +248,7 @@ impl Bridge {
                     &id,
                     json!({"sessionUpdate":"available_commands_update","availableCommands":commands::available()}),
                 )?;
+                self.restore_tasks(cx, &id).await;
                 Ok(json!({"sessionId":id,"configOptions":options}))
             }
             "session/close" | "session/delete" => {
@@ -257,6 +274,7 @@ impl Bridge {
                 )
                 .await?;
                 self.sessions.lock().unwrap().remove(id);
+                self.close_tasks(id);
                 self.forget_children(id);
                 Ok(json!({}))
             }
@@ -373,6 +391,7 @@ impl Bridge {
                     Ok(json!({"configOptions":options}))
                 }
             }
+            "_session/async_task/stop" => self.stop_task(cx, &p).await,
             "session/prompt" => {
                 if let Some((name, args)) = commands::parse(&p["prompt"]) {
                     if p["prompt"].as_array().is_some_and(|v| v.len() != 1) {
@@ -600,6 +619,7 @@ impl Bridge {
                 } else {
                     let p = &v["params"];
                     self.observe_subagents(&cx, method, p)?;
+                    self.observe_tasks(&cx, method, p)?;
                     let id = p["threadId"].as_str().unwrap_or("");
                     if self.children.lock().unwrap().contains_key(id) {
                         if let Some(event) = event_update(method, p)
@@ -1037,6 +1057,7 @@ pub async fn run() -> Result<()> {
         subagents: AtomicBool::new(false),
         children: Mutex::default(),
         limits: Mutex::default(),
+        async_tasks: Mutex::default(),
     });
     let requests = bridge.clone();
     let notifications = bridge.clone();

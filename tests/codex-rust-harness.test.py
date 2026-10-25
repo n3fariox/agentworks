@@ -25,7 +25,7 @@ class HarnessTests(unittest.TestCase):
             sock.bind(("127.0.0.1",0))
             port=sock.getsockname()[1]
         self.base=f"http://127.0.0.1:{port}"
-        self.env=dict(os.environ, AGENTWORKS_PORT=str(port),AGENTWORKS_BIND="127.0.0.1",AGENTWORKS_ROOTS=str(self.cwd),AGENTWORKS_CATALOG_PATH=str(self.cwd/"catalog.json"),AGENTWORKS_DB_PATH=str(self.cwd/"sessions.sqlite3"),AGENTWORKS_AUTH_MODE="existing",AGENTWORKS_NODE="/nonexistent/node",CODEX_PATH=str(self.root/"tests/codex-acp.test.py"))
+        self.env=dict(os.environ, AGENTWORKS_PORT=str(port),AGENTWORKS_BIND="127.0.0.1",AGENTWORKS_ROOTS=str(self.cwd),AGENTWORKS_CATALOG_PATH=str(self.cwd/"catalog.json"),AGENTWORKS_DB_PATH=str(self.cwd/"sessions.sqlite3"),AGENTWORKS_AUTH_MODE="existing",ACP_FIXTURE_ASYNC="1",AGENTWORKS_NODE="/nonexistent/node",CODEX_PATH=str(self.root/"tests/codex-acp.test.py"))
         self.log=tempfile.TemporaryFile(mode="w+")
         self.addCleanup(self.log.close)
         self.start()
@@ -99,6 +99,23 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(restored["session"]["status"],"suspended")
         self.request(path+"/resume","POST",{})
         self.until(lambda:self.request(path)["session"]["status"]=="idle")
+
+    def test_native_background_jobs_reach_application_and_stop_individually(self):
+        created=self.request("/api/sessions","POST",dict(provider="codex-rust",cwd=str(self.cwd),title="Native jobs test"))
+        path="/api/sessions/"+created["id"]
+        self.until(lambda:self.request(path)["session"]["status"]=="idle")
+        self.request(path+"/prompt","POST",dict(text="async-child",requestId=str(uuid4())))
+        snapshot=self.until(lambda:(s if (s:=self.request(path))["session"]["status"]=="idle" and len(s["asyncTasks"]["tasks"])==2 else None))
+        self.assertTrue(snapshot["asyncTasks"]["supported"])
+        tasks={t["asyncTaskId"]:t for t in snapshot["asyncTasks"]["tasks"]}
+        self.assertEqual(tasks["bg-command"]["state"],"running")
+        self.assertEqual(tasks["child-bg:bg-command"]["acpSessionId"],"child-bg")
+        result=self.request(path+"/async-tasks/stop","POST",dict(asyncTaskId="child-bg:bg-command",acpSessionId="child-bg"))
+        self.assertTrue(result["stopped"])
+        snapshot=self.until(lambda:(s if (s:=self.request(path)) and any(t["asyncTaskId"]=="child-bg:bg-command" and t["state"]=="stopped" for t in s["asyncTasks"]["tasks"]) else None))
+        self.assertEqual(next(t for t in snapshot["asyncTasks"]["tasks"] if t["asyncTaskId"]=="bg-command")["state"],"running")
+        self.assertEqual(len([e for e in snapshot["events"] if e["kind"]=="turn_end"]),1)
+        self.assertFalse(any(e["kind"]=="stop_requested" for e in snapshot["events"]))
 
     def test_native_subagents_reach_application_routing(self):
         created=self.request("/api/sessions","POST",dict(provider="codex-rust",cwd=str(self.cwd),title="Native child test"))
