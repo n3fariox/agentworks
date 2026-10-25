@@ -23,8 +23,8 @@ use tokio::sync::broadcast;
 
 use crate::tool_headers::{HeaderTracker, Headers};
 
-/// `script_order` holds human-set routing priorities. It is a separate additive
-/// table so the schema version stays at 9 and older binaries ignore it.
+/// `script_order` holds human-set routing priorities. It is an additive table;
+/// older binaries ignore it and retain filename ordering.
 pub const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS scripts(name TEXT PRIMARY KEY,capability TEXT NOT NULL,source TEXT NOT NULL,hash TEXT NOT NULL,enabled INTEGER NOT NULL,builtin INTEGER NOT NULL,updated INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS script_order(name TEXT PRIMARY KEY,priority INTEGER NOT NULL);";
 

@@ -85,7 +85,8 @@ parser limits, as Settings saves already do.
 
 ### Storage
 
-Additive tables (schema version unchanged, like `script_order`):
+Additive tables, created by the normal startup schema block; if a future
+implementation needs a one-time data migration, increment the schema version:
 
 - `script_proposals(id, actor, actor_title, project_id, request_id, name, source,
   hash, base_hash, hooks, rationale, status, created, decided, decided_note,
