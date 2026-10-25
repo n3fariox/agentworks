@@ -2117,12 +2117,10 @@ async fn fork_session(
             None
         }
     });
+    let same_model_provider = model_provider == parent_profile;
     // Native history belongs to one host/provider. Cross-host/provider forks
     // retain the recorded transcript/summary and open a fresh native session.
-    if target_host != parent.host_id
-        || provider != parent.provider
-        || model_provider != parent_profile
-    {
+    if target_host != parent.host_id || provider != parent.provider || !same_model_provider {
         seed.lineage.source_session_id = None;
         seed.lineage.source_message_id = None;
     }
@@ -2135,7 +2133,7 @@ async fn fork_session(
                 .unwrap_or_else(|| parent.title.clone()),
             // A model only carries over to the same harness; another agent advertises
             // its own models and would reject a foreign ID.
-            (provider == parent.provider)
+            (provider == parent.provider && same_model_provider)
                 .then(|| {
                     data.models["currentValue"]
                         .as_str()
