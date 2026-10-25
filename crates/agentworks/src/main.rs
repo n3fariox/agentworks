@@ -3248,6 +3248,7 @@ mod tests {
         let coordinator = initial_agent_access(None, false, communication::Role::Coordinator)
             .expect("explicit project coordinator role should be materialized");
         assert!(coordinator.start_sessions);
+        assert!(coordinator.archive_sessions);
         assert!(!coordinator.restart_service);
         assert!(!coordinator.manage_review_queue);
 

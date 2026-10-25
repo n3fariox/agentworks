@@ -184,7 +184,7 @@ fn tools(a: &mail::Access, session: bool) -> Value {
     if a.prompt_sessions {
         tools.push(tool("prompt_session","Submit a new turn to an idle session in this project; starts model work. Reuse requestId on retry.",json!({"sessionId":{"type":"string","description":"Session ID or agentworks://sessions/<id> URI, passed exactly as given in list_sessions or a prompt."},"text":{"type":"string"},"requestId":{"type":"string","maxLength":50}}),&["sessionId","text","requestId"]));
     }
-    if a.archive_sessions && !session {
+    if (session && mail::coordinator(a)) || (!session && a.archive_sessions) {
         tools.push(tool("archive_session", "Archive a session in this controller’s project. Stops its terminal. Default worktree cleanup removes only safe, clean owned worktrees and retains dirty, busy or unsafe worktrees. Does not merge or delete branches. No unarchive or cleanup override is available.", json!({"sessionId":{"type":"string","minLength":1,"description":"Session ID or agentworks://sessions/<id> URI."}}), &["sessionId"]));
     }
     if a.cancel_sessions {
@@ -407,12 +407,6 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
             .map(|j| j.0)
         }
         "archive_session" => {
-            if a.session.is_some() {
-                return Err(crate::fail(
-                    StatusCode::FORBIDDEN,
-                    "Only external controllers can archive sessions",
-                ));
-            }
             mail::require_actor(app, a, "archive_sessions")?;
             let req: ArchiveSession = serde_json::from_value(args).map_err(|_| {
                 crate::fail(StatusCode::BAD_REQUEST, "Invalid archive request fields")
@@ -544,12 +538,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn archive_requires_explicit_controller_grant_without_other_tools() {
-        for role in [
-            mail::Role::Off,
-            mail::Role::Participant,
-            mail::Role::Coordinator,
-        ] {
+    fn coordinators_and_explicit_controllers_can_archive_sessions() {
+        for role in [mail::Role::Off, mail::Role::Participant] {
             let access = role.access();
             assert!(!access.archive_sessions);
             for session in [true, false] {
@@ -561,6 +551,17 @@ mod tests {
                         .any(|t| t["name"] == "archive_session")
                 );
             }
+        }
+        let coordinator = mail::Role::Coordinator.access();
+        assert!(coordinator.archive_sessions);
+        for session in [true, false] {
+            assert!(
+                tools(&coordinator, session)["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|t| t["name"] == "archive_session")
+            );
         }
         let old: mail::Access = serde_json::from_value(json!({"communicate":true})).unwrap();
         assert!(!old.archive_sessions);
