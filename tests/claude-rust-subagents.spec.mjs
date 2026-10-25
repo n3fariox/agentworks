@@ -107,3 +107,25 @@ test('claude-rust accepts role instructions as an appended system prompt',async(
   expect(text).toContain('--append-system-prompt');
   expect(text).toContain('You are reviewing changes');
 });
+
+test('claude-rust background commands become jobs that stop individually',async({page})=>{
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  const s=await api('/api/sessions',{provider:'claude-rust',cwd:dir});await state(s.id,'idle');
+  await page.goto(base);await page.evaluate(id=>localStorage.setItem('agentworks-session',id),s.id);await page.reload();
+  await api('/api/sessions/'+s.id+'/prompt',{text:'background',requestId:'claude-rust-background'});await state(s.id,'idle');
+  const panel=page.locator('#background-jobs');await expect(panel).toBeVisible();await panel.locator('summary').click();
+  await expect(panel.locator('.background-job')).toHaveCount(2);await expect(panel).not.toContainText('Watch');
+  const build=panel.locator('.background-job').filter({hasText:'Build'}),sleep=panel.locator('.background-job').filter({hasText:'Sleep'});
+  await expect(build.locator('.background-job-state')).toHaveText('Running');await expect(build).toContainText('/tmp/x y/tasks/b1.output');
+  await expect(page.locator('#messages')).toContainText('Background · Running');
+  await api('/api/sessions/'+s.id+'/prompt',{text:'later',requestId:'claude-rust-later'});await state(s.id,'idle');
+  // The fake CLI's level drops Sleep before its completion; Agentworks keeps the first terminal state.
+  await expect(sleep.locator('.background-job-state')).toHaveText('Stopped');
+  await expect(panel.locator('.background-job')).toHaveCount(3);
+  await build.getByRole('button',{name:'Stop Build'}).click();
+  await expect(build.locator('.background-job-state')).toHaveText('Stopped');
+  await expect(panel.locator('.background-job').filter({hasText:'spec'}).locator('.background-job-state')).toHaveText('Running');
+  expect((await api('/api/sessions/'+s.id)).session.status).toBe('idle');
+  await page.reload();await expect(panel).toBeVisible();
+  expect(errors).toEqual([]);
+});

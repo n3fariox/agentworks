@@ -83,6 +83,10 @@ def harness():
                 ok(v["request_id"])
             elif r["subtype"] == "set_model" and r["model"] == "refuse":
                 send(type="control_response", response=dict(subtype="error", request_id=v["request_id"], error="Model refused"))
+            elif r["subtype"] == "stop_task":
+                # Like Claude Code, the task's own notification can beat the response.
+                send(type="system", subtype="task_notification", task_id=r["task_id"], tool_use_id="tool-b", status="stopped", summary="Build stopped", output_file="")
+                ok(v["request_id"])
             elif r["subtype"] == "interrupt":
                 ok(v["request_id"])
                 raise KeyboardInterrupt
@@ -167,6 +171,33 @@ def harness():
             send(type="assistant", parent_tool_use_id="tool-a", message=dict(id="sub-3", model="claude-haiku-test", content=[dict(type="text", text=json.dumps(answer["behavior"]))]))
             send(type="system", subtype="task_notification", task_id="t1", tool_use_id="tool-a", status="completed", summary="Found 3 files")
             text("msg-a2", "done")
+            result()
+        elif prompt == "background":
+            # A backgrounded command: Claude names its task, then the result names it too.
+            tool("Bash", "tool-b", dict(command="make", description="Build", run_in_background=True))
+            send(type="system", subtype="task_started", task_id="b1", tool_use_id="tool-b", task_type="local_bash", is_backgrounded=True, description="Build")
+            send(type="user", parent_tool_use_id=None, message=dict(role="user", content=[dict(type="tool_result", tool_use_id="tool-b", content="Command running in background with ID: b1. Output is being written to: /tmp/x y/tasks/b1.output")]), tool_use_result=dict(stdout="", stderr="", interrupted=False, backgroundTaskId="b1"))
+            send(type="system", subtype="task_progress", task_id="b1", description="Build", summary="Compiling", usage=dict(total_tokens=5, tool_uses=1, duration_ms=9))
+            # Monitor tasks only feed the model.
+            tool("Monitor", "tool-m", dict(command="tail -f log"))
+            send(type="system", subtype="task_started", task_id="m1", tool_use_id="tool-m", task_type="local_bash", is_backgrounded=True, description="Watch")
+            # A foreground command that goes to the background later.
+            tool("Bash", "tool-f", dict(command="sleep 9"))
+            send(type="system", subtype="task_started", task_id="f1", tool_use_id="tool-f", task_type="local_bash", is_backgrounded=False, description="Sleep")
+            send(type="system", subtype="task_updated", task_id="f1", patch=dict(is_backgrounded=True))
+            send(type="user", parent_tool_use_id=None, message=dict(role="user", content=[dict(type="tool_result", tool_use_id="tool-f", content="Command was manually backgrounded with ID: f1")]), tool_use_result=dict(stdout="", stderr="", interrupted=False, backgroundTaskId="f1"))
+            # A foreground command that just finishes is no background job.
+            tool("Bash", "tool-g", dict(command="true"))
+            send(type="system", subtype="task_started", task_id="g1", tool_use_id="tool-g", task_type="local_bash", is_backgrounded=False, description="True")
+            send(type="system", subtype="task_notification", task_id="g1", tool_use_id="tool-g", status="completed", summary="", output_file="")
+            send(type="user", parent_tool_use_id=None, message=dict(role="user", content=[dict(type="tool_result", tool_use_id="tool-g", content="")]), tool_use_result=dict(stdout="", stderr="", interrupted=False))
+            text("msg-bg", "Started")
+            result()
+        elif prompt == "later":
+            # The level drops f1 before its own terminal event, which then corrects it.
+            send(type="system", subtype="background_tasks_changed", tasks=[dict(task_id="b1", task_type="local_bash")])
+            send(type="system", subtype="task_notification", task_id="f1", tool_use_id="tool-f", status="completed", summary="Slept", output_file="/tmp/tasks/f1.output")
+            send(type="system", subtype="task_started", task_id="w1", task_type="local_workflow", workflow_name="spec", description="Spec workflow")
             result()
         elif prompt == "unfinished":
             tool("Read", "tool-r", dict(file_path=os.getcwd() + "/a.txt"))
@@ -584,6 +615,49 @@ class BridgeTests(unittest.TestCase):
         self.assertTrue(all(n["sessionId"] == self.id for n in notes))
         self.assertFalse(any(n["update"]["sessionUpdate"] == "subagent_update" for n in notes))
         self.assertEqual(self.answer_text(), "all done")
+
+    def test_background_jobs_and_individual_stop(self):
+        air = dict(version=1, capabilities=["asyncTasks"])
+        init = self.call("initialize", dict(protocolVersion=1, clientCapabilities=dict(_meta=dict(terminal_output=True, jetbrains=dict(air=air)))))
+        self.assertEqual(init["_meta"]["jetbrains"]["air"], air)
+        self.session()
+        self.assertEqual(self.prompt("background")["stopReason"], "end_turn")
+        jobs = lambda: [u for u in self.updates() if u["sessionUpdate"].startswith("async_task")]
+        self.assertEqual(jobs(), [
+            dict(sessionUpdate="async_task_spawned", asyncTaskId="b1", name="Build", taskType="shell", description="Build", showInTranscript=True, canStop=True, toolCallId="tool-b"),
+            dict(sessionUpdate="async_task_progress", asyncTaskId="b1", outputFilePath="/tmp/x y/tasks/b1.output"),
+            dict(sessionUpdate="async_task_progress", asyncTaskId="b1", description="Build", summary="Compiling", usage=dict(totalTokens=5, toolUses=1, durationMs=9)),
+            dict(sessionUpdate="async_task_spawned", asyncTaskId="f1", name="Sleep", taskType="shell", description="Sleep", showInTranscript=True, canStop=True, toolCallId="tool-f"),
+        ])  # Monitor and foreground tasks stay out
+        launches = {u["toolCallId"]: u for u in self.updates("tool_call_update") if "status" in u}
+        self.assertEqual(launches["tool-b"]["_meta"]["jetbrains"]["air"]["asyncTasks"], dict(backgrounded=True))
+        self.assertNotIn("jetbrains", launches["tool-g"]["_meta"])
+        delta = next(u for u in self.updates("tool_call_update") if u["toolCallId"] == "tool-b" and "terminal_output_delta" in u["_meta"])
+        self.assertIn("running in background with ID: b1", delta["_meta"]["terminal_output_delta"]["data"])
+        start = len(jobs())
+        self.prompt("later")
+        self.assertEqual(jobs()[start:], [
+            dict(sessionUpdate="async_task_state_update", asyncTaskId="f1", state="stopped"),
+            dict(sessionUpdate="async_task_state_update", asyncTaskId="f1", state="completed", summary="Slept", outputFilePath="/tmp/tasks/f1.output"),
+            dict(sessionUpdate="async_task_spawned", asyncTaskId="w1", name="spec", taskType="workflow", description="spec", showInTranscript=True, canStop=True),
+        ])
+        stop = lambda task: self.call("_session/async_task/stop", dict(sessionId=self.id, asyncTaskId=task))
+        start = len(jobs())
+        self.assertEqual(stop("b1"), dict(stopped=True))
+        self.assertEqual(stop("b1"), dict(stopped=False))  # already ended
+        self.assertEqual(stop("m1"), dict(stopped=False))  # never shown
+        self.assertEqual(stop("f1"), dict(stopped=False))
+        self.assertEqual(jobs()[start:], [dict(sessionUpdate="async_task_state_update", asyncTaskId="b1", state="stopped", summary="Build stopped")])
+        self.call("session/close", dict(sessionId=self.id))
+        self.assertEqual(jobs()[-1], dict(sessionUpdate="async_task_state_update", asyncTaskId="w1", state="stopped"))
+
+    def test_background_jobs_need_the_client_capability(self):
+        self.assertNotIn("_meta", self.call("initialize", dict(protocolVersion=1, clientCapabilities={})))
+        self.session()
+        self.prompt("background")
+        self.assertFalse(any(u["sessionUpdate"].startswith("async_task") for u in self.updates()))
+        self.assertFalse(any("jetbrains" in u.get("_meta", {}) for u in self.updates("tool_call_update")))
+        self.assertEqual(self.call("_session/async_task/stop", dict(sessionId=self.id, asyncTaskId="b1")), dict(stopped=False))
 
     def test_older_cli_without_state_events_ends_on_result(self):
         Path(self.cwd, "no-state-events").touch()

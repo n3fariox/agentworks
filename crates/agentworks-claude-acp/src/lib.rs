@@ -115,6 +115,8 @@ struct State {
     agents: HashMap<String, SubAgent>,
     /// The CLI reports idle; turns then end there, after any background subagents.
     state_events: bool,
+    /// Claude's other background tasks (AIR asyncTasks) by task id; they outlive turns.
+    jobs: HashMap<String, Job>,
 }
 struct Turn {
     cancelled: bool,
@@ -137,6 +139,89 @@ struct SubAgent {
     /// The child was reported idle.
     ended: bool,
 }
+/// A background task that is not a subagent, such as a backgrounded Bash command.
+#[derive(Default)]
+struct Job {
+    name: String,
+    task_type: String,
+    tool: Option<String>,
+    output: Option<String>,
+    /// The output path the client was given.
+    sent_output: Option<String>,
+    /// The ACP session of the tool call that started it.
+    owner: String,
+    transcript: bool,
+    /// Reported to the client; a task that stays in the foreground never is.
+    announced: bool,
+    /// running, paused, or a terminal state.
+    state: String,
+    /// Ended because background_tasks_changed omitted it; a late terminal event corrects it.
+    by_level: bool,
+    stopping: bool,
+}
+fn terminal(state: &str) -> bool {
+    matches!(state, "completed" | "failed" | "stopped")
+}
+fn job_state(status: &str) -> Option<&'static str> {
+    match status {
+        "pending" | "running" => Some("running"),
+        "paused" => Some("paused"),
+        "completed" => Some("completed"),
+        "failed" => Some("failed"),
+        "killed" | "cancelled" | "stopped" => Some("stopped"),
+        _ => None,
+    }
+}
+fn nonblank(v: &Value) -> Option<&str> {
+    v.as_str().map(str::trim).filter(|s| !s.is_empty())
+}
+impl Job {
+    fn new(owner: &str) -> Self {
+        Job {
+            name: "Background task".into(),
+            task_type: "task".into(),
+            owner: owner.into(),
+            transcript: true,
+            state: "running".into(),
+            ..Default::default()
+        }
+    }
+    /// The spawn, once, followed by its state if it already ended.
+    fn spawn(&mut self, id: &str) -> Vec<Value> {
+        if self.announced {
+            return vec![];
+        }
+        self.announced = true;
+        self.sent_output = self.output.clone();
+        let mut spawn = json!({"sessionUpdate":"async_task_spawned","asyncTaskId":id,"name":self.name,"taskType":self.task_type,"description":self.name,"showInTranscript":self.transcript,"canStop":true});
+        if let Some(output) = &self.output {
+            spawn["outputFilePath"] = json!(output);
+        }
+        if let Some(tool) = &self.tool {
+            spawn["toolCallId"] = json!(tool);
+        }
+        let mut updates = vec![spawn];
+        if self.state != "running" {
+            updates.push(self.state_update(id, None));
+        }
+        updates
+    }
+    fn state_update(&mut self, id: &str, summary: Option<&str>) -> Value {
+        let mut update =
+            json!({"sessionUpdate":"async_task_state_update","asyncTaskId":id,"state":self.state});
+        if let Some(summary) = summary {
+            update["summary"] = json!(summary);
+        }
+        self.output_change(&mut update);
+        update
+    }
+    fn output_change(&mut self, update: &mut Value) {
+        if self.output.is_some() && self.output != self.sent_output {
+            update["outputFilePath"] = json!(self.output);
+            self.sent_output = self.output.clone();
+        }
+    }
+}
 struct Session {
     id: String,
     cwd: String,
@@ -152,6 +237,7 @@ struct Bridge {
     form: AtomicBool,
     terminal_output: AtomicBool,
     subagents: AtomicBool,
+    async_tasks: AtomicBool,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     /// A session's CLI exited on its own; the bridge then ends so the client sees it.
     exited: tokio::sync::Notify,
@@ -778,7 +864,11 @@ impl Session {
                         let task = v["task_id"].as_str().unwrap_or_default();
                         self.announce(tool, task, title, v["prompt"].as_str(), cx)?;
                     }
+                    self.job_started(v, cx, bridge)?;
                 }
+                Some("task_progress") => self.job_progress(v, cx)?,
+                Some("task_updated") => self.job_patch(v, cx)?,
+                Some("background_tasks_changed") => self.jobs_level(v, cx)?,
                 Some("task_notification") => {
                     if let Some(tool) = v["tool_use_id"].as_str() {
                         let known = {
@@ -802,6 +892,21 @@ impl Session {
                                 if completed { "end_turn" } else { "cancelled" },
                                 cx,
                             )?;
+                        }
+                    }
+                    if let Some(task) = v["task_id"].as_str() {
+                        let output = nonblank(&v["output_file"]).map(str::to_owned);
+                        if let (Some(output), Some(job)) =
+                            (output, self.state.lock().unwrap().jobs.get_mut(task))
+                        {
+                            job.output = Some(output);
+                        }
+                        if let Some(state) = v["status"]
+                            .as_str()
+                            .and_then(job_state)
+                            .filter(|s| terminal(s))
+                        {
+                            self.finish_job(task, state, nonblank(&v["summary"]), false, cx)?;
                         }
                     }
                 }
@@ -951,6 +1056,7 @@ impl Session {
             self.end_child(tool_id, stop, cx)?;
         }
         let session = tool["session"].as_str().unwrap_or(&self.id).to_owned();
+        let backgrounded = self.background_result(&tool, tool_id, block, structured, cx, bridge)?;
         if tool["name"] == "TaskCreate" && block["is_error"] != true {
             let text = text_of(&block["content"]);
             if let Some((task, _)) = text
@@ -973,6 +1079,10 @@ impl Session {
             let mut event = event;
             if let Some(parent) = tool["parent"].as_str() {
                 event["_meta"]["claudeCode"]["parentToolUseId"] = json!(parent);
+            }
+            if backgrounded && event["status"].is_string() {
+                event["_meta"]["jetbrains"]["air"] =
+                    json!({"version":1,"asyncTasks":{"backgrounded":true}});
             }
             update(cx, &session, event)?;
         }
@@ -1123,6 +1233,277 @@ impl Session {
         Ok(())
     }
 
+    /// Change job `task`, then send what `change` returns to the job's session.
+    fn with_job(
+        &self,
+        task: &str,
+        cx: &ConnectionTo<Client>,
+        change: impl FnOnce(&mut Job) -> Vec<Value>,
+    ) -> Result<()> {
+        let (owner, updates) = {
+            let mut s = self.state.lock().unwrap();
+            let Some(job) = s.jobs.get_mut(task) else {
+                return Ok(());
+            };
+            let updates = change(job);
+            (job.owner.clone(), updates)
+        };
+        for event in updates {
+            update(cx, &owner, event)?;
+        }
+        Ok(())
+    }
+    /// Record a background task other than a subagent, and announce it once it runs
+    /// in the background. Monitor tasks only feed the model, so they stay hidden.
+    fn job_started(&self, v: &Value, cx: &ConnectionTo<Client>, bridge: &Bridge) -> Result<()> {
+        let kind = v["task_type"].as_str();
+        let Some(task) = nonblank(&v["task_id"]) else {
+            return Ok(());
+        };
+        if !bridge.async_tasks.load(Ordering::Relaxed)
+            || v["subagent_type"].is_string()
+            || matches!(kind, Some("local_agent" | "local_monitor"))
+        {
+            return Ok(());
+        }
+        let background = v["is_backgrounded"]
+            .as_bool()
+            .unwrap_or(kind != Some("local_bash"));
+        {
+            let mut s = self.state.lock().unwrap();
+            let tool = nonblank(&v["tool_use_id"]);
+            let info = tool.and_then(|t| s.tools.get(t)).cloned();
+            if info.as_ref().is_some_and(|t| t["name"] == "Monitor") {
+                return Ok(());
+            }
+            let job = s
+                .jobs
+                .entry(task.into())
+                .or_insert_with(|| Job::new(&self.id));
+            if let Some(kind) = kind {
+                job.task_type = match kind {
+                    "local_bash" => "shell",
+                    "local_workflow" => "workflow",
+                    other => other,
+                }
+                .into();
+            }
+            if let Some(name) = nonblank(&v["workflow_name"]).or(nonblank(&v["description"])) {
+                job.name = name.into();
+            }
+            if let Some(tool) = tool.filter(|_| job.tool.is_none()) {
+                job.tool = Some(tool.into());
+                if let Some(owner) = info.as_ref().and_then(|t| t["session"].as_str()) {
+                    job.owner = owner.into();
+                }
+            }
+            if v["skip_transcript"] == true {
+                job.transcript = false;
+            }
+        }
+        if background {
+            self.with_job(task, cx, |job| job.spawn(task))?;
+        }
+        Ok(())
+    }
+    fn job_progress(&self, v: &Value, cx: &ConnectionTo<Client>) -> Result<()> {
+        let task = v["task_id"].as_str().unwrap_or_default();
+        self.with_job(task, cx, |job| {
+            if !job.announced || terminal(&job.state) {
+                return vec![];
+            }
+            let mut progress = json!({"sessionUpdate":"async_task_progress","asyncTaskId":task});
+            for (from, to) in [
+                ("description", "description"),
+                ("summary", "summary"),
+                ("last_tool_name", "lastToolName"),
+            ] {
+                if let Some(text) = nonblank(&v[from]) {
+                    progress[to] = json!(text);
+                }
+            }
+            let usage = &v["usage"];
+            if let (Some(total), Some(tools), Some(duration)) = (
+                usage["total_tokens"].as_u64(),
+                usage["tool_uses"].as_u64(),
+                usage["duration_ms"].as_u64(),
+            ) {
+                progress["usage"] =
+                    json!({"totalTokens":total,"toolUses":tools,"durationMs":duration});
+            }
+            job.output_change(&mut progress);
+            if progress.as_object().unwrap().len() > 2 {
+                vec![progress]
+            } else {
+                vec![]
+            }
+        })
+    }
+    /// `task_updated`: a task moved to the background, paused, resumed or ended.
+    fn job_patch(&self, v: &Value, cx: &ConnectionTo<Client>) -> Result<()> {
+        let task = v["task_id"].as_str().unwrap_or_default();
+        let patch = &v["patch"];
+        let state = patch["status"].as_str().and_then(job_state);
+        self.with_job(task, cx, |job| {
+            if let Some(name) = nonblank(&patch["description"]) {
+                job.name = name.into();
+            }
+            let mut updates = vec![];
+            if let Some(state) =
+                state.filter(|s| !terminal(s) && !terminal(&job.state) && job.state != *s)
+            {
+                job.state = state.into();
+                if job.announced {
+                    updates.push(job.state_update(task, None));
+                }
+            }
+            if patch["is_backgrounded"] == true {
+                updates.extend(job.spawn(task));
+            }
+            updates
+        })?;
+        match state.filter(|s| terminal(s)) {
+            Some(state) => self.finish_job(task, state, nonblank(&patch["error"]), false, cx),
+            None => Ok(()),
+        }
+    }
+    /// `background_tasks_changed` lists every live background task: a known task in
+    /// it went to the background, and an announced task missing from it has ended.
+    fn jobs_level(&self, v: &Value, cx: &ConnectionTo<Client>) -> Result<()> {
+        let live: HashSet<&str> = v["tasks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|t| t["task_id"].as_str())
+            .collect();
+        let (promoted, ended): (Vec<String>, Vec<String>) = {
+            let s = self.state.lock().unwrap();
+            let open = s.jobs.iter().filter(|(_, j)| !terminal(&j.state));
+            let (promoted, ended): (Vec<_>, Vec<_>) =
+                open.partition(|(id, _)| live.contains(id.as_str()));
+            (
+                promoted
+                    .into_iter()
+                    .filter(|(_, j)| !j.announced)
+                    .map(|(id, _)| id.clone())
+                    .collect(),
+                ended
+                    .into_iter()
+                    .filter(|(_, j)| j.announced)
+                    .map(|(id, _)| id.clone())
+                    .collect(),
+            )
+        };
+        for task in promoted {
+            self.with_job(&task, cx, |job| job.spawn(&task))?;
+        }
+        for task in ended {
+            self.finish_job(&task, "stopped", None, true, cx)?;
+        }
+        Ok(())
+    }
+    fn finish_job(
+        &self,
+        task: &str,
+        state: &str,
+        summary: Option<&str>,
+        level: bool,
+        cx: &ConnectionTo<Client>,
+    ) -> Result<()> {
+        self.with_job(task, cx, |job| {
+            if terminal(&job.state) && (level || !job.by_level) {
+                return vec![];
+            }
+            job.state = state.into();
+            job.by_level = level;
+            if job.announced {
+                vec![job.state_update(task, summary)]
+            } else {
+                vec![]
+            }
+        })
+    }
+    /// The CLI is going away, and its background tasks with it.
+    fn end_jobs(&self, cx: &ConnectionTo<Client>) -> Result<()> {
+        let live: Vec<String> = {
+            let s = self.state.lock().unwrap();
+            s.jobs
+                .iter()
+                .filter(|(_, j)| j.announced && !terminal(&j.state))
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        for task in live {
+            self.finish_job(&task, "stopped", None, false, cx)?;
+        }
+        Ok(())
+    }
+    /// The job of a Bash result, which names the task of a backgrounded command and
+    /// its output file. Returns whether the command runs in the background.
+    fn background_result(
+        &self,
+        tool: &Value,
+        tool_id: &str,
+        block: &Value,
+        structured: &Value,
+        cx: &ConnectionTo<Client>,
+        bridge: &Bridge,
+    ) -> Result<bool> {
+        if !bridge.async_tasks.load(Ordering::Relaxed)
+            || !matches!(tool["name"].as_str(), Some("Bash" | "PowerShell"))
+        {
+            return Ok(false);
+        }
+        let named = nonblank(&structured["backgroundTaskId"]);
+        let task = {
+            let mut s = self.state.lock().unwrap();
+            let task = named.map(str::to_owned).or_else(|| {
+                s.jobs
+                    .iter()
+                    .find(|(_, j)| j.tool.as_deref() == Some(tool_id))
+                    .map(|(id, _)| id.clone())
+            });
+            let Some(task) = task else {
+                return Ok(tool["input"]["run_in_background"] == true && block["is_error"] != true);
+            };
+            let owner = tool["session"].as_str().unwrap_or(&self.id).to_owned();
+            let job = s.jobs.entry(task.clone()).or_insert_with(|| {
+                let mut job = Job::new(&owner);
+                job.task_type = "shell".into();
+                let input = &tool["input"];
+                if let Some(name) = nonblank(&input["description"]).or(nonblank(&input["command"]))
+                {
+                    job.name = name.into();
+                }
+                job
+            });
+            job.tool.get_or_insert_with(|| tool_id.into());
+            if job.output.is_none() {
+                job.output = output_path(&text_of(&block["content"]), &task);
+            }
+            task
+        };
+        let mut backgrounded = false;
+        self.with_job(&task, cx, |job| {
+            let mut updates = if named.is_some() {
+                job.spawn(&task)
+            } else {
+                vec![]
+            };
+            backgrounded = job.announced;
+            if job.announced && !terminal(&job.state) {
+                let mut progress =
+                    json!({"sessionUpdate":"async_task_progress","asyncTaskId":task});
+                job.output_change(&mut progress);
+                if progress.get("outputFilePath").is_some() {
+                    updates.push(progress);
+                }
+            }
+            updates
+        })?;
+        Ok(backgrounded)
+    }
+
     fn agent_text(&self, parent: &str, text: &str, cx: &ConnectionTo<Client>) -> Result<()> {
         let known = {
             let mut s = self.state.lock().unwrap();
@@ -1238,12 +1619,21 @@ impl Bridge {
                     .store(caps["_meta"]["terminal_output"] == true, Ordering::Relaxed);
                 self.subagents
                     .store(caps["subagents"].is_object(), Ordering::Relaxed);
-                Ok(
-                    json!({"protocolVersion":1,"agentInfo":{"name":"agentworks-claude-acp","title":"Claude Agent","version":env!("CARGO_PKG_VERSION")},
+                let air = &caps["_meta"]["jetbrains"]["air"];
+                let async_tasks = air["version"].as_u64().is_some_and(|v| v >= 1)
+                    && air["capabilities"]
+                        .as_array()
+                        .is_some_and(|c| c.iter().any(|c| c == "asyncTasks"));
+                self.async_tasks.store(async_tasks, Ordering::Relaxed);
+                let mut response = json!({"protocolVersion":1,"agentInfo":{"name":"agentworks-claude-acp","title":"Claude Agent","version":env!("CARGO_PKG_VERSION")},
                     "agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"embeddedContext":true},"mcpCapabilities":{"http":true,"sse":true},
                         "sessionCapabilities":{"list":{},"resume":{},"close":{},"delete":{},"fork":{},"additionalDirectories":{},"systemPrompt":{"mode":{"override":{}}}}},
-                    "authMethods":[]}),
-                )
+                    "authMethods":[]});
+                if async_tasks {
+                    response["_meta"] =
+                        json!({"jetbrains":{"air":{"version":1,"capabilities":["asyncTasks"]}}});
+                }
+                Ok(response)
             }
             "authenticate" => Err(invalid(
                 "Use the host Claude sign-in (claude auth login) or ANTHROPIC_API_KEY",
@@ -1261,6 +1651,7 @@ impl Bridge {
                         ));
                     }
                     self.sessions.lock().unwrap().remove(id);
+                    let _ = live.end_jobs(cx);
                     live.kill().await;
                 }
                 if method == "session/delete" {
@@ -1393,6 +1784,29 @@ impl Bridge {
                     return Err(e);
                 }
                 rx.await.map_err(|_| failure("Claude turn disconnected"))?
+            }
+            "_session/async_task/stop" => {
+                let s = self.session(&p)?;
+                let task = field(&p, "asyncTaskId")?.to_owned();
+                let claimed = s
+                    .state
+                    .lock()
+                    .unwrap()
+                    .jobs
+                    .get_mut(&task)
+                    .filter(|j| j.announced && !j.stopping && !terminal(&j.state))
+                    .map(|j| j.stopping = true)
+                    .is_some();
+                if !claimed {
+                    return Ok(json!({"stopped":false}));
+                }
+                let stopped = s.control("stop_task", json!({"task_id":task})).await;
+                if let Some(job) = s.state.lock().unwrap().jobs.get_mut(&task) {
+                    job.stopping = false;
+                }
+                stopped?;
+                s.finish_job(&task, "stopped", None, false, cx)?;
+                Ok(json!({"stopped":true}))
             }
             _ => Err(Error::method_not_found()),
         }
@@ -1818,6 +2232,27 @@ fn text_of(content: &Value) -> String {
 }
 
 /// The ACP presentation of a Claude tool use, keyed by Claude's tool names.
+/// The absolute `.../tasks/<task>.output` path in a backgrounded command's result,
+/// which Claude Code writes after "Output is being written to: ".
+fn output_path(text: &str, task: &str) -> Option<String> {
+    let suffixes = [
+        format!("/tasks/{task}.output"),
+        format!("\\tasks\\{task}.output"),
+    ];
+    text.lines().find_map(|line| {
+        let end = suffixes
+            .iter()
+            .find_map(|s| line.find(s.as_str()).map(|i| i + s.len()))?;
+        let start = line[..end].rfind(": ").map_or(0, |i| i + 2);
+        let path = &line[start..end];
+        let bytes = path.as_bytes();
+        let absolute = path.starts_with('/')
+            || path.starts_with("\\\\")
+            || (bytes.len() > 2 && bytes[1] == b':' && matches!(bytes[2], b'/' | b'\\'));
+        absolute.then(|| path.to_owned())
+    })
+}
+
 fn tool_call(name: &str, id: &str, input: &Value, cwd: &str, bridge: &Bridge) -> Value {
     let s = |k: &str| input[k].as_str();
     let path = |k: &str| s(k).map(|p| display_path(p, cwd));
@@ -1999,7 +2434,11 @@ fn tool_result(
             text_of(&block["content"]),
             if error { None } else { Some(0) },
         );
-        if structured["stdout"].is_string() && structured["stderr"].is_string() {
+        // A backgrounded command's text names its task and output file; stdout is empty.
+        if structured["stdout"].is_string()
+            && structured["stderr"].is_string()
+            && !structured["backgroundTaskId"].is_string()
+        {
             output = [&structured["stdout"], &structured["stderr"]]
                 .iter()
                 .filter_map(|s| s.as_str())
@@ -2502,6 +2941,7 @@ pub async fn run() -> Result<()> {
         form: AtomicBool::new(false),
         terminal_output: AtomicBool::new(false),
         subagents: AtomicBool::new(false),
+        async_tasks: AtomicBool::new(false),
         sessions: Mutex::default(),
         exited: tokio::sync::Notify::new(),
         exit_reason: Mutex::default(),
