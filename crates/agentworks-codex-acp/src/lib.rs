@@ -17,6 +17,7 @@ use tokio::{
 };
 
 mod commands;
+mod subagents;
 
 type Result<T> = std::result::Result<T, Error>;
 type Reply = oneshot::Sender<Result<Value>>;
@@ -69,6 +70,8 @@ struct Bridge {
     // Dropping an SDK request sends $/cancel_request, withdrawing the client's UI.
     questions: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     boolean_config: AtomicBool,
+    subagents: AtomicBool,
+    children: Mutex<HashMap<String, String>>,
     limits: Mutex<Map<String, Value>>,
 }
 
@@ -106,6 +109,14 @@ impl Bridge {
         p: Value,
         cx: &ConnectionTo<Client>,
     ) -> Result<Value> {
+        if p["sessionId"]
+            .as_str()
+            .is_some_and(|id| self.children.lock().unwrap().contains_key(id))
+        {
+            return Err(invalid(
+                "Codex owns this subagent; send instructions through its parent",
+            ));
+        }
         match method {
             "initialize" => {
                 if p["protocolVersion"] != 1 {
@@ -115,12 +126,16 @@ impl Bridge {
                     p["clientCapabilities"]["session"]["configOptions"]["boolean"].is_object(),
                     Ordering::Relaxed,
                 );
+                self.subagents.store(
+                    p["clientCapabilities"]["subagents"].is_object(),
+                    Ordering::Relaxed,
+                );
                 self.rpc("initialize", json!({"clientInfo":{"name":"agentworks","title":"Agentworks","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}})).await?;
                 self.write(json!({"method":"initialized","params":{}}))
                     .await?;
                 Ok(
                     json!({"protocolVersion":1,"agentInfo":{"name":"agentworks-codex-acp","version":env!("CARGO_PKG_VERSION")},
-                    "agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"embeddedContext":true},"mcpCapabilities":{"http":true},"sessionCapabilities":{"list":{},"close":{},"delete":{},"fork":{},"additionalDirectories":{}}},
+                    "agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"embeddedContext":true},"mcpCapabilities":{"http":true},"sessionCapabilities":{"list":{},"close":{},"delete":{},"fork":{},"additionalDirectories":{},"subagents":{}}},
                     "authMethods":[{"id":"api-key","name":"API key"}]}),
                 )
             }
@@ -209,8 +224,7 @@ impl Bridge {
                 );
                 if method == "session/load" {
                     // History is replayed as ACP notifications; the app decides whether to display it.
-                    self.history(&id, |_, item| replay_item(cx, &id, item))
-                        .await?;
+                    self.replay_tree(cx, &id).await?;
                 }
                 let options = self.config_options(&id).await?;
                 update(
@@ -243,6 +257,7 @@ impl Bridge {
                 )
                 .await?;
                 self.sessions.lock().unwrap().remove(id);
+                self.forget_children(id);
                 Ok(json!({}))
             }
             "session/list" => {
@@ -554,13 +569,14 @@ impl Bridge {
                     let client = cx.clone();
                     let request_id = v["id"].to_string();
                     let method = method.to_owned();
+                    let params = self.approval_session(&v["params"]);
                     // Remove completed entries; serverRequest/resolved withdraws unanswered ones.
                     self.questions
                         .lock()
                         .unwrap()
                         .retain(|_, task| !task.is_finished());
                     let task = tokio::spawn(async move {
-                        let result = client_request(&client, &method, &v["params"]).await;
+                        let result = client_request(&client, &method, &params).await;
                         let reply = match result {
                             Ok(result) => json!({"id":v["id"],"result":result}),
                             Err(e) => {
@@ -583,7 +599,16 @@ impl Bridge {
                     observe_limits(&mut self.limits.lock().unwrap(), &v["params"]["rateLimits"]);
                 } else {
                     let p = &v["params"];
+                    self.observe_subagents(&cx, method, p)?;
                     let id = p["threadId"].as_str().unwrap_or("");
+                    if self.children.lock().unwrap().contains_key(id) {
+                        if let Some(event) = event_update(method, p)
+                            .filter(|_| self.subagents.load(Ordering::Relaxed))
+                        {
+                            update(&cx, id, event)?;
+                        }
+                        continue;
+                    }
                     if method == "turn/started"
                         || (method == "item/started"
                             && matches!(
@@ -898,7 +923,11 @@ fn tool_update(item: &Value, done: bool) -> Option<Value> {
     let kind = match item["type"].as_str()? {
         "commandExecution" => "execute",
         "fileChange" => "edit",
-        "mcpToolCall" | "dynamicToolCall" | "contextCompaction" => "other",
+        "mcpToolCall"
+        | "dynamicToolCall"
+        | "contextCompaction"
+        | "collabAgentToolCall"
+        | "subAgentActivity" => "other",
         "webSearch" => "search",
         "imageView" => "read",
         _ => return None,
@@ -906,6 +935,7 @@ fn tool_update(item: &Value, done: bool) -> Option<Value> {
     let title = item["command"]
         .as_str()
         .or_else(|| item["tool"].as_str())
+        .or_else(|| item["agentPath"].as_str())
         .unwrap_or(kind);
     let mut result = json!({"sessionUpdate":if done{"tool_call_update"}else{"tool_call"},"toolCallId":item["id"],"title":title,"kind":kind,"status":if !done{"in_progress"}else if matches!(item["status"].as_str(),Some("failed"|"declined")){"failed"}else{"completed"}});
     result[if done { "rawOutput" } else { "rawInput" }] = item.clone();
@@ -1004,6 +1034,8 @@ pub async fn run() -> Result<()> {
         sessions: Mutex::default(),
         questions: Mutex::default(),
         boolean_config: AtomicBool::new(false),
+        subagents: AtomicBool::new(false),
+        children: Mutex::default(),
         limits: Mutex::default(),
     });
     let requests = bridge.clone();
