@@ -94,7 +94,11 @@ fn truthy(v: &Value) -> bool {
     }
 }
 fn or<'a>(v: &'a Value, fallback: &'a str) -> Value {
-    if truthy(v) { v.clone() } else { json!(fallback) }
+    if truthy(v) {
+        v.clone()
+    } else {
+        json!(fallback)
+    }
 }
 fn ms(v: &Value, fallback: u64) -> u64 {
     v.as_f64().map_or(fallback, |n| n.max(0.0) as u64)
@@ -108,7 +112,11 @@ fn words(text: &str, leading: bool) -> Vec<&str> {
     let mut starts: Vec<usize> = text
         .char_indices()
         .filter(|&(i, c)| {
-            !c.is_whitespace() && text[..i].chars().next_back().is_none_or(char::is_whitespace)
+            !c.is_whitespace()
+                && text[..i]
+                    .chars()
+                    .next_back()
+                    .is_none_or(char::is_whitespace)
         })
         .map(|(i, _)| i)
         .collect();
@@ -152,7 +160,11 @@ fn model_config(model: &Value, mode: &Value) -> Value {
         json!({"id":"model","name":"Model","category":"model","type":"select","currentValue":model,"options":options}),
     ];
     if env_is("AGENTWORKS_DEMO_MODES", "1") {
-        let mode = if mode.is_null() { json!("default") } else { mode.clone() };
+        let mode = if mode.is_null() {
+            json!("default")
+        } else {
+            mode.clone()
+        };
         config.push(json!({"id":"mode","name":"Mode","category":"mode","type":"select","currentValue":mode,"options":[{"value":"default","name":"Manual"},{"value":"auto","name":"Auto"}]}));
     }
     json!(config)
@@ -197,7 +209,9 @@ impl Demo {
             }
             s["history"].as_array_mut().unwrap().push(update.clone());
         }
-        self.send(json!({"method":"session/update","params":{"sessionId":session,"update":update}}));
+        self.send(
+            json!({"method":"session/update","params":{"sessionId":session,"update":update}}),
+        );
     }
     fn chunk(&self, session: &str, text: &str) {
         self.update(
@@ -385,7 +399,10 @@ impl Demo {
     }
 
     fn open(self: &Arc<Self>, id: &Value, method: &str, params: &Value) -> Result<(), ()> {
-        let session = params["sessionId"].as_str().filter(|s| is_session_id(s)).ok_or(())?;
+        let session = params["sessionId"]
+            .as_str()
+            .filter(|s| is_session_id(s))
+            .ok_or(())?;
         let file = std::fs::read(self.state_dir.join(format!("{session}.json"))).map_err(|_| ())?;
         let mut state: Value = serde_json::from_slice(&file).map_err(|_| ())?;
         if !state.is_object() || state["cwd"] != params["cwd"] {
@@ -393,11 +410,18 @@ impl Demo {
         }
         state["cancelled"] = json!(false);
         let history = state["history"].as_array().cloned().unwrap_or_default();
-        let (fail_load, resume_delay) = (truthy(&state["failLoad"]), state["resumeDelayMs"].as_u64());
+        let (fail_load, resume_delay) =
+            (truthy(&state["failLoad"]), state["resumeDelayMs"].as_u64());
         let config = model_config(&state["model"], &state["mode"]);
         self.sessions.lock().unwrap().insert(session.into(), state);
-        self.mcp_configs.lock().unwrap().insert(session.into(), or_array(&params["mcpServers"]));
-        self.system_prompts.lock().unwrap().insert(session.into(), system_prompt(params));
+        self.mcp_configs
+            .lock()
+            .unwrap()
+            .insert(session.into(), or_array(&params["mcpServers"]));
+        self.system_prompts
+            .lock()
+            .unwrap()
+            .insert(session.into(), system_prompt(params));
         if method == "session/load" {
             for update in history {
                 self.send(json!({"method":"session/update","params":{"sessionId":session,"update":update}}));
@@ -510,7 +534,10 @@ impl Demo {
                     return self.error(&id, -32602, "Unknown model", None);
                 }
                 self.save(&session);
-                let config = model_config(&self.field(&session, "model"), &self.field(&session, "mode"));
+                let config = model_config(
+                    &self.field(&session, "model"),
+                    &self.field(&session, "mode"),
+                );
                 self.reply(&id, json!({"configOptions":config}));
             }
             "session/close" => {
@@ -563,7 +590,10 @@ impl Demo {
                         demo.error(&id, -32603, &e, None);
                     }
                     let mut active = demo.active_prompts.lock().unwrap();
-                    if active.get(&session).is_some_and(|r| Arc::ptr_eq(r, &running)) {
+                    if active
+                        .get(&session)
+                        .is_some_and(|r| Arc::ptr_eq(r, &running))
+                    {
                         active.remove(&session);
                     }
                 });
@@ -615,7 +645,9 @@ impl Demo {
         // U-07 fixture: `usage-status {json}` emits that usage_update deterministically; no model is called.
         if let Some(usage) = text.strip_prefix("usage-status ") {
             let mut update: Value = serde_json::from_str(usage).map_err(|e| e.to_string())?;
-            let fields = update.as_object_mut().ok_or("usage-status expects an object")?;
+            let fields = update
+                .as_object_mut()
+                .ok_or("usage-status expects an object")?;
             let mut merged = Map::from_iter([("sessionUpdate".to_owned(), json!("usage_update"))]);
             merged.append(fields);
             self.update(sid, Value::Object(merged));
@@ -626,7 +658,13 @@ impl Demo {
         }
         // Roles fixture: `role?` reports the system prompt this connection received.
         if text == "role?" {
-            let prompt = self.system_prompts.lock().unwrap().get(sid).cloned().flatten();
+            let prompt = self
+                .system_prompts
+                .lock()
+                .unwrap()
+                .get(sid)
+                .cloned()
+                .flatten();
             self.chunk(sid, prompt.as_deref().unwrap_or("No system prompt."));
             self.save(sid);
             self.reply(id, json!({"stopReason":"end_turn"}));
@@ -650,7 +688,10 @@ impl Demo {
                 self.update(sid, update);
                 delay(10).await;
             }
-            self.chunk(sid, "Replayed the recorded Bazel fixture. No command was executed.");
+            self.chunk(
+                sid,
+                "Replayed the recorded Bazel fixture. No command was executed.",
+            );
             self.save(sid);
             self.reply(id, json!({"stopReason":"end_turn"}));
             return Ok(());
@@ -663,11 +704,19 @@ impl Demo {
             .map(describe_attachment)
             .collect();
         if !attached.is_empty() {
-            self.chunk(sid, &format!("Received attachments:\n{}\n\n", attached.join("\n")));
+            self.chunk(
+                sid,
+                &format!("Received attachments:\n{}\n\n", attached.join("\n")),
+            );
         }
         // B-02: deterministic provider-local read; no model/tool action is dispatched.
         if text == "/status" || text == "/usage" {
-            delay(env("AGENTWORKS_DEMO_STATUS_DELAY_MS").and_then(|v| v.parse().ok()).unwrap_or(0)).await;
+            delay(
+                env("AGENTWORKS_DEMO_STATUS_DELAY_MS")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
+            )
+            .await;
             let probe = self.field(sid, "probeMode");
             if probe == "transport-exit" {
                 std::process::exit(1);
@@ -693,7 +742,10 @@ impl Demo {
             return Ok(());
         }
         if text == "quota active-approval" {
-            self.update(sid, rate_limit(json!({"status":"rejected","resetsAt":now_ceil()+2})));
+            self.update(
+                sid,
+                rate_limit(json!({"status":"rejected","resetsAt":now_ceil()+2})),
+            );
             let tool_call = json!({"toolCallId":uuid::Uuid::new_v4().to_string(),"title":"Quota approval boundary","kind":"other","status":"pending"});
             let _ = self.permission(sid, tool_call, false).await;
             self.reply(id, self.stop_reason(sid));
@@ -703,9 +755,14 @@ impl Demo {
             self.set(sid, "repeatQuota", json!(2));
         }
         let repeat = self.field(sid, "repeatQuota").as_i64().unwrap_or(0);
-        let quota = ["quota known", "quota unknown", "quota multi", "quota repeat"]
-            .iter()
-            .any(|p| text.starts_with(p));
+        let quota = [
+            "quota known",
+            "quota unknown",
+            "quota multi",
+            "quota repeat",
+        ]
+        .iter()
+        .any(|p| text.starts_with(p));
         if quota || (text.starts_with("[Agentworks usage-limit continuation;") && repeat > 0) {
             if repeat > 0 {
                 self.set(sid, "repeatQuota", json!(repeat - 1));
@@ -740,7 +797,12 @@ impl Demo {
             return Ok(());
         }
         if text == "quota generic" {
-            self.error(id, -32603, "rate limit quota resetsAt 9999999999 (injected prose)", None);
+            self.error(
+                id,
+                -32603,
+                "rate limit quota resetsAt 9999999999 (injected prose)",
+                None,
+            );
             return Ok(());
         }
         if let Some(rest) = text.strip_prefix("mcp ") {
@@ -822,7 +884,10 @@ impl Demo {
                 json!({"sessionUpdate":"tool_call","toolCallId":tool_call_id,"title":"Show a demo tool result","kind":"other","status":"pending","rawInput":{"demo":true}}),
             );
             let tool_call = json!({"toolCallId":tool_call_id,"title":"Show a demo tool result","kind":"other","status":"pending"});
-            let decision = self.permission(sid, tool_call, true).await.unwrap_or(Value::Null);
+            let decision = self
+                .permission(sid, tool_call, true)
+                .await
+                .unwrap_or(Value::Null);
             if !self.cancelled(sid) {
                 let allowed = decision["outcome"] == "selected" && decision["optionId"] == "allow";
                 let result = if allowed {
@@ -895,7 +960,10 @@ impl Demo {
                 delay(ms(wait, 0)).await;
             } else if let Some(approve) = step.get("approve") {
                 let tool_call = json!({"toolCallId":approve,"title":step["title"],"kind":or(&step["kind"],"other"),"status":"pending"});
-                let decision = self.permission(sid, tool_call, true).await.unwrap_or(Value::Null);
+                let decision = self
+                    .permission(sid, tool_call, true)
+                    .await
+                    .unwrap_or(Value::Null);
                 if !(decision["outcome"] == "selected" && decision["optionId"] == "allow") {
                     self.update(
                         sid,
@@ -911,7 +979,10 @@ impl Demo {
                 };
                 let (args, failure) = match resolve_refs(&arguments, &seen) {
                     Ok(args) => (args, None),
-                    Err(e) => (step["arguments"].clone(), Some(json!({"isError":true,"message":e}))),
+                    Err(e) => (
+                        step["arguments"].clone(),
+                        Some(json!({"isError":true,"message":e})),
+                    ),
                 };
                 self.update(
                     sid,
@@ -965,7 +1036,11 @@ fn describe_attachment(p: &Value) -> String {
                 .bytes()
                 .filter(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'-' | b'_'))
                 .count();
-            format!("- image {} {} bytes", p["mimeType"].as_str().unwrap_or("undefined"), chars * 3 / 4)
+            format!(
+                "- image {} {} bytes",
+                p["mimeType"].as_str().unwrap_or("undefined"),
+                chars * 3 / 4
+            )
         }
         "resource" => {
             let r = &p["resource"];
@@ -993,10 +1068,14 @@ fn resolve_refs(value: &Value, seen: &Map<String, Value>) -> Result<Value, Strin
             .collect::<Result<Map<_, _>, String>>()
             .map(Value::Object),
         Value::String(s) => {
-            let Some((kind, title)) = s
-                .strip_prefix('$')
-                .and_then(|r| r.split_once(':'))
-                .filter(|(k, t)| matches!(*k, "peer" | "message-from" | "sender") && !t.is_empty() && !t.contains('\n'))
+            let Some((kind, title)) =
+                s.strip_prefix('$')
+                    .and_then(|r| r.split_once(':'))
+                    .filter(|(k, t)| {
+                        matches!(*k, "peer" | "message-from" | "sender")
+                            && !t.is_empty()
+                            && !t.contains('\n')
+                    })
             else {
                 return Ok(value.clone());
             };
@@ -1038,17 +1117,32 @@ async fn call_mcp(spec: Option<&Value>, name: &str, args: Value) -> Value {
 async fn mcp_request(spec: &Value, (method, params): (&str, Value)) -> Result<Value, String> {
     let mut command = Command::new(spec["command"].as_str().unwrap_or_default());
     command
-        .args(spec["args"].as_array().into_iter().flatten().filter_map(Value::as_str))
+        .args(
+            spec["args"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str),
+        )
         .env_clear()
         // The MCP SDK's default inheritance, then the server's own variables.
         .envs(
             ["HOME", "LOGNAME", "PATH", "SHELL", "TERM", "USER"]
                 .into_iter()
-                .filter_map(|k| std::env::var(k).ok().filter(|v| !v.starts_with("()")).map(|v| (k, v))),
+                .filter_map(|k| {
+                    std::env::var(k)
+                        .ok()
+                        .filter(|v| !v.starts_with("()"))
+                        .map(|v| (k, v))
+                }),
         )
-        .envs(spec["env"].as_array().into_iter().flatten().filter_map(|e| {
-            Some((e["name"].as_str()?, e["value"].as_str()?))
-        }))
+        .envs(
+            spec["env"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|e| Some((e["name"].as_str()?, e["value"].as_str()?))),
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -1061,7 +1155,13 @@ async fn mcp_request(spec: &Value, (method, params): (&str, Value)) -> Result<Va
         let id = next;
         next += 1;
         input
-            .write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})).as_bytes())
+            .write_all(
+                format!(
+                    "{}\n",
+                    json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+                )
+                .as_bytes(),
+            )
             .await
             .map_err(|e| e.to_string())?;
         loop {
@@ -1088,7 +1188,11 @@ async fn mcp_request(spec: &Value, (method, params): (&str, Value)) -> Result<Va
                 continue;
             }
             if let Some(error) = message.get("error") {
-                return Err(format!("MCP error {}: {}", error["code"], error["message"].as_str().unwrap_or_default()));
+                return Err(format!(
+                    "MCP error {}: {}",
+                    error["code"],
+                    error["message"].as_str().unwrap_or_default()
+                ));
             }
             if method == "initialize" {
                 input
@@ -1143,7 +1247,11 @@ pub async fn run() -> std::io::Result<()> {
             let waiting = demo.approvals.lock().unwrap().remove(&key);
             if let Some(a) = waiting {
                 let result = &message["result"];
-                let _ = a.resolve.send(if a.raw { result.clone() } else { result["outcome"].clone() });
+                let _ = a.resolve.send(if a.raw {
+                    result.clone()
+                } else {
+                    result["outcome"].clone()
+                });
             }
             continue;
         }
@@ -1158,7 +1266,10 @@ mod tests {
 
     #[test]
     fn words_match_the_javascript_patterns() {
-        assert_eq!(words("  one two\n three ", true), ["  one ", "two\n ", "three "]);
+        assert_eq!(
+            words("  one two\n three ", true),
+            ["  one ", "two\n ", "three "]
+        );
         assert_eq!(words("  one two", false), ["one ", "two"]);
         assert!(words("   ", true).is_empty());
     }
@@ -1166,10 +1277,16 @@ mod tests {
     #[test]
     fn refs_resolve_from_seen_results() {
         let seen = Map::from_iter([
-            ("list_sessions".into(), json!({"sessions":[{"title":"Peer","uri":"aw://peer"}]})),
-            ("read_inbox".into(), json!({"messages":[
+            (
+                "list_sessions".into(),
+                json!({"sessions":[{"title":"Peer","uri":"aw://peer"}]}),
+            ),
+            (
+                "read_inbox".into(),
+                json!({"messages":[
                 {"senderTitle":"Peer","uri":"aw://m1","senderUri":"aw://s1"},
-                {"senderTitle":"Peer","uri":"aw://m2","senderUri":"aw://s2"}]})),
+                {"senderTitle":"Peer","uri":"aw://m2","senderUri":"aw://s2"}]}),
+            ),
         ]);
         let args = json!({"to":["$peer:Peer"],"reply":"$message-from:Peer","sender":"$sender:Peer","text":"$other"});
         assert_eq!(
@@ -1189,7 +1306,9 @@ mod tests {
             "- image image/png 5 bytes"
         );
         assert_eq!(
-            describe_attachment(&json!({"type":"resource","resource":{"mimeType":"text/plain","uri":"file:///a","text":"hi \"x\""}})),
+            describe_attachment(
+                &json!({"type":"resource","resource":{"mimeType":"text/plain","uri":"file:///a","text":"hi \"x\""}})
+            ),
             "- resource text/plain file:///a 6 chars: \"hi \\\"x\\\"\""
         );
     }
