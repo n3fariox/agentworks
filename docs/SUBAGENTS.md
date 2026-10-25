@@ -10,6 +10,8 @@ The strip scrolls horizontally on narrow screens, and arrow keys, Home and End
 navigate its tabs. Child views keep the parent approval controls and composer;
 composer messages are sent to the main agent.
 
+Background work reported through the optional [async-task extension](BACKGROUND-JOBS.md) appears in the Background jobs dropdown, including jobs owned by a child. Its individual Stop control targets only that reported job.
+
 Children are created by the harness. Agentworks does not start, prompt, resume,
 or cancel individual children. **Stop** cancels the root turn; the harness owns
 cancelling its children. A child with no confirmed activity shows **Activity
@@ -28,8 +30,9 @@ older adapters retain their ordinary tool-call presentation.
 
 The bundled Codex SDK parser needs one local correction to preserve
 `clientCapabilities.subagents`; see its [modification notice](../vendor/codex-acp/AGENTWORKS.md).
-Canonical negotiation is used without identifying Agentworks as a JetBrains
-client. Claude's installed SDK already preserves the capability. The Rust Claude
+Canonical subagent negotiation is retained. Declaring the separate AIR `asyncTasks`
+capability selects Claude’s older subagent event format, which is also supported;
+the client identity remains Agentworks. Claude's installed SDK already preserves the capability. The Rust Claude
 harness (`claude-rust`) announces each Claude task as a current-draft child session;
 see [its notes](RUST-CLAUDE-ACP.md).
 

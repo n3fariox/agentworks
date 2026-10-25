@@ -1,6 +1,6 @@
 # Tool activity, progress and compact work logs
 
-Compact work logs, [configurable timeouts](TIMEOUTS.md), and built-in Bazel progress are implemented. Bazel progress requires terminal output metadata from the adapter. Work-log durations currently use live browser observations and are omitted after replay because stored events do not carry timestamps; unknown background process state is labelled unresolved rather than running.
+Compact work logs, [configurable timeouts](TIMEOUTS.md), and built-in Bazel progress are implemented. Bazel progress requires terminal output metadata from the adapter. Work-log durations currently use live browser observations and are omitted after replay because stored events do not carry timestamps; unknown background process state is labelled unresolved rather than running. Compatible adapters additionally expose [background jobs](BACKGROUND-JOBS.md) with independent lifecycle tracking and individual Stop controls.
 
 ## Current behavior and transport work
 

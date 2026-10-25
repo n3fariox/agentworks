@@ -1,3 +1,4 @@
+mod async_tasks;
 mod attachments;
 mod automations;
 mod browser_origin;
@@ -188,6 +189,11 @@ impl Session {
             data["continuationState"] =
                 serde_json::to_value(&state.continuation).unwrap_or(Value::Null);
         }
+        if kind == "async_task_connection" {
+            state.async_tasks.connection(data["supported"] == true);
+        } else if kind == "acp" {
+            state.async_tasks.observe(&data);
+        }
         state.seq += 1;
         let time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -324,7 +330,7 @@ impl Session {
         json!({"kind":"snapshot","seq":data.seq,"resumed":resumed,"session":{"id":self.id,"provider":self.provider,
             "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None},"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"])} ,"events":events,
             "truncated":data.events.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
-            "providerCapabilities":data.agent_capabilities["sessionCapabilities"],"sessionConfig":data.session_config,"permissionModes":data.permission_modes,"models":data.models,"attachments":attachments::policy(&self.provider,&data.prompt_capabilities),"commands":data.available_commands,"storageError":data.storage_error,
+            "asyncTasks":data.async_tasks.snapshot(),"providerCapabilities":data.agent_capabilities["sessionCapabilities"],"sessionConfig":data.session_config,"permissionModes":data.permission_modes,"models":data.models,"attachments":attachments::policy(&self.provider,&data.prompt_capabilities),"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|a.event(id)).collect::<Vec<_>>(),
             "toolProgress":self.progress.views(&self.id)})
     }
@@ -420,6 +426,7 @@ impl Session {
         let mut next = data.clone();
         let mut events = Vec::with_capacity(updates.len() + 1);
         for update in updates {
+            next.async_tasks.observe(&update);
             next.seq += 1;
             events.push(json!({"seq":next.seq,"kind":"acp","data":update}));
         }
@@ -744,6 +751,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (
                     [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
                     include_str!("../../../web/sidebar-pin.js"),
+                )
+            }),
+        )
+        .route(
+            "/background-jobs.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/background-jobs.js"),
                 )
             }),
         )
@@ -1134,6 +1150,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/sessions/{id}/queue/{item}",
             axum::routing::patch(input_queue::edit).delete(input_queue::remove),
+        )
+        .route(
+            "/api/sessions/{id}/async-tasks/stop",
+            post(async_tasks::stop),
         )
         .route("/api/sessions/{id}/cancel", post(cancel))
         .route("/api/sessions/{id}/stop", post(cancel))
@@ -2403,6 +2423,7 @@ async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>
             permission_modes: Value::Null,
             session_config: Value::Null,
             agent_capabilities: Value::Null,
+            async_tasks: Default::default(),
             provider_history_deleted: false,
             provider_history_delete_pending: false,
             initial_claude_permission_mode: permission_modes::initial_claude_default(

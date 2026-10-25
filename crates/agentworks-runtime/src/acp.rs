@@ -27,10 +27,11 @@ pub fn initialize_request() -> InitializeRequest {
             .subagents(SubagentCapabilities::new())
             .elicitation(ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()))
             .meta(
-                json!({"terminal_output": true, "terminal_output_delta": true})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
+                json!({"terminal_output": true, "terminal_output_delta": true,
+                    "jetbrains":{"air":{"version":1,"capabilities":["asyncTasks"]}}})
+                .as_object()
+                .unwrap()
+                .clone(),
             ),
     )
 }

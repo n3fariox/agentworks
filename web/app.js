@@ -1,3 +1,4 @@
+import {createBackgroundJobs} from './background-jobs.js';
 import {createSubagents} from './subagents.js';
 import {setupTerminal} from './terminal.js';
 import {hostEnrollment} from './host-enrollment.js';
@@ -57,6 +58,7 @@ let sidePanel=null;
 setInterval(()=>usageStatus.render(),60000);
 let timeoutControls=null,parserScripts=null;
 let transcript=[], tools=new Map(), approvals=new Map(), assistant=null, status='starting';
+const backgroundJobs=createBackgroundJobs({root:$('background-jobs'),api,getActive:()=>active,isConnected:()=>connected,onChange:()=>scheduleDraw()});
 const subagents=createSubagents({append:()=>{},tabs:$('session-tabs'),panel:$('subagent-view'),messages:$('messages'),onSelect:view=>{sessionTerminal.select(view);scheduleDraw();},uuid,applyToolUpdate,renderToolActivity,renderMessage:(body,item)=>{if(item.role==='Agent')updateMarkdown(item,body);else body.textContent=item.text;},el});
 // L-05 hook: activity indicator and explicit queued inputs (server-owned state).
 const questions=setupQuestions({api,uuid:()=>uuid(),storage:localStorage,getActive:()=>active,isConnected:()=>connected,agentName:request=>subagents.name(request?.sessionId)||labels[active?.provider]||'the agent'});
@@ -505,7 +507,7 @@ function openProjectDialog(project=null){
   $('archive-project').textContent=project?.archived?'Unarchive project':'Archive project';
   policyEditor.open(editingProject);$('project-dialog').showModal();$('project-name').focus();
 }
-function resetTranscript(){eventSeq=null;subagents.reset();transcript=[];tools=new Map();approvals=new Map();assistant=null;nodes.clear();turnEnds=new Map();workLogs?.reset();$('messages').replaceChildren();$('approval-area').replaceChildren();}
+function resetTranscript(){eventSeq=null;backgroundJobs.reset();subagents.reset();transcript=[];tools=new Map();approvals=new Map();assistant=null;nodes.clear();turnEnds=new Map();workLogs?.reset();$('messages').replaceChildren();$('approval-area').replaceChildren();}
 // The desktop header and the phone session bar both show the session title.
 function setTitle(title){$('header-title').textContent=title;$('session-heading-title').textContent=title;}
 // Phone navigation: the session browser and a chat are separate history
@@ -568,6 +570,7 @@ function connect(gen){
       }
       if(Number.isSafeInteger(e.seq))eventSeq=e.seq;
       currentUserSeq=e.session.lastUserSeq??currentUserSeq;
+      backgroundJobs.set(e.asyncTasks);
       if(e.toolHeaders){
         for(const [id,tool] of tools)tool.header=e.toolHeaders[id]??null;
         subagents.setHeaders(e.toolHeaders);
@@ -627,8 +630,10 @@ function rebuildTranscript(){
   let anchor=null;
   for(const item of transcript){const rect=nodes.get(item.id)?.getBoundingClientRect();if(rect?.height&&rect.bottom>top){anchor={id:item.id,offset:rect.top-top};break;}}
   const keep={status,approvals,currentUserSeq,modelConfig,permissionModes,availableCommands},oldTools=tools,oldNodes=new Map(nodes);
+  const savedJobs=backgroundJobs.snapshot();
   const appliedSeq=eventSeq;resetTranscript();eventSeq=appliedSeq;rebuilding=true;
   try{replay(currentUserSeq);}finally{rebuilding=false;({status,approvals,currentUserSeq,modelConfig,permissionModes,availableCommands}=keep);}
+  backgroundJobs.set(savedJobs);
   for(const tool of tools.values()){
     // Browser-observed timing and derived progress are not in stored events.
     const was=oldTools.get(tool.id);if(!was)continue;
@@ -757,7 +762,9 @@ function renderToolActivity(node,tool,sessionBusy){
   const summary=node.querySelector('summary');
   // Header hooks shorten long commands; the full title stays in the tooltip and details.
   const title=el('span','tool-title',tool.header||tool.title||'Tool activity');if(tool.header&&tool.title)title.title=tool.title;
-  summary.replaceChildren(title,el('span','tool-state',tool.status||'pending'));
+  const job=backgroundJobs.forTool(tool);
+  const backgrounded=tool._meta?.jetbrains?.air?.asyncTasks?.backgrounded;
+  summary.replaceChildren(title,el('span','tool-state',job?`Background · ${backgroundJobs.label(job.state)}`:backgrounded?'Background job':tool.status||'pending'));
   let loader=node.querySelector('.tool-output-loader');
   if(!loader){
     loader=el('div','tool-output-loader');
@@ -791,6 +798,7 @@ function consume(e,live=false){
   }
   if(e.kind==='user'||e.kind==='turn_end')for(const tool of tools.values())if(tool.activityOutput&&!tool.activityOutput.turnEnded){tool.activityOutput.turnEnded=true;if(live&&!replaying)tool.activityOutput.turnEndedAt=Date.now();}
   if(!rebuilding)usageStatus.consume(e,{live});
+  backgroundJobs.consume(e);
   if(subagents.consume(e,{live:live&&!replaying}))return;
   if(d?.continuationState&&active&&!rebuilding)active.continuation=d.continuationState;
   {const t=timeoutControls?.notice(e.kind,d);if(t){transcript.push({id:itemId(),type:'notice',text:t});assistant=null;}}
@@ -906,7 +914,8 @@ function renderSessionConfig(){
   for(const control of root.querySelectorAll('select,input'))control.disabled=!connected||status!=='idle';
 }
 
-function updateControls(){questions.refresh();
+function updateControls(){
+  backgroundJobs.render();questions.refresh();
   $('archive-session').textContent=active?.archived?'Unarchive session':'Archive session';
   $('suspend-session').disabled=!connected||status==='suspended'||status==='closed';
   $('resume-session').hidden=!['suspended','error'].includes(status);
@@ -974,6 +983,7 @@ function updateMarkdown(message,body){
 }
 function draw(){
   if(!active)return;
+  backgroundJobs.render();
   const area=$('messages'),visible=!area.hidden&&!$('session-chat').hidden;const atBottom=visible&&area.scrollHeight-area.scrollTop-area.clientHeight<100;
   const empty=area.querySelector('.session-empty');if(transcript.length)empty?.remove();
   if(older.mode==='none')historyControl.remove();else if(area.firstChild!==historyControl){renderHistoryControl();area.prepend(historyControl);}

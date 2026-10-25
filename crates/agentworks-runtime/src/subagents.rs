@@ -17,6 +17,7 @@ pub struct Notification {
 pub enum Update {
     Current(SessionUpdate),
     Legacy(LegacyUpdate),
+    Async(crate::async_tasks::Update),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -32,10 +33,14 @@ pub enum LegacyUpdate {
         task: String,
         #[serde(default)]
         capabilities: Value,
+        #[serde(flatten)]
+        fields: serde_json::Map<String, Value>,
     },
     SubagentStateUpdate {
         subagent_session_id: String,
         state: String,
+        #[serde(flatten)]
+        fields: serde_json::Map<String, Value>,
     },
 }
 

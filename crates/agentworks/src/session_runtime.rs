@@ -44,6 +44,11 @@ pub enum Command {
     },
     Close(oneshot::Sender<Result<(), String>>),
     Cancel,
+    StopAsyncTask {
+        id: String,
+        owner: String,
+        reply: oneshot::Sender<Result<bool, String>>,
+    },
     CancelInbox(crate::inbox_delivery::Turn),
     Model(String),
     PermissionMode(String),
@@ -117,6 +122,10 @@ async fn open_session(
     )
     .await?;
     s.data.lock().unwrap().agent_capabilities = init["agentCapabilities"].clone();
+    s.emit(
+        "async_task_connection",
+        json!({"supported":agentworks_runtime::async_tasks::supported(&init)}),
+    );
     s.emit(
         "provider_capabilities",
         init["agentCapabilities"]["sessionCapabilities"].clone(),
@@ -320,6 +329,8 @@ pub async fn run(
     if s.host_id == "local" {
         prepare(&s.provider)?;
     }
+    s.emit("async_task_connection", json!({"supported":false}));
+    let _async_connection = crate::async_tasks::Connection(s.clone());
     let child_sessions = {
         let data = s.data.lock().unwrap();
         let mut sessions = Sessions::new(data.provider_session_id.clone());
@@ -381,7 +392,7 @@ pub async fn run(
                 let mut staged=notify_history.lock().unwrap();staged.1+=update.to_string().len();
                 if staged.1>32*1024*1024 || staged.0.len()>=50000 {staged.2=true;}else{staged.0.push(update.clone());}
             }
-            if !notify_replaying.load(Ordering::SeqCst) || (!is_child && matches!(update["sessionUpdate"].as_str(),Some("available_commands_update"|"config_option_update"|"current_mode_update"))) {
+            if !notify_replaying.load(Ordering::SeqCst) || (!import_pending && update["sessionUpdate"].as_str().is_some_and(|kind| kind.starts_with("async_task_"))) || (!is_child && matches!(update["sessionUpdate"].as_str(),Some("available_commands_update"|"config_option_update"|"current_mode_update"))) {
                 if !is_child {crate::limit_resume::observe(&notify_s, &update);}
                 crate::timeouts::observe(&notify_s.id,&update,crate::timeouts::now_ms());
                 notify_s.emit("acp",update);
@@ -536,6 +547,7 @@ pub async fn run(
                         let _=reply.send(result);return Ok(());
                     },
                     Command::Cancel | Command::CancelInbox(_)=>{},
+                    Command::StopAsyncTask{id,owner,reply}=>crate::async_tasks::dispatch(&connection,&s,&provider_id,id,owner,reply).await,
                     command @ (Command::Model(_) | Command::PermissionMode(_) | Command::Config{..})=>{
                         // Read live configuration, including agent-initiated updates.
                         let config=s.data.lock().unwrap().session_config.clone();
@@ -638,6 +650,7 @@ pub async fn run(
                                             cancelled=true;
                                         }
                                     }
+                                    Some(Command::StopAsyncTask{id,owner,reply})=>crate::async_tasks::dispatch(&connection,&s,&provider_id,id,owner,reply).await,
                                     Some(Command::Prompt(_) | Command::AttachedPrompt{..} | Command::InboxPrompt{..})=>{},
                                     Some(Command::Model(_)|Command::PermissionMode(_)|Command::Config{..})=>{},
                                     None=>return Ok(()),

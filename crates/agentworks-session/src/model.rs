@@ -35,6 +35,8 @@ pub struct SessionData {
     #[serde(default)]
     pub agent_capabilities: Value,
     #[serde(default)]
+    pub async_tasks: crate::async_tasks::State,
+    #[serde(default)]
     pub provider_history_deleted: bool,
     #[serde(default)]
     pub provider_history_delete_pending: bool,
