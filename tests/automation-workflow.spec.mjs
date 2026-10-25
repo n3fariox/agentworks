@@ -2,6 +2,7 @@ import {test,expect} from '@playwright/test';
 import {spawn} from 'node:child_process';
 import {mkdtemp,mkdir,rm} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
+import {DatabaseSync} from 'node:sqlite';
 
 // Own server, catalog, database and demo state on a dedicated port; never the live service.
 const port=process.env.AGENTWORKS_WORKFLOW_PORT||'4651',base='http://127.0.0.1:'+port;
@@ -49,6 +50,9 @@ test('API stores typed manual recipes and rejects unsupported triggers and steps
   expect(single.prompt).toBe('/status');
   for(const workflow of [
     {version:1,trigger:{kind:'schedule',cron:'0 * * * *'},steps:[{kind:'agent',text:'x'}]},
+    {version:1,trigger:{kind:'schedule',timeZone:'Mars/Olympus',at:'09:00',days:[1]},steps:[{kind:'agent',text:'x'}]},
+    {version:1,trigger:{kind:'schedule',timeZone:'UTC',at:'25:00',days:[1]},steps:[{kind:'agent',text:'x'}]},
+    {version:1,trigger:{kind:'schedule',timeZone:'UTC',at:'09:00',days:[]},steps:[{kind:'agent',text:'x'}]},
     {version:1,trigger:{kind:'github',event:'push'},steps:[{kind:'agent',text:'x'}]},
     {version:1,trigger:{kind:'manual'},steps:[{kind:'shell',text:'echo hi'}]},
     {version:1,trigger:{kind:'manual'},steps:[{kind:'agent',text:'x',approval:true}]},
@@ -76,8 +80,8 @@ test('recipe editor builds ordered steps that persist through restart and run on
   await page.locator('#dismiss-automation').click();
 
   await page.locator('#new-automation').click();
-  await expect(page.locator('#automation-trigger')).toHaveText('I click Run now');
-  await expect(page.locator('#automation-recipe select, #automation-recipe input[type=time]')).toHaveCount(0);
+  await expect(page.locator('#automation-trigger')).toHaveValue('manual');
+  await expect(page.locator('#automation-schedule')).toBeHidden();
   await page.locator('#automation-name').fill('Ordered recipe');await page.locator('#automation-provider').selectOption('demo');await page.locator('#automation-directory').fill(fixture);
   await page.getByLabel('Step 1 instructions').fill('Inspect the repository');
   await page.locator('#add-automation-step').click();await expect(page.getByLabel('Step 2 instructions')).toBeFocused();
@@ -117,4 +121,92 @@ test('recipe editor builds ordered steps that persist through restart and run on
   await expect.poll(async()=>JSON.stringify((await api('/api/sessions/'+run.sessionId)).events),{timeout:15000}).toContain('Step 2:\\nReport findings');
   for(const id of [def.id,legacy.id])await api('/api/automations/'+id,undefined,'DELETE');
   await api('/api/sessions/'+run.sessionId,undefined,'DELETE');
+});
+
+const schedule=(at,extra={})=>({version:1,trigger:{kind:'schedule',timeZone:'UTC',at,days:[1,2,3,4,5,6,7],...extra},steps:[{kind:'agent',text:'/status'}]});
+const hhmm=ms=>new Date(ms).toISOString().slice(11,16);
+const minute=ms=>Math.floor(ms/60000)*60000;
+const scheduledRuns=async id=>(await api('/api/automations/'+id+'/runs')).filter(r=>r.scheduledFor);
+
+test('schedule editor saves a weekly trigger and pausing clears the next run',async({page})=>{
+  await page.goto('/?view=automations');await page.locator('#nav-automations').click();
+  await page.locator('#new-automation').click();
+  await page.locator('#automation-name').fill('Weekday review');await page.locator('#automation-provider').selectOption('demo');await page.locator('#automation-directory').fill(fixture);
+  await page.getByLabel('Step 1 instructions').fill('Review');
+  await page.locator('#automation-trigger').selectOption('schedule');
+  await expect(page.locator('#automation-schedule')).toBeVisible();
+  await expect(page.locator('#automation-days input:checked')).toHaveCount(5);
+  await page.locator('#automation-at').fill('07:45');await page.locator('#automation-time-zone').fill('Europe/Berlin');
+  await page.locator('#automation-days').getByLabel('Fri').uncheck();await page.locator('#automation-missed').selectOption('runOnce');
+  await page.screenshot({path:'.cache/workflow-schedule-editor.png'});
+  await page.locator('#save-automation').click();await expect(page.locator('#automation-dialog')).toBeHidden();
+  await expect(page.locator('#automation-detail .recipe-trigger')).toHaveText('Mon, Tue, Wed, Thu at 07:45 (Europe/Berlin)');
+  await expect(page.locator('#automation-detail .automation-badge')).toContainText('Next run');
+  await expect(page.locator('.automation-item.selected small')).toContainText('Scheduled');
+  const def=(await api('/api/automations')).find(d=>d.name==='Weekday review');
+  expect(def.workflow.trigger).toEqual({kind:'schedule',timeZone:'Europe/Berlin',at:'07:45',days:[1,2,3,4],missed:'runOnce'});
+  expect(def.nextRun).toBeGreaterThan(Date.now());
+  const berlin=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Berlin',weekday:'short',hour:'2-digit',minute:'2-digit',hour12:false}).format(def.nextRun);
+  expect(berlin).toMatch(/^(Mon|Tue|Wed|Thu) 07:45$/);
+  // Reopening restores the schedule fields.
+  await page.locator('#automation-detail').getByRole('button',{name:'Edit'}).click();
+  await expect(page.locator('#automation-at')).toHaveValue('07:45');await expect(page.locator('#automation-time-zone')).toHaveValue('Europe/Berlin');
+  await expect(page.locator('#automation-missed')).toHaveValue('runOnce');await expect(page.locator('#automation-days input:checked')).toHaveCount(4);
+  await page.locator('#automation-enabled').uncheck();await page.locator('#save-automation').click();await expect(page.locator('#automation-dialog')).toBeHidden();
+  await expect(page.locator('#automation-detail .automation-badge')).toHaveText('Paused');
+  expect((await api('/api/automations')).find(d=>d.id===def.id).nextRun).toBeNull();
+  await api('/api/automations/'+def.id,undefined,'DELETE');
+});
+
+test('scheduled occurrences dispatch once and stay deduplicated across restart',async()=>{
+  test.setTimeout(180000);
+  // The next whole minute, leaving time to save before it.
+  const slot=minute(Date.now()+(new Date().getUTCSeconds()>45?120000:60000));
+  const def=await api('/api/automations',{name:'Every minute soon',provider:'demo',cwd:fixture,workflow:schedule(hhmm(slot))});
+  expect(def.nextRun).toBe(slot);
+  await expect.poll(async()=>(await scheduledRuns(def.id)).length,{timeout:slot-Date.now()+30000,intervals:[1000]}).toBe(1);
+  const [run]=await scheduledRuns(def.id);
+  expect(run.scheduledFor).toBe(slot);expect(run.sessionId).toBeTruthy();expect(run.created-slot).toBeLessThan(60000);
+  expect((await api('/api/sessions/'+run.sessionId)).session.title).toBe('Every minute soon · Scheduled run');
+  // Its request ID is durable: a restart within the grace window does not start it again.
+  await stopServer();await startServer();
+  await new Promise(r=>setTimeout(r,7000));
+  expect((await scheduledRuns(def.id)).map(r=>r.id)).toEqual([run.id]);
+  // Manual runs remain separate from the schedule.
+  await api('/api/automations/'+def.id,{...def,workflow:schedule(hhmm(slot)),enabled:false},'PUT');
+  expect((await call('/api/automations/'+def.id+'/run',{requestId:'paused'})).status).toBe(409);
+  await api('/api/automations/'+def.id,undefined,'DELETE');
+  await api('/api/sessions/'+run.sessionId,undefined,'DELETE');
+});
+
+test('downtime applies the missed-run policy to the latest occurrence only',async()=>{
+  test.setTimeout(60000);
+  // An occurrence two hours ago, while the cursor says the server last ran two days ago.
+  const slot=minute(Date.now()-7200000);
+  const skip=await api('/api/automations',{name:'Skip missed',provider:'demo',cwd:fixture,workflow:schedule(hhmm(slot))});
+  const once=await api('/api/automations',{name:'Run missed once',provider:'demo',cwd:fixture,workflow:schedule(hhmm(slot),{missed:'runOnce'})});
+  const paused=await api('/api/automations',{name:'Paused missed',provider:'demo',cwd:fixture,enabled:false,workflow:schedule(hhmm(slot),{missed:'runOnce'})});
+  await stopServer();
+  const db=new DatabaseSync(join(fixture,'sessions.sqlite3'));
+  const update=db.prepare('UPDATE automation_schedules SET cursor=? WHERE automation_id=?');
+  for(const def of [skip,once])expect(update.run(Date.now()-2*86400000,def.id).changes).toBe(1);
+  // Paused definitions are not armed, so no downtime is attributed to them.
+  expect(db.prepare('SELECT count(*) AS n FROM automation_schedules WHERE automation_id=?').get(paused.id).n).toBe(0);
+  db.close();
+  await startServer();
+  await expect.poll(async()=>(await scheduledRuns(skip.id)).length,{timeout:15000}).toBe(1);
+  const [missed]=await scheduledRuns(skip.id);
+  expect(missed).toMatchObject({status:'missed',scheduledFor:slot,sessionId:null});
+  expect(missed.detail).toContain('Earlier missed occurrences were not run.');
+  await expect.poll(async()=>(await scheduledRuns(once.id)).length,{timeout:15000}).toBe(1);
+  const [late]=await scheduledRuns(once.id);
+  expect(late.scheduledFor).toBe(slot);expect(late.sessionId).toBeTruthy();
+  await expect.poll(async()=>(await scheduledRuns(once.id))[0].detail).toContain('Started late under the run-once policy.');
+  // Resuming the paused definition never catches up on time spent paused.
+  await api('/api/automations/'+paused.id,{name:'Paused missed',provider:'demo',cwd:fixture,enabled:true,workflow:schedule(hhmm(slot),{missed:'runOnce'})},'PUT');
+  await new Promise(r=>setTimeout(r,7000));
+  expect(await scheduledRuns(paused.id)).toEqual([]);
+  expect((await scheduledRuns(skip.id)).length).toBe(1);expect((await scheduledRuns(once.id)).length).toBe(1);
+  for(const def of [skip,once,paused])await api('/api/automations/'+def.id,undefined,'DELETE');
+  await api('/api/sessions/'+late.sessionId,undefined,'DELETE');
 });

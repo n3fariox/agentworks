@@ -51,7 +51,7 @@ impl Store {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
         )?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 9 {
+        if version > 10 {
             return Err("Session database was created by a newer Agentworks version".into());
         }
         connection.execute_batch("BEGIN; CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, metadata TEXT NOT NULL, state TEXT NOT NULL);
@@ -70,14 +70,15 @@ impl Store {
           CREATE INDEX IF NOT EXISTS agent_completions_latest ON agent_completions(author,id DESC);
           CREATE TABLE IF NOT EXISTS session_creations(request_key TEXT PRIMARY KEY,payload TEXT NOT NULL,session_id TEXT,error TEXT,mutation_started INTEGER NOT NULL DEFAULT 0);
           COMMIT;")?;
-        // C-01 controllers, C-05 review records, U-05 parser scripts and roles are additive schema migrations.
+        // C-01 controllers, C-05 review records, U-05 parser scripts, roles and A-01 schedules are additive schema migrations.
         connection.execute_batch(&format!(
-            "BEGIN; {} {} {} {} {} PRAGMA user_version=9; COMMIT;",
+            "BEGIN; {} {} {} {} {} {} PRAGMA user_version=10; COMMIT;",
             crate::inbox_delivery::SCHEMA,
             crate::review_queue::SCHEMA,
             crate::controllers::SCHEMA,
             crate::tool_progress::SCHEMA,
-            crate::roles::SCHEMA
+            crate::roles::SCHEMA,
+            crate::automations::SCHEMA
         ))?;
         Ok(Self {
             connection,
@@ -292,8 +293,56 @@ impl Store {
             .optional()?;
         Ok(value.map(|s| serde_json::from_str(&s)).transpose()?)
     }
-    pub fn save_automation(&mut self, definition: &crate::automations::Definition) -> Result<()> {
-        self.connection.execute("INSERT INTO automations(id,definition) VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET definition=excluded.definition",params![definition.id,serde_json::to_string(definition)?])?;
+    /// Saves a definition; `arm` atomically resets its schedule cursor. A
+    /// definition without a schedule has no cursor.
+    pub fn save_automation(
+        &mut self,
+        definition: &crate::automations::Definition,
+        arm: Option<i64>,
+    ) -> Result<()> {
+        let tx = self.connection.transaction()?;
+        tx.execute("INSERT INTO automations(id,definition) VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET definition=excluded.definition",params![definition.id,serde_json::to_string(definition)?])?;
+        if definition.schedule().is_none() {
+            tx.execute(
+                "DELETE FROM automation_schedules WHERE automation_id=?1",
+                [&definition.id],
+            )?;
+        } else if let Some(cursor) = arm {
+            tx.execute("INSERT INTO automation_schedules(automation_id,cursor) VALUES (?1,?2) ON CONFLICT(automation_id) DO UPDATE SET cursor=excluded.cursor",params![definition.id,cursor])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn schedule_cursor(&self, id: &str) -> Result<Option<i64>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT cursor FROM automation_schedules WHERE automation_id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+    pub fn arm_schedule(&mut self, id: &str, cursor: i64) -> Result<()> {
+        self.connection.execute("INSERT INTO automation_schedules(automation_id,cursor) VALUES (?1,?2) ON CONFLICT(automation_id) DO UPDATE SET cursor=excluded.cursor",params![id,cursor])?;
+        Ok(())
+    }
+    /// Records the outcome of one occurrence and advances the cursor past it.
+    /// The first outcome recorded for an occurrence is kept.
+    pub fn claim_slot(
+        &mut self,
+        id: &str,
+        slot: i64,
+        request_id: &str,
+        outcome: &str,
+        detail: Option<&str>,
+        now: i64,
+    ) -> Result<()> {
+        let tx = self.connection.transaction()?;
+        tx.execute("INSERT OR IGNORE INTO automation_slots(automation_id,slot,request_id,outcome,detail,created) VALUES (?1,?2,?3,?4,?5,?6)",params![id,slot,request_id,outcome,detail,now])?;
+        tx.execute("INSERT INTO automation_schedules(automation_id,cursor) VALUES (?1,?2) ON CONFLICT(automation_id) DO UPDATE SET cursor=MAX(cursor,excluded.cursor)",params![id,slot])?;
+        tx.commit()?;
         Ok(())
     }
     pub fn detach_automation_project(&mut self, id: &str) -> Result<()> {
@@ -301,13 +350,23 @@ impl Store {
         Ok(())
     }
     pub fn delete_automation(&mut self, id: &str) -> Result<()> {
-        self.connection
-            .execute("DELETE FROM automations WHERE id=?1", [id])?;
+        let tx = self.connection.transaction()?;
+        tx.execute("DELETE FROM automations WHERE id=?1", [id])?;
+        tx.execute(
+            "DELETE FROM automation_schedules WHERE automation_id=?1",
+            [id],
+        )?;
+        tx.commit()?;
         Ok(())
     }
+    /// Runs, newest first, plus scheduled occurrences that started no run
+    /// (`missed` or `skipped`, with a `detail`). Scheduled runs carry
+    /// `scheduledFor`.
     pub fn automation_runs(&self, id: &str) -> Result<Vec<Value>> {
-        let mut stmt=self.connection.prepare("SELECT id,session_id,name,provider,created,status FROM automation_runs WHERE automation_id=?1 ORDER BY created DESC LIMIT 100")?;
-        Ok(stmt.query_map([id],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"sessionId":r.get::<_,Option<String>>(1)?,"name":r.get::<_,String>(2)?,"provider":r.get::<_,String>(3)?,"created":r.get::<_,i64>(4)?,"status":r.get::<_,String>(5)?})))?.collect::<rusqlite::Result<Vec<_>>>()?)
+        let mut stmt=self.connection.prepare("SELECT r.id,r.session_id,r.name,r.provider,r.created,r.status,s.slot,s.detail FROM automation_runs r LEFT JOIN automation_slots s ON s.automation_id=r.automation_id AND s.request_id=r.request_id WHERE r.automation_id=?1
+          UNION ALL SELECT 'slot:'||slot,NULL,NULL,NULL,created,outcome,slot,detail FROM automation_slots WHERE automation_id=?1 AND outcome<>'started'
+          ORDER BY 5 DESC LIMIT 100")?;
+        Ok(stmt.query_map([id],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"sessionId":r.get::<_,Option<String>>(1)?,"name":r.get::<_,Option<String>>(2)?,"provider":r.get::<_,Option<String>>(3)?,"created":r.get::<_,i64>(4)?,"status":r.get::<_,String>(5)?,"scheduledFor":r.get::<_,Option<i64>>(6)?,"detail":r.get::<_,Option<String>>(7)?})))?.collect::<rusqlite::Result<Vec<_>>>()?)
     }
     pub fn run_session(&self, id: &str, request_id: &str) -> Result<Option<String>> {
         use rusqlite::OptionalExtension;
@@ -552,7 +611,7 @@ mod tests {
                     .connection
                     .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                     .unwrap(),
-                9
+                10
             );
         }
         let state:SessionData=serde_json::from_value(json!({"status":"idle","seq":0,"requests":[],"models":null,"available_commands":[],"turn_active":false,"project_id":null,"provider_session_id":null})).unwrap();
@@ -582,7 +641,7 @@ mod tests {
             assert_eq!(
                 db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                     .unwrap(),
-                9
+                10
             );
             for (sql, expected) in [
                 (

@@ -692,6 +692,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let scheduler = tokio::spawn(limit_resume::scheduler(app.clone()));
     let inbox_scheduler = tokio::spawn(inbox_delivery::scheduler(app.clone()));
     let input_scheduler = tokio::spawn(input_queue::scheduler(app.clone()));
+    tokio::spawn(automations::scheduler(app.clone()));
     tokio::spawn(mcp::serve_bridge(app.clone(), mcp_listener));
     let router = Router::new()
         .route(
