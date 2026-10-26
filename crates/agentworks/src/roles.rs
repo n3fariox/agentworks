@@ -1,4 +1,4 @@
-//! Roles: named instructions appended to an agent's system prompt over ACP.
+//! Roles: named instructions appended at system/developer precedence over ACP.
 //!
 //! A role is context only. It never grants Agentworks access; grants stay with
 //! the human controls in Agents & inbox. Built-in roles ship with the binary and
@@ -95,7 +95,10 @@ pub struct Input {
 /// Harnesses known to accept an ACP `systemPrompt`. The capability advertised
 /// at initialization is still checked before a session is opened.
 pub fn supported(provider: &str) -> bool {
-    matches!(provider, "claude" | "claude-rust" | "goose" | "demo")
+    matches!(
+        provider,
+        "claude" | "claude-rust" | "codex-rust" | "goose" | "demo"
+    )
 }
 
 pub fn hash(instructions: &str) -> String {
@@ -334,6 +337,12 @@ mod tests {
         assert_eq!(resolve(&db, Some(""), "codex").unwrap(), None);
         let role = resolve(&db, Some("reviewer"), "claude").unwrap().unwrap();
         assert_eq!(role.name, "Reviewer");
+        assert_eq!(
+            resolve(&db, Some("reviewer"), "codex-rust")
+                .unwrap()
+                .unwrap(),
+            role
+        );
         assert_eq!(role.hash, hash(&role.instructions));
         assert_eq!(
             resolve(&db, Some("missing"), "claude").unwrap_err().0,

@@ -3,8 +3,9 @@ use agent_client_protocol::schema::v1::{
     CancelNotification, CloseSessionRequest, ContentBlock, CreateElicitationRequest,
     CreateElicitationResponse, DeleteSessionRequest, ForkSessionRequest, InitializeRequest,
     LoadSessionRequest, NewSessionRequest, PromptRequest, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionConfigOptionValue, SessionNotification, SetSessionConfigOptionRequest, StopReason,
+    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
+    SelectedPermissionOutcome, SessionConfigOptionValue, SessionNotification,
+    SetSessionConfigOptionRequest, StopReason, SystemPrompt,
 };
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo};
 use serde_json::json;
@@ -58,8 +59,9 @@ async fn native_bridge_works_with_typed_acp_client() {
                     let init: InitializeRequest=serde_json::from_value(json!({"protocolVersion":1,"clientCapabilities":{"subagents":{},"session":{"configOptions":{"boolean":{}}},"elicitation":{"form":{}}}}))?;
                     let initialized=cx.send_request(init).block_task().await?;
                     assert!(serde_json::to_value(initialized)?["agentCapabilities"]["sessionCapabilities"]["close"].is_object());
+                    let prompt = SystemPrompt::new(vec![ContentBlock::from("Role and shared context.")]);
                     let session = cx
-                        .send_request(NewSessionRequest::new(root.clone()))
+                        .send_request(NewSessionRequest::new(root.clone()).system_prompt(prompt.clone()))
                         .block_task()
                         .await?;
                     assert!(!session.config_options.as_ref().unwrap().is_empty());
@@ -86,8 +88,10 @@ async fn native_bridge_works_with_typed_acp_client() {
                         .await?;
                     assert_eq!(response.stop_reason, StopReason::EndTurn);
                     cx.send_request(CloseSessionRequest::new(session.session_id.clone())).block_task().await?;
-                    cx.send_request(LoadSessionRequest::new(session.session_id.clone(),root.clone())).block_task().await?;
-                    let fork=cx.send_request(ForkSessionRequest::new(session.session_id.clone(),root)).block_task().await?;
+                    cx.send_request(LoadSessionRequest::new(session.session_id.clone(),root.clone()).system_prompt(prompt.clone())).block_task().await?;
+                    cx.send_request(CloseSessionRequest::new(session.session_id.clone())).block_task().await?;
+                    cx.send_request(ResumeSessionRequest::new(session.session_id.clone(),root.clone()).system_prompt(prompt.clone())).block_task().await?;
+                    let fork=cx.send_request(ForkSessionRequest::new(session.session_id.clone(),root).system_prompt(prompt)).block_task().await?;
                     assert_ne!(fork.session_id,session.session_id);
                     cx.send_request(DeleteSessionRequest::new(fork.session_id)).block_task().await?;
                     cx.send_request(DeleteSessionRequest::new(session.session_id)).block_task().await?;

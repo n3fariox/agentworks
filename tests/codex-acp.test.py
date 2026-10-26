@@ -124,10 +124,16 @@ def harness():
             if method == "thread/fork" and "lastTurnId" in p:
                 assert p["lastTurnId"] == "turn-old", "Wrong fork boundary"
             result = dict(settings, thread=dict(id=thread_id))
+        elif method == "config/read":
+            if os.environ.get("ACP_FIXTURE_CONFIG_ERROR"):
+                send(dict(id=v["id"],error=dict(code=-32603,message="Configuration unavailable")))
+                continue
+            assert p["cwd"].startswith("/") and p["includeLayers"] is False
+            result = dict(config=dict(developer_instructions="Configured developer guidance."))
         elif method == "model/list":
             result = dict(data=[dict(model="test-model", displayName="Test Model", additionalSpeedTiers=["fast"], supportedReasoningEfforts=[dict(reasoningEffort="medium"), dict(reasoningEffort="high")], defaultReasoningEffort="medium")])
         elif method == "thread/list":
-            result = dict(data=[dict(id="thread-1", cwd="/tmp", preview="Previous chat")], nextCursor=None)
+            result = dict(data=[dict(id="thread-1", cwd=os.environ.get("ACP_FIXTURE_CWD","/tmp"), preview="Previous chat")], nextCursor=None)
         elif method == "thread/read":
             if p["threadId"] == "child-b" and os.environ.get("ACP_FIXTURE_MISSING_CHILD"):
                 send(dict(id=v["id"],error=dict(code=-32602,message="Child history was deleted")))
@@ -283,7 +289,7 @@ def harness():
                 notify("item/started", item=item)
                 notify("item/commandExecution/outputDelta", itemId="tool-1", delta="hello\n")
                 notify("item/completed", item=dict(item, status="completed", aggregatedOutput="hello\n"))
-                notify("item/agentMessage/delta", delta="answer")
+                notify("item/agentMessage/delta", delta="answer", **(dict(itemId="old-answer") if text=="fork-boundary" else {}))
                 complete()
             continue
         elif method == "turn/interrupt":
@@ -306,13 +312,17 @@ class BridgeTests(unittest.TestCase):
             env["ACP_FIXTURE_HOLD_COMPACT"]="1"
         if self._testMethodName=="test_subagents_missing_child_history_keeps_parent_loadable":
             env["ACP_FIXTURE_MISSING_CHILD"]="1"
+        self.native_fixture=tempfile.TemporaryDirectory(prefix="codex-wire-")
+        self.addCleanup(self.native_fixture.cleanup)
+        self.native_log=Path(self.native_fixture.name)/"native.jsonl"
+        env["ACP_FIXTURE_NATIVE_LOG"]=str(self.native_log)
         if self._testMethodName.startswith("test_async_"):
-            self.native_fixture=tempfile.TemporaryDirectory(prefix="codex-background-")
-            self.addCleanup(self.native_fixture.cleanup)
-            self.native_log=Path(self.native_fixture.name)/"native.jsonl"
-            env["ACP_FIXTURE_NATIVE_LOG"]=str(self.native_log)
             if self._testMethodName != "test_async_without_negotiation":env["ACP_FIXTURE_ASYNC"]="1"
             if self._testMethodName == "test_async_old_native_keeps_ordinary_turns_usable":env["ACP_FIXTURE_OLD_BACKGROUND"]="1"
+        if self._testMethodName == "test_system_prompt_preserves_config_override":
+            env["CODEX_CONFIG"]=json.dumps(dict(developer_instructions="Explicit host guidance.", model="test-model"))
+        if self._testMethodName == "test_system_prompt_config_failure_does_not_open_thread":
+            env["ACP_FIXTURE_CONFIG_ERROR"]="1"
         self.process = subprocess.Popen([binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
         self.addCleanup(self.close)
         self.messages = queue.Queue()
@@ -337,6 +347,8 @@ class BridgeTests(unittest.TestCase):
         init = self.call("initialize", dict(protocolVersion=1, clientCapabilities=capabilities))
         self.assertEqual("asyncTasks" in init.get("_meta",{}).get("jetbrains",{}).get("air",{}).get("capabilities",[]),capabilities_async)
         self.assertTrue(init["agentCapabilities"]["loadSession"])
+        self.assertEqual(init["agentCapabilities"]["sessionCapabilities"]["systemPrompt"], {})
+        self.assertEqual(init["agentCapabilities"]["sessionCapabilities"]["resume"], {})
 
     def close(self):
         self.process.stdin.close()
@@ -386,6 +398,62 @@ class BridgeTests(unittest.TestCase):
 
     def prompt(self, text):
         return self.call("session/prompt", dict(sessionId="thread-1", prompt=[dict(type="text", text=text)]))
+
+    def test_system_prompt_lifecycle_mapping_and_replay(self):
+        prompt=dict(mode="append",content=[dict(type="text",text="Role guidance."),dict(type="text",text="Shared context.")])
+        for method,native in [("session/new","thread/start"),("session/load","thread/resume"),("session/resume","thread/resume"),("session/fork","thread/fork")]:
+            with self.subTest(method=method):
+                p=dict(cwd="/tmp",mcpServers=[],systemPrompt=prompt)
+                if method!="session/new":p["sessionId"]="thread-1"
+                before=len(self.seen)
+                result=self.call(method,p)
+                calls=[v for v in self.native_requests() if v.get("method")==native]
+                params=calls[-1]["params"]
+                self.assertEqual(params["developerInstructions"],"Configured developer guidance.\n\nRole guidance.\n\nShared context.")
+                self.assertNotIn("baseInstructions",params)
+                history=[v for v in self.seen[before:] if v.get("method")=="session/update" and v["params"]["update"]["sessionUpdate"] in ("user_message_chunk","agent_message_chunk")]
+                self.assertEqual(bool(history),method=="session/load")
+                self.call("session/close",dict(sessionId=result["sessionId"]))
+        # Omission and an empty prompt do not inherit the previous ACP text.
+        self.session()
+        params=[v for v in self.native_requests() if v.get("method")=="thread/start"][-1]["params"]
+        self.assertNotIn("developerInstructions",params)
+        self.call("session/close",dict(sessionId="thread-1"))
+        self.call("session/resume",dict(cwd="/tmp",sessionId="thread-1",systemPrompt=dict(mode="append",content=[])))
+        params=[v for v in self.native_requests() if v.get("method")=="thread/resume"][-1]["params"]
+        self.assertEqual(params["developerInstructions"],"Configured developer guidance.")
+
+    def test_system_prompt_preserves_config_override(self):
+        self.call("session/new",dict(cwd="/tmp",systemPrompt=dict(mode="append",content=[dict(type="text",text="Role.")])))
+        params=next(v["params"] for v in self.native_requests() if v.get("method")=="thread/start")
+        self.assertEqual(params["developerInstructions"],"Explicit host guidance.\n\nRole.")
+        self.assertEqual(params["config"]["model"],"test-model")
+
+    def test_system_prompt_invalid_requests_do_not_touch_native_state(self):
+        invalid=[None,{},dict(mode="override",content=[]),dict(mode="future",content=[]),dict(mode="append"),dict(mode="append",content={}),dict(mode="append",content=[dict(type="image",data="a")]),dict(mode="append",content=[dict(type="future")]),dict(mode="append",content=[dict(type="text",text=123)])]
+        for method in ("session/new","session/load","session/resume","session/fork"):
+            for prompt in invalid:
+                with self.subTest(method=method,prompt=prompt):
+                    before=self.native_requests()
+                    request=self.send(method,dict(cwd="/tmp",sessionId="thread-1",systemPrompt=prompt))
+                    reply=self.until(lambda v:v.get("id")==request)
+                    self.assertEqual(reply["error"]["code"],-32602)
+                    self.assertEqual(self.native_requests(),before)
+
+    def test_system_prompt_config_failure_does_not_open_thread(self):
+        request=self.send("session/new",dict(cwd="/tmp",systemPrompt=dict(mode="append",content=[])))
+        reply=self.until(lambda v:v.get("id")==request)
+        self.assertIn("Configuration unavailable",json.dumps(reply["error"]))
+        self.assertFalse(any(v.get("method","").startswith("thread/") for v in self.native_requests()))
+
+    def test_system_prompt_loaded_thread_rejoin_is_rejected(self):
+        self.session()
+        for method in ("session/load","session/resume"):
+            before=self.native_requests()
+            request=self.send(method,dict(cwd="/tmp",sessionId="thread-1",systemPrompt=dict(mode="append",content=[])))
+            reply=self.until(lambda v:v.get("id")==request)
+            self.assertIn("Close the session",json.dumps(reply["error"]))
+            self.assertEqual(self.native_requests(),before)
 
     def test_streaming_and_early_completion_and_second_turn(self):
         self.assertEqual(self.session()["configOptions"][0]["currentValue"], "test-model")

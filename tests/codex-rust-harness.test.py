@@ -12,6 +12,7 @@ import tempfile
 import time
 import unittest
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 from uuid import uuid4
 
 
@@ -26,6 +27,8 @@ class HarnessTests(unittest.TestCase):
             port=sock.getsockname()[1]
         self.base=f"http://127.0.0.1:{port}"
         self.env=dict(os.environ, AGENTWORKS_PORT=str(port),AGENTWORKS_BIND="127.0.0.1",AGENTWORKS_ROOTS=str(self.cwd),AGENTWORKS_CATALOG_PATH=str(self.cwd/"catalog.json"),AGENTWORKS_DB_PATH=str(self.cwd/"sessions.sqlite3"),AGENTWORKS_AUTH_MODE="existing",ACP_FIXTURE_ASYNC="1",AGENTWORKS_NODE="/nonexistent/node",CODEX_PATH=str(self.root/"tests/codex-acp.test.py"))
+        self.env["ACP_FIXTURE_CWD"]=str(self.cwd)
+        self.env["ACP_FIXTURE_NATIVE_LOG"]=str(self.cwd/"native.jsonl")
         self.log=tempfile.TemporaryFile(mode="w+")
         self.addCleanup(self.log.close)
         self.start()
@@ -47,8 +50,13 @@ class HarnessTests(unittest.TestCase):
 
     def request(self,path,method="GET",body=None):
         request=Request(self.base+path,method=method,data=None if body is None else json.dumps(body).encode(),headers={"Content-Type":"application/json","Origin":self.base})
-        with urlopen(request,timeout=10) as response:
-            return json.load(response)
+        try:
+            with urlopen(request,timeout=10) as response:
+                return json.load(response)
+        except HTTPError as error:
+            detail=error.read().decode()
+            error.close()
+            self.fail(f"{method} {path}: {error.code} {detail}")
 
     def until(self,check):
         deadline=time.monotonic()+15
@@ -99,6 +107,69 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(restored["session"]["status"],"suspended")
         self.request(path+"/resume","POST",{})
         self.until(lambda:self.request(path)["session"]["status"]=="idle")
+
+    def native_lifecycle(self):
+        return [v for line in (self.cwd/"native.jsonl").read_text().splitlines() if (v:=json.loads(line)).get("method") in ("thread/start","thread/resume","thread/fork")]
+
+    def test_role_and_shared_context_survive_resume_restart_and_native_fork(self):
+        providers={p["id"]:p for p in self.request("/api/status")["providers"]}
+        self.assertTrue(providers["codex-rust"]["roles"])
+        self.assertFalse(providers["codex"]["roles"])
+        role=self.request("/api/roles","POST",dict(name="Test role",instructions="Keep the original role."))
+        created=self.request("/api/sessions","POST",dict(provider="codex-rust",cwd=str(self.cwd),role=role["id"]))
+        path="/api/sessions/"+created["id"]
+        self.until(lambda:self.request(path)["session"]["status"]=="idle")
+        def assert_delivery(call,session_id):
+            text=call["params"]["developerInstructions"]
+            self.assertIn("Configured developer guidance.",text)
+            self.assertIn("agentworks://sessions/"+session_id,text)
+            self.assertIn("Use the Agentworks MCP tools",text)
+            self.assertIn("# Agentworks role: Test role",text)
+            self.assertIn("Keep the original role.",text)
+            self.assertNotIn("Edited role.",text)
+            self.assertEqual(text.count("# Agentworks role:"),1)
+            self.assertNotIn("baseInstructions",call["params"])
+        self.assertEqual(self.native_lifecycle()[-1]["method"],"thread/start")
+        assert_delivery(self.native_lifecycle()[-1],created["id"])
+        self.request("/api/roles/"+role["id"],"PUT",dict(name="Changed",instructions="Edited role."))
+        self.request(path+"/prompt","POST",dict(text="fork-boundary",requestId=str(uuid4())))
+        self.until(lambda:(s:=self.request(path))["session"]["status"]=="idle" and any(e["kind"]=="turn_end" for e in s["events"]))
+        self.request(path+"/suspend","POST",{})
+        self.until(lambda:self.request(path)["session"]["status"]=="suspended")
+        self.request(path+"/resume","POST",{})
+        self.until(lambda:self.request(path)["session"]["status"]=="idle")
+        self.assertEqual(self.native_lifecycle()[-1]["method"],"thread/resume")
+        assert_delivery(self.native_lifecycle()[-1],created["id"])
+        # This restarts only the isolated test server, never the running application.
+        self.stop()
+        self.start()
+        self.until(lambda:self.request(path))
+        self.request(path+"/resume","POST",{})
+        self.until(lambda:self.request(path)["session"]["status"]=="idle")
+        assert_delivery(self.native_lifecycle()[-1],created["id"])
+        fork=self.request(path+"/fork","POST",dict(requestId=str(uuid4())))
+        self.until(lambda:self.request("/api/sessions/"+fork["id"])["session"]["status"]=="idle")
+        self.assertEqual(fork["role"],created["role"])
+        call=self.native_lifecycle()[-1]
+        self.assertEqual(call["method"],"thread/fork")
+        assert_delivery(call,fork["id"])
+        self.assertNotIn("agentworks://sessions/"+created["id"],call["params"]["developerInstructions"])
+
+    def test_roleless_session_receives_shared_context(self):
+        created=self.request("/api/sessions","POST",dict(provider="codex-rust",cwd=str(self.cwd)))
+        self.until(lambda:self.request("/api/sessions/"+created["id"])["session"]["status"]=="idle")
+        text=self.native_lifecycle()[-1]["params"]["developerInstructions"]
+        self.assertIn("agentworks://sessions/"+created["id"],text)
+        self.assertNotIn("# Agentworks role:",text)
+
+    def test_import_load_receives_shared_context(self):
+        created=self.request("/api/sessions/import","POST",dict(provider="codex-rust",providerSessionId="thread-1",cwd=str(self.cwd)))
+        path="/api/sessions/"+created["id"]
+        snapshot=self.until(lambda:(s if (s:=self.request(path))["session"]["status"]=="idle" else None))
+        call=self.native_lifecycle()[-1]
+        self.assertEqual(call["method"],"thread/resume")
+        self.assertIn("agentworks://sessions/"+created["id"],call["params"]["developerInstructions"])
+        self.assertTrue(any(e["kind"]=="acp" and e["data"].get("sessionUpdate")=="user_message_chunk" for e in snapshot["events"]))
 
     def test_native_background_jobs_reach_application_and_stop_individually(self):
         created=self.request("/api/sessions","POST",dict(provider="codex-rust",cwd=str(self.cwd),title="Native jobs test"))

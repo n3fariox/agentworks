@@ -136,7 +136,7 @@ impl Bridge {
                 self.write(json!({"method":"initialized","params":{}}))
                     .await?;
                 let mut response = json!({"protocolVersion":1,"agentInfo":{"name":"agentworks-codex-acp","version":env!("CARGO_PKG_VERSION")},
-                    "agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"embeddedContext":true},"mcpCapabilities":{"http":true},"sessionCapabilities":{"list":{},"close":{},"delete":{},"fork":{},"additionalDirectories":{},"subagents":{}}},
+                    "agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"embeddedContext":true},"mcpCapabilities":{"http":true},"sessionCapabilities":{"list":{},"close":{},"delete":{},"fork":{},"resume":{},"systemPrompt":{},"additionalDirectories":{},"subagents":{}}},
                     "authMethods":[{"id":"api-key","name":"API key"}]});
                 self.negotiate_tasks(&p, &mut response);
                 Ok(response)
@@ -160,7 +160,8 @@ impl Bridge {
                     .await?;
                 Ok(json!({}))
             }
-            "session/new" | "session/load" | "session/fork" => {
+            "session/new" | "session/load" | "session/resume" | "session/fork" => {
+                let prompt = system_prompt(&p)?; // Validate before touching native state.
                 let roots = workspace_roots(&p)?;
                 if method != "session/new"
                     && self
@@ -170,9 +171,50 @@ impl Bridge {
                         .get(field(&p, "sessionId")?)
                         .is_some_and(|s| s.active.is_some() || s.configuring)
                 {
-                    return Err(invalid("Cannot load or fork an active session"));
+                    return Err(invalid("Cannot load, resume or fork an active session"));
                 }
-                let mut params = json!({"cwd":field(&p,"cwd")?,"config":session_config(&p)?,"runtimeWorkspaceRoots":roots});
+                // Codex ignores instruction overrides when rejoining a subscribed thread.
+                // Refuse rather than claiming to apply a prompt that it would drop.
+                if matches!(method, "session/load" | "session/resume")
+                    && prompt.is_some()
+                    && self
+                        .sessions
+                        .lock()
+                        .unwrap()
+                        .contains_key(field(&p, "sessionId")?)
+                {
+                    return Err(invalid(
+                        "Close the session before loading or resuming with a system prompt",
+                    ));
+                }
+                let config = session_config(&p)?;
+                let mut params =
+                    json!({"cwd":field(&p,"cwd")?,"config":config,"runtimeWorkspaceRoots":roots});
+                if let Some(prompt) = prompt {
+                    // The native field replaces configured developer_instructions. Preserve
+                    // the effective config (including project layers) before appending ours.
+                    let configured = self
+                        .rpc(
+                            "config/read",
+                            json!({"cwd":field(&p,"cwd")?,"includeLayers":false}),
+                        )
+                        .await?;
+                    let base = params["config"]
+                        .get("developer_instructions")
+                        .unwrap_or(&configured["config"]["developer_instructions"]);
+                    let base = match base {
+                        Value::Null => "",
+                        Value::String(text) => text,
+                        _ => return Err(invalid("Invalid configured developer_instructions")),
+                    };
+                    params["developerInstructions"] = json!(if base.is_empty() {
+                        prompt
+                    } else if prompt.is_empty() {
+                        base.to_owned()
+                    } else {
+                        format!("{base}\n\n{prompt}")
+                    });
+                }
                 let native = if method != "session/new" {
                     params["threadId"] = json!(field(&p, "sessionId")?);
                     params["excludeTurns"] = json!(true);
@@ -206,13 +248,13 @@ impl Bridge {
                 } else {
                     "thread/start"
                 };
-                if method == "session/load" {
+                if matches!(method, "session/load" | "session/resume") {
                     self.close_tasks(field(&p, "sessionId")?);
                 }
                 let response = match self.rpc(native, params).await {
                     Ok(response) => response,
                     Err(error) => {
-                        if method == "session/load" {
+                        if matches!(method, "session/load" | "session/resume") {
                             let id = field(&p, "sessionId")?;
                             self.open_tasks(id);
                             self.restore_tasks(cx, id).await;
@@ -860,6 +902,31 @@ fn observe_limits(cache: &mut Map<String, Value>, snapshot: &Value) {
             }
         }
     }
+}
+
+// ACP append has developer precedence; replacing Codex baseInstructions would
+// discard its tool guidance. Override and non-text content are not advertised.
+fn system_prompt(p: &Value) -> Result<Option<String>> {
+    let Some(prompt) = p.get("systemPrompt") else {
+        return Ok(None);
+    };
+    if prompt["mode"] != "append" {
+        return Err(invalid("Codex supports append system prompts only"));
+    }
+    let blocks = prompt["content"]
+        .as_array()
+        .ok_or_else(|| invalid("Invalid system prompt content"))?;
+    let text = blocks
+        .iter()
+        .map(|block| {
+            if block["type"] != "text" {
+                return Err(invalid("Codex system prompts accept text content only"));
+            }
+            field(block, "text")
+        })
+        .collect::<Result<Vec<_>>>()?
+        .join("\n\n");
+    Ok(Some(text))
 }
 
 fn session_config(p: &Value) -> Result<Value> {

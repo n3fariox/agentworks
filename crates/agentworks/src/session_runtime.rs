@@ -89,7 +89,7 @@ fn profile_agent(
     Ok(AcpAgent::new(config))
 }
 
-/// The session's role as an ACP system prompt. Harnesses do not persist it, so
+/// The session's role as an ACP system prompt. Do not rely on harness persistence:
 /// it accompanies every new/load/resume/fork request. A role is never dropped
 /// silently: a harness that does not advertise the capability is an error.
 fn role_prompt(
