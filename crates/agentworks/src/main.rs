@@ -192,12 +192,19 @@ impl Session {
             data["continuationState"] =
                 serde_json::to_value(&state.continuation).unwrap_or(Value::Null);
         }
-        if kind == "async_task_connection" {
-            state.async_tasks.connection(data["supported"] == true);
+        // A job's outcome becomes its own transcript event, after the event that ended it.
+        let finished = if kind == "async_task_connection" {
+            state.async_tasks.connection(data["supported"] == true)
         } else if kind == "acp" {
-            state.async_tasks.observe(&data);
-        }
+            state.async_tasks.observe(&data).into_iter().collect()
+        } else {
+            vec![]
+        };
         state.seq += 1;
+        if kind == "async_task_finished" {
+            let seq = state.seq;
+            state.async_tasks.record(&data, seq);
+        }
         let time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -264,6 +271,10 @@ impl Session {
             let _ = self
                 .tx
                 .send(json!({"kind":"storage_error","seq":state.seq,"data":{"message":message}}));
+        }
+        drop(state);
+        for result in finished {
+            self.emit("async_task_finished", result);
         }
     }
     fn status(&self, status: &str) {
@@ -429,9 +440,14 @@ impl Session {
         let mut next = data.clone();
         let mut events = Vec::with_capacity(updates.len() + 1);
         for update in updates {
-            next.async_tasks.observe(&update);
+            let finished = next.async_tasks.observe(&update);
             next.seq += 1;
             events.push(json!({"seq":next.seq,"kind":"acp","data":update}));
+            if let Some(result) = finished {
+                next.seq += 1;
+                next.async_tasks.record(&result, next.seq);
+                events.push(json!({"seq":next.seq,"kind":"async_task_finished","data":result}));
+            }
         }
         next.seq += 1;
         next.import_pending = false;

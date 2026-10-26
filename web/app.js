@@ -1,4 +1,4 @@
-import {createBackgroundJobs} from './background-jobs.js';
+import {createBackgroundJobs,jobResultLines} from './background-jobs.js';
 import {createSubagents} from './subagents.js';
 import {setupTerminal} from './terminal.js';
 import {hostEnrollment} from './host-enrollment.js';
@@ -60,7 +60,7 @@ setInterval(()=>usageStatus.render(),60000);
 let timeoutControls=null,parserScripts=null;
 let transcript=[], tools=new Map(), approvals=new Map(), assistant=null, status='starting';
 const backgroundJobs=createBackgroundJobs({root:$('background-jobs'),api,getActive:()=>active,isConnected:()=>connected,onChange:()=>scheduleDraw()});
-const subagents=createSubagents({append:()=>{},tabs:$('session-tabs'),panel:$('subagent-view'),messages:$('messages'),onSelect:view=>{sessionTerminal.select(view);scheduleDraw();},uuid,applyToolUpdate,renderToolActivity,renderMessage:(body,item)=>{if(item.role==='Agent')updateMarkdown(item,body);else body.textContent=item.text;},el});
+const subagents=createSubagents({jobResult:job=>[`${job.name||'Background job'} · ${backgroundJobs.label(job.state)}`,...jobResultLines(job)].join('\n'),append:()=>{},tabs:$('session-tabs'),panel:$('subagent-view'),messages:$('messages'),onSelect:view=>{sessionTerminal.select(view);scheduleDraw();},uuid,applyToolUpdate,renderToolActivity,renderMessage:(body,item)=>{if(item.role==='Agent')updateMarkdown(item,body);else body.textContent=item.text;},el});
 // L-05 hook: activity indicator and explicit queued inputs (server-owned state).
 const questions=setupQuestions({api,uuid:()=>uuid(),storage:localStorage,getActive:()=>active,isConnected:()=>connected,agentName:request=>subagents.name(request?.sessionId)||labels[active?.provider]||'the agent'});
 const inputQueue=setupInputQueue({$,api,uuid:()=>uuid(),getActive:()=>active,getStatus:()=>status,toolActive:()=>[...tools.values()].some(t=>['pending','in_progress'].includes(t.status))});
@@ -788,6 +788,25 @@ function renderToolActivity(node,tool,sessionBusy){
   output.textContent=tool.bodyOmitted?'':toolRawText(tool);
 }
 // End U-05 tool activity.
+// A background job's outcome, at the point in the conversation where it ended.
+function renderJobResult(node,item){
+  const job=item.job,tool=job.toolCallId?tools.get(job.toolCallId):null;
+  const summary=node.querySelector('summary'),body=node.querySelector('.job-result-body');
+  summary.replaceChildren(el('span','tool-title',job.name||'Background job'),el('span','tool-state','Background · '+backgroundJobs.label(job.state)));
+  node.classList.toggle('is-failed',job.state==='failed');
+  const lines=jobResultLines(job);
+  // Codex reports the command's exit code on the launching tool call's raw item.
+  const exit=tool?.rawOutput?.exitCode;if(Number.isInteger(exit))lines.push('Exit '+exit);
+  if(!lines.length)lines.push('The adapter reported no further details for this job.');
+  const text=lines.join('\n');
+  if(body.dataset.text!==text){body.dataset.text=text;body.querySelector('.job-result-text').textContent=text;}
+  const show=body.querySelector('button');show.hidden=!tool;
+  show.onclick=()=>{
+    const target=nodes.get(tool.id);if(!target)return;
+    const log=target.closest('details.work-log');if(log)log.open=true;
+    target.open=true;target.scrollIntoView({block:'center'});target.querySelector('summary')?.focus();
+  };
+}
 
 function consume(e,live=false){
   const d=e.data;itemKey=Number.isSafeInteger(e.seq)?`${active.id}:${e.seq}`:null;itemCount=0;eventTime=Number.isSafeInteger(e.time)?e.time:null;
@@ -830,6 +849,7 @@ function consume(e,live=false){
       transcript.push({id:itemId(),type:'notice',text:`${asked} — ${d.action==='accept'?'answer sent':d.action==='decline'?'skipped':d.action==='cancel'?'cancelled by you':d.withdrawn?'withdrawn by the agent':'cancelled because the turn ended'}.`});
     }
   }
+  else if(e.kind==='async_task_finished'){assistant=null;transcript.push({id:itemId(),type:'job',job:{...d},seq:e.seq});}
   else if(e.kind==='interrupted'){transcript.push({id:itemId(),type:'notice',text:d.message,interrupted:true});assistant=null;}
   else if(e.kind==='storage_error'){status='error';$('session-notice').textContent=d.message;$('session-notice').hidden=false;}
   else if(e.kind==='error'){transcript.push({id:itemId(),type:'error',text:d.message});assistant=null;}
@@ -1002,6 +1022,9 @@ function draw(){
         content.append(label,el('div','message-body'));node.append(content);
       }else if(item.type==='tool'){
         node=el('details','tool-card');node.append(el('summary'),el('pre'));
+      }else if(item.type==='job'){
+        node=el('details','tool-card job-result');const body=el('div','job-result-body'),show=el('button','text-button','Show launching tool call');show.type='button';
+        body.append(el('div','job-result-text'),show);node.append(el('summary'),body);
       }else if(item.type==='image'){
         node=el('div','message');const image=el('img','agent-image');
         if(/^image\/(png|jpeg|gif|webp)$/.test(item.content.mimeType)&&item.content.data.length<14*1024*1024){image.src=`data:${item.content.mimeType};base64,${item.content.data}`;image.alt='Image from agent';imageViewer.decorate(image);node.append(image);}else node.textContent='Unsupported image format';
@@ -1013,7 +1036,7 @@ function draw(){
       if(item.role==='user'&&!item.inboxDelivery){renderUserReferences(body,item.text);decorateMarkdown(body);if(item.attachments&&!node.querySelector('.message-attachments')){const sent=el('div','message-attachments');attachments.renderSent(sent,active.id,item.attachments);for(const img of sent.querySelectorAll('img'))imageViewer.decorate(img);body.after(sent);}}else updateMarkdown(item,body);
     }else if(item.type==='tool'){
       renderToolActivity(node,item,['running','waiting','cancelling'].includes(status));
-    }
+    }else if(item.type==='job')renderJobResult(node,item);
   }
   subagents.sync(['running','waiting','cancelling'].includes(status));
   const pending=$('approval-area');for(const node of [...pending.children])if(!node.classList.contains('question'))node.remove();

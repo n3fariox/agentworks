@@ -19,20 +19,39 @@ async function start(){
 test.beforeAll(async()=>{dir=await mkdtemp(join(tmpdir(),'agentworks-async-'));await mkdir(join(dir,'node_modules/.bin'),{recursive:true});await copyFile('tests/fixtures/async-task-agent.mjs',join(dir,'node_modules/.bin/codex-acp'));await start();});
 test.afterAll(async()=>{await stopChild(server);await removeFixture(dir);});
 
-test('jobs survive turn completion and reload, report failures, and stop individually',async({page})=>{
+const jobCard=(page,name)=>page.locator('#messages .job-result').filter({hasText:name});
+async function openLogs(page){const closed=page.locator('#messages details.work-log:not([open]) > .work-log-summary');while(await closed.count())await closed.first().click();}
+
+test('active jobs survive turn completion and reload; finished jobs move to the work log; stop works individually',async({page})=>{
  const errors=[];page.on('pageerror',e=>errors.push(e.message));
  const s=await api('/api/sessions',{provider:'codex',cwd:dir});await status(s.id,'idle');await open(page,s.id);
  await expect(page.locator('#background-jobs')).toBeHidden();
  await api(`/api/sessions/${s.id}/prompt`,{text:'jobs',requestId:'jobs'});await status(s.id,'idle');
  const panel=page.locator('#background-jobs');await expect(panel).toBeVisible();await panel.locator('summary').click();
- await expect(panel.locator('.background-job')).toHaveCount(4);await expect(panel).not.toContainText('Foreign job');
- const root=panel.locator('.background-job').filter({hasText:'Root build'}),child=panel.locator('.background-job').filter({hasText:'Child build'}),failed=panel.locator('.background-job').filter({hasText:'Failed build'});
- await expect(root.locator('.background-job-state')).toHaveText('Running');await expect(child).toContainText('Subagent job');await expect(failed.locator('.background-job-state')).toHaveText('Failed');await expect(failed.getByRole('button')).toBeHidden();
+ // The failed job is not listed as active: its outcome is in the conversation instead.
+ await expect(panel.locator('.background-job')).toHaveCount(3);await expect(panel.locator('summary')).toHaveText('Background jobs · 3 active');
+ await expect(panel).not.toContainText('Foreign job');await expect(panel).not.toContainText('Failed build');
+ const root=panel.locator('.background-job').filter({hasText:'Root build'}),child=panel.locator('.background-job').filter({hasText:'Child build'});
+ await expect(root.locator('.background-job-state')).toHaveText('Running');await expect(child).toContainText('Subagent job');
+ await openLogs(page);
+ const failed=jobCard(page,'Failed build');await expect(failed).toHaveCount(1);await expect(failed.locator('.tool-state')).toHaveText('Background · Failed');
+ await failed.locator('summary').first().click();await expect(failed).toContainText('Build failed');await expect(failed).toContainText('Output file: /tmp/fixture-job.output');
+ // It folds with the turn's tool calls, inside the same work log.
+ await expect(page.locator('#messages details.work-log').filter({has:page.locator('.job-result',{hasText:'Failed build'})}).locator('.work-log-counts')).toContainText('1 background job ended · 1 job failed');
  await expect(page.locator('#messages')).toContainText('Background · Running');
  await page.reload();await expect(panel).toBeVisible();await panel.locator('summary').click();await expect(root.locator('.background-job-state')).toHaveText('Running');
- await child.getByRole('button',{name:'Stop Child build'}).click();await expect(child.locator('.background-job-state')).toHaveText('Stopped');await expect(root.locator('.background-job-state')).toHaveText('Running');
+ await expect(panel.locator('.background-job')).toHaveCount(3);await openLogs(page);await expect(jobCard(page,'Failed build')).toHaveCount(1);
+ await child.getByRole('button',{name:'Stop Child build'}).click();await expect(child).toHaveCount(0);await expect(root.locator('.background-job-state')).toHaveText('Running');
+ // A child's job outcome stays attributed to the child transcript, not the root conversation.
+ await expect(jobCard(page,'Child build')).toHaveCount(0);
+ await page.getByRole('tab',{name:'Sub: Worker',exact:true}).click();await expect(page.locator('#subagent-view')).toContainText('Child build · Stopped');
+ await page.getByRole('tab',{name:'Chat',exact:true}).click();
  await panel.getByRole('button',{name:'Stop Protected build'}).click();await expect(panel.getByRole('alert')).toContainText(['Fixture stop rejected']);
  const saved=await snapshot(s.id);expect(saved.asyncTasks.tasks).toHaveLength(4);expect(saved.asyncTasks.tasks.find(t=>t.asyncTaskId==='root-job').usage).toEqual({totalTokens:5});
+ const finished=saved.events.filter(e=>e.kind==='async_task_finished');
+ expect(finished.map(e=>[e.data.asyncTaskId,e.data.state])).toEqual([['fail-job','failed'],['child-job','stopped']]);
+ expect(finished[1].data.parentSessionId).toBe(saved.asyncTasks.tasks.find(t=>t.asyncTaskId==='root-job').acpSessionId);
+ for(const e of finished)expect(saved.asyncTasks.tasks.find(t=>t.asyncTaskId===e.data.asyncTaskId).resultSeq).toBe(e.seq);
  const log=await wire();expect(log.find(m=>m.method==='initialize').params.clientCapabilities._meta.jetbrains.air).toEqual({version:1,capabilities:['asyncTasks']});
  expect(log.filter(m=>m.method==='_session/async_task/stop').every(m=>m.params.sessionId===saved.asyncTasks.tasks.find(t=>t.asyncTaskId==='root-job').acpSessionId)).toBe(true);
  expect(log.filter(m=>m.method==='session/cancel')).toHaveLength(0);
@@ -40,31 +59,48 @@ test('jobs survive turn completion and reload, report failures, and stop individ
  expect(errors).toEqual([]);
 });
 
-test('individual stop works during a turn and does not cancel that turn',async({page})=>{
+test('individual stop works during a turn, does not cancel that turn and records the outcome',async({page})=>{
  const s=await api('/api/sessions',{provider:'codex',cwd:dir});await status(s.id,'idle');await open(page,s.id);
  await api(`/api/sessions/${s.id}/prompt`,{text:'busy',requestId:'busy'});await status(s.id,'running');
  const panel=page.locator('#background-jobs');await expect(panel).toBeVisible();await panel.locator('summary').click();await panel.getByRole('button',{name:'Stop Root build'}).click();
- await expect(panel.locator('.background-job-state')).toHaveText('Stopped');expect((await snapshot(s.id)).session.status).toBe('running');
+ await expect(panel).toBeHidden();await expect(jobCard(page,'Root build').locator('.tool-state')).toHaveText('Background · Stopped');
+ expect((await snapshot(s.id)).session.status).toBe('running');
  await page.locator('#stop').click();await status(s.id,'idle');
 });
 
-test('restart makes old jobs unknown and stale or foreign stop requests are rejected',async({page})=>{
+test('restart resolves old jobs as unknown in the work log and stale or foreign stop requests are rejected',async({page})=>{
  const s=await api('/api/sessions',{provider:'codex',cwd:dir});await status(s.id,'idle');await open(page,s.id);
  await api(`/api/sessions/${s.id}/prompt`,{text:'jobs',requestId:'restart'});await status(s.id,'idle');
  await stopChild(server);await start();await page.reload();
- const panel=page.locator('#background-jobs');await expect(panel).toBeVisible();await panel.locator('summary').click();
- const root=panel.locator('.background-job').filter({hasText:'Root build'});await expect(root.locator('.background-job-state')).toHaveText('Status unknown');await expect(root.getByRole('button')).toBeDisabled();
+ // Reconnecting ends control of the old process's jobs; their outcome is unknown, not "still running".
+ const panel=page.locator('#background-jobs'),root=jobCard(page,'Root build');
+ await expect(root).toHaveCount(1);await expect(panel).toBeHidden();
+ await expect(page.locator('#messages .work-log-counts').last()).toHaveText('2 background jobs ended · 2 with unknown status');
+ await openLogs(page);await expect(root.locator('.tool-state')).toHaveText('Background · Status unknown');
+ await root.locator('summary').first().click();await expect(root).toContainText('The agent process ended before this job reported an outcome');
  const tasks=(await snapshot(s.id)).asyncTasks.tasks;const owner=tasks.find(t=>t.asyncTaskId==='root-job').acpSessionId;
  for(const acpSessionId of [owner,'foreign']){const r=await fetch(`${base}/api/sessions/${s.id}/async-tasks/stop`,{method:'POST',headers:{Origin:base,'Content-Type':'application/json'},body:JSON.stringify({asyncTaskId:'root-job',acpSessionId})});expect(r.status).toBe(409);}
- const failed=panel.locator('.background-job').filter({hasText:'Failed build'});await expect(failed.locator('.background-job-state')).toHaveText('Failed');
+ await expect(jobCard(page,'Failed build').locator('.tool-state')).toHaveText('Background · Failed');
+ // Replaying the stored history shows each outcome once, and the panel stays empty.
+ await page.reload();await expect(jobCard(page,'Root build')).toHaveCount(1);await expect(panel).toBeHidden();
+ await expect(jobCard(page,'Failed build')).toHaveCount(1);await expect(jobCard(page,'Protected build')).toHaveCount(1);
+ expect((await snapshot(s.id)).events.filter(e=>e.kind==='async_task_finished').map(e=>e.data.state)).toEqual(['failed','unknown','unknown','unknown']);
 });
 
-
-test('late completion updates an idle session and jobs survive truncated transcript replay',async({page})=>{
+test('late completion of an idle session is shown in a work log after the turn and survives replay',async({page})=>{
  const s=await api('/api/sessions',{provider:'codex',cwd:dir});await status(s.id,'idle');await open(page,s.id);
  await api(`/api/sessions/${s.id}/prompt`,{text:'late',requestId:'late'});await status(s.id,'idle');
- const panel=page.locator('#background-jobs');await expect(panel).toBeVisible();await panel.locator('summary').click();
- await expect(panel.locator('.background-job-state')).toHaveText('Completed');await expect(panel).toContainText('Checks passed');
+ const panel=page.locator('#background-jobs');
+ const late=page.locator('#messages details.work-log').filter({hasText:'Background job · Root build · completed'});
+ await expect(late).toHaveCount(1);await expect(panel).toBeHidden();
+ // The result comes after the turn's own work log, in event order.
+ const order=await page.locator('#messages > details.work-log .work-log-counts').allTextContents();
+ expect(order.at(-1)).toBe('Background job · Root build · completed');expect(order.length).toBe(2);
+ await late.locator('.work-log-summary').click();const card=jobCard(page,'Root build');await card.locator('summary').first().click();
+ await expect(card).toContainText('Checks passed');await expect(card).toContainText('Output file: /tmp/fixture-job.output');await expect(card).toContainText('5 tokens');
+ await card.getByRole('button',{name:'Show launching tool call'}).click();
+ await expect(page.locator('#messages details.work-log').first()).toHaveAttribute('open','');
+ await page.reload();await expect(late).toHaveCount(1);await expect(panel).toBeHidden();
  const trimmed=await api('/api/sessions',{provider:'codex',cwd:dir});await status(trimmed.id,'idle');await open(page,trimmed.id);
  await api(`/api/sessions/${trimmed.id}/prompt`,{text:'trim',requestId:'trim'});await status(trimmed.id,'idle');
  const saved=await snapshot(trimmed.id);expect(saved.truncated).toBe(true);expect(saved.events.some(e=>e.data?.sessionUpdate==='async_task_spawned')).toBe(false);expect(saved.asyncTasks.tasks[0].state).toBe('running');

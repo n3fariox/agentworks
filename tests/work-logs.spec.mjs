@@ -32,6 +32,25 @@ test('live-observed duration is shown only when every call has timing',()=>{
   expect(summaryText(log)).toBe('2 tool calls · 2m 14s');
 });
 
+const job=(id,seq,state,name='Build')=>({id,seq,type:'job',job:{asyncTaskId:id,name,state}});
+test('a job result inside the tool range folds with it; after the answer it gets its own log',()=>{
+  const items=[user('u1',1),tool('t1','completed'),job('j1',3,'completed'),tool('t2','completed'),say('answer'),job('j2',6,'failed','Tests'),job('j3',7,'unknown','Lint')];
+  const [main,late]=buildWorkLogs(items,{sessionIdle:true,scope:'s'});
+  expect(main.members).toEqual(['t1','j1','t2']);
+  expect(summaryText(main)).toBe('2 tool calls · 1 background job ended');
+  // The answer stays prominent; consecutive late results share one log keyed by the first result's seq.
+  expect(late).toMatchObject({key:'work-s:1:0:job-6',members:['j2','j3'],calls:0,jobs:2,jobsFailed:1,jobsUnknown:1,complete:true,duration:null});
+  expect(summaryText(late)).toBe('2 background jobs ended · 1 job failed · 1 with unknown status');
+});
+test('a job that ends while the session is idle forms a log after the turn end and names the job',()=>{
+  const items=[user('u1',1),tool('t1','completed'),say('done'),job('j',5,'completed','Root build')];
+  const logs=buildWorkLogs(items,{sessionIdle:true,scope:'s',turnEnds:new Map([['done',{seq:4,stopReason:'end_turn'}]])});
+  expect(logs.map(l=>l.key)).toEqual(['work-s:1:0','work-s:end-4:0:job-5']);
+  expect(summaryText(logs[1])).toBe('Background job · Root build · completed');
+  // Replay produces new item ids, but the same persisted seq, so the log key is stable.
+  const again=buildWorkLogs([user('x',1),tool('y','completed'),say('done2'),job('z',5,'completed','Root build')],{sessionIdle:true,scope:'s',turnEnds:new Map([['done2',{seq:4,stopReason:'end_turn'}]])});
+  expect(again.map(l=>l.key)).toEqual(logs.map(l=>l.key));
+});
 test('keys use persisted seq scoped by session, not per-replay item ids',()=>{
   const a=buildWorkLogs([user('random-1',7),tool('t','completed')],{scope:'s1'});
   const b=buildWorkLogs([user('random-2',7),tool('t','completed')],{scope:'s1'});

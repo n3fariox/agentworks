@@ -9,7 +9,7 @@ export function activityLabel(state,rootBusy){
   return 'Activity unconfirmed';
 }
 
-export function createSubagents({append,uuid,applyToolUpdate,renderToolActivity,renderMessage,el,tabs,panel,messages,onSelect}){
+export function createSubagents({jobResult,append,uuid,applyToolUpdate,renderToolActivity,renderMessage,el,tabs,panel,messages,onSelect}){
   const children=new Map();
   let lastSeq=0,selected=null;
   function ensure(id,parent){
@@ -23,6 +23,13 @@ export function createSubagents({append,uuid,applyToolUpdate,renderToolActivity,
   }
   function consume(e,{live=false}={}){
     const d=e.data,kind=d?.sessionUpdate;
+    // A child's background-job outcome belongs to the child transcript that launched it.
+    if(e.kind==='async_task_finished'&&typeof d?.parentSessionId==='string'){
+      if(Number.isSafeInteger(e.seq)){if(e.seq<=lastSeq)return true;lastSeq=e.seq;}
+      const child=ensure(d.acpSessionId,d.parentSessionId);child.message=null;
+      child.items.push({id:uuid(),type:'text',role:'Background job',text:jobResult?jobResult(d):d.name||'Background job'});
+      return true;
+    }
     if(e.kind!=='acp')return false;
     const lifecycle=['subagent_spawned','subagent_state_update','subagent_update'].includes(kind);
     if(!lifecycle&&typeof d?.parentSessionId!=='string')return false;
