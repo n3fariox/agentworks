@@ -1165,7 +1165,7 @@ $('session-project').onchange=async event=>{
 };
 $('dismiss-create').onclick=()=>$('create-dialog').close();
 $('menu').onclick=()=>document.body.classList.toggle('menu-open');$('session-home').onclick=()=>{if(history.state?.agentworks==='chat')history.back();else showBrowser();};$('session-search').onclick=()=>$('palette-search').click();$('scrim').onclick=()=>document.body.classList.remove('menu-open');
-const modelProviders=setupModelProviders({$,api,el,getHosts:()=>hosts,selectionChanged:()=>{resetCreateModels();providerNote();}});
+const modelProviders=setupModelProviders({$,api,el,socketUrl,getHosts:()=>hosts,selectionChanged:()=>{resetCreateModels();providerNote();}});
 $('provider').onchange=()=>{providerNote();resetCreateModels();modelProviders.loadCreate();updateRoleNote();};
 $('create-role').onchange=()=>updateRoleNote();
 $('directory').onchange=resetCreateModels;

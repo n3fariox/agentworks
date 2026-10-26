@@ -67,6 +67,8 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         "directories": true,
         "terminal": true,
         "hostMetrics": if crate::metrics::supported() { 1 } else { 0 },
+        "providerAuthTerminal": true,
+        "managedCodexAuth": true,
         "home": home(),
     });
     ws.send(Message::text(hello.to_string()))
@@ -167,7 +169,17 @@ pub async fn run(args: &[String]) -> Result<(), String> {
                         if terminals.contains_key(&channel) {
                             continue;
                         }
-                        match crate::terminal::spawn(cwd) {
+                        let opened = if let Some(auth) =
+                            request.get("providerAuth").filter(|a| a.is_object())
+                        {
+                            crate::model_providers::login_terminal(
+                                auth["kind"].as_str().unwrap_or(""),
+                                auth["id"].as_str().unwrap_or(""),
+                            )
+                        } else {
+                            crate::terminal::spawn(cwd)
+                        };
+                        match opened {
                             Ok(handle) => {
                                 let mut frames = handle.frames.clone();
                                 let out = out.clone();

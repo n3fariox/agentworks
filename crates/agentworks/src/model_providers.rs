@@ -156,12 +156,23 @@ pub async fn update(
                 .unwrap_or("")
                 .trim()
                 .trim_end_matches('/');
-            if old["baseUrl"] != proposed {
+            if old["baseUrl"] != proposed
+                || old["kind"].as_str().unwrap_or("openai-compatible")
+                    != request["profile"]["kind"]
+                        .as_str()
+                        .unwrap_or("openai-compatible")
+            {
                 return Err(fail(
                     StatusCode::CONFLICT,
                     "Saved sessions use this endpoint. Add another provider to use a different URL",
                 ));
             }
+        }
+    }
+    if operation == "delete" {
+        if let Some(id) = id {
+            crate::terminal::remove_provider_auth(id).await;
+            crate::codex_oauth::remove(id).await;
         }
     }
     Ok(Json(profiles::dispatch(&request).map_err(bad)?))

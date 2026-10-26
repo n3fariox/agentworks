@@ -461,3 +461,10 @@ dialog.image-viewer{width:96vw;max-width:96vw;height:92dvh;max-height:92dvh;padd
 .directory-list button:hover,.directory-list button:focus-visible{background:#252a32}
 .directory-current{min-width:0;overflow-wrap:anywhere;color:var(--muted);font-size:12px}
 @media(max-width:600px){.directory-field{flex-wrap:wrap}.directory-field input{flex-basis:100%;order:-1}}
+
+#provider-auth-terminal{position:relative;margin-top:20px;padding:12px;border:1px solid var(--border);border-radius:8px;min-width:0}
+#provider-auth-surface{height:320px;position:relative;overflow:hidden;background:#101218;margin-top:12px}
+#provider-auth-surface.terminal-readonly{overflow:auto}
+#provider-auth-cell-measure{position:absolute;visibility:hidden;pointer-events:none;font:14px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace}
+
+#codex-oauth{margin-top:20px;padding:12px;border:1px solid var(--border);border-radius:8px}#codex-oauth a{margin-right:16px}

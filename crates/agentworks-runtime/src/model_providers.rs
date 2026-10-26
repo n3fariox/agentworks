@@ -11,7 +11,10 @@ type Result<T> = std::result::Result<T, String>;
 pub struct Profile {
     pub id: String,
     pub name: String,
+    #[serde(default)]
     pub base_url: String,
+    #[serde(default = "compatible_kind")]
+    pub kind: String,
     pub default_model: String,
     #[serde(default = "local_hosts")]
     pub host_ids: Vec<String>,
@@ -22,13 +25,20 @@ pub struct Profile {
 pub struct Input {
     pub id: Option<String>,
     pub name: String,
+    #[serde(default)]
     pub base_url: String,
+    #[serde(default = "compatible_kind")]
+    pub kind: String,
     pub default_model: String,
     #[serde(default = "local_hosts")]
     pub host_ids: Vec<String>,
     pub api_key: Option<String>,
     #[serde(default)]
     pub remove_key: bool,
+}
+
+fn compatible_kind() -> String {
+    "openai-compatible".into()
 }
 
 fn local_hosts() -> Vec<String> {
@@ -116,7 +126,7 @@ pub fn directory() -> PathBuf {
     }
 }
 
-fn storage_lock() -> Result<fs::File> {
+pub(crate) fn storage_lock() -> Result<fs::File> {
     let dir = directory();
     fs::create_dir_all(&dir).map_err(|_| "Could not create model provider store")?;
     #[cfg(unix)]
@@ -140,7 +150,7 @@ fn storage_lock() -> Result<fs::File> {
     Ok(file)
 }
 
-fn read<T: serde::de::DeserializeOwned + Default>(name: &str) -> Result<T> {
+pub(crate) fn read<T: serde::de::DeserializeOwned + Default>(name: &str) -> Result<T> {
     match fs::read(directory().join(name)) {
         Ok(bytes) => {
             serde_json::from_slice(&bytes).map_err(|_| "Invalid model provider store".into())
@@ -150,7 +160,7 @@ fn read<T: serde::de::DeserializeOwned + Default>(name: &str) -> Result<T> {
     }
 }
 
-fn write(name: &str, value: &impl Serialize) -> Result<()> {
+pub(crate) fn write(name: &str, value: &impl Serialize) -> Result<()> {
     let dir = directory();
     fs::create_dir_all(&dir).map_err(|_| "Could not create model provider store")?;
     #[cfg(unix)]
@@ -197,7 +207,10 @@ fn profile(id: &str) -> Result<Profile> {
 fn view(profile: &Profile, keys: &BTreeMap<String, String>) -> Value {
     let mut value = json!(profile);
     value["keyConfigured"] = json!(keys.contains_key(&profile.id));
-    value["type"] = json!("openai-compatible");
+    value["type"] = json!(profile.kind);
+    if profile.kind == "chatgpt_codex" {
+        value["signedIn"] = json!(crate::codex_auth::has_credentials(&profile.id));
+    }
     value
 }
 
@@ -208,17 +221,34 @@ fn validate(input: Input) -> Result<(Profile, Option<String>, bool)> {
     }
     let name = input.name.trim().to_owned();
     let default_model = input.default_model.trim().to_owned();
-    let base_url = input.base_url.trim().trim_end_matches('/').to_owned();
-    let url: http::Uri = base_url
-        .parse()
-        .map_err(|_| "Use an absolute HTTP or HTTPS base URL")?;
-    if !matches!(url.scheme_str(), Some("http" | "https"))
-        || url.host().is_none()
-        || url.authority().is_some_and(|a| a.as_str().contains('@'))
-        || url.query().is_some()
-        || base_url.contains('#')
-    {
-        return Err("Use an HTTP or HTTPS base URL without credentials, query, or fragment".into());
+    let base_url = if input.kind == "openai-compatible" {
+        input.base_url.trim().trim_end_matches('/').to_owned()
+    } else {
+        String::new()
+    };
+    if !matches!(
+        input.kind.as_str(),
+        "openai-compatible" | "chatgpt_codex" | "claude-code"
+    ) {
+        return Err("Unknown model provider type".into());
+    }
+    if input.kind == "openai-compatible" {
+        let url: http::Uri = base_url
+            .parse()
+            .map_err(|_| "Use an absolute HTTP or HTTPS base URL")?;
+        if !matches!(url.scheme_str(), Some("http" | "https"))
+            || url.host().is_none()
+            || url.authority().is_some_and(|a| a.as_str().contains('@'))
+            || url.query().is_some()
+            || base_url.contains('#')
+        {
+            return Err(
+                "Use an HTTP or HTTPS base URL without credentials, query, or fragment".into(),
+            );
+        }
+    }
+    if input.kind != "openai-compatible" && input.api_key.as_ref().is_some_and(|k| !k.is_empty()) {
+        return Err("Subscription providers use host sign-in, not an API key".into());
     }
     if name.is_empty()
         || name.chars().count() > 80
@@ -255,6 +285,7 @@ fn validate(input: Input) -> Result<(Profile, Option<String>, bool)> {
             id,
             name,
             base_url,
+            kind: input.kind,
             default_model,
             host_ids,
         },
@@ -276,7 +307,7 @@ pub fn dispatch(request: &Value) -> Result<Value> {
             let (p, key, remove) = validate(input)?;
             let mut profiles = profiles()?;
             let mut keys = secrets()?;
-            if remove {
+            if remove || p.kind != "openai-compatible" {
                 keys.remove(&p.id);
             }
             if let Some(key) = key {
@@ -295,6 +326,7 @@ pub fn dispatch(request: &Value) -> Result<Value> {
             let id = request["id"].as_str().ok_or("Missing profile ID")?;
             let mut profiles = profiles()?;
             profiles.retain(|p| p.id != id);
+            crate::codex_auth::remove_unlocked(id)?;
             write("profiles.json", &profiles)?;
             let mut keys = secrets()?;
             keys.remove(id);
@@ -331,6 +363,9 @@ pub async fn execute(request: &Value) -> Result<Value> {
 }
 
 async fn models(p: Profile, key: Option<String>) -> Result<Value> {
+    if p.kind != "openai-compatible" {
+        return Err("Choose a model ID and sign in on the execution host; subscription model discovery is not available here".into());
+    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
@@ -380,6 +415,31 @@ pub fn configure_connection(
     connection: Connection,
 ) -> Result<AcpAgentConfig> {
     let p = connection.profile;
+    if p.kind != "openai-compatible" {
+        let mut config = config
+            .env("GOOSE_PROVIDER", &p.kind)
+            .env("GOOSE_MODEL", &p.default_model)
+            .env("GOOSE_PATH_ROOT", auth_root(&p.id)?.to_string_lossy());
+        if p.kind == "chatgpt_codex" {
+            config = config.env("AGENTWORKS_CODEX_MANAGED", "1");
+        }
+        if p.kind == "claude-code" {
+            for key in [
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_AUTH_TOKEN",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "CLAUDE_CODE_USE_BEDROCK",
+                "CLAUDE_CODE_USE_VERTEX",
+                "CLAUDE_CODE_USE_FOUNDRY",
+            ] {
+                config = config.env(key, "");
+            }
+            if let Some(command) = std::env::var_os("CLAUDE_CODE_EXECUTABLE") {
+                config = config.env("CLAUDE_CODE_COMMAND", command.to_string_lossy());
+            }
+        }
+        return Ok(config);
+    }
     let key = connection.api_key.unwrap_or_default();
     let id = p.id.clone();
     let url: http::Uri = p
@@ -437,4 +497,84 @@ mod tests {
             assert!(validate(serde_json::from_value(bad).unwrap()).is_err());
         }
     }
+    #[test]
+    fn subscription_profiles_use_host_auth_without_api_credentials() {
+        for kind in ["chatgpt_codex", "claude-code"] {
+            let input = json!({"kind":kind,"name":"Subscription","defaultModel":"account-model"});
+            let (p, key, _) = validate(serde_json::from_value(input.clone()).unwrap()).unwrap();
+            assert!(key.is_none());
+            assert!(p.base_url.is_empty());
+            let expected_root = auth_root(&p.id).unwrap();
+            let config = configure_connection(
+                AcpAgentConfig::new("fixture"),
+                Connection {
+                    profile: p,
+                    api_key: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(config.environment()["GOOSE_PROVIDER"], kind);
+            assert_eq!(config.environment()["GOOSE_MODEL"], "account-model");
+            assert_eq!(
+                config.environment()["GOOSE_PATH_ROOT"],
+                expected_root.to_string_lossy()
+            );
+            assert!(!config.environment().contains_key("OPENAI_BASE_PATH"));
+            if kind == "claude-code" {
+                assert_eq!(config.environment()["ANTHROPIC_API_KEY"], "");
+            }
+            let mut invalid = input;
+            invalid["apiKey"] = json!("must-not-be-used");
+            assert!(validate(serde_json::from_value(invalid).unwrap()).is_err());
+        }
+        assert!(auth_root("../outside-store").is_err());
+    }
+
+    #[test]
+    fn legacy_profiles_keep_the_compatible_provider() {
+        let profile: Profile = serde_json::from_value(json!({"id":uuid::Uuid::new_v4().to_string(),"name":"Legacy","baseUrl":"https://example.com/v1","defaultModel":"fixture"})).unwrap();
+        assert_eq!(profile.kind, "openai-compatible");
+        let config = configure_connection(
+            AcpAgentConfig::new("fixture"),
+            Connection {
+                profile,
+                api_key: Some("fixture-key".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            config.environment()["OPENAI_BASE_PATH"],
+            "/v1/chat/completions"
+        );
+        assert_eq!(config.environment()["OPENAI_API_KEY"], "fixture-key");
+    }
+}
+
+/// Auth tokens belong to the execution host, never the shared credential payload.
+pub fn auth_root(id: &str) -> Result<PathBuf> {
+    uuid::Uuid::parse_str(id).map_err(|_| "Invalid model provider ID")?;
+    Ok(directory().join("goose").join(id))
+}
+
+pub fn login_terminal(kind: &str, id: &str) -> Result<crate::terminal::Handle> {
+    if kind != "claude-code" {
+        return Err("This provider does not use subscription sign-in".into());
+    }
+    let root = auth_root(id)?;
+    let executable = std::env::current_exe().map_err(|_| "Could not locate Agentworks")?;
+    // webbrowser splits BROWSER on whitespace. procfs keeps Linux executable
+    // paths usable even when the installation directory contains spaces.
+    #[cfg(target_os = "linux")]
+    let browser_executable = format!("/proc/{}/exe", std::process::id());
+    #[cfg(not(target_os = "linux"))]
+    let browser_executable = executable.to_string_lossy().into_owned();
+    let mut command = std::process::Command::new(&executable);
+    command
+        .args(["goose-login", kind])
+        .env("GOOSE_PATH_ROOT", root)
+        .env(
+            "BROWSER",
+            format!("{browser_executable} goose-browser-url %s"),
+        );
+    crate::terminal::spawn_command(std::env::temp_dir(), command)
 }

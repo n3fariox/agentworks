@@ -13,3 +13,5 @@ use agentworks_workspace::{cleanup as worktree_cleanup, directories, worktrees};
 pub mod async_tasks;
 pub mod model_providers;
 pub mod subagents;
+
+pub mod codex_auth;

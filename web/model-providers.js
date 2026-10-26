@@ -1,6 +1,50 @@
+import {setupTerminal} from './terminal.js';
 // Shared provider definitions, host availability, and session selection.
-export function setupModelProviders({$,api,el,getHosts,selectionChanged}) {
+export function setupModelProviders({$,api,el,getHosts,selectionChanged,socketUrl}) {
   let editing=null,profiles=[],settingsGeneration=0,createGeneration=0,busy=false;
+  let auth=null,codexAuth=null,codexPoll=null,codexGeneration=0,codexDevice=false;
+  const codexPath=id=>`/api/model-providers/${encodeURIComponent(id)}/codex-auth`;
+  function stopCodexPoll(){clearTimeout(codexPoll);codexPoll=null;codexGeneration++;}
+  async function pollCodex(id,generation){
+    try{
+      const result=await api(codexPath(id));if(generation!==codexGeneration)return;
+      if(result.status==='pending'||result.status==='exchanging'){
+        $('codex-oauth-status').textContent=result.status==='pending'?(codexDevice?'Enter the displayed code on the OpenAI page.':'Complete sign-in in the ChatGPT tab.'):'Completing sign-in…';
+        codexPoll=setTimeout(()=>pollCodex(id,generation),1000);
+      }else{
+        $('codex-oauth-cancel').hidden=true;$('codex-oauth-link').hidden=true;$('codex-device-instructions').hidden=true;
+        $('codex-oauth-status').textContent=result.error||(result.signedIn?'Signed in. Enabled hosts can use this ChatGPT account.':'Sign-in cancelled.');
+        await list();await loadCreate();
+      }
+    }catch(error){if(generation===codexGeneration)$('codex-oauth-status').textContent=error.message;}
+  }
+  async function signInCodex(p,device=false){
+    stopCodexPoll();const generation=codexGeneration;codexAuth=p.id;codexDevice=device;
+    const popup=device?null:window.open('about:blank','_blank');if(popup)popup.opener=null;
+    $('codex-oauth').hidden=false;$('codex-oauth-title').textContent=p.name+' · ChatGPT sign-in';
+    $('codex-device-instructions').hidden=true;$('codex-device-code').textContent='';$('codex-oauth-status').textContent='Starting sign-in…';$('codex-oauth-link').hidden=true;$('codex-oauth-cancel').hidden=true;
+    $('codex-oauth').scrollIntoView({block:'center'});
+    try{
+      const result=await api(codexPath(p.id)+(device?'/device':''),{method:'POST'});if(generation!==codexGeneration){popup?.close();return;}
+      if(device){$('codex-device-code').textContent=result.userCode;$('codex-device-instructions').hidden=false;}
+      $('codex-oauth-link').href=result.verificationUrl||result.authorizationUrl;$('codex-oauth-link').hidden=false;$('codex-oauth-cancel').hidden=false;
+      if(popup)popup.location.href=result.authorizationUrl;
+      pollCodex(p.id,generation);
+    }catch(error){popup?.close();$('codex-oauth-status').textContent=error.message;}
+  }
+  $('codex-oauth-cancel').onclick=async()=>{const id=codexAuth;stopCodexPoll();try{await api(codexPath(id)+'/cancel',{method:'POST'});$('codex-oauth-status').textContent='Sign-in cancelled.';$('codex-oauth-cancel').hidden=true;$('codex-oauth-link').hidden=true;$('codex-device-instructions').hidden=true;}catch(error){$('codex-oauth-status').textContent=error.message;}};
+  addEventListener('pagehide',stopCodexPoll);
+  const authPath=id=>`/api/model-providers/${encodeURIComponent(id)}/auth`;
+  const authTerminal=setupTerminal({$:id=>$(id==='session-terminal'?'provider-auth-terminal':id.replace(/^terminal-/,'provider-auth-')),api,getActive:()=>auth,socketUrl,tabs:false,runningStatus:'Sign-in running',exitStatus:frame=>frame.code===0?'Sign-in completed':frame.code==null?'Sign-in stopped':'Sign-in failed',
+    endpoint:id=>authPath(auth.profileId)+'?hostId='+encodeURIComponent(auth.hostId),eventsEndpoint:id=>authPath(auth.profileId)+'/events?hostId='+encodeURIComponent(auth.hostId)});
+  $('provider-auth-close').onclick=()=>{$('provider-auth-terminal').hidden=true;};
+  function kind(){return $('model-provider-kind').value;}
+  function kindChanged(){
+    const subscription=kind()!=='openai-compatible';
+    $('model-provider-api-fields').hidden=subscription;$('model-provider-auth-note').hidden=!subscription;
+    $('test-model-provider').hidden=subscription;$('load-model-provider-models').hidden=subscription;
+  }
+  $('model-provider-kind').onchange=()=>{kindChanged();$('model-provider-model').value=kind()==='claude-code'?'default':kind()==='chatgpt_codex'?'gpt-6.1-sol':'';};
   const endpoint=host=>'/api/model-providers?hostId='+encodeURIComponent(host||'local');
   const hostOptions=()=>[{id:'local',name:'Local',status:'connected'},...getHosts().filter(h=>h.kind==='remote')];
   const hostName=id=>hostOptions().find(h=>h.id===id)?.name||id;
@@ -21,11 +65,11 @@ export function setupModelProviders({$,api,el,getHosts,selectionChanged}) {
   const selection=()=>$('provider').value==='goose'?$('create-model-provider').value||null:null;
   const profile=()=>profiles.find(p=>p.id===selection());
   function draft(){return {
-    ...(editing?{id:editing.id}:{}),name:$('model-provider-name').value.trim(),baseUrl:$('model-provider-url').value.trim(),
-    defaultModel:$('model-provider-model').value.trim(),hostIds:checkedHosts(),apiKey:$('model-provider-key').value||null,removeKey:$('model-provider-remove-key').checked,
+    ...(editing?{id:editing.id}:{}),name:$('model-provider-name').value.trim(),kind:kind(),baseUrl:kind()==='openai-compatible'?$('model-provider-url').value.trim():'',
+    defaultModel:$('model-provider-model').value.trim(),hostIds:checkedHosts(),apiKey:kind()==='openai-compatible'?$('model-provider-key').value||null:null,removeKey:kind()!=='openai-compatible'||$('model-provider-remove-key').checked,
   };}
   function editor(p=null){
-    editing=p;$('model-provider-editor').hidden=false;
+    editing=p;$('model-provider-editor').hidden=false;$('model-provider-kind').value=p?.kind||'openai-compatible';kindChanged();
     $('model-provider-editor-title').textContent=p?'Edit provider':'Add provider';
     $('model-provider-name').value=p?.name||'';$('model-provider-url').value=p?.baseUrl||'';
     $('model-provider-model').value=p?.defaultModel||'';$('model-provider-models').replaceChildren();
@@ -43,7 +87,7 @@ export function setupModelProviders({$,api,el,getHosts,selectionChanged}) {
       if(!result.profiles.length)list.append(el('p','field-note','No providers configured. Add a provider, then choose which hosts can use it.'));
       for(const p of result.profiles){
         const card=el('div','model-provider-card'),copy=el('div');
-        copy.append(el('strong','',p.name),el('p','field-note',p.baseUrl),el('p','field-note',`${p.defaultModel} · ${p.keyConfigured?'API key configured':'No API key'}`),el('p','field-note','Available on: '+(p.hostIds?.map(hostName).join(', ')||'No hosts')));
+        copy.append(el('strong','',p.name),el('p','field-note',p.kind==='chatgpt_codex'?'ChatGPT subscription · Codex OAuth':p.kind==='claude-code'?'Claude subscription · Claude Code':p.baseUrl),el('p','field-note',`${p.defaultModel} · ${p.kind==='chatgpt_codex'?(p.signedIn?'Signed in · shared with enabled hosts':'Not signed in'):p.kind==='claude-code'?'Sign-in managed on each host':p.keyConfigured?'API key configured':'No API key'}`),el('p','field-note','Available on: '+(p.hostIds?.map(hostName).join(', ')||'No hosts')));
         const actions=el('div','model-provider-actions'),edit=el('button','text-button','Edit'),remove=el('button','text-button','Delete');edit.type=remove.type='button';
         edit.onclick=()=>editor(p);
         remove.onclick=async()=>{
@@ -51,6 +95,15 @@ export function setupModelProviders({$,api,el,getHosts,selectionChanged}) {
           try{await api('/api/model-providers',{method:'POST',body:JSON.stringify({operation:'delete',id:p.id})});if(editing?.id===p.id)closeEditor();await list();await loadCreate();}
           catch(e){message(e.message);}
         };
+        if(p.kind==='chatgpt_codex'){
+          const signin=el('button','text-button',p.signedIn?'Sign in again':'Sign in with ChatGPT');signin.type='button';signin.onclick=()=>signInCodex(p);actions.append(signin);
+          const device=el('button','text-button','Device code');device.type='button';device.title='Experimental device-code sign-in';device.onclick=()=>signInCodex(p,true);actions.append(device);
+          if(p.signedIn){const disconnect=el('button','text-button','Disconnect');disconnect.type='button';disconnect.onclick=async()=>{try{stopCodexPoll();await api(codexPath(p.id),{method:'DELETE'});$('codex-oauth').hidden=true;await list();}catch(error){message(error.message);}};actions.append(disconnect);}
+        }
+        if(p.kind==='claude-code')for(const hostId of p.hostIds||[]){
+          const host=hostOptions().find(h=>h.id===hostId),signin=el('button','text-button','Sign in · '+hostName(hostId));signin.type='button';signin.disabled=host?.status!=='connected';
+          signin.onclick=()=>{auth={id:p.id+':'+hostId,profileId:p.id,hostId};$('provider-auth-title').textContent=p.name+' · '+hostName(hostId);$('provider-auth-terminal').hidden=false;$('provider-auth-surface').scrollIntoView({block:'center'});authTerminal.open();};actions.append(signin);
+        }
         actions.append(edit,remove);card.append(copy,actions);list.append(card);
       }
     }catch(e){if(generation===settingsGeneration){$('model-provider-list').replaceChildren();message(e.message);}}
@@ -62,7 +115,7 @@ export function setupModelProviders({$,api,el,getHosts,selectionChanged}) {
     for(const button of $('model-provider-editor').querySelectorAll('button'))button.disabled=true;
     message(operation==='save'?'Saving provider…':'Connecting to provider…');
     try{
-      if(operation==='save'&&(!p.name||!p.baseUrl||!p.defaultModel))throw Error('Enter a name, base URL, and default model. Load models to discover available IDs.');
+      if(operation==='save'&&(!p.name||(p.kind==='openai-compatible'&&!p.baseUrl)||!p.defaultModel))throw Error('Enter a name, base URL, and default model. Load models to discover available IDs.');
       if(operation!=='save'&&!selectedHost)throw Error('Select a connected host to test this provider.');
       const result=await api(operation==='save'?'/api/model-providers':endpoint(selectedHost),{method:'POST',body:JSON.stringify({operation,profile:p})});
       if(generation!==settingsGeneration)return;

@@ -128,3 +128,20 @@ Usage-limit continuation is opt-in per session (off for existing and new session
 Settings includes browser-local wrapping, syntax-highlighting and plain-prose preferences for chat blocks and file previews. Blocks offer original-text copy and a plain/code toggle; unsupported or large blocks remain unhighlighted. Tool/approval literals follow wrapping preferences. Successful settings saves use green status feedback; failures remain explicit.
 
 For development coordinated by a saved Agentworks session, see the [bounded self-improvement workflow and transfer helper](SELF-IMPROVEMENT.md). Supervised restart is implemented in R-06; the helper can explicitly grant it to the selected coordinator but does not start turns, enable timers or deploy.
+
+
+## Goose subscription connections
+
+In **Settings → Model providers**, add a connection, choose **ChatGPT subscription · Codex OAuth**, enter a name and a model available to your account, select its execution hosts, and save. Click **Sign in with ChatGPT** and finish authorization in the new browser tab. Then select Goose and that connection when creating a session. **Disconnect** removes the server's saved credentials and stops it from issuing access tokens to sessions.
+
+Browser sign-in uses the browser origin for its `/auth/callback`. In live testing, OpenAI accepted `http://localhost:1455/auth/callback` and rejected port 5555 for the existing Codex OAuth client. Open through `http://localhost:1455` (forward that port over SSH when necessary) to use the tested browser flow.
+
+The adjacent **Device code** button prototypes Codex CLI's device-login mechanism: Agentworks displays a one-time code and an OpenAI verification link, then waits for approval without a localhost callback or extra SSH tunnel. This flow does not depend on the browser origin, so it can also be initiated through an HTTPS deployment. Device-code login may need enabling in ChatGPT security settings or by a workspace administrator. It uses Codex's existing client ID and publicly visible implementation endpoints, whose third-party compatibility and stability are not guaranteed. **Cancel sign-in**, retry, disconnect, and provider deletion invalidate the pending attempt without replacing existing credentials.
+
+Agentworks saves the OAuth credentials in the server's protected model-provider store and owns token refresh. Local and SSH Goose adapters request an access token over their existing ACP connection before each model request. They keep that token in memory and never receive the refresh token or write a Codex OAuth credential file. Host assignments are checked on each token request. Remote workers must be updated to a version supporting managed Codex authentication. Enterprise access continues to depend on your workspace's entitlements and permissions.
+
+The embedded Goose snapshot and its small managed-auth patch are documented in [Goose sources](../vendor/GOOSE-SOURCES.md). `AGENTWORKS_CODEX_OAUTH_ISSUER` and `AGENTWORKS_CODEX_API_URL` are operator-controlled endpoint overrides used by integration fixtures; normally leave them unset.
+
+**Claude subscription · Claude Code** continues to use the installed Claude Code CLI on each execution host. Its **Sign in** button invokes the native `claude auth login` flow in the host terminal. If its localhost callback cannot reach that host, open the printed URL and paste the returned code into the waiting terminal. `CLAUDE_CODE_EXECUTABLE` or Goose's `CLAUDE_CODE_COMMAND` can select the CLI executable. Claude Code owns its credentials and shares its account with other Claude Code sessions on that host.
+
+Closing the Claude sign-in terminal leaves its flow running until it finishes or times out. **Stop sign-in** cancels it; **Retry sign-in** starts it after exit. For ChatGPT, **Cancel sign-in** invalidates the pending attempt; expired, cancelled, or repeated callbacks cannot complete it. Sign-in makes no inference request and does not verify model access. The first successful inference confirms access. Existing OpenAI-compatible connections continue using their saved URL and API key.

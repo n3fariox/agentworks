@@ -245,6 +245,23 @@ pub async fn stop_host(State(app): State<App>, Path(id): Path<String>) -> crate:
 }
 pub async fn remove_host(id: &str) {
     stop(&host_key(id), true).await;
+    stop_auth_matching(|key| key.starts_with(&format!("provider-auth:{id}:"))).await;
+}
+async fn stop_auth_matching(matches: impl Fn(&str) -> bool) {
+    let keys: Vec<_> = registry()
+        .lock()
+        .unwrap()
+        .keys()
+        .filter(|key| matches(key))
+        .cloned()
+        .collect();
+    for key in keys {
+        stop(&key, true).await;
+    }
+}
+pub async fn remove_provider_auth(id: &str) {
+    stop_auth_matching(|key| key.starts_with("provider-auth:") && key.ends_with(&format!(":{id}")))
+        .await;
 }
 pub async fn host_events(
     State(app): State<App>,
@@ -342,5 +359,96 @@ async fn socket(ws: WebSocket, handle: Arc<Handle>, session: Option<Arc<Session>
                 }
             }
         }
+    }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderAuthQuery {
+    host_id: Option<String>,
+}
+fn auth_key(id: &str, host: &str) -> String {
+    format!("provider-auth:{host}:{id}")
+}
+pub async fn open_provider_auth(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<ProviderAuthQuery>,
+    Json(request): Json<OpenRequest>,
+) -> crate::ApiResult {
+    let _run = app.run_lock.lock().await;
+    let host = query.host_id.as_deref().unwrap_or("local");
+    require_host(&app, host)?;
+    let connection = agentworks_runtime::model_providers::connection(&id, host)
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    let key = auth_key(&id, host);
+    if STOPPING.load(Ordering::Acquire) {
+        return Err(fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The service is stopping",
+        ));
+    }
+    let mut terminals = registry().lock().unwrap();
+    if let Some(handle) = terminals.get(&key) {
+        if !request.restart {
+            return Ok(Json(serde_json::json!({"available":true})));
+        }
+        if !handle.frames.borrow().exited {
+            return Err(fail(
+                StatusCode::CONFLICT,
+                "Sign-in is still running. Stop it before restarting.",
+            ));
+        }
+    }
+    crate::service_restart::allow_start(&app)?;
+    let kind = &connection.profile.kind;
+    let handle = if host == "local" {
+        agentworks_runtime::model_providers::login_terminal(kind, &id)
+    } else {
+        app.hosts
+            .live(host)
+            .ok_or_else(|| fail(StatusCode::CONFLICT, "The host is offline"))?
+            .provider_auth_terminal(kind, &id)
+    }
+    .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    terminals.insert(key, Arc::new(handle));
+    Ok(Json(serde_json::json!({"available":true})))
+}
+pub async fn stop_provider_auth(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<ProviderAuthQuery>,
+) -> crate::ApiResult {
+    require_host(&app, query.host_id.as_deref().unwrap_or("local"))?;
+    stop(
+        &auth_key(&id, query.host_id.as_deref().unwrap_or("local")),
+        true,
+    )
+    .await;
+    Ok(Json(serde_json::json!({"ok":true})))
+}
+pub async fn provider_auth_events(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<ProviderAuthQuery>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let host = query.host_id.as_deref().unwrap_or("local");
+    if let Err(e) = agentworks_runtime::model_providers::authorize(&id, host) {
+        return (StatusCode::BAD_REQUEST, e).into_response();
+    }
+    if let Err(e) = require_host(&app, host) {
+        return e.into_response();
+    }
+    let handle = registry()
+        .lock()
+        .unwrap()
+        .get(&auth_key(&id, host))
+        .cloned();
+    match handle {
+        Some(handle) => ws
+            .max_message_size(32 * 1024)
+            .on_upgrade(move |ws| socket(ws, handle, None)),
+        None => (StatusCode::NOT_FOUND, "Start sign-in first").into_response(),
     }
 }

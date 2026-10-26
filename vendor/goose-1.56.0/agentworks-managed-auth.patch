@@ -1,0 +1,86 @@
+--- a/src/providers/chatgpt_codex.rs
++++ b/src/providers/chatgpt_codex.rs
+@@ -44,6 +44,28 @@
+ // Allow time for users to complete the browser-based OAuth flow.
+ const OAUTH_TIMEOUT_SECS: u64 = 300;
+ const HTML_AUTO_CLOSE_TIMEOUT_MS: u64 = 2000;
++
++// Agentworks embedding hook: the host owns refresh and persistence. The provider
++// receives an access token for each HTTP request and never caches managed tokens.
++pub struct ManagedToken {
++    pub access_token: String,
++    pub account_id: Option<String>,
++}
++pub type ManagedTokenProvider =
++    Arc<dyn Fn() -> BoxFuture<'static, Result<ManagedToken>> + Send + Sync>;
++struct ManagedAuth {
++    tokens: ManagedTokenProvider,
++    endpoint: String,
++}
++static MANAGED_AUTH: std::sync::OnceLock<ManagedAuth> = std::sync::OnceLock::new();
++pub fn set_managed_auth(tokens: ManagedTokenProvider, endpoint: Option<String>) -> Result<()> {
++    MANAGED_AUTH
++        .set(ManagedAuth {
++            tokens,
++            endpoint: endpoint.unwrap_or_else(|| format!("{}/responses", CODEX_API_ENDPOINT)),
++        })
++        .map_err(|_| anyhow!("Managed Codex authentication was already configured"))
++}
+ 
+ const CHATGPT_CODEX_PROVIDER_NAME: &str = "chatgpt_codex";
+ pub const CHATGPT_CODEX_DEFAULT_MODEL: &str = "gpt-5.5";
+@@ -909,11 +931,27 @@
+     }
+ 
+     async fn post_streaming(&self, payload: &Value) -> Result<reqwest::Response, ProviderError> {
+-        let token_data = self
+-            .auth_provider
+-            .get_valid_token()
+-            .await
+-            .map_err(|e| ProviderError::Authentication(e.to_string()))?;
++        let (token_data, endpoint) = if let Some(managed) = MANAGED_AUTH.get() {
++            (
++                (managed.tokens)()
++                    .await
++                    .map_err(|e| ProviderError::Authentication(e.to_string()))?,
++                managed.endpoint.as_str(),
++            )
++        } else {
++            let token = self
++                .auth_provider
++                .get_valid_token()
++                .await
++                .map_err(|e| ProviderError::Authentication(e.to_string()))?;
++            (
++                ManagedToken {
++                    access_token: token.access_token,
++                    account_id: token.account_id,
++                },
++                "https://chatgpt.com/backend-api/codex/responses",
++            )
++        };
+ 
+         let mut headers = reqwest::header::HeaderMap::new();
+         if let Some(account_id) = &token_data.account_id {
+@@ -932,7 +970,7 @@
+             .build()
+             .map_err(|e| ProviderError::ExecutionError(e.to_string()))?;
+         let request = client
+-            .post(format!("{}/responses", CODEX_API_ENDPOINT))
++            .post(endpoint)
+             .header(
+                 "Authorization",
+                 format!("Bearer {}", token_data.access_token),
+@@ -1037,6 +1075,12 @@
+     }
+ 
+     async fn configure_oauth(&self) -> Result<(), ProviderError> {
++        if MANAGED_AUTH.get().is_some() {
++            return Err(ProviderError::Authentication(
++                "Sign in through Agentworks Settings; this worker does not store OAuth credentials"
++                    .into(),
++            ));
++        }
+         let previous_token = self.auth_provider.cache.load();
+         self.auth_provider.clear_cached_tokens();
+ 

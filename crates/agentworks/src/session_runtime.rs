@@ -372,6 +372,7 @@ pub async fn run(
     let notify_s = s.clone();
     let permission_s = s.clone();
     let question_s = s.clone();
+    let token_s = s.clone();
     let replaying = Arc::new(AtomicBool::new(true));
     let notify_replaying = replaying.clone();
     let initial_mode = {
@@ -502,6 +503,10 @@ pub async fn run(
                     .unwrap_or_else(||CreateElicitationResponse::new(ElicitationAction::Cancel));
                 responder.respond(response)
             })
+        },agent_client_protocol::on_receive_request!())
+        .on_receive_request(async move |request: agent_client_protocol::UntypedMessage, responder, cx| {
+            let session = token_s.clone();
+            cx.spawn(async move { responder.respond_with_result(codex_token(&session, &request).await) })
         },agent_client_protocol::on_receive_request!())
         .connect_with(transport,move |connection:ConnectionTo<Agent>|async move {
             let created=tokio::time::timeout(Duration::from_secs(75),open_session(&connection,&s))
@@ -1099,4 +1104,31 @@ pub async fn delete_provider_history(
     }
     s.emit("provider_history_deleted", json!({"providerSessionId":id}));
     Ok(())
+}
+
+async fn codex_token(
+    session: &Session,
+    request: &agent_client_protocol::UntypedMessage,
+) -> Result<Value, agent_client_protocol::Error> {
+    use agent_client_protocol::Error;
+    if request.method != agentworks_runtime::codex_auth::TOKEN_METHOD || session.provider != "goose"
+    {
+        return Err(Error::method_not_found());
+    }
+    let id = session
+        .data
+        .lock()
+        .unwrap()
+        .model_provider
+        .clone()
+        .ok_or_else(|| Error::invalid_params().data("No model provider selected"))?;
+    let connection = agentworks_runtime::model_providers::connection(&id, &session.host_id)
+        .map_err(|e| Error::invalid_params().data(e))?;
+    if connection.profile.kind != "chatgpt_codex" {
+        return Err(Error::invalid_params().data("Not a Codex subscription"));
+    }
+    let token = agentworks_runtime::codex_auth::access(&id)
+        .await
+        .map_err(|e| Error::auth_required().data(e))?;
+    Ok(serde_json::to_value(token).unwrap())
 }

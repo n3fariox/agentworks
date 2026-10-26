@@ -669,7 +669,24 @@ impl Live {
             .ok_or_else(|| "Update the remote worker to enable host terminals.".to_string())?;
         self.terminal(home)
     }
+    pub fn provider_auth_terminal(
+        self: &Arc<Self>,
+        kind: &str,
+        id: &str,
+    ) -> Result<crate::terminal::Handle, String> {
+        if self.worker["providerAuthTerminal"] != true {
+            return Err("Update the remote worker to enable subscription sign-in".into());
+        }
+        self.terminal_request("", json!({"kind":kind,"id":id}))
+    }
     pub fn terminal(self: &Arc<Self>, cwd: &str) -> Result<crate::terminal::Handle, String> {
+        self.terminal_request(cwd, Value::Null)
+    }
+    fn terminal_request(
+        self: &Arc<Self>,
+        cwd: &str,
+        auth: Value,
+    ) -> Result<crate::terminal::Handle, String> {
         if self.worker["terminal"] != true {
             return Err("Update the remote worker to enable terminals.".into());
         }
@@ -689,7 +706,8 @@ impl Live {
         if self
             .out
             .try_send(Message::text(
-                json!({"type":"terminalOpen","channel":channel,"cwd":cwd}).to_string(),
+                json!({"type":"terminalOpen","channel":channel,"cwd":cwd,"providerAuth":auth})
+                    .to_string(),
             ))
             .is_err()
         {
@@ -806,6 +824,11 @@ impl Live {
         host_profile: bool,
         model_provider: Option<&crate::model_providers::Connection>,
     ) -> Result<(RemoteLines, Spawned), String> {
+        if model_provider.is_some_and(|p| p.profile.kind == "chatgpt_codex")
+            && self.worker["managedCodexAuth"] != true
+        {
+            return Err("Update this host's worker to use server-managed Codex sign-in".into());
+        }
         if model_provider.is_some() && self.worker["sharedModelProviders"] != true {
             return Err("Update this host's worker to use model provider profiles".into());
         }
@@ -1018,6 +1041,8 @@ fn check_hello(hello: &Value) -> Result<Value, String> {
         "directories": hello["directories"] == true,
         "terminal": hello["terminal"].as_bool().unwrap_or(false),
         "hostMetrics": if hello["hostMetrics"].as_u64() == Some(1) { 1 } else { 0 },
+        "providerAuthTerminal": hello["providerAuthTerminal"] == true,
+        "managedCodexAuth": hello["managedCodexAuth"] == true,
         "home": text("home", 4096),
     }))
 }

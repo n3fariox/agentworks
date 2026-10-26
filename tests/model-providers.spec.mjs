@@ -1,7 +1,7 @@
 import {test,expect} from '@playwright/test';
 import {spawn} from 'node:child_process';
 import {createServer} from 'node:http';
-import {mkdtemp,readFile} from 'node:fs/promises';
+import {mkdtemp,readFile,writeFile,chmod,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {serverReady,stopChild,removeFixture} from './support/cleanup.mjs';
@@ -11,6 +11,13 @@ let dir,server,fixture,providerUrl,remote,offline,output='';
 async function api(path,body){const res=await fetch(base+path,{method:body===undefined?'GET':'POST',headers:{Origin:base,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});expect(res.ok).toBeTruthy();return res.json();}
 test.beforeAll(async()=>{
   dir=await mkdtemp(join(tmpdir(),'agentworks-provider-ui-'));
+  const claude=join(dir,'claude-fixture');
+  await writeFile(claude,`#!/bin/sh
+if [ "$1 $2" != "auth login" ]; then echo "unexpected CLI invocation"; exit 2; fi
+if [ -n "$ANTHROPIC_API_KEY$ANTHROPIC_AUTH_TOKEN$CLAUDE_CODE_OAUTH_TOKEN" ]; then echo "unexpected API credential"; exit 3; fi
+if [ -f "$(dirname "$0")/fail-login" ]; then echo "CLAUDE_LOGIN_FIXTURE_FAILURE"; exit 7; fi
+echo "CLAUDE_LOGIN_FIXTURE_OK"
+`);await chmod(claude,0o700);
   fixture=createServer((req,res)=>{
     if(req.headers.authorization!=='Bearer ui-fixture-key'){res.writeHead(401);res.end();return;}
     res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({data:[{id:'ui-fixture-model'}]}));
@@ -19,7 +26,7 @@ test.beforeAll(async()=>{
   server=spawn(resolve(process.env.AGENTWORKS_TEST_BINARY||'target/debug/agentworks'),[],{env:{...process.env,
     AGENTWORKS_SSH:resolve('scripts/fake-ssh.sh'),AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:'4498',AGENTWORKS_ROOTS:dir,
     AGENTWORKS_CATALOG_PATH:join(dir,'catalog.json'),AGENTWORKS_DB_PATH:join(dir,'sessions.sqlite3'),
-    AGENTWORKS_MODEL_PROVIDERS_DIR:join(dir,'providers'),GOOSE_DISABLE_SESSION_NAMING:'true',
+    CLAUDE_CODE_EXECUTABLE:claude,ANTHROPIC_API_KEY:'must-not-use-for-subscription',AGENTWORKS_MODEL_PROVIDERS_DIR:join(dir,'providers'),GOOSE_DISABLE_SESSION_NAMING:'true',
   },stdio:['ignore','pipe','pipe']});
   server.stdout.on('data',b=>output+=b);server.stderr.on('data',b=>output+=b);
   let error;server.on('error',e=>error=e);
@@ -103,4 +110,63 @@ test('add one provider and enable it on an offline host',async({page})=>{
   const all=(await api('/api/model-providers')).profiles;expect(all).toHaveLength(count+1);
   const p=all.find(p=>p.name==='Shared offline provider');expect(p.hostIds.sort()).toEqual(['local',offline.id].sort());
   expect((await api('/api/model-providers?hostId='+offline.id)).profiles[0].id).toBe(p.id);
+});
+
+
+test('save subscription providers and run native Claude login on local and remote hosts',async({page})=>{
+  const errors=[];page.on('pageerror',error=>{errors.push(error.message);console.error('Provider UI error:',error.message);});
+  await page.goto(base+'/?settings');await page.getByRole('tab',{name:'Model providers',exact:true}).click();
+  for(const [kind,name] of [['chatgpt_codex','ChatGPT account'],['claude-code','Claude account']]){
+    await page.getByRole('button',{name:'Add provider'}).click();
+    await page.locator('#model-provider-kind').selectOption(kind);
+    await expect(page.locator('#model-provider-api-fields')).toBeHidden();
+    await expect(page.locator('#load-model-provider-models')).toBeHidden();
+    await page.locator('#model-provider-name').fill(name);
+    await page.locator(`#model-provider-hosts input[value="${remote.id}"]`).check();
+    await page.locator('#save-model-provider').click();
+    await expect(page.locator('#model-provider-editor')).toBeHidden();
+    const profile=(await api('/api/model-providers')).profiles.find(p=>p.name===name);
+    expect(profile.kind).toBe(kind);expect(profile.keyConfigured).toBe(false);expect(profile.baseUrl).toBe('');
+  }
+  const card=page.locator('.model-provider-card').filter({has:page.getByText('Claude account',{exact:true})});
+  for(const host of ['Local','Build server']){
+    await card.getByRole('button',{name:'Sign in · '+host,exact:true}).click();
+    await expect(page.locator('#provider-auth-title')).toHaveText('Claude account · '+host);
+    await expect(page.locator('#provider-auth-status')).toHaveText('Sign-in completed');
+    await expect(page.locator('#provider-auth-surface')).toContainText('CLAUDE_LOGIN_FIXTURE_OK',{timeout:15000});
+    await expect(page.locator('#provider-auth-surface')).toContainText('Sign-in completed');
+    await page.locator('#provider-auth-close').click();
+  }
+  await writeFile(join(dir,'fail-login'),'');
+  await card.getByRole('button',{name:'Sign in · Local',exact:true}).click();
+  await expect(page.locator('#provider-auth-restart')).toBeVisible();
+  await page.locator('#provider-auth-restart').click();
+  await expect(page.locator('#provider-auth-status')).toHaveText('Sign-in failed');
+  await expect(page.locator('#provider-auth-surface')).toContainText('CLAUDE_LOGIN_FIXTURE_FAILURE');
+  await expect(page.locator('#provider-auth-surface')).toContainText('Sign-in failed');
+  await rm(join(dir,'fail-login'));
+  const profile=(await api('/api/model-providers')).profiles.find(p=>p.name==='Claude account');
+  const denied=await fetch(base+`/api/model-providers/${profile.id}/auth?hostId=${offline.id}`,{method:'POST',headers:{Origin:base,'Content-Type':'application/json'},body:'{}'});
+  expect(denied.status).toBe(400);expect(await denied.text()).toContain('not available on this host');
+  expect(errors).toEqual([]);
+});
+
+
+test('Codex sign-in uses the browser-facing web port and supports cancellation',async({page})=>{
+  const profile=await api('/api/model-providers',{operation:'save',profile:{kind:'chatgpt_codex',name:'Codex OAuth test',defaultModel:'gpt-6.1-sol',hostIds:['local']}});
+  // Prevent navigation to a real provider; this test exercises URL generation only.
+  await page.context().route('https://auth.openai.com/**',route=>route.fulfill({body:'OAuth provider fixture'}));
+  await page.goto(base+'/?settings');await page.getByRole('tab',{name:'Model providers',exact:true}).click();
+  const card=page.locator('.model-provider-card').filter({has:page.getByText(profile.name,{exact:true})});
+  const popupPromise=page.waitForEvent('popup');await card.getByRole('button',{name:'Sign in with ChatGPT',exact:true}).click();
+  const popup=await popupPromise;
+  await expect(page.locator('#codex-oauth-link')).toBeVisible();
+  const url=new URL(await page.locator('#codex-oauth-link').getAttribute('href'));
+  expect(url.searchParams.get('redirect_uri')).toBe(base+'/auth/callback');
+  expect(url.searchParams.get('code_challenge_method')).toBe('S256');
+  await page.locator('#codex-oauth-cancel').click();
+  await expect(page.locator('#codex-oauth-status')).toHaveText('Sign-in cancelled.');
+  const callback=await fetch(base+'/auth/callback?code=unused&state='+url.searchParams.get('state'));
+  expect(callback.status).toBe(400);await popup.close();
+  expect(JSON.stringify((await api('/api/model-providers')).profiles)).not.toContain('access_token');
 });

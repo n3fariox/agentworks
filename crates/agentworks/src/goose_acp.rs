@@ -222,6 +222,21 @@ pub async fn run() -> Result<()> {
         session_cwd: None,
         enable_scheduler: false,
     });
+    let outer: Arc<OnceLock<ConnectionTo<Client>>> = Arc::default();
+    if std::env::var("AGENTWORKS_CODEX_MANAGED").is_ok_and(|v| v == "1") {
+        let credentials = outer.clone();
+        goose::providers::chatgpt_codex::set_managed_auth(Arc::new(move || {
+            let credentials = credentials.clone();
+            Box::pin(async move {
+                let connection = credentials.get().ok_or_else(|| std::io::Error::other("Agentworks is not connected"))?;
+                let value = connection.send_request(UntypedMessage {
+                    method: agentworks_runtime::codex_auth::TOKEN_METHOD.into(), params: json!({}),
+                }).block_task().await.map_err(|_| std::io::Error::other("Could not obtain a Codex token. Check sign-in and host access in Settings."))?;
+                let token: agentworks_runtime::codex_auth::AccessToken = serde_json::from_value(value)?;
+                Ok(goose::providers::chatgpt_codex::ManagedToken { access_token: token.access_token, account_id: token.account_id })
+            })
+        }), std::env::var("AGENTWORKS_CODEX_API_URL").ok()).map_err(failure)?;
+    }
     let agent = server.create_agent().await.map_err(failure)?;
     let (client_io, goose_io) = tokio::io::duplex(1024 * 1024);
     let (goose_read, goose_write) = tokio::io::split(goose_io);
@@ -231,7 +246,6 @@ pub async fn run() -> Result<()> {
         goose_write.compat_write(),
     ));
     let (read, write) = tokio::io::split(client_io);
-    let outer: Arc<OnceLock<ConnectionTo<Client>>> = Arc::default();
     let requests = outer.clone();
     let notifications = outer.clone();
     let result = Client
@@ -357,4 +371,32 @@ mod tests {
         ambiguous.messages_mut()[3].id = Some("a1".into());
         assert!(fork_conversation(ambiguous, &json!({"version":1,"messageId":"a1"})).is_err());
     }
+}
+
+/// Run sign-in in an isolated child, so Goose's global configuration is host-local.
+pub async fn login(kind: &str) -> Result<()> {
+    match kind {
+        "claude-code" => {
+            let command = std::env::var_os("CLAUDE_CODE_EXECUTABLE")
+                .or_else(|| std::env::var_os("CLAUDE_CODE_COMMAND"))
+                .unwrap_or_else(|| "claude".into());
+            let mut child = tokio::process::Command::new(command);
+            child.args(["auth", "login"]).env_remove("CLAUDECODE");
+            for key in [
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_AUTH_TOKEN",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "CLAUDE_CODE_USE_BEDROCK",
+                "CLAUDE_CODE_USE_VERTEX",
+                "CLAUDE_CODE_USE_FOUNDRY",
+            ] {
+                child.env_remove(key);
+            }
+            if !child.status().await.map_err(failure)?.success() {
+                return Err(failure("Claude Code login did not complete"));
+            }
+        }
+        _ => return Err(failure("Unknown subscription provider")),
+    }
+    Ok(())
 }

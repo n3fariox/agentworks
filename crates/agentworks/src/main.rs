@@ -3,6 +3,7 @@ mod attachments;
 mod automations;
 mod browser_origin;
 mod catalog;
+mod codex_oauth;
 mod communication;
 mod completion;
 mod controllers;
@@ -515,6 +516,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).is_some_and(|arg| arg == "recovery") {
         return recovery::run(&args[2..]).map_err(|e| e.to_string().into());
+    }
+    if args.get(1).is_some_and(|arg| arg == "goose-browser-url") {
+        // Browser launchers discard stdout; the sign-in PTY is our UI.
+        use std::io::Write;
+        let url = args.get(2).ok_or("Missing authorization URL")?;
+        let mut tty = std::fs::OpenOptions::new().write(true).open("/dev/tty")?;
+        writeln!(tty, "Open this URL in your browser:\n{url}")?;
+        return Ok(());
+    }
+    if args.get(1).is_some_and(|arg| arg == "goose-login") {
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_target(false)
+            .init();
+        let result = goose_acp::login(args.get(2).map(String::as_str).unwrap_or("")).await;
+        match result {
+            Ok(()) => println!(
+                "Sign-in completed. You can close this terminal and start a Goose session."
+            ),
+            Err(error) => {
+                eprintln!("Sign-in failed: {error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
     }
     if args.get(1).is_some_and(|arg| arg == "goose-acp") {
         let result = goose_acp::run().await;
@@ -1248,6 +1274,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/sessions/{id}/questions/{question}",
             post(answer_question),
         )
+        .route(
+            "/api/model-providers/{id}/auth",
+            post(terminal::open_provider_auth).delete(terminal::stop_provider_auth),
+        )
+        .route(
+            "/api/model-providers/{id}/auth/events",
+            get(terminal::provider_auth_events),
+        )
+        .route(
+            "/api/model-providers/{id}/codex-auth",
+            post(codex_oauth::start)
+                .get(codex_oauth::status)
+                .delete(codex_oauth::disconnect),
+        )
+        .route(
+            "/api/model-providers/{id}/codex-auth/device",
+            post(codex_oauth::start_device),
+        )
+        .route(
+            "/api/model-providers/{id}/codex-auth/cancel",
+            post(codex_oauth::cancel),
+        )
+        .route("/auth/callback", get(codex_oauth::callback))
         .route("/api/sessions/{id}/terminal", post(terminal::open))
         .route("/api/sessions/{id}/terminal/events", get(terminal::events))
         .route("/api/sessions/{id}/events", get(events))
@@ -1387,7 +1436,18 @@ fn allowed_host(host: &str, bind: IpAddr, port: u16) -> bool {
     let Ok(authority) = host.parse::<axum::http::uri::Authority>() else {
         return false;
     };
-    if authority.port_u16().unwrap_or(80) != port || authority.host().contains('@') {
+    if authority.host().contains('@') {
+        return false;
+    }
+    let loopback = authority.host() == "localhost"
+        || authority
+            .host()
+            .trim_matches(['[', ']'])
+            .parse::<IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    // An SSH tunnel's browser-facing port can differ from the listening port.
+    // The write/WebSocket guard still enforces exact Origin/Host agreement.
+    if !loopback && authority.port_u16().unwrap_or(80) != port {
         return false;
     }
     if !bind.is_loopback() {
@@ -3496,6 +3556,9 @@ mod tests {
         let network = "0.0.0.0".parse().unwrap();
         assert!(allowed_host("127.0.0.1:4317", local, 4317));
         assert!(!allowed_host("agentbox:4317", local, 4317));
+        assert!(allowed_host("localhost:5555", local, 4317));
+        assert!(allowed_host("127.0.0.1:5555", local, 4317));
+        assert!(!allowed_host("localhost.evil:5555", local, 4317));
         assert!(allowed_host("agentbox:4317", network, 4317));
         assert!(allowed_host("100.64.1.2:4317", network, 4317));
         assert!(!allowed_host("agentbox:9999", network, 4317));

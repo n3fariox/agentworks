@@ -381,7 +381,10 @@ const SHELL_VARIABLES: [(&str, &str); 4] = [
     ("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION")),
 ];
 
-fn shell_environment(command: &mut Command, keys: impl IntoIterator<Item = std::ffi::OsString>) {
+pub(crate) fn shell_environment(
+    command: &mut Command,
+    keys: impl IntoIterator<Item = std::ffi::OsString>,
+) {
     for key in keys {
         if transient_shell_variable(&key) {
             command.env_remove(key);

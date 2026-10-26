@@ -90,18 +90,31 @@
           <div id="model-provider-list"></div>
           <div id="model-provider-editor" hidden>
             <h3 id="model-provider-editor-title">Add provider</h3>
-            <p class="field-note">Provider type: OpenAI-compatible</p>
+            <label for="model-provider-kind">Provider type</label><select id="model-provider-kind"><option value="openai-compatible">OpenAI-compatible API</option><option value="chatgpt_codex">ChatGPT subscription · Codex OAuth</option><option value="claude-code">Claude subscription · Claude Code</option></select>
+            <p id="model-provider-auth-note" class="field-note" hidden>Save the provider, then sign in. ChatGPT sign-in is shared with enabled hosts. Claude uses the installed Claude Code CLI on each host.</p>
             <fieldset class="model-provider-availability"><legend>Available on hosts</legend><div id="model-provider-hosts"></div></fieldset>
             <p id="model-provider-test-host" class="field-note"></p>
             <label for="model-provider-name">Name</label><input id="model-provider-name" maxlength="80" placeholder="Local inference" autocomplete="off">
-            <label for="model-provider-url">Base URL</label><input id="model-provider-url" type="text" maxlength="2048" placeholder="http://localhost:8080/v1" autocomplete="off" spellcheck="false">
+            <div id="model-provider-api-fields"><label for="model-provider-url">Base URL</label><input id="model-provider-url" type="text" maxlength="2048" placeholder="http://localhost:8080/v1" autocomplete="off" spellcheck="false">
             <label for="model-provider-key">API key <span class="optional">optional</span></label><input id="model-provider-key" type="password" maxlength="8192" autocomplete="new-password" spellcheck="false">
             <p id="model-provider-key-note" class="field-note"></p>
-            <label class="workspace-check"><input id="model-provider-remove-key" type="checkbox"> Remove saved API key</label>
+            <label class="workspace-check"><input id="model-provider-remove-key" type="checkbox"> Remove saved API key</label></div>
             <label for="model-provider-model">Default model</label><div class="model-field"><input id="model-provider-model" maxlength="256" list="model-provider-models" placeholder="Model ID" autocomplete="off"><button id="load-model-provider-models" type="button" class="text-button">Load models</button></div>
             <datalist id="model-provider-models"></datalist>
             <div class="model-provider-actions"><button id="test-model-provider" type="button" class="text-button">Test connection</button><button id="cancel-model-provider" type="button" class="text-button">Cancel</button><button id="save-model-provider" type="button" class="primary">Save provider</button></div>
           </div>
+          <section id="codex-oauth" hidden aria-label="ChatGPT sign-in">
+            <h3 id="codex-oauth-title">ChatGPT sign-in</h3><p id="codex-oauth-status" class="field-note" role="status" aria-live="polite"></p>
+            <p id="codex-device-instructions" class="field-note" hidden>Enter this code on the OpenAI page: <strong id="codex-device-code"></strong>. The code expires in 15 minutes.</p>
+            <a id="codex-oauth-link" target="_blank" rel="noopener noreferrer" hidden>Open ChatGPT sign-in</a>
+            <button id="codex-oauth-cancel" type="button" class="text-button" hidden>Cancel sign-in</button>
+          </section>
+          <section id="provider-auth-terminal" hidden aria-label="Provider sign-in terminal">
+            <h3 id="provider-auth-title">Sign in</h3>
+            <p class="field-note">Complete Claude Code sign-in in its browser flow. If the callback cannot reach this host, paste the returned code into this terminal.</p>
+            <p id="provider-auth-status" role="status"></p><button id="provider-auth-stop" class="text-button" type="button">Stop sign-in</button><button id="provider-auth-restart" class="text-button" type="button" hidden>Retry sign-in</button><button id="provider-auth-close" class="text-button" type="button">Close terminal</button>
+            <div id="provider-auth-surface"></div><span id="provider-auth-cell-measure" aria-hidden="true">M</span>
+          </section>
           <p id="model-provider-message" class="field-note" role="status" aria-live="polite"></p>
         </fieldset>
       </div>

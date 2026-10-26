@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-exclude = ["vendor/agent-client-protocol-3.4.0", "vendor/agent-client-protocol-schema-1.12.0"]
+exclude = ["vendor/goose-1.56.0", "vendor/agent-client-protocol-3.4.0", "vendor/agent-client-protocol-schema-1.12.0"]
 members = [
     "crates/agentworks",
     "crates/agentworks-codex-acp",

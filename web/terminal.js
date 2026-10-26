@@ -1,5 +1,5 @@
 // The browser can disconnect freely; the service owns the shell and emulator.
-export function setupTerminal({$,api,getActive,socketUrl,tabs=true,onSelect=()=>{},endpoint=id=>`/api/sessions/${id}/terminal`}) {
+export function setupTerminal({$,api,getActive,socketUrl,tabs=true,onSelect=()=>{},endpoint=id=>`/api/sessions/${id}/terminal`,eventsEndpoint=id=>endpoint(id)+'/events',runningStatus='Shell running',exitStatus=frame=>frame.code==null?'Terminal stopped':`Shell exited (${frame.code})`}) {
   let current=null, terminal=null, socket=null, timer=null, observer=null, generation=0, ready=false, exited=false;
   const selected=new Map();
   let renderQueue=[],writing=false,alternate=false,historyStart=0,historyEpoch=null;
@@ -52,15 +52,15 @@ export function setupTerminal({$,api,getActive,socketUrl,tabs=true,onSelect=()=>
   function connect(gen){
     if(gen!==generation||!terminal)return;
     status('Connecting…');
-    const ws=socket=new WebSocket(socketUrl(endpoint(current)+'/events'));
-    ws.onopen=()=>{if(gen!==generation)return;ready=true;if($('terminal-stop'))$('terminal-stop').disabled=false;$('terminal-restart').hidden=true;send({type:'flowControl'});send({type:'resize',cols:terminal.cols,rows:terminal.rows});status('Shell running');};
+    const ws=socket=new WebSocket(socketUrl(eventsEndpoint(current)));
+    ws.onopen=()=>{if(gen!==generation)return;ready=true;if($('terminal-stop'))$('terminal-stop').disabled=false;$('terminal-restart').hidden=true;send({type:'flowControl'});send({type:'resize',cols:terminal.cols,rows:terminal.rows});status(runningStatus);};
     ws.onmessage=event=>{
       if(gen!==generation)return;
       let frame;try{frame=JSON.parse(event.data);}catch{return;}
       if(frame.type!=='frame')return;
       if(frame.exited){exited=true;$('terminal-surface').classList.add('terminal-readonly');}
       renderQueue.push(frame);renderNext(gen);
-      if(frame.exited){exited=true;ready=false;if($('terminal-stop'))$('terminal-stop').disabled=true;status(frame.error||(frame.archived?'Archived · saved terminal history':frame.code==null?'Terminal stopped':`Shell exited (${frame.code})`));$('terminal-restart').hidden=Boolean(frame.archived);ws.onclose=null;ws.close();}
+      if(frame.exited){exited=true;ready=false;if($('terminal-stop'))$('terminal-stop').disabled=true;status(frame.error||(frame.archived?'Archived · saved terminal history':exitStatus(frame)));$('terminal-restart').hidden=Boolean(frame.archived);ws.onclose=null;ws.close();}
     };
     ws.onclose=()=>{if(gen!==generation)return;ready=false;status('Disconnected · reconnecting…');$('terminal-restart').hidden=false;timer=setTimeout(()=>connect(gen),1500);};
     ws.onerror=()=>ws.close();

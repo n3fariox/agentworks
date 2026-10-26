@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fmt::Write as _,
     path::PathBuf,
+    process::Command,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -237,6 +238,13 @@ impl Drop for Handle {
     }
 }
 pub fn spawn(cwd: PathBuf) -> Result<Handle> {
+    spawn_program(cwd, None)
+}
+/// Run a fixed command in a fresh PTY, without an intervening interactive shell.
+pub fn spawn_command(cwd: PathBuf, command: Command) -> Result<Handle> {
+    spawn_program(cwd, Some(command))
+}
+fn spawn_program(cwd: PathBuf, command: Option<Command>) -> Result<Handle> {
     let (input, incoming) = mpsc::channel(64);
     let (frames, receiver) = watch::channel(Frame {
         cols: 80,
@@ -248,7 +256,7 @@ pub fn spawn(cwd: PathBuf) -> Result<Handle> {
     std::thread::Builder::new()
         .name("session-terminal".into())
         .spawn(move || {
-            if let Err(error) = run(cwd, incoming, &frames, stop) {
+            if let Err(error) = run(cwd, command, incoming, &frames, stop) {
                 frames.send_modify(|frame| {
                     frame.seq += 1;
                     frame.exited = true;
@@ -276,6 +284,7 @@ pub fn spawn(cwd: PathBuf) -> Result<Handle> {
 
 fn run(
     cwd: PathBuf,
+    command: Option<Command>,
     mut incoming: mpsc::Receiver<Input>,
     frames: &watch::Sender<Frame>,
     stop: Arc<AtomicBool>,
@@ -307,8 +316,15 @@ fn run(
         .on_pty_write(move |_, bytes| reply_sink.borrow_mut().extend_from_slice(bytes))
         .map_err(|e| e.to_string())?;
     let (events, output) = std::sync::mpsc::sync_channel(64);
-    let mut shell =
-        pty::spawn(&pty::shell(&cwd), 80, 24, true, events).map_err(|e| e.to_string())?;
+    let command = match command {
+        Some(mut command) => {
+            command.current_dir(&cwd);
+            pty::shell_environment(&mut command, std::env::vars_os().map(|(key, _)| key));
+            command
+        }
+        None => pty::shell(&cwd),
+    };
+    let mut shell = pty::spawn(&command, 80, 24, true, events).map_err(|e| e.to_string())?;
     let mut previous = Vec::new();
     let mut history_state = HistoryState::default();
     let mut dirty = true;
