@@ -122,6 +122,21 @@ pub async fn update(
             .unwrap()
             .values()
             .any(|s| s.data.lock().unwrap().model_provider.as_deref() == Some(id));
+        if operation == "delete"
+            && app
+                .store
+                .lock()
+                .unwrap()
+                .automations()
+                .map_err(|_| bad("Could not read automations"))?
+                .iter()
+                .any(|d| d.model_provider.as_deref() == Some(id))
+        {
+            return Err(fail(
+                StatusCode::CONFLICT,
+                "This provider is used by automations. Choose another provider in those automations before deleting it",
+            ));
+        }
         if used && operation == "delete" {
             return Err(fail(
                 StatusCode::CONFLICT,

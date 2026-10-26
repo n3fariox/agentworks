@@ -18,6 +18,10 @@ pub struct Definition {
     pub name: String,
     pub provider: String,
     pub model: Option<String>,
+    /// Goose model provider profile the run session is bound to. Absent means
+    /// the harness uses the host's own environment configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider: Option<String>,
     pub cwd: String,
     pub location_id: String,
     pub host_id: String,
@@ -258,6 +262,8 @@ pub struct Input {
     name: String,
     provider: String,
     model: Option<String>,
+    #[serde(default)]
+    model_provider: Option<String>,
     cwd: String,
     host_id: Option<String>,
     project_id: Option<String>,
@@ -319,6 +325,11 @@ async fn definition(
         ));
     }
     let host = input.host_id.as_deref().unwrap_or("local");
+    let model_provider = input
+        .model_provider
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty());
+    crate::model_providers::selected(app, host, &input.provider, model_provider.as_deref()).await?;
     let cwd = crate::hosts::directory_on(app, host, &input.provider, &input.cwd).await?;
     let mut catalog = app.catalog.lock().unwrap();
     if input
@@ -362,6 +373,7 @@ async fn definition(
         name: name.into(),
         provider: input.provider,
         model,
+        model_provider,
         cwd: cwd.to_string_lossy().into_owned(),
         location_id: location.id,
         host_id: host.into(),
@@ -379,8 +391,11 @@ fn storage(_error: impl std::fmt::Display) -> (StatusCode, String) {
         "Could not access automation storage",
     )
 }
-/// Definition plus `nextRun`, the next scheduled instant while enabled.
-fn view(def: &Definition, now: i64) -> serde_json::Value {
+/// Definition plus `nextRun`, the next scheduled instant while enabled, and
+/// `modelProviderStatus` for a bound profile. The status reports whether the
+/// profile is usable on the definition's host and whether a key is stored; it
+/// never claims the provider will accept that key.
+fn view(def: &Definition, now: i64, profiles: &[serde_json::Value]) -> serde_json::Value {
     let next = def
         .schedule()
         .filter(|_| def.enabled)
@@ -388,13 +403,41 @@ fn view(def: &Definition, now: i64) -> serde_json::Value {
         .and_then(|plan| plan.next(now));
     let mut value = json!(def);
     value["nextRun"] = json!(next);
+    if let Some(id) = &def.model_provider {
+        value["modelProviderStatus"] = match profiles.iter().find(|p| p["id"] == id.as_str()) {
+            None => json!({"available":false,"detail":"Model provider profile no longer exists"}),
+            Some(p)
+                if !p["hostIds"]
+                    .as_array()
+                    .is_some_and(|h| h.iter().any(|h| h == def.host_id.as_str())) =>
+            {
+                json!({"available":false,"name":p["name"],"detail":"Model provider profile is not available on this host"})
+            }
+            Some(p) => {
+                json!({"available":true,"name":p["name"],"keyConfigured":p["keyConfigured"]})
+            }
+        };
+    }
     value
+}
+/// Public profile views, read only when some definition is bound to one.
+fn profiles_for(defs: &[&Definition]) -> Vec<serde_json::Value> {
+    if defs.iter().all(|d| d.model_provider.is_none()) {
+        return Vec::new();
+    }
+    agentworks_runtime::model_providers::dispatch(&json!({"operation":"list"}))
+        .ok()
+        .and_then(|mut r| r["profiles"].as_array_mut().map(std::mem::take))
+        .unwrap_or_default()
 }
 pub async fn list(State(app): State<App>) -> ApiResult {
     let defs = app.store.lock().unwrap().automations().map_err(storage)?;
     let now = now() as i64;
+    let profiles = profiles_for(&defs.iter().collect::<Vec<_>>());
     Ok(Json(json!(
-        defs.iter().map(|d| view(d, now)).collect::<Vec<_>>()
+        defs.iter()
+            .map(|d| view(d, now, &profiles))
+            .collect::<Vec<_>>()
     )))
 }
 /// Saves a definition and (re)arms its schedule at the current instant when
@@ -411,7 +454,7 @@ fn save(app: &App, previous: Option<&Definition>, def: &Definition) -> ApiResult
         .unwrap()
         .save_automation(def, rearm.then_some(now))
         .map_err(storage)?;
-    Ok(Json(view(def, now)))
+    Ok(Json(view(def, now, &profiles_for(&[def]))))
 }
 pub async fn create(State(app): State<App>, Json(input): Json<Input>) -> ApiResult {
     let _workspace = app.workspace_lock.lock().await;
@@ -508,8 +551,22 @@ async fn start(
     if !def.enabled {
         return Err(fail(StatusCode::CONFLICT, "This automation is paused"));
     }
+    // A bound profile replaces the host environment as the credential source,
+    // so it must still exist and be enabled on this host. Whether its key is
+    // accepted is only known once the provider is contacted.
+    if let Some(profile) = def.model_provider.as_deref() {
+        crate::model_providers::selected(app, &def.host_id, &def.provider, Some(profile))
+            .await
+            .map_err(|(_, message)| {
+                fail(
+                    StatusCode::CONFLICT,
+                    format!("Model provider profile is unavailable: {message}"),
+                )
+            })?;
+    }
     if def.host_id == "local"
-        && (!installed(&def.provider) || (use_api_key() && !key_present(&def.provider)))
+        && (!installed(&def.provider)
+            || (def.model_provider.is_none() && use_api_key() && !key_present(&def.provider)))
     {
         return Err(fail(
             StatusCode::CONFLICT,
@@ -553,7 +610,7 @@ async fn start(
             cwd: def.cwd,
             title: Some(format!("{} · {label}", def.name)),
             model: def.model,
-            model_provider: None,
+            model_provider: def.model_provider,
             project_id: def.project_id,
             host_id: Some(def.host_id),
             external_id: None,
@@ -935,5 +992,37 @@ mod tests {
         let def: Definition = serde_json::from_str(legacy).unwrap();
         assert!(def.workflow.is_none());
         assert!(!serde_json::to_string(&def).unwrap().contains("workflow"));
+        assert!(def.model_provider.is_none());
+        assert!(
+            !serde_json::to_string(&def)
+                .unwrap()
+                .contains("modelProvider")
+        );
+        assert!(view(&def, 0, &[]).get("modelProviderStatus").is_none());
+    }
+    #[test]
+    fn bound_profiles_persist_and_report_availability_without_claiming_auth() {
+        let mut def: Definition = serde_json::from_str(r#"{"id":"a","name":"n","provider":"goose","model":null,"modelProvider":"p1","cwd":"/","locationId":"l","hostId":"local","projectId":null,"prompt":"p","enabled":true,"created":1,"updated":1}"#).unwrap();
+        assert_eq!(def.model_provider.as_deref(), Some("p1"));
+        let again: Definition =
+            serde_json::from_str(&serde_json::to_string(&def).unwrap()).unwrap();
+        assert_eq!(again.model_provider.as_deref(), Some("p1"));
+        let profiles =
+            [json!({"id":"p1","name":"Gateway","hostIds":["local"],"keyConfigured":false})];
+        let status = &view(&def, 0, &profiles)["modelProviderStatus"];
+        assert_eq!(status["available"], true);
+        assert_eq!(status["keyConfigured"], false);
+        def.host_id = "remote".into();
+        let status = &view(&def, 0, &profiles)["modelProviderStatus"];
+        assert_eq!(status["available"], false);
+        assert!(status.get("keyConfigured").is_none());
+        let status = &view(&def, 0, &[])["modelProviderStatus"];
+        assert_eq!(status["available"], false);
+        assert!(
+            status["detail"]
+                .as_str()
+                .unwrap()
+                .contains("no longer exists")
+        );
     }
 }

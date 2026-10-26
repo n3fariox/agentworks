@@ -181,7 +181,27 @@ export function createWorkspace(hooks){
   function automationHostChanged(){
     editorGeneration++;const id=$('automation-host').value,active=hooks.getActive();
     $('automation-directory').value=active?.hostId===id?active.cwd:id==='local'?directory():(catalog.hosts.find(h=>h.id===id)?.roots?.[0]||'');
-    $('automation-model').value='';$('automation-models').replaceChildren();
+    $('automation-model').value='';$('automation-models').replaceChildren();automationProfiles($('automation-model-provider').value,false);
+  }
+  // Goose provider profiles enabled on the chosen host. A saved profile that is gone or not enabled
+  // there stays selected and marked, so saving reports it instead of silently using the host environment.
+  let profileGeneration=0,automationProfileList=[];
+  const automationProfile=()=>$('automation-provider').value==='goose'?$('automation-model-provider').value||null:null;
+  function automationProfileChanged(){const p=automationProfileList.find(p=>p.id===automationProfile());$('automation-model').placeholder=p?'Profile default · '+p.defaultModel:'Host default';}
+  async function automationProfiles(selected,keepMissing=true){
+    const gen=++profileGeneration,goose=$('automation-provider').value==='goose',select=$('automation-model-provider'),note=$('automation-model-provider-note');
+    $('automation-model-provider-field').hidden=!goose;automationProfileList=[];
+    select.replaceChildren(new Option('Host environment configuration',''),...(goose&&selected?[new Option('Loading saved provider…',selected)]:[]));select.value=goose&&selected||'';note.textContent='';
+    if(!goose){automationProfileChanged();return;}
+    select.disabled=true;
+    try{
+      const result=await api('/api/model-providers?hostId='+encodeURIComponent($('automation-host').value||'local'));if(gen!==profileGeneration)return;
+      automationProfileList=result.profiles;const missing=selected&&!automationProfileList.some(p=>p.id===selected)&&keepMissing;
+      select.replaceChildren(new Option('Host environment configuration',''),...automationProfileList.map(p=>new Option(`${p.name} · ${p.keyConfigured?'API key stored':'No API key stored'}`,p.id)),...(missing?[new Option('Unavailable profile · choose another',selected)]:[]));
+      select.value=automationProfileList.some(p=>p.id===selected)||missing?selected:'';
+      note.textContent=missing?'The saved provider profile was deleted or is not enabled on this host. Choose another before saving.':automationProfileList.length?'A profile replaces the host’s Goose environment for runs. Its key is only checked when a run contacts the provider.':'No provider profiles are enabled on this host. Add one in Settings → Model providers, or use the host environment.';
+    }catch(error){if(gen===profileGeneration)note.textContent=error.message;}
+    finally{if(gen===profileGeneration){select.disabled=false;automationProfileChanged();}}
   }
   // Recipe steps being edited. The server derives the run prompt from them; legacy definitions are one step.
   const MAX_STEPS=20;let steps=[];
@@ -229,7 +249,7 @@ export function createWorkspace(hooks){
   function automationEditor(def=null){
     editorGeneration++;editing=def?.id||null;automationOptions();automationHosts(def?.hostId||hooks.getActive()?.hostId||'local');$('automation-dialog-title').textContent=def?'Edit automation':'New automation';
     $('automation-name').value=def?.name||'';$('automation-provider').value=def?.provider||hooks.getActive()?.provider||'claude';$('automation-model').value=def?.model||'';
-    $('automation-project').value=def?.projectId||state.projectId||'';$('automation-directory').value=def?.cwd||(hooks.getActive()?.hostId===$('automation-host').value?hooks.getActive().cwd:$('automation-host').value==='local'?directory():catalog.hosts.find(h=>h.id===$('automation-host').value)?.roots?.[0]||'');steps=stepsOf(def);renderSteps();scheduleFields(triggerOf(def));$('automation-enabled').checked=def?.enabled??true;
+    $('automation-project').value=def?.projectId||state.projectId||'';$('automation-directory').value=def?.cwd||(hooks.getActive()?.hostId===$('automation-host').value?hooks.getActive().cwd:$('automation-host').value==='local'?directory():catalog.hosts.find(h=>h.id===$('automation-host').value)?.roots?.[0]||'');steps=stepsOf(def);renderSteps();scheduleFields(triggerOf(def));$('automation-enabled').checked=def?.enabled??true;automationProfiles(def?.modelProvider||'');
     $('delete-automation').hidden=!def;$('automation-error').textContent='';$('automation-models').replaceChildren();$('automation-load-models').disabled=false;$('automation-dialog').showModal();
   }
   async function loadAutomations(){
@@ -249,7 +269,9 @@ export function createWorkspace(hooks){
     const area=$('automation-detail');area.replaceChildren();if(!def){area.append(el('div','workspace-empty','Save repeatable instructions, then start a manual run.'));return;}
     const header=el('div','automation-detail-header'),titles=el('div');const scheduled=triggerOf(def).kind==='schedule';titles.append(el('div','workspace-eyebrow',scheduled?'SCHEDULED AUTOMATION':'MANUAL AUTOMATION'),el('h1','',def.name));
     const actions=el('div','workspace-action-row'),edit=el('button','text-button','Edit'),run=el('button','primary','Run now ↗');edit.onclick=()=>automationEditor(def);run.id='run-automation';run.disabled=!def.enabled||runStarting;run.onclick=()=>runAutomation(def);actions.append(edit,run);header.append(titles,actions);area.append(header);
-    const details=el('div','automation-execution');details.append(el('p','',`${hooks.labels[def.provider]} · ${def.model||'Host default'} · ${catalog.hosts.find(h=>h.id===def.hostId)?.name||def.hostId||'Local'}`),el('p','field-note',def.cwd),el('span','automation-badge',!def.enabled?'Paused':!scheduled?'Manual trigger':def.nextRun?'Next run '+new Date(def.nextRun).toLocaleString():'No upcoming run'));area.append(details);
+    const details=el('div','automation-execution');details.append(el('p','',`${hooks.labels[def.provider]} · ${def.model||'Host default'} · ${catalog.hosts.find(h=>h.id===def.hostId)?.name||def.hostId||'Local'}`));
+    if(def.modelProvider){const status=def.modelProviderStatus||{};details.append(status.available?el('p','field-note',`Model provider: ${status.name} · ${status.keyConfigured?'API key stored (checked when a run contacts the provider)':'No API key stored'}`):el('p','error-text',`Model provider unavailable: ${status.detail||'unknown profile'}. Runs will not start until you choose another.`));}
+    details.append(el('p','field-note',def.cwd),el('span','automation-badge',!def.enabled?'Paused':!scheduled?'Manual trigger':def.nextRun?'Next run '+new Date(def.nextRun).toLocaleString():'No upcoming run'));area.append(details);
     area.append(el('h2','','Recipe'),recipeView(def),el('h2','','Recent runs'));
     const rows=el('div');rows.id='automation-runs';rows.append(el('p','field-note','Loading runs…'));area.append(rows);
   }
@@ -303,13 +325,14 @@ export function createWorkspace(hooks){
   $('add-automation-step').onclick=()=>{if(steps.length>=MAX_STEPS)return;steps.push('');renderSteps(steps.length-1);};
   $('automation-host').onchange=automationHostChanged;
   $('automation-trigger').onchange=()=>{$('automation-schedule').hidden=$('automation-trigger').value!=='schedule';};
-  $('automation-provider').onchange=()=>{editorGeneration++;$('automation-model').value='';$('automation-models').replaceChildren();};$('automation-directory').oninput=()=>{editorGeneration++;};
+  $('automation-provider').onchange=()=>{editorGeneration++;$('automation-model').value='';$('automation-models').replaceChildren();automationProfiles('');};
+  $('automation-model-provider').onchange=()=>{editorGeneration++;$('automation-models').replaceChildren();automationProfileChanged();};$('automation-directory').oninput=()=>{editorGeneration++;};
   $('automation-load-models').onclick=async()=>{const token=editorGeneration;const button=$('automation-load-models');button.disabled=true;$('automation-error').textContent='';
-    try{const result=await api('/api/models',{method:'POST',body:JSON.stringify({provider:$('automation-provider').value,cwd:$('automation-directory').value,...($('automation-host').value!=='local'?{hostId:$('automation-host').value}:{})})});if(token!==editorGeneration)return;$('automation-models').replaceChildren();for(const model of result.options||[]){const node=el('option');node.value=model.value;node.label=model.name||model.value;$('automation-models').append(node);}}
+    try{const result=await api('/api/models',{method:'POST',body:JSON.stringify({provider:$('automation-provider').value,modelProvider:automationProfile(),cwd:$('automation-directory').value,...($('automation-host').value!=='local'?{hostId:$('automation-host').value}:{})})});if(token!==editorGeneration)return;$('automation-models').replaceChildren();for(const model of result.options||[]){const node=el('option');node.value=model.value;node.label=model.name||model.value;$('automation-models').append(node);}}
     catch(error){if(token===editorGeneration)$('automation-error').textContent=error.message;}finally{button.disabled=false;}
   };
   $('automation-form').onsubmit=async event=>{event.preventDefault();$('save-automation').disabled=true;$('automation-error').textContent='';
-    try{const def=await api(editing?'/api/automations/'+editing:'/api/automations',{method:editing?'PUT':'POST',body:JSON.stringify({name:$('automation-name').value,provider:$('automation-provider').value,model:$('automation-model').value||null,projectId:$('automation-project').value||null,...($('automation-host').value!=='local'?{hostId:$('automation-host').value}:{}),cwd:$('automation-directory').value,workflow:{version:1,trigger:triggerInput(),steps:steps.map(text=>({kind:'agent',text}))},enabled:$('automation-enabled').checked})});state.projectId=def.projectId;state.locationKey=def.locationId;state.automationId=def.id;await hooks.refreshSessions();$('automation-dialog').close();showView('automations');}
+    try{const def=await api(editing?'/api/automations/'+editing:'/api/automations',{method:editing?'PUT':'POST',body:JSON.stringify({name:$('automation-name').value,provider:$('automation-provider').value,model:$('automation-model').value||null,...(automationProfile()?{modelProvider:automationProfile()}:{}),projectId:$('automation-project').value||null,...($('automation-host').value!=='local'?{hostId:$('automation-host').value}:{}),cwd:$('automation-directory').value,workflow:{version:1,trigger:triggerInput(),steps:steps.map(text=>({kind:'agent',text}))},enabled:$('automation-enabled').checked})});state.projectId=def.projectId;state.locationKey=def.locationId;state.automationId=def.id;await hooks.refreshSessions();$('automation-dialog').close();showView('automations');}
     catch(error){$('automation-error').textContent=error.message;}finally{$('save-automation').disabled=false;}
   };
   $('delete-automation').onclick=async()=>{if(!editing||!confirm('Delete this automation definition? Its run sessions and history will remain.'))return;try{await api('/api/automations/'+editing,{method:'DELETE'});$('automation-dialog').close();loadAutomations();}catch(error){$('automation-error').textContent=error.message;}};
