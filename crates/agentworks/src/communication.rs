@@ -31,6 +31,7 @@ impl Role {
             restart_service: false,
             manage_review_queue: false,
             archive_sessions: self == Self::Coordinator,
+            manage_automations: false,
         }
     }
 }
@@ -60,6 +61,10 @@ pub struct Access {
     /// Explicit controller grant; never inherited from a session role.
     #[serde(default)]
     pub archive_sessions: bool,
+    /// Explicit opt-in to create, edit, pause and delete project automations;
+    /// never part of a role preset or inherited by child sessions.
+    #[serde(default)]
+    pub manage_automations: bool,
 }
 impl Access {
     pub fn enabled(&self) -> bool {
@@ -71,6 +76,7 @@ impl Access {
             || self.restart_service
             || self.manage_review_queue
             || self.archive_sessions
+            || self.manage_automations
     }
 }
 pub use agentworks_session::origins::ControlOrigin;
@@ -252,6 +258,7 @@ fn permitted(a: &Access, capability: &str) -> bool {
         "restart_service" => a.restart_service,
         "manage_review_queue" => a.manage_review_queue,
         "archive_sessions" => a.archive_sessions,
+        "manage_automations" => a.manage_automations,
         _ => false,
     }
 }

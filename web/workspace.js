@@ -225,18 +225,23 @@ export function createWorkspace(hooks){
   const triggerOf=def=>def?.workflow?.trigger||{kind:'manual'};
   const localZone=()=>{try{return Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';}catch{return 'UTC';}};
   function describeTrigger(trigger){
+    if(trigger.kind==='once')return `Once on ${trigger.at.replace('T',' at ')} (${trigger.timeZone})${trigger.afterRun==='delete'?', then delete it':''}`;
     if(trigger.kind!=='schedule')return 'I click Run now';
     const days=trigger.days.length===7?'Every day':trigger.days.join()==='1,2,3,4,5'?'Weekdays':trigger.days.map(d=>DAYS[d-1]).join(', ');
     return `${days} at ${trigger.at} (${trigger.timeZone})`;
   }
+  function triggerKindChanged(){const kind=$('automation-trigger').value;$('automation-schedule').hidden=kind==='manual';$('automation-days').hidden=kind!=='schedule';$('automation-date-field').hidden=$('automation-after-run-field').hidden=kind!=='once';}
   function scheduleFields(trigger){
-    const scheduled=trigger.kind==='schedule';$('automation-trigger').value=trigger.kind;$('automation-schedule').hidden=!scheduled;
-    $('automation-at').value=scheduled?trigger.at:'09:00';$('automation-time-zone').value=scheduled?trigger.timeZone:localZone();$('automation-missed').value=scheduled?trigger.missed||'skip':'skip';
+    const scheduled=trigger.kind==='schedule',once=trigger.kind==='once',timed=scheduled||once;$('automation-trigger').value=trigger.kind;
+    const tomorrow=new Date(Date.now()+86400000),pad=n=>String(n).padStart(2,'0');
+    $('automation-date').value=once?trigger.at.slice(0,10):`${tomorrow.getFullYear()}-${pad(tomorrow.getMonth()+1)}-${pad(tomorrow.getDate())}`;$('automation-after-run').value=once?trigger.afterRun||'complete':'complete';
+    $('automation-at').value=scheduled?trigger.at:once?trigger.at.slice(11):'09:00';$('automation-time-zone').value=timed?trigger.timeZone:localZone();$('automation-missed').value=timed?trigger.missed||'skip':'skip';triggerKindChanged();
     const days=scheduled?trigger.days:[1,2,3,4,5];for(const box of $('automation-days').querySelectorAll('input'))box.checked=days.includes(Number(box.value));
     const zones=$('automation-time-zones');if(!zones.children.length){let names=[];try{names=Intl.supportedValuesOf('timeZone');}catch{}for(const name of new Set(['UTC',...names])){const node=el('option');node.value=name;zones.append(node);}}
   }
   function triggerInput(){
-    if($('automation-trigger').value!=='schedule')return {kind:'manual'};
+    const kind=$('automation-trigger').value;if(kind==='manual')return {kind};
+    if(kind==='once')return {kind,at:`${$('automation-date').value}T${$('automation-at').value}`,timeZone:$('automation-time-zone').value,missed:$('automation-missed').value,afterRun:$('automation-after-run').value};
     return {kind:'schedule',at:$('automation-at').value,timeZone:$('automation-time-zone').value,days:[...$('automation-days').querySelectorAll('input:checked')].map(box=>Number(box.value)),missed:$('automation-missed').value};
   }
   function recipeView(def){
@@ -261,17 +266,17 @@ export function createWorkspace(hooks){
   function renderAutomations(){
     const list=$('automation-list');list.replaceChildren();const visible=visibleDefinitions();
     if(!visible.some(d=>d.id===state.automationId))state.automationId=visible[0]?.id||null;
-    for(const def of visible){const button=el('button','automation-item'+(def.id===state.automationId?' selected':''));button.append(el('strong','',def.name),el('small','',`${hooks.labels[def.provider]} · ${def.enabled?triggerOf(def).kind==='schedule'?'Scheduled':'Manual':'Paused'} · ${stepsOf(def).length===1?'1 step':stepsOf(def).length+' steps'}`));button.onclick=()=>{state.automationId=def.id;save();renderAutomations();};list.append(button);}
+    for(const def of visible){const button=el('button','automation-item'+(def.id===state.automationId?' selected':''));button.append(el('strong','',def.name),el('small','',`${hooks.labels[def.provider]} · ${def.completed?'Completed':def.enabled?{schedule:'Scheduled',once:'Once'}[triggerOf(def).kind]||'Manual':'Paused'} · ${stepsOf(def).length===1?'1 step':stepsOf(def).length+' steps'}`));button.onclick=()=>{state.automationId=def.id;save();renderAutomations();};list.append(button);}
     if(!visible.length)list.append(el('p','field-note','No automations in this project yet.'));
     const def=visible.find(d=>d.id===state.automationId);renderAutomation(def);if(def)loadRuns(def.id);
   }
   function renderAutomation(def){
     const area=$('automation-detail');area.replaceChildren();if(!def){area.append(el('div','workspace-empty','Save repeatable instructions, then start a manual run.'));return;}
-    const header=el('div','automation-detail-header'),titles=el('div');const scheduled=triggerOf(def).kind==='schedule';titles.append(el('div','workspace-eyebrow',scheduled?'SCHEDULED AUTOMATION':'MANUAL AUTOMATION'),el('h1','',def.name));
+    const header=el('div','automation-detail-header'),titles=el('div');const kind=triggerOf(def).kind,scheduled=kind!=='manual';titles.append(el('div','workspace-eyebrow',{schedule:'SCHEDULED AUTOMATION',once:'ONE-TIME AUTOMATION'}[kind]||'MANUAL AUTOMATION'),el('h1','',def.name));
     const actions=el('div','workspace-action-row'),edit=el('button','text-button','Edit'),run=el('button','primary','Run now ↗');edit.onclick=()=>automationEditor(def);run.id='run-automation';run.disabled=!def.enabled||runStarting;run.onclick=()=>runAutomation(def);actions.append(edit,run);header.append(titles,actions);area.append(header);
     const details=el('div','automation-execution');details.append(el('p','',`${hooks.labels[def.provider]} · ${def.model||'Host default'} · ${catalog.hosts.find(h=>h.id===def.hostId)?.name||def.hostId||'Local'}`));
     if(def.modelProvider){const status=def.modelProviderStatus||{};details.append(status.available?el('p','field-note',`Model provider: ${status.name} · ${status.keyConfigured?'API key stored (checked when a run contacts the provider)':'No API key stored'}`):el('p','error-text',`Model provider unavailable: ${status.detail||'unknown profile'}. Runs will not start until you choose another.`));}
-    details.append(el('p','field-note',def.cwd),el('span','automation-badge',!def.enabled?'Paused':!scheduled?'Manual trigger':def.nextRun?'Next run '+new Date(def.nextRun).toLocaleString():'No upcoming run'));area.append(details);
+    if(def.createdBy)details.append(el('p','field-note',`Created by agent: ${def.createdBy.title}. Scheduled runs need its current Manage automations and Start sessions grants.`));details.append(el('p','field-note',def.cwd),el('span','automation-badge',def.completed?'Completed '+new Date(def.completed).toLocaleString():!def.enabled?'Paused':!scheduled?'Manual trigger':def.nextRun?'Next run '+new Date(def.nextRun).toLocaleString():'No upcoming run'));area.append(details);
     area.append(el('h2','','Recipe'),recipeView(def),el('h2','','Recent runs'));
     const rows=el('div');rows.id='automation-runs';rows.append(el('p','field-note','Loading runs…'));area.append(rows);
   }
@@ -324,7 +329,7 @@ export function createWorkspace(hooks){
   $('new-automation').onclick=()=>automationEditor();$('dismiss-automation').onclick=()=>$('automation-dialog').close();
   $('add-automation-step').onclick=()=>{if(steps.length>=MAX_STEPS)return;steps.push('');renderSteps(steps.length-1);};
   $('automation-host').onchange=automationHostChanged;
-  $('automation-trigger').onchange=()=>{$('automation-schedule').hidden=$('automation-trigger').value!=='schedule';};
+  $('automation-trigger').onchange=triggerKindChanged;
   $('automation-provider').onchange=()=>{editorGeneration++;$('automation-model').value='';$('automation-models').replaceChildren();automationProfiles('');};
   $('automation-model-provider').onchange=()=>{editorGeneration++;$('automation-models').replaceChildren();automationProfileChanged();};$('automation-directory').oninput=()=>{editorGeneration++;};
   $('automation-load-models').onclick=async()=>{const token=editorGeneration;const button=$('automation-load-models');button.disabled=true;$('automation-error').textContent='';

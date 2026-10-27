@@ -18,7 +18,8 @@ Each controller belongs to exactly one project and is created by a human in **Pr
 | `startSessions` | `start_session` in its project; started sessions inherit no grants and record the controller as initiator |
 | `promptSessions` / `cancelSessions` | `prompt_session` / `cancel_session` on same-project sessions |
 | `archiveSessions` | `archive_session {sessionId}` on same-project sessions, including non-messaging sessions. Controller grant remains explicit. |
-| `runAutomations` | `list_automations`, `run_automation` for project automations |
+| `runAutomations` | `list_automations`, `get_automation`, `list_automation_runs`, `run_automation` for project automations |
+| `manageAutomations` | The reads above plus `create_automation`, `update_automation`, `set_automation_enabled`, `delete_automation`. Explicit opt-in; creating or replacing also needs `startSessions`. See [Agent-managed automations](SCHEDULED-AUTOMATIONS.md#agent-managed-automations). |
 
 These are never available to controllers, regardless of stored grants:
 

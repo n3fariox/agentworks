@@ -211,14 +211,44 @@ fn tools(a: &mail::Access, session: bool) -> Value {
             &["sessionId"],
         ));
     }
-    if a.run_automations {
+    if a.run_automations || a.manage_automations {
         tools.push(tool(
             "list_automations",
-            "List existing automation names and IDs in this project.",
+            "List existing automation names and IDs in this project. With manageAutomations, also triggers, next runs, revisions and agent authors.",
             json!({}),
             &[],
         ));
+        let target = json!({"automationId":{"type":"string"}});
+        tools.push(tool(
+            "get_automation",
+            "Read one project automation's full definition, revision and next run.",
+            target.clone(),
+            &["automationId"],
+        ));
+        tools.push(tool("list_automation_runs", "Read up to 100 recent runs and scheduled occurrences (started, missed or skipped, with reasons) of a project automation.", target, &["automationId"]));
+    }
+    if a.run_automations {
         tools.push(tool("run_automation","Run an existing automation in this project. Reuse requestId on retry. No grant is inherited by the run.",json!({"automationId":{"type":"string"},"requestId":{"type":"string","maxLength":50}}),&["automationId","requestId"]));
+    }
+    if a.manage_automations {
+        let workflow = json!({"type":"object","description":"Recipe: {version:1, trigger:{kind:'manual'} or {kind:'schedule',timeZone:'Europe/Berlin',at:'09:30',days:[1..7 ISO weekdays],missed:'skip'|'runOnce'} or {kind:'once',timeZone,at:'YYYY-MM-DDTHH:MM' local, 1 minute to 1 year ahead,missed,afterRun:'complete' (pause, keep) |'delete'}, steps:[{kind:'agent',text}] (1-20, run in order in one turn)}. See docs/SCHEDULED-AUTOMATIONS.md."});
+        let fields = |update: bool| {
+            let mut p = json!({"requestId":{"type":"string","maxLength":100},"name":{"type":"string","maxLength":80},"provider":{"type":"string","enum":agentworks_runtime::remote::PROVIDERS},"model":{"type":"string"},"modelProvider":{"type":"string"},"cwd":{"type":"string","description":"Run directory on your host; must be inside its allowed roots."},"enabled":{"type":"boolean","default":true},"prompt":{"type":"string","description":"Single instruction; use workflow for steps or a schedule."},"workflow":workflow.clone()});
+            if update {
+                p["automationId"] = json!({"type":"string"});
+                p["revision"] = json!({"type":"integer","description":"Revision from get_automation; a stale revision is rejected."});
+            }
+            p
+        };
+        tools.push(tool("create_automation", "Create an automation in this project on your host. Requires manageAutomations and startSessions. Scheduled runs act on your authority and are skipped if you lose those grants or leave the project. Runs inherit no grants. Reuse requestId only for an identical retry.", fields(false), &["requestId","name","provider","cwd"]));
+        tools.push(tool("update_automation", "Replace an agent-created automation's definition. Pass the current revision. Reuse requestId only for an identical retry.", fields(true), &["requestId","automationId","revision","name","provider","cwd"]));
+        tools.push(tool("set_automation_enabled", "Pause (enabled=false) any project automation, or resume an agent-created one. Resuming never runs occurrences missed while paused.", json!({"requestId":{"type":"string","maxLength":100},"automationId":{"type":"string"},"enabled":{"type":"boolean"}}), &["requestId","automationId","enabled"]));
+        tools.push(tool(
+            "delete_automation",
+            "Delete an agent-created automation. Run history is kept.",
+            json!({"requestId":{"type":"string","maxLength":100},"automationId":{"type":"string"}}),
+            &["requestId", "automationId"],
+        ));
     }
     json!({"tools":tools})
 }
@@ -459,20 +489,27 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
             .await
             .map(|j| j.0)
         }
-        "list_automations" | "run_automation" => {
+        "list_automations"
+        | "get_automation"
+        | "list_automation_runs"
+        | "create_automation"
+        | "update_automation"
+        | "set_automation_enabled"
+        | "delete_automation" => crate::automations::agent(app, a, operation, args).await,
+        "run_automation" => {
             mail::require_actor(app, a, "run_automations")?;
             let scope = a
                 .project
                 .clone()
                 .ok_or_else(|| crate::fail(StatusCode::FORBIDDEN, "Assign a project first"))?;
-            let defs = app.store.lock().unwrap().automations().map_err(|_| {
-                crate::fail(StatusCode::INTERNAL_SERVER_ERROR, "Cannot read automations")
-            })?;
-            if operation == "list_automations" {
-                return Ok(
-                    json!({"automations":defs.iter().filter(|d|d.project_id.as_deref()==Some(&scope)).map(|d|json!({"id":d.id,"name":d.name,"enabled":d.enabled})).collect::<Vec<_>>()}),
-                );
-            }
+            let defs = app
+                .store
+                .lock()
+                .unwrap()
+                .usable_automations()
+                .map_err(|_| {
+                    crate::fail(StatusCode::INTERNAL_SERVER_ERROR, "Cannot read automations")
+                })?;
             let id = field(&args, "automationId")?;
             if !defs
                 .iter()
@@ -530,7 +567,7 @@ pub async fn serve_bridge(app: App, listener: TcpListener) {
                 };
                 let response=if let Some(s)=actor {
                     let operation=v["operation"].as_str().unwrap_or("");
-                    let mutation=!matches!(operation,"tools/list"|"read_inbox"|"list_sessions"|"list_automations"|"get_completion"|"get_service_status"|"get_review_queue");
+                    let mutation=!matches!(operation,"tools/list"|"read_inbox"|"list_sessions"|"list_automations"|"get_automation"|"list_automation_runs"|"get_completion"|"get_service_status"|"get_review_queue");
                     let action=operation.chars().take(80).collect::<String>();
                     let argument_target=v["arguments"]["sessionId"].as_str().or(v["arguments"]["recipient"].as_str()).or(v["arguments"]["automationId"].as_str()).unwrap_or("").chars().take(128).collect::<String>();
                     let request=v["arguments"]["requestId"].as_str().unwrap_or("").chars().take(100).collect::<String>();
@@ -598,5 +635,42 @@ mod tests {
         };
         assert_eq!(names(false), vec!["list_sessions", "archive_session"]);
         assert_eq!(names(true), vec!["list_sessions"]);
+    }
+    #[test]
+    fn automation_management_is_an_explicit_grant() {
+        for role in [
+            mail::Role::Off,
+            mail::Role::Participant,
+            mail::Role::Coordinator,
+        ] {
+            assert!(!role.access().manage_automations);
+        }
+        let old: mail::Access = serde_json::from_value(json!({"runAutomations":true})).unwrap();
+        assert!(!old.manage_automations);
+        let access = mail::Access {
+            manage_automations: true,
+            ..Default::default()
+        };
+        assert!(access.enabled());
+        assert!(!mail::coordinator(&access)); // No session-management authority implied.
+        let names = tools(&access, true)["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "list_sessions",
+                "list_automations",
+                "get_automation",
+                "list_automation_runs",
+                "create_automation",
+                "update_automation",
+                "set_automation_enabled",
+                "delete_automation"
+            ]
+        );
     }
 }

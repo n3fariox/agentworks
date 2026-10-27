@@ -210,3 +210,75 @@ test('downtime applies the missed-run policy to the latest occurrence only',asyn
   for(const def of [skip,once,paused])await api('/api/automations/'+def.id,undefined,'DELETE');
   await api('/api/sessions/'+late.sessionId,undefined,'DELETE');
 });
+
+const utcLocal=ms=>new Date(ms).toISOString().slice(0,16);
+const oneTime=(at,extra={})=>({version:1,trigger:{kind:'once',timeZone:'UTC',at,...extra},steps:[{kind:'agent',text:'Once'}]});
+const occurrences=async id=>(await api('/api/automations/'+id+'/runs'));
+
+test('one-time triggers are validated and edited like schedules',async({page})=>{
+  for(const at of [utcLocal(Date.now()-60000),utcLocal(Date.now()+400*86400000)])
+    expect((await call('/api/automations',{name:'Bad time',provider:'demo',cwd:fixture,workflow:oneTime(at)})).status).toBe(400);
+  // A paused one-time definition may keep a past time; resuming needs a new one.
+  const paused=await api('/api/automations',{name:'Past but paused',provider:'demo',cwd:fixture,enabled:false,workflow:oneTime(utcLocal(Date.now()-3600000))});
+  expect((await call('/api/automations/'+paused.id,{name:'Past but paused',provider:'demo',cwd:fixture,enabled:true,workflow:oneTime(paused.workflow.trigger.at)},'PUT')).status).toBe(400);
+  await api('/api/automations/'+paused.id,undefined,'DELETE');
+  await page.goto('/?view=automations');await page.locator('#nav-automations').click();
+  await page.locator('#new-automation').click();
+  await page.locator('#automation-name').fill('Release check');await page.locator('#automation-provider').selectOption('demo');await page.locator('#automation-directory').fill(fixture);
+  await page.getByLabel('Step 1 instructions').fill('Check the release');
+  await page.locator('#automation-trigger').selectOption('once');
+  await expect(page.locator('#automation-date')).toBeVisible();await expect(page.locator('#automation-days')).toBeHidden();
+  const day=new Date(Date.now()+3*86400000).toISOString().slice(0,10);
+  await page.locator('#automation-date').fill(day);await page.locator('#automation-at').fill('06:15');await page.locator('#automation-time-zone').fill('UTC');
+  await page.locator('#automation-after-run').selectOption('delete');
+  await page.screenshot({path:'.cache/workflow-once-editor.png'});
+  await page.locator('#save-automation').click();await expect(page.locator('#automation-dialog')).toBeHidden();
+  await expect(page.locator('#automation-detail .recipe-trigger')).toHaveText(`Once on ${day} at 06:15 (UTC), then delete it`);
+  await expect(page.locator('#automation-detail .workspace-eyebrow')).toHaveText('ONE-TIME AUTOMATION');
+  await expect(page.locator('.automation-item.selected small')).toContainText('Once');
+  const def=(await api('/api/automations')).find(d=>d.name==='Release check');
+  expect(def.workflow.trigger).toEqual({kind:'once',timeZone:'UTC',at:`${day}T06:15`,missed:'skip',afterRun:'delete'});
+  expect(def.nextRun).toBe(Date.parse(`${day}T06:15:00Z`));
+  await page.locator('#automation-detail').getByRole('button',{name:'Edit'}).click();
+  await expect(page.locator('#automation-date')).toHaveValue(day);await expect(page.locator('#automation-at')).toHaveValue('06:15');
+  await expect(page.locator('#automation-after-run')).toHaveValue('delete');
+  await page.locator('#dismiss-automation').click();
+  await api('/api/automations/'+def.id,undefined,'DELETE');
+});
+
+test('a one-time occurrence is handled once, then completes or deletes the definition',async({page})=>{
+  test.setTimeout(60000);
+  const future=utcLocal(Date.now()+3600000);
+  const keep=await api('/api/automations',{name:'Once then complete',provider:'demo',cwd:fixture,workflow:oneTime(future,{missed:'runOnce'})});
+  const drop=await api('/api/automations',{name:'Once then delete',provider:'demo',cwd:fixture,workflow:oneTime(future,{afterRun:'delete'})});
+  // Simulate downtime across the occurrence: it is now two hours past.
+  await stopServer();
+  const past=utcLocal(Date.now()-7200000),slot=Date.parse(past+':00Z');
+  const db=new DatabaseSync(join(fixture,'sessions.sqlite3'));
+  for(const def of [keep,drop]){
+    db.prepare("UPDATE automations SET definition=json_set(definition,'$.workflow.trigger.at',?) WHERE id=?").run(past,def.id);
+    db.prepare('UPDATE automation_schedules SET cursor=? WHERE automation_id=?').run(slot-3600000,def.id);
+  }
+  db.close();
+  await startServer();
+  await expect.poll(async()=>(await occurrences(keep.id)).length,{timeout:15000}).toBe(1);
+  const [late]=await occurrences(keep.id);
+  expect(late.scheduledFor).toBe(slot);expect(late.sessionId).toBeTruthy();
+  const done=(await api('/api/automations')).find(d=>d.id===keep.id);
+  expect(done).toMatchObject({enabled:false,nextRun:null,revision:2});expect(done.completed).toBeGreaterThan(slot);
+  await expect.poll(async()=>(await occurrences(drop.id)).length,{timeout:15000}).toBe(1);
+  expect((await occurrences(drop.id))[0]).toMatchObject({status:'missed',scheduledFor:slot,sessionId:null});
+  expect((await api('/api/automations')).some(d=>d.id===drop.id)).toBe(false);
+  // Nothing fires again after a restart.
+  await stopServer();await startServer();await new Promise(r=>setTimeout(r,7000));
+  expect((await occurrences(keep.id)).length).toBe(1);
+  await page.goto('/?view=automations');await page.locator('#nav-automations').click();
+  await page.locator('.automation-item',{hasText:'Once then complete'}).click();
+  await expect(page.locator('.automation-item.selected small')).toContainText('Completed');
+  await expect(page.locator('#automation-detail .automation-badge')).toContainText('Completed');
+  // Rescheduling clears completion.
+  const again=await api('/api/automations/'+keep.id,{name:'Once then complete',provider:'demo',cwd:fixture,workflow:oneTime(utcLocal(Date.now()+7200000))},'PUT');
+  expect(again.enabled).toBe(true);expect(again.completed).toBeUndefined();expect(again.nextRun).toBeGreaterThan(Date.now());
+  await api('/api/automations/'+keep.id,undefined,'DELETE');
+  await api('/api/sessions/'+late.sessionId,undefined,'DELETE');
+});
