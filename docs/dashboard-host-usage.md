@@ -1,79 +1,126 @@
 # Dashboard host usage
 
 The operations dashboard opens `/api/dashboard/host-usage/events`, a same-origin
-WebSocket under the existing host/origin guard. Reverse proxy mount paths use
-`socketUrl`. The server owns sampling; browsers never request individual samples.
-Session/project/quota snapshots retain their existing manual refresh behavior.
+WebSocket under the existing host/origin guard. Reverse proxy mounts use
+`socketUrl`. The server owns viewer subscriptions; browsers never request samples.
+Session/project/quota snapshots retain manual refresh behavior.
+
+## Collection and platforms
+
+Local servers and connected capable workers use the same
+`agentworks_runtime::metrics::Collector`, based on `sysinfo` **0.38.4** with only
+`system` and `disk` features. It refreshes CPU usage, memory, swap, and selected disk
+capacity. It never enumerates processes, network counters, sensors, or disk I/O.
+
+The collector supports Linux, macOS, and Windows through sysinfo. Other OSes
+explicitly report unsupported. This is collection support, not a claim that every
+Agentworks remote-worker feature or SSH setup works on every platform. Native
+verification is required on each target OS. The existing worker still contains
+Unix-specific process/ownership code; this change does not port the full runtime
+to Windows. The portable metrics module can be checked independently. Sysinfo's latest 0.39.6 requires Rust
+1.95; 0.38.4 requires 1.88 and fits this workspace's declared 1.94.1 minimum.
+
+Sources: [sysinfo 0.38.4](https://docs.rs/sysinfo/0.38.4/sysinfo/),
+[upstream repository](https://github.com/GuillaumeGomez/sysinfo),
+[latest version](https://docs.rs/sysinfo/0.39.6/sysinfo/).
+Heim's own documentation describes partial platform support and MVP status, so it
+was not selected: [heim documentation](https://docs.rs/heim/latest/heim/).
 
 ## Lifecycle and overhead
 
-- The first visible dashboard subscribes to a shared, reference-counted collector
-  on the Agentworks server. Additional dashboards subscribe to the same current
-  value and do not start additional reads. The first read runs immediately; the
-  next reads run every five seconds, with missed ticks skipped and no queued reads.
-- Only the current value and one CPU baseline exist in memory. There is no database
-  write, sample history, host shell command, new SSH connection, or external probe.
-- Browser `alive` messages every ten seconds renew a thirty-second lease per
-  connection. Expiry is independent of sample delivery. Sends have a five-second
-  deadline; input frames are capped at 128 bytes. Unrecognized input closes the
-  subscription. A stalled or disconnected browser cannot keep collection alive
-  indefinitely.
-- `visibilitychange` to hidden and `pagehide` close the stream and clear browser
-  timers/data. Visible/restored pages reconnect; network failure retries after five
-  seconds. Hidden dashboards therefore do not count as viewers.
-- The last subscription's drop aborts the collector and drops its sample and CPU
-  baseline. A new viewer starts with CPU warmup. A blocking OS read already in
-  progress may finish after cancellation, but its result is discarded and no more
-  reads are scheduled. Abrupt network loss without a close frame can continue
-  sampling until lease expiry (up to thirty seconds).
+- The first visible dashboard starts one server collector. All other dashboards
+  share its current per-host snapshot. The first local read runs immediately;
+  subsequent ticks run every five seconds, skipping missed ticks and never
+  queueing reads. Remote events may arrive between dashboard snapshot ticks, so
+  delivery can lag a remote sample by an additional five seconds.
+- Only the current snapshot, each remote connection's current event, and CPU
+  baselines exist in memory. There are no history/database writes, shell probes,
+  extra SSH connections, or external services.
+- Browser `alive` messages every ten seconds renew a thirty-second viewer lease.
+  Expiry is independent of sample delivery. Sends have a five-second deadline
+  capped by lease expiry; incoming browser frames are capped at 128 bytes.
+- Hidden/pagehide closes the stream and clears browser timers/data. Visible or
+  restored pages reconnect; transport errors retry after five seconds. Hidden
+  dashboards do not count as viewers.
+- The service shutdown hook closes metrics viewers as well, so a dashboard cannot
+  keep graceful shutdown alive by renewing its lease.
+- The last viewer aborts local collection, explicitly stops all remote
+  subscriptions, and clears samples/baselines. A new viewer starts with CPU warmup.
+  Cleanup does not wait for an in-progress local OS read. A cancellation flag
+  prevents a completing read from starting new remote subscriptions after stop.
+- Abrupt browser loss without a close frame may keep sampling until its lease
+  expires (at most thirty seconds). Already executing blocking OS reads cannot be
+  force-cancelled: they may finish after stop, with their results discarded.
 
-## Supported metrics and limits
+## Remote protocol
 
-Only the local Linux host is collected. Non-Linux servers explicitly report
-unsupported; remote hosts explicitly report that their worker lacks metrics
-capability, even when connected to Linux. No privilege or remote protocol changes
-are included.
+Protocol remains **3**; `hostMetrics: 1` in worker hello negotiates the additive
+feature. Unsupported/old workers advertise no capability. Servers report an
+update-needed reason and send no unknown message to them. A new worker remains
+idle when connected to an old server that never requests metrics.
 
-- CPU is aggregate utilization from consecutive `/proc/stat` counters, with guest
-  counters excluded from the sum because user/nice already include them. Idle and
-  I/O wait are excluded from used time. First sample, resets, zero deltas, and read
-  errors report reasons instead of percentages. A read failure clears the baseline.
-- Memory is `MemTotal - MemAvailable`, with both used and total in bytes. There is
-  no guessed fallback when `MemAvailable` is absent. Swap is `SwapTotal - SwapFree`;
-  zero total means no configured swap, not a read failure.
-- Disk is `statvfs("/")`: total blocks and used blocks (`blocks - bfree`) times
-  fragment size. Reserved but free blocks are not counted as used. This covers
-  the root filesystem only, not every mount, remote workspace, or physical device.
-- The timestamp records completion of the read, not browser delivery. The UI labels
-  samples older than fifteen seconds stale and identifies an ahead source clock.
-  Individual failures carry reasons. Stream disconnection clears the displayed
-  value. Sampling is sequential, so a blocked OS read delays updates and freshness
-  becomes stale. There is no command timeout that can cancel a kernel filesystem
-  read; `/` is deliberately the only statvfs target.
-- Values reflect the server process's Linux proc/mount namespaces. They are not
-  cgroup/container quota measurements or per-session resource attribution.
+Messages over the existing SSH worker WebSocket:
 
-## Remote proposal (deferred)
+```json
+{"type":"metricsStart","subscription":7}
+{"type":"metricsEvent","subscription":7,"sample":{"sampledAt":123,"cpu":{"percent":25},"memory":{"used":1,"total":2},"swap":{"used":0,"total":0},"disks":[{"path":"/build","used":1,"total":2}]}}
+{"type":"metricsStop","subscription":7}
+```
 
-Remote execution already uses one persistent SSH-supervised, framed WebSocket to
-an `agentworks worker` (protocol 3). Worker hello reports platform/providers and
-negotiated features for some existing operations, but no metrics feature exists.
-Unknown message types are ignored; sending a metrics message to an old worker
-would hang until an RPC timeout. Local server `/proc` must never be labeled as a
-remote host's usage.
+Subscription IDs are positive integers generated per connection. Repeating start
+for the active ID renews a fixed thirty-second lease without resetting the CPU
+baseline. A different start replaces the collector; stop only matches its ID.
+There is one collector per worker, sampling every five seconds. No caller-supplied
+path, interval, command, or privilege is accepted.
 
-A follow-up should add a Linux-only `hostMetrics: 1` hello capability, preserved by
-`check_hello`, plus a bounded `hostMetrics` request/reply using existing request IDs
-and deadlines. Keep it read-only, accept no caller-controlled filesystem path or
-shell command, use `/proc` and `statvfs("/")` without sudo, and cap reply size.
-The shared server collector should issue at most one request per connected capable
-host per interval while viewers exist; disconnected/old/unsupported workers get
-explicit unavailable reasons. Do not create a worker-side timer: return raw CPU
-counters and compute interval deltas centrally, resetting on connection generation
-changes. Dropping the last viewer cancels pending waits and clears all baselines;
-workers perform no ongoing work. Tests must cover mixed worker versions, timeout,
-reconnect, late replies, and closing every viewer while remote reads are pending.
+The shared server collector renews starts once per snapshot tick. Last-viewer
+cleanup sends stop without awaiting the transport; a full queue or partition is
+covered by worker lease expiry. Worker connection teardown drops the collector.
+Events are at most 64 KiB, have at most 64 mounts, and undergo shape/value
+validation. Outgoing queue saturation ends worker collection rather than building
+an unbounded backlog. The next renewal can restart it. Events with old or unknown
+subscription IDs are ignored, and reconnecting creates a fresh subscription and
+baseline. Disconnected hosts get an explicit reason. Absent events remain waiting;
+old timestamped events become stale rather than being labeled fresh by a renewal.
 
-This is an additive negotiated protocol extension, rather than a need for broader
-SSH access or privileges. It needs coordinated server/worker implementation and
-compatibility checks and is intentionally outside this local slice.
+## Values, freshness, and mounts
+
+- CPU uses sysinfo's interval deltas, respecting `MINIMUM_CPU_UPDATE_INTERVAL`.
+  The first read is warmup. Empty CPU lists and invalid percentages are unavailable.
+  CPU busy-time semantics follow the platform's sysinfo backend.
+- Memory and swap use sysinfo's OS definitions in bytes. These differ across OSes;
+  this is not a cross-platform accounting identity. A zero swap total means no
+  configured swap. Memory state is recreated per read so failed capacity refreshes
+  cannot retain an old successful value; missing/invalid totals show a reason.
+- Disk policy is automatic: local storage mount points/volumes, including separate
+  build mounts and read-only system volumes. Removable media, tmpfs, common pseudo
+  filesystems, network filesystems, and FUSE mounts are excluded. Sysinfo also
+  applies backend-specific enumeration filters. Mounts are rediscovered per read,
+  filtered before capacity queries, deduplicated by mount point, sorted, and
+  limited to 64 and the event byte budget. Truncation is labeled. Bind mounts or
+  APFS volumes can share underlying storage; figures must not be summed.
+- Disk used is **total minus available**, labeled "used or reserved" because
+  reserved blocks unavailable to the service user are included. Capacity snapshots
+  are recreated each read, preventing stale cached capacity after refresh failure.
+  An individual failed capacity read reports a reason and retains its mount label.
+- The source timestamp records completion, not delivery or lease renewal. The UI
+  labels samples older than fifteen seconds stale and identifies an ahead source
+  clock. Disconnection clears browser values. There is no persisted history.
+- Metrics reflect OS/process namespaces, not per-session usage or cgroup quotas.
+  Sysinfo refresh methods do not expose every native OS failure as a `Result`;
+  CPU read failures may be indistinguishable from a retained native counter value.
+  Freshness is the sampler timestamp, not proof that each OS counter advanced.
+- Network/FUSE/tmpfs build storage is intentionally excluded in this slice. There
+  is no explicit mount allowlist UI. Kernel filesystem calls can block even on a
+  selected local volume; updates then become stale. No userspace timeout can
+  forcibly cancel a kernel read. Lease expiry still prevents ongoing remote work.
+
+## Focused checks
+
+```sh
+mise exec -- cargo test --locked -p agentworks-runtime
+mise exec -- cargo test --locked -p agentworks host_usage
+mise exec -- cargo test --locked -p agentworks hosting::tests
+node --test web/dashboard-checks/*.test.mjs
+mise exec -- cargo check --locked -p agentworks-runtime --target x86_64-pc-windows-gnu
+```

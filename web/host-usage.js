@@ -2,14 +2,19 @@ import {socketUrl} from './hosting.js';
 
 const bytes = value => `${(value / 1073741824).toFixed(2)} GiB`;
 export function hostUsageLines(sample, now = Date.now()) {
-  if (!sample || sample.reason) return [sample?.reason || 'Waiting for host metrics'];
+  if (!sample || sample.reason) return [`Host metrics unavailable: ${sample?.reason || 'Waiting for host metrics'}`];
   const age = now - sample.sampledAt;
   const lines = [`Sampled ${new Date(sample.sampledAt).toLocaleString()} · ${age > 15000 ? 'stale' : age < 0 ? 'source clock ahead' : 'fresh'} · every 5 seconds`];
-  lines.push(sample.cpu?.percent == null ? `CPU unavailable: ${sample.cpu?.reason || 'No report'}` : `CPU: ${sample.cpu.percent.toFixed(1)}% (interval delta; idle and I/O wait excluded)`);
-  for (const [key, label] of [['memory','Memory'],['swap','Swap'],['disk','Disk /']]) {
+  lines.push(sample.cpu?.percent == null ? `CPU unavailable: ${sample.cpu?.reason || 'No report'}` : `CPU: ${sample.cpu.percent.toFixed(1)}% (interval delta)`);
+  for (const [key, label] of [['memory','Memory'],['swap','Swap']]) {
     const metric = sample[key];
-    lines.push(metric?.total == null ? `${label} unavailable: ${metric?.reason || 'No report'}` : `${label}: ${bytes(metric.used)} / ${bytes(metric.total)} used${key === 'memory' ? ' (total minus available)' : key === 'disk' ? ' (root filesystem only)' : metric.total === 0 ? ' (no swap configured)' : ''}`);
+    lines.push(metric?.total == null ? `${label} unavailable: ${metric?.reason || 'No report'}` : `${label}: ${bytes(metric.used)} / ${bytes(metric.total)} used${key === 'swap' && metric.total === 0 ? ' (no swap configured)' : ''}`);
   }
+  for (const disk of sample.disks || []) {
+    lines.push(disk.total == null ? `Disk ${disk.path} unavailable: ${disk.reason || 'No report'}` : `Disk ${disk.path}: ${bytes(disk.used)} / ${bytes(disk.total)} used or reserved`);
+  }
+  if (!sample.disks?.length) lines.push(`Disk usage unavailable: ${sample.diskReason || 'No storage volumes reported'}`);
+  if (sample.disksTruncated) lines.push('Disk list limited by mount count (64) or event size.');
   return lines;
 }
 

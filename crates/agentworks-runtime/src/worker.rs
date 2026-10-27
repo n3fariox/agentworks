@@ -65,6 +65,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         "sharedModelProviders": true,
         "worktreeCleanup": true,
         "terminal": true,
+        "hostMetrics": if crate::metrics::supported() { 1 } else { 0 },
         "home": home(),
     });
     ws.send(Message::text(hello.to_string()))
@@ -106,6 +107,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
             }
         }
     });
+    let mut metrics = crate::metrics::WorkerMetrics::default();
     let mut workspace_tasks = tokio::task::JoinSet::new();
     let workspace_lock = Arc::new(tokio::sync::Mutex::new(()));
     let mut retiring_terminals = Vec::<crate::terminal::Handle>::new();
@@ -148,6 +150,17 @@ pub async fn run(args: &[String]) -> Result<(), String> {
                 let channel = request["channel"].as_u64().unwrap_or(0) as u32;
                 match request["type"].as_str() {
                     Some("mcpReply") => mcp.reply(&request),
+
+                    Some("metricsStart") if crate::metrics::supported() => {
+                        if let Some(id) = request["subscription"].as_u64() {
+                            metrics.start(id, out.clone());
+                        }
+                    }
+                    Some("metricsStop") => {
+                        if let Some(id) = request["subscription"].as_u64() {
+                            metrics.stop(id);
+                        }
+                    }
                     Some("terminalOpen") => {
                         let cwd = PathBuf::from(request["cwd"].as_str().unwrap_or(""));
                         if terminals.contains_key(&channel) {
@@ -290,6 +303,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
     };
     // Stop the socket writer first: exit reports must not block teardown on
     // a full outgoing queue after the peer has gone away.
+    drop(metrics);
     writer.abort();
     for handle in terminals.values().chain(retiring_terminals.iter()) {
         handle

@@ -18,19 +18,37 @@ use tokio::{
     time::{Instant, MissedTickBehavior},
 };
 
-const SAMPLE_EVERY: Duration = Duration::from_secs(5);
-const LEASE: Duration = Duration::from_secs(30);
-type Cpu = (u64, u64);
-type Sampler = Arc<dyn Fn(&mut Option<Cpu>) -> Value + Send + Sync>;
+const SAMPLE_EVERY: Duration = agentworks_runtime::metrics::EVERY;
+const LEASE: Duration = agentworks_runtime::metrics::LEASE;
+#[derive(Default)]
+struct Sampling {
+    local: agentworks_runtime::metrics::Collector,
+}
+#[derive(Default)]
+struct RemoteSampling {
+    stopped: std::sync::atomic::AtomicBool,
+    subscriptions:
+        Mutex<std::collections::HashMap<String, agentworks_runtime::remote::MetricsSubscription>>,
+}
+impl RemoteSampling {
+    fn stop(&self) {
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.subscriptions.lock().unwrap().clear();
+    }
+}
+type Sampler = Arc<dyn Fn(&mut Option<Sampling>) -> Value + Send + Sync>;
 
 #[derive(Default)]
 pub struct Hub {
     active: Mutex<Option<Active>>,
+    shutdown: tokio_util::sync::CancellationToken,
 }
 struct Active {
     viewers: usize,
     sample: watch::Receiver<Value>,
     task: tokio::task::AbortHandle,
+    stop: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 struct Viewer {
     hub: Arc<Hub>,
@@ -43,13 +61,24 @@ impl Drop for Viewer {
             state.viewers -= 1;
             if state.viewers == 0 {
                 state.task.abort();
+                if let Some(stop) = &state.stop {
+                    stop();
+                }
                 *active = None; // discard the sample and CPU baseline, too
             }
         }
     }
 }
 impl Hub {
-    fn subscribe(self: &Arc<Self>, every: Duration, sampler: Sampler) -> Viewer {
+    pub fn shutdown(&self) {
+        self.shutdown.cancel();
+    }
+    fn subscribe(
+        self: &Arc<Self>,
+        every: Duration,
+        sampler: Sampler,
+        stop: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> Viewer {
         let mut active = self.active.lock().unwrap();
         let state = active.get_or_insert_with(|| {
             let (tx, rx) =
@@ -82,6 +111,7 @@ impl Hub {
                 viewers: 0,
                 sample: rx,
                 task: task.abort_handle(),
+                stop,
             }
         });
         state.viewers += 1;
@@ -95,10 +125,20 @@ impl Hub {
 pub async fn events(State(app): State<App>, ws: WebSocketUpgrade) -> Response {
     ws.max_message_size(128)
         .max_frame_size(128)
-        .on_upgrade(move |socket| stream(app.host_usage, socket))
-}
-async fn stream(hub: Arc<Hub>, socket: WebSocket) {
-    stream_with(hub, socket, SAMPLE_EVERY, LEASE, Arc::new(sample)).await;
+        .on_upgrade(move |socket| {
+            let hosts = app.hosts;
+            let catalog = app.catalog;
+            let remote = Arc::new(RemoteSampling::default());
+            let stopping = remote.clone();
+            stream_with(
+                app.host_usage,
+                socket,
+                SAMPLE_EVERY,
+                LEASE,
+                Arc::new(move |state| sample(&hosts, &catalog, &remote, state)),
+                Some(Arc::new(move || stopping.stop())),
+            )
+        })
 }
 async fn stream_with(
     hub: Arc<Hub>,
@@ -106,8 +146,13 @@ async fn stream_with(
     every: Duration,
     lease: Duration,
     sampler: Sampler,
+    stop: Option<Arc<dyn Fn() + Send + Sync>>,
 ) {
-    let mut viewer = hub.subscribe(every, sampler);
+    if hub.shutdown.is_cancelled() {
+        return;
+    }
+    let shutdown = hub.shutdown.clone();
+    let mut viewer = hub.subscribe(every, sampler, stop);
     let (mut sink, mut source) = socket.split();
     let mut deadline = Instant::now() + lease;
     loop {
@@ -125,6 +170,7 @@ async fn stream_with(
         loop {
             tokio::select! {
                 biased;
+                _ = shutdown.cancelled() => return,
                 _ = tokio::time::sleep_until(deadline) => return,
                 incoming = source.next() => match incoming {
                     Some(Ok(Message::Text(text))) if text == "alive" => deadline = Instant::now() + lease,
@@ -141,153 +187,64 @@ async fn stream_with(
     }
 }
 
-fn unavailable(reason: &str) -> Value {
-    json!({"reason":reason})
-}
-fn cpu_counters(text: &str) -> Option<Cpu> {
-    let mut fields = text.lines().next()?.split_whitespace();
-    if fields.next()? != "cpu" {
-        return None;
+fn sample(
+    hosts: &crate::hosts::Hosts,
+    catalog: &Mutex<crate::catalog::Catalog>,
+    remote: &RemoteSampling,
+    state: &mut Option<Sampling>,
+) -> Value {
+    use agentworks_runtime::metrics::unavailable;
+    let state = state.get_or_insert_with(Sampling::default);
+    let mut samples = serde_json::Map::new();
+    samples.insert("local".into(), state.local.sample());
+    let configured = catalog.lock().unwrap().data.hosts.clone();
+    let mut subscriptions = remote.subscriptions.lock().unwrap();
+    if remote.stopped.load(std::sync::atomic::Ordering::Acquire) {
+        return json!({"hosts":{}});
     }
-    // guest/guest_nice are already included in user/nice; never double count them.
-    let values: Vec<u64> = fields
-        .take(8)
-        .map(str::parse)
-        .collect::<Result<_, _>>()
-        .ok()?;
-    if values.len() != 8 {
-        return None;
-    }
-    let total = values
-        .iter()
-        .try_fold(0u64, |sum, value| sum.checked_add(*value))?;
-    Some((total, values[3].checked_add(values[4])?))
-}
-fn cpu_percent(previous: Option<Cpu>, current: Cpu) -> Option<f64> {
-    let previous = previous?;
-    let total = current.0.checked_sub(previous.0)?;
-    let idle = current.1.checked_sub(previous.1)?;
-    if total == 0 || idle > total {
-        return None;
-    }
-    Some((total - idle) as f64 * 100.0 / total as f64)
-}
-fn memory(text: &str, total_key: &str, free_key: &str) -> Value {
-    let field = |key: &str| -> Option<u64> {
-        text.lines().find_map(|line| {
-            let mut parts = line.split_whitespace();
-            if parts.next()? != key {
-                return None;
+    subscriptions.retain(|id, _| configured.iter().any(|host| host.id == *id));
+    for host in configured {
+        let value = match hosts.live(&host.id) {
+            None => {
+                subscriptions.remove(&host.id);
+                unavailable("Remote host disconnected")
             }
-            let value = parts.next()?.parse::<u64>().ok()?;
-            if parts.next()? != "kB" {
-                return None;
+            Some(live) => {
+                if subscriptions
+                    .get(&host.id)
+                    .is_some_and(|subscription| !subscription.same_connection(&live))
+                {
+                    subscriptions.remove(&host.id); // reset baseline on reconnect
+                }
+                if !subscriptions.contains_key(&host.id) {
+                    match live.metrics() {
+                        Ok(subscription) => {
+                            subscriptions.insert(host.id.clone(), subscription);
+                        }
+                        Err(reason) => {
+                            samples.insert(host.id, unavailable(&reason));
+                            continue;
+                        }
+                    }
+                }
+                match subscriptions[&host.id].latest() {
+                    Ok(value) => value,
+                    Err(reason) => {
+                        subscriptions.remove(&host.id);
+                        unavailable(&reason)
+                    }
+                }
             }
-            value.checked_mul(1024)
-        })
-    };
-    match (field(total_key), field(free_key)) {
-        (Some(total), Some(free)) if free <= total => json!({"used":total-free,"total":total}),
-        _ => unavailable("Required Linux memory counters unavailable or invalid"),
-    }
-}
-#[cfg(target_os = "linux")]
-fn disk() -> Value {
-    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    // SAFETY: NUL-terminated constant path and writable statvfs allocation.
-    if unsafe { libc::statvfs(c"/".as_ptr(), stat.as_mut_ptr()) } != 0 {
-        return unavailable("Root filesystem statistics unavailable");
-    }
-    // SAFETY: statvfs initialized the structure on success.
-    let stat = unsafe { stat.assume_init() };
-    let total = (stat.f_blocks as u64).checked_mul(stat.f_frsize as u64);
-    let free = (stat.f_bfree as u64).checked_mul(stat.f_frsize as u64);
-    match (total, free) {
-        (Some(total), Some(free)) if total > 0 && free <= total => {
-            json!({"path":"/","used":total-free,"total":total})
-        }
-        _ => unavailable("Root filesystem counters invalid"),
-    }
-}
-fn sample(previous: &mut Option<Cpu>) -> Value {
-    #[cfg(target_os = "linux")]
-    {
-        let current = std::fs::read_to_string("/proc/stat")
-            .ok()
-            .and_then(|text| cpu_counters(&text));
-        let cpu = match current {
-            Some(current) => cpu_percent(*previous, current)
-                .map(|percent| json!({"percent":percent}))
-                .unwrap_or_else(|| {
-                    unavailable(if previous.is_none() {
-                        "Warming up: waiting for interval delta"
-                    } else {
-                        "CPU counters reset or interval invalid"
-                    })
-                }),
-            None => unavailable("Linux CPU counters unavailable or invalid"),
         };
-        *previous = current;
-        let mem = std::fs::read_to_string("/proc/meminfo");
-        let (memory, swap) = match mem {
-            Ok(text) => (
-                memory(&text, "MemTotal:", "MemAvailable:"),
-                memory(&text, "SwapTotal:", "SwapFree:"),
-            ),
-            Err(_) => (
-                unavailable("Linux memory counters unavailable"),
-                unavailable("Linux swap counters unavailable"),
-            ),
-        };
-        json!({"sampledAt":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64,"cpu":cpu,"memory":memory,"swap":swap,"disk":disk()})
+        samples.insert(host.id, value);
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = previous;
-        json!({"sampledAt":null,"reason":"Host metrics supported only on Linux"})
-    }
+    json!({"hosts":samples})
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    #[test]
-    fn linux_counter_semantics_and_bad_inputs() {
-        assert_eq!(
-            cpu_counters("cpu 10 20 30 40 50 60 70 80 900 1000\ncpu0 1"),
-            Some((360, 90))
-        );
-        assert_eq!(cpu_counters("cpu 1 x"), None);
-        assert_eq!(cpu_counters("cpu0 1 2 3 4 5 6 7 8"), None);
-        assert_eq!(cpu_percent(Some((100, 40)), (200, 65)), Some(75.0));
-        for (old, new) in [
-            (None, (1, 1)),
-            (Some((10, 5)), (10, 5)),
-            (Some((10, 5)), (9, 5)),
-            (Some((10, 5)), (11, 7)),
-        ] {
-            assert_eq!(cpu_percent(old, new), None);
-        }
-        let mem = "MemTotal: 100 kB\nMemAvailable: 25 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n";
-        assert_eq!(
-            memory(mem, "MemTotal:", "MemAvailable:"),
-            json!({"used":76800,"total":102400})
-        );
-        assert_eq!(
-            memory(mem, "SwapTotal:", "SwapFree:"),
-            json!({"used":0,"total":0})
-        );
-        assert!(
-            memory(
-                "MemTotal: 1 kB\nMemAvailable: 2 kB",
-                "MemTotal:",
-                "MemAvailable:"
-            )["reason"]
-                .is_string()
-        );
-        assert!(memory("", "MemTotal:", "MemAvailable:")["reason"].is_string());
-    }
     #[tokio::test]
     async fn shared_collector_stops_and_discards_baseline_after_last_viewer() {
         let hub = Arc::new(Hub::default());
@@ -296,22 +253,32 @@ mod tests {
         let sampler: Sampler = Arc::new(move |baseline| {
             count.fetch_add(1, Ordering::SeqCst);
             let warm = baseline.is_none();
-            *baseline = Some((1, 1));
+            *baseline = Some(Sampling::default());
             json!({"warm":warm})
         });
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        let mut first = hub.subscribe(Duration::from_secs(3600), sampler.clone());
+        let stops = Arc::new(AtomicUsize::new(0));
+        let stopped = stops.clone();
+        let mut first = hub.subscribe(
+            Duration::from_secs(3600),
+            sampler.clone(),
+            Some(Arc::new(move || {
+                stopped.fetch_add(1, Ordering::SeqCst);
+            })),
+        );
         tokio::time::timeout(Duration::from_secs(2), first.sample.changed())
             .await
             .unwrap()
             .unwrap();
-        let second = hub.subscribe(Duration::from_secs(3600), sampler.clone());
+        let second = hub.subscribe(Duration::from_secs(3600), sampler.clone(), None);
         assert_eq!(*first.sample.borrow(), *second.sample.borrow());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let task = hub.active.lock().unwrap().as_ref().unwrap().task.clone();
         drop(first);
         assert_eq!(hub.active.lock().unwrap().as_ref().unwrap().viewers, 1);
+        assert_eq!(stops.load(Ordering::SeqCst), 0);
         drop(second);
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
         assert!(hub.active.lock().unwrap().is_none());
         tokio::time::timeout(Duration::from_secs(2), async {
             while !task.is_finished() {
@@ -321,7 +288,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        let mut fresh = hub.subscribe(Duration::from_secs(3600), sampler);
+        let mut fresh = hub.subscribe(Duration::from_secs(3600), sampler, None);
         assert!(fresh.sample.borrow()["sampledAt"].is_null());
         tokio::time::timeout(Duration::from_secs(2), fresh.sample.changed())
             .await
@@ -348,6 +315,7 @@ mod tests {
                             Duration::from_millis(10),
                             Duration::from_millis(250),
                             Arc::new(|_| json!({"test":true})),
+                            None,
                         )
                     })
                 }
@@ -407,16 +375,22 @@ mod tests {
         })
         .await
         .unwrap();
+        let (mut third, _) = connect_async(format!("ws://{address}/events"))
+            .await
+            .unwrap();
+        hub.shutdown();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while third
+                .next()
+                .await
+                .is_some_and(|message| message.is_ok_and(|m| !m.is_close()))
+            {}
+            while hub.active.lock().unwrap().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         server.abort();
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn local_linux_sample_has_freshness_and_root_disk_scope() {
-        let value = sample(&mut None);
-        assert!(value["sampledAt"].as_u64().is_some());
-        assert!(value["cpu"]["reason"].is_string());
-        assert_eq!(value["disk"]["path"], "/");
-        assert!(value["memory"]["total"].as_u64().unwrap() > 0);
     }
 }

@@ -429,3 +429,11 @@ coordinator method exclusion, and deliberate reconnect/native resume. It also ru
 in `npm run verify`. Runtime unit tests cover credential/channel/link binding,
 malformed and truncated frames/replies, method/destination restrictions, discovery
 filtering, lost replies/timeouts without replay, correlation and teardown cleanup.
+
+## Dashboard host metrics
+
+Workers may negotiate `hostMetrics: 1` in hello. The server then uses
+`metricsStart` (also lease renewal), `metricsStop`, and `metricsEvent` over the
+existing connection, sharing one collector across dashboard viewers. Older workers
+receive no unknown metrics messages. See [host usage](dashboard-host-usage.md) for
+message shapes, platform scope, mount policy, expiry, and sample freshness.

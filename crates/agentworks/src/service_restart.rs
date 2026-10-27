@@ -145,6 +145,7 @@ fn pending(r: &Record) -> bool {
 }
 /// Fence admission before the process begins graceful adapter shutdown.
 pub fn begin_shutdown(app: &App) {
+    app.host_usage.shutdown();
     app.restart.blocked.store(true, Ordering::SeqCst);
 }
 

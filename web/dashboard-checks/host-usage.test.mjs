@@ -3,17 +3,17 @@ import assert from 'node:assert/strict';
 import {hostUsageLines, startHostUsage} from '../host-usage.js';
 
 test('host usage labels freshness, zero swap, scope, warmup and failures', () => {
-  const sample = {sampledAt:1000,cpu:{reason:'Warming up'},memory:{used:1024,total:2048},swap:{used:0,total:0},disk:{reason:'Denied'}};
+  const sample = {sampledAt:1000,cpu:{reason:'Warming up'},memory:{used:1024,total:2048},swap:{used:0,total:0},disks:[{path:'/build',reason:'Denied'}]};
   assert.match(hostUsageLines(sample, 17000).join('\n'), /stale/);
   assert.match(hostUsageLines(sample, 2000).join('\n'), /fresh/);
   assert.match(hostUsageLines(sample, 0).join('\n'), /source clock ahead/);
   assert.match(hostUsageLines(sample).join('\n'), /CPU unavailable: Warming up/);
   assert.match(hostUsageLines(sample).join('\n'), /no swap configured/);
-  assert.match(hostUsageLines(sample).join('\n'), /Disk \/ unavailable: Denied/);
-  sample.cpu = {percent:12.345}; sample.disk = {path:'/',used:1,total:2};
+  assert.match(hostUsageLines(sample).join('\n'), /Disk \/build unavailable: Denied/);
+  sample.cpu = {percent:12.345}; sample.disks = [{path:'/',used:1,total:2},{path:'/build',used:1,total:2}];
   assert.match(hostUsageLines(sample).join('\n'), /12.3%/);
-  assert.match(hostUsageLines(sample).join('\n'), /root filesystem only/);
-  assert.deepEqual(hostUsageLines({reason:'Linux only'}), ['Linux only']);
+  assert.match(hostUsageLines(sample).join('\n'), /Disk \/build:/);
+  assert.deepEqual(hostUsageLines({reason:'Linux only'}), ['Host metrics unavailable: Linux only']);
 });
 
 function fixture(hidden = false) {

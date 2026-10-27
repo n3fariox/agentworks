@@ -411,6 +411,42 @@ impl Drop for ConnectionGuard {
     }
 }
 
+/// Dropping the last dashboard's server collector sends explicit stop. A full
+/// transport queue cannot block cancellation; the worker lease is the fallback.
+pub struct MetricsSubscription {
+    live: Arc<Live>,
+    id: u64,
+    sample: tokio::sync::watch::Receiver<Value>,
+}
+impl MetricsSubscription {
+    pub fn same_connection(&self, live: &Arc<Live>) -> bool {
+        Arc::ptr_eq(&self.live, live)
+    }
+    pub fn latest(&self) -> Result<Value, String> {
+        if self.live.closed.load(Ordering::Acquire) || self.sample.has_changed().is_err() {
+            return Err("Remote metrics connection closed".into());
+        }
+        self.live
+            .out
+            .try_send(Message::text(
+                json!({"type":"metricsStart","subscription":self.id}).to_string(),
+            ))
+            .map_err(|_| "Remote metrics lease could not be renewed")?;
+        Ok(self.sample.borrow().clone())
+    }
+}
+impl Drop for MetricsSubscription {
+    fn drop(&mut self) {
+        let mut metrics = self.live.metrics.lock().unwrap();
+        if metrics.as_ref().is_some_and(|(id, _)| *id == self.id) {
+            *metrics = None;
+            let _ = self.live.out.try_send(Message::text(
+                json!({"type":"metricsStop","subscription":self.id}).to_string(),
+            ));
+        }
+    }
+}
+
 /// Generous limits: one ACP line, such as a replayed transcript or an image,
 /// travels as one frame.
 pub fn ws_config() -> WebSocketConfig {
@@ -433,6 +469,8 @@ pub struct Live {
     worker: Value,
     mcp: Mutex<HashMap<u32, (std::net::SocketAddr, String)>>,
     mcp_slots: Arc<tokio::sync::Semaphore>,
+
+    metrics: Mutex<Option<(u64, tokio::sync::watch::Sender<Value>)>>,
 }
 
 impl Live {
@@ -453,6 +491,8 @@ impl Live {
             worker,
             mcp: Default::default(),
             mcp_slots: Arc::new(tokio::sync::Semaphore::new(16)),
+
+            metrics: Default::default(),
         }
     }
     pub fn has_provider(&self, provider: &str) -> bool {
@@ -513,6 +553,19 @@ impl Live {
                             let _ = out.try_send(Message::text(json!({"type":"mcpReply","request":value["request"],"result":result}).to_string()));
                         });
                     }
+                    Some("metricsEvent") => {
+                        if text.len() > crate::metrics::MAX_EVENT_BYTES
+                            || !crate::metrics::valid_sample(&value["sample"])
+                        {
+                            return;
+                        }
+                        let metrics = self.metrics.lock().unwrap();
+                        if let Some((id, tx)) = metrics.as_ref() {
+                            if value["subscription"].as_u64() == Some(*id) {
+                                tx.send_replace(value["sample"].clone());
+                            }
+                        }
+                    }
                     Some("terminalFrame") => {
                         let channel = value["channel"].as_u64().unwrap_or(0) as u32;
                         if let Ok(mut frame) =
@@ -565,6 +618,8 @@ impl Live {
     fn close(&self, reason: &str) {
         self.closed.store(true, Ordering::Release);
         self.mcp.lock().unwrap().clear();
+
+        self.metrics.lock().unwrap().take();
         for (_, tx) in self.channels.lock().unwrap().drain() {
             let _ = tx.unbounded_send(Err(io::Error::other(reason.to_string())));
         }
@@ -579,6 +634,33 @@ impl Live {
         for (_, tx) in self.requests.lock().unwrap().drain() {
             let _ = tx.send(Err(reason.to_string()));
         }
+    }
+    /// One server collector owns this subscription, regardless of browser count.
+    pub fn metrics(self: &Arc<Self>) -> Result<MetricsSubscription, String> {
+        if self.worker["hostMetrics"] != 1 {
+            return Err("Update this host's worker to enable host metrics".into());
+        }
+        let mut metrics = self.metrics.lock().unwrap();
+        if self.closed.load(Ordering::Acquire) {
+            return Err("Host disconnected".into());
+        }
+        if metrics.is_some() {
+            return Err("Previous metrics subscription is stopping".into());
+        }
+        let id = self.next_request.fetch_add(1, Ordering::Relaxed) + 1;
+        let (tx, sample) =
+            tokio::sync::watch::channel(crate::metrics::unavailable("Waiting for remote metrics"));
+        self.out
+            .try_send(Message::text(
+                json!({"type":"metricsStart","subscription":id}).to_string(),
+            ))
+            .map_err(|_| "Remote metrics transport unavailable")?;
+        *metrics = Some((id, tx));
+        Ok(MetricsSubscription {
+            live: self.clone(),
+            id,
+            sample,
+        })
     }
     pub fn home_terminal(self: &Arc<Self>) -> Result<crate::terminal::Handle, String> {
         let home = self.worker["home"]
@@ -934,6 +1016,7 @@ fn check_hello(hello: &Value) -> Result<Value, String> {
         "sharedModelProviders": hello["sharedModelProviders"] == true,
         "worktreeCleanup": hello["worktreeCleanup"] == true,
         "terminal": hello["terminal"].as_bool().unwrap_or(false),
+        "hostMetrics": if hello["hostMetrics"].as_u64() == Some(1) { 1 } else { 0 },
         "home": text("home", 4096),
     }))
 }
@@ -1024,6 +1107,68 @@ mod tests {
         live.close("disconnected");
         guard.bind_mcp("127.0.0.1:1".parse().unwrap(), "stale".into());
         assert!(live.mcp.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn metrics_capability_events_stop_and_disconnect_are_fenced() {
+        let (out, mut sent) = mpsc::channel(16);
+        let old = Arc::new(Live::new(out.clone(), json!({})));
+        assert!(old.metrics().is_err());
+        assert!(sent.try_recv().is_err());
+        let hello =
+            check_hello(&json!({"type":"hello","protocol":PROTOCOL,"hostMetrics":1})).unwrap();
+        assert_eq!(hello["hostMetrics"], 1);
+        let live = Arc::new(Live::new(out, hello));
+        let subscription = live.metrics().unwrap();
+        let start: Value =
+            serde_json::from_str(sent.recv().await.unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(start["type"], "metricsStart");
+        let id = start["subscription"].as_u64().unwrap();
+        assert!(live.metrics().is_err()); // a second collector cannot start
+        let (events, mut incoming) = mpsc::channel(8);
+        let mut worker = crate::metrics::WorkerMetrics::default();
+        worker.start(id, events);
+        let event = tokio::time::timeout(Duration::from_secs(2), incoming.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        live.receive(event);
+        let sample = subscription.latest().unwrap();
+        assert!(crate::metrics::valid_sample(&sample));
+        assert_eq!(
+            sample["cpu"]["reason"],
+            "Warming up: waiting for interval delta"
+        );
+        let renewed: Value =
+            serde_json::from_str(sent.recv().await.unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(renewed["subscription"], id);
+        live.receive(Message::text(
+            json!({"type":"metricsEvent","subscription":id+1,"sample":{"reason":"late"}})
+                .to_string(),
+        ));
+        assert_eq!(*subscription.sample.borrow(), sample);
+        live.receive(Message::text(
+            json!({"type":"metricsEvent","subscription":id,"sample":{"cpu":{"percent":"bad"}}})
+                .to_string(),
+        ));
+        assert_eq!(*subscription.sample.borrow(), sample);
+        drop(subscription);
+        let stop: Value =
+            serde_json::from_str(sent.recv().await.unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(stop, json!({"type":"metricsStop","subscription":id}));
+        worker.stop(id);
+        let next = live.metrics().unwrap();
+        assert_ne!(next.id, id);
+        let replacement = Arc::new(Live::new(live.out.clone(), json!({"hostMetrics":1})));
+        assert!(!next.same_connection(&replacement));
+        live.receive(Message::text(
+            json!({"type":"metricsEvent","subscription":id,"sample":{"reason":"late after stop"}})
+                .to_string(),
+        ));
+        assert_eq!(next.sample.borrow()["reason"], "Waiting for remote metrics");
+        live.close("disconnected");
+        assert!(next.latest().is_err());
+        assert!(live.metrics().is_err());
     }
 
     #[tokio::test]

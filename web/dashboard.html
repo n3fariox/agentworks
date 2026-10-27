@@ -11,7 +11,7 @@
   <main id="content" tabindex="-1">
     <div class="page-heading"><div><p class="eyebrow">WORKSPACE OPERATIONS</p><h1>Operations dashboard</h1><p>Hosts, projects, and reported provider usage in one place.</p></div><button id="refresh" class="primary" type="button">Refresh dashboard</button></div>
     <p id="refresh-status" role="status" aria-live="polite">Loading dashboard…</p>
-    <p class="note">Session and quota snapshots: refresh to update. Local Linux host metrics update every 5 seconds while this dashboard is visible; all viewers share one collector. Session counts and lists include only sessions actively taking a turn.</p>
+    <p class="note">Session and quota snapshots: refresh to update. Local and capable remote host metrics update every 5 seconds while this dashboard is visible; all viewers share one collector per host. Disk usage covers local storage mounts. Session counts and lists include only sessions actively taking a turn.</p>
     <div id="errors" role="alert"></div>
     <section aria-labelledby="hosts-heading"><div class="section-heading"><h2 id="hosts-heading">Hosts</h2><p>Connection state, host usage, and active turns</p></div><div id="hosts" class="cards"><p>Loading hosts…</p></div></section>
     <section aria-labelledby="projects-heading"><div class="section-heading"><h2 id="projects-heading">Projects &amp; active turns</h2><p>Sessions currently taking a turn</p></div><div id="projects"><p>Loading projects…</p></div></section>

@@ -62,9 +62,8 @@ async function read(path) {
 let hostSample = null, hostMetricStatus = 'Waiting for host metrics';
 function renderHostMetrics() {
   for (const root of document.querySelectorAll('[data-host-metrics]')) {
-    const lines = root.dataset.hostMetrics === 'local'
-      ? (hostSample ? hostUsageLines(hostSample) : [hostMetricStatus])
-      : ['Host metrics unavailable: remote worker protocol has no metrics capability.'];
+    const sample = hostSample?.hosts?.[root.dataset.hostMetrics];
+    const lines = sample ? hostUsageLines(sample) : [hostSample?.reason || hostMetricStatus];
     root.replaceChildren(...lines.map(text => el('p', text, 'host-meta')));
   }
 }
