@@ -29,7 +29,7 @@ async function sendDisplayMessage(page){
 }
 async function setPreference(page,key,value){
   await page.locator('#nav-settings').click();await page.locator('#settings-tab-display').click();
-  await page.getByLabel({wrap:'Long lines in code blocks',highlight:'Syntax highlighting',prose:'Prose in unlabeled code blocks'}[key]).selectOption(value);
+  await page.getByLabel({theme:'Syntax color theme',wrap:'Long lines in code blocks',highlight:'Syntax highlighting',prose:'Prose in unlabeled code blocks'}[key]).selectOption(value);
   await expect(page.locator('#display-preferences-note')).toContainText('saved in this browser');
   await page.locator('#dismiss-settings').click();
 }
@@ -108,6 +108,7 @@ test('desktop: highlighting, exact raw copy, prose toggle, persisted preferences
   await setPreference(page,'highlight','off');
   await expect(rust.locator('[class^=tok-]')).toHaveCount(0);
   expect(await rust.locator('pre code').evaluate(n=>n.textContent)).toBe(rustRaw);
+  await setPreference(page,'theme','monokai');
   await setPreference(page,'wrap','wrap');
   expect(await pre.evaluate(n=>getComputedStyle(n).whiteSpace)).toBe('pre-wrap');
   expect(await pre.evaluate(n=>n.scrollWidth<=n.clientWidth)).toBe(true);
@@ -116,6 +117,7 @@ test('desktop: highlighting, exact raw copy, prose toggle, persisted preferences
   await page.reload();await expect(page.locator('#session-state')).toHaveText('Ready');
   await expect(blocks(page)).toHaveCount(3);
   expect(await page.evaluate(()=>document.body.dataset.codeWrap)).toBe('wrap');
+  await expect(page.locator('body')).toHaveAttribute('data-code-theme','monokai');
   await expect(blocks(page).nth(0).locator('[class^=tok-]')).toHaveCount(0);
   await expect(blocks(page).nth(1)).not.toHaveClass(/plain/);
   await page.locator('#nav-settings').click();await page.locator('#settings-tab-display').click();

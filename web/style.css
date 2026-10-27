@@ -27,14 +27,24 @@
 #side-diff label>select,#side-diff label>input{margin-top:6px}
 .diff-layout{display:grid;grid-template-columns:minmax(0,1fr);gap:10px}
 #diff-file-label{min-width:0;margin:0}
-#diff-files{width:100%;height:140px;max-width:100%;font-family:monospace}
+#diff-file-label h3{font-size:12px;font-weight:500;color:var(--muted);margin:0 0 8px}
+#diff-files{max-height:280px;overflow:auto;font:12px/1.6 monospace;border:1px solid var(--border);border-radius:6px;padding:6px;background:#101216}
+#diff-files ul{list-style:none;margin:0;padding:0 0 0 14px}
+#diff-files>ul{padding:0}
+#diff-files details{margin:0}
+#diff-files summary{padding:5px 4px;overflow-wrap:anywhere}
+#diff-files button{display:block;width:100%;padding:5px 8px;text-align:left;font:inherit;border:0;border-radius:4px;background:transparent;overflow-wrap:anywhere;white-space:pre-wrap}
+#diff-files button:hover{background:#24262d}
+#diff-files button[aria-current=true]{background:#2a2539;color:#d2c5f2}
+#diff-files :is(button,summary):focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 .diff-patch-area{min-width:0}
 #diff-patch,#diff-other{white-space:pre;overflow:auto;max-width:100%;font:12px/1.6 monospace;tab-size:4;padding:12px;background:#101216;border:1px solid #333;border-radius:6px}
 #diff-patch:empty{display:none}
 #diff-patch-note{font-size:12px;overflow-wrap:anywhere}
 #side-diff details{margin-top:12px}
 #side-diff summary{cursor:pointer;font-size:12px}
-@media(max-width:650px){#diff-files{height:120px}}
+@media(min-width:1000px){.diff-layout{grid-template-columns:minmax(180px,240px) minmax(0,1fr);align-items:start}#diff-files{max-height:60dvh;position:sticky;top:0}}
+@media(max-width:650px){#diff-files{max-height:200px}#diff-files :is(button,summary){min-height:44px}}
 .palette-entry{margin-bottom:0}
 #palette-search{font-size:20px}
 #palette-dialog{width:560px;padding:26px 0 20px;overflow:hidden}
@@ -80,10 +90,10 @@ body[data-code-wrap=scroll] .tool-card pre,body[data-code-wrap=scroll] .approval
 .code-block.plain pre{white-space:pre-wrap;overflow-wrap:anywhere;font-family:inherit}
 .code-block.plain pre code{font-family:inherit;font-size:13px;line-height:1.8;color:#cbd0d8}
 .code-block.plain .code-language::after{content:' · plain text'}
-.tok-keyword{color:#c4a7ff}
-.tok-string{color:#9fd3b1}
-.tok-number{color:#f0c38e}
-.tok-comment{color:#7d8591;font-style:italic}
+.tok-keyword{color:var(--syntax-keyword,#c4a7ff)}
+.tok-string{color:var(--syntax-string,#9fd3b1)}
+.tok-number{color:var(--syntax-number,#f0c38e)}
+.tok-comment{color:var(--syntax-comment,#7d8591);font-style:italic}
 .display-preferences{border:1px solid var(--border);border-radius:8px;padding:10px 14px 4px;margin:16px 0 0;min-width:0}
 .display-preferences legend{padding:0 6px;font-size:12px;color:var(--muted)}
 .display-field{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,auto);align-items:center;gap:6px 12px;margin:6px 0}
@@ -320,13 +330,15 @@ dialog.image-viewer{width:96vw;max-width:96vw;height:92dvh;max-height:92dvh;padd
 /* Source/diff gutters are presentation only; Copy reads captured raw text. */
 .source-line{display:block;position:relative;padding-left:4.5em;min-height:1.6em}
 .source-line::before{content:attr(data-line);position:absolute;left:0;width:3.5em;text-align:right;color:#a0a8b5;user-select:none;font-style:normal;font-weight:normal;white-space:pre}
-.diff-line{padding-left:11em;min-width:max-content}
-.diff-line::before{width:9.5em}
+.diff-line{padding-left:7em;min-width:max-content}
+.diff-line::before{width:6em}
+.diff-hunk,.diff-meta{padding-left:1em}
+.diff-hunk::before,.diff-meta::before{content:none}
 .diff-add{background:#18382a;color:#c6efd5}
 .diff-remove{background:#41252d;color:#ffd0d4}
 .diff-hunk{color:#b4c9ef;background:#1c283b}
 .diff-meta{color:#aab4c5}
-.diff-line .tok-comment{color:#b0bac9}
+.diff-line .tok-comment{color:var(--syntax-comment,#b0bac9)}
 #diff-patch .source-line{line-height:1.6}
 #diff-patch{padding:8px 0}
 
@@ -471,3 +483,13 @@ dialog.image-viewer{width:96vw;max-width:96vw;height:92dvh;max-height:92dvh;padd
 
 .model-provider-auth-status[data-signed-in="true"]{color:var(--green)}
 .model-provider-auth-status[data-signed-in="false"]{color:#ddb878}
+
+/* Syntax palettes are independent of the application chrome and diff status colors. */
+body[data-code-theme=monokai]{--syntax-keyword:#f92672;--syntax-string:#e6db74;--syntax-number:#ae81ff;--syntax-comment:#a6a28c;--syntax-bg:#272822;--syntax-text:#f8f8f2}
+body[data-code-theme=github-light]{--syntax-keyword:#cf222e;--syntax-string:#0a3069;--syntax-number:#0550ae;--syntax-comment:#6e7781;--syntax-bg:#ffffff;--syntax-text:#24292f}
+body[data-code-theme]:not([data-code-theme=default]) .code-block:not(.plain) pre{background:var(--syntax-bg);color:var(--syntax-text)}
+body[data-code-theme=github-light] .diff-add{background:#dafbe1;color:#116329}
+body[data-code-theme=github-light] .diff-remove{background:#ffebe9;color:#82071e}
+body[data-code-theme=github-light] .diff-hunk{background:#ddf4ff;color:#0550ae}
+body[data-code-theme=github-light] .diff-meta{color:#57606a}
+body[data-code-theme=github-light] .source-line::before{color:#6e7781}

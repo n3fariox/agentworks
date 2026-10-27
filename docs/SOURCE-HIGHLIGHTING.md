@@ -8,6 +8,8 @@ Source rows have line numbers; unified patches have old/new line numbers, hunk
 markers and green/red addition/removal backgrounds independent of syntax colors.
 Turning syntax highlighting off retains patch colors and gutters.
 
+Settings → Display → **Syntax color theme** selects Default, Monokai or GitHub Light. The palette applies immediately to chat code blocks, source previews and diffs, and is remembered in this browser. It does not change the application chrome. Diff metadata and hunk headings span the gutter; only patch body rows reserve space for old/new line numbers.
+
 The tokenizer handles comments, strings, numbers and keywords, not full language
 semantics. Each side of each diff hunk is tokenized separately, preserving multiline
 comments within the available context. Omitted context cannot establish lexer state.

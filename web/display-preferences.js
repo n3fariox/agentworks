@@ -4,10 +4,11 @@ import {localState as localStorage} from './hosting.js';
 const KEY='agentworks-display-preferences';
 const CHOICES={
   wrap:[['auto','Wrap on narrow screens'],['wrap','Always wrap'],['scroll','Never wrap (scroll)']],
+  theme:[['default','Default'],['monokai','Monokai'],['github-light','GitHub Light']],
   highlight:[['on','Highlight supported languages'],['off','Off (plain monospace)']],
   prose:[['detect','Show as plain text'],['code','Keep as code']],
 };
-const LABELS={wrap:'Long lines in code blocks',highlight:'Syntax highlighting',prose:'Prose in unlabeled code blocks'};
+const LABELS={wrap:'Long lines in code blocks',highlight:'Syntax highlighting',theme:'Syntax color theme',prose:'Prose in unlabeled code blocks'};
 const HIGHLIGHT_LIMIT=60000,TOKEN_LIMIT=20000;
 
 export function loadDisplayPreferences(storage=localStorage){
@@ -116,7 +117,7 @@ export function renderLines(code,raw,language,{diff=false,highlight=true}={}){
 export function setupDisplayPreferences({root=document,storage=localStorage}={}){
   let preferences=loadDisplayPreferences(storage);
   const overrides=new Map();
-  const apply=()=>{root.body.dataset.codeWrap=preferences.wrap;for(const block of root.querySelectorAll('.code-block'))renderBlock(block);};
+  const apply=()=>{root.body.dataset.codeWrap=preferences.wrap;root.body.dataset.codeTheme=preferences.theme;for(const block of root.querySelectorAll('.code-block'))renderBlock(block);};
 
   function renderBlock(block){
     const {raw,language,lines,diff}=block.codeState,code=block.querySelector('pre > code'),toggle=block.querySelector('.code-mode');

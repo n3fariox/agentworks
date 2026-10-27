@@ -96,3 +96,9 @@ body[data-workspace-view=host-terminal] .workspace-context{display:none}
 .automation-days input{width:auto;margin:0;accent-color:var(--accent)}
 .run-status.missed,.run-status.skipped{background:#2b2c31;color:#b9bcc6}
 @media (max-width:650px){.automation-schedule{padding-left:0}}
+
+/* Diff needs the whole session canvas, not the narrow file-browser column.
+   Keep the chat mounted so closing the view restores draft and scroll state. */
+#workspace-session-area:has(#side-panel[data-tab=diff]:not([hidden])) #workspace-chat-column{display:none}
+#side-panel[data-tab=diff]{width:100%;min-width:0;max-width:none;flex:1;border-left:0}
+#side-panel[data-tab=diff] #side-panel-resize{display:none}

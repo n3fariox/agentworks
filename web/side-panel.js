@@ -14,6 +14,7 @@ export function setupSidePanel({panel,tabs,triggers={},close,renderers,getActive
   const save=()=>localStorage.setItem(KEY,JSON.stringify({open:state.open&&!phone(),tab:state.tab}));
   function render(){
     panel.hidden=!state.open;
+    panel.dataset.tab=state.tab;
     for(const [name,button] of Object.entries(tabs)){
       const selected=state.open&&name===state.tab;
       button.setAttribute('aria-selected',String(selected));button.tabIndex=selected?0:-1;
