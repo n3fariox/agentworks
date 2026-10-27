@@ -105,13 +105,13 @@ to one live link and are not durable session IDs or prompt idempotency keys.
 
 | Direction | Type | Fields and meaning |
 | --- | --- | --- |
-| Worker → server | `hello` | `protocol`: integer; `version`: application version string; `platform`, `hostname`: strings; `providers`: provider-name array; `tools`: discovered CLI paths; `workspace`: worker-side worktree support; `worktreeCleanup`: inspection, removal and restore support; optional `mcpRelay`: worker-loopback `endpoint` and absolute native facade `command` |
+| Worker → server | `hello` | `protocol`: integer; `version`: application version string; `platform`, `hostname`: strings; `providers`: provider-name array; `tools`: discovered CLI paths; `workspace`: worker-side worktree support; `worktreeCleanup`: inspection, removal and restore support; `directories`: folder browsing and creation; optional `mcpRelay`: worker-loopback `endpoint` and absolute native facade `command` |
 | Server → worker | `welcome` | `protocol`: matching integer; `hostId`: stable catalog UUID used for ownership |
 | Worker → server | `ready` | `protocol`: matching integer; worker has acquired ownership |
 | Server → worker | `error` | `message`: handshake rejection diagnostic |
 | Server → worker | `checkDir` | `request`: request ID; `path`: remote directory, optionally beginning with `~/` |
 | Worker → server | `reply` | Same `request`; canonical `path`, workspace `result`, or `error` string |
-| Server → worker | `workspace` | `request`, `operation` (`list`, `prepare`, `inspectWorktree`, `removeWorktree`, `restoreWorktree`), `cwd`, `roots`; preparation also includes `workspace` and project `policy`; lifecycle operations carry server-recorded `owned` metadata, with `fingerprint` and `force` for removal |
+| Server → worker | `workspace` | `request`, `operation` (`list`, `prepare`, `inspectWorktree`, `removeWorktree`, `restoreWorktree`, `browseDirectories`, `createDirectory`), `cwd`, `roots`; folder operations carry `path`, `hidden` or `name` ([project directories](PROJECT-DIRECTORIES.md)); preparation also includes `workspace` and project `policy`; lifecycle operations carry server-recorded `owned` metadata, with `fingerprint` and `force` for removal |
 | Server → worker | `spawn` | `channel`: channel ID; `provider`: one of `demo`, `claude`, `codex`, `opencode`; `cwd`: remote path; `hostProfile`: boolean passed to adapter configuration |
 | Server → worker | `kill` | `channel`: stop this adapter's process group |
 | Worker → server | `exit` | `channel`; `message`: startup/exit diagnostic; ends that channel |
@@ -346,7 +346,8 @@ names. The optional `workspace: true` hello field gates worktree requests; for o
 workers, the server rejects worktree requests with an update diagnostic.
 The optional `tools` map reports native CLI paths, including bundled Codex/Claude
 CLIs. `worktreeCleanup: true` gates inspection, removal and restore on workers that
-support the full lifecycle. An unrecognized request can time out.
+support the full lifecycle. `directories: true` gates `browseDirectories` and
+`createDirectory`; older workers get an update diagnostic. An unrecognized request can time out.
 
 Protocol 2 is intentionally rejected because it does not establish the protocol-3
 ownership-ready contract. Upgrade both binaries within a coordinated maintenance

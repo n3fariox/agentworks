@@ -38,6 +38,7 @@ try{
   await run('node',['scripts/progress-smoke.mjs']);
   await run('node',['scripts/tool-bodies-smoke.mjs']);
   await run('node',['scripts/projects-smoke.mjs']);
+  await run('node',['scripts/directories-smoke.mjs']);
   await run('node',['scripts/settings-smoke.mjs']);
   await run('node',['scripts/import-smoke.mjs']);
   await run('node',['scripts/workspace-smoke.mjs']);

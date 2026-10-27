@@ -35,6 +35,7 @@
     "test:acp-lifecycle": "node scripts/acp-lifecycle-smoke.mjs",
     "test:lifecycle": "node scripts/lifecycle-smoke.mjs",
     "test:project-lifecycle": "node scripts/project-lifecycle-smoke.mjs",
+    "test:directories": "node scripts/directories-smoke.mjs && playwright test tests/directory-picker.spec.mjs",
     "test:diff": "playwright test tests/diff.spec.mjs",
     "test:fork-ui": "playwright test tests/fork.spec.mjs",
     "test:palettes": "playwright test tests/palettes.spec.mjs",

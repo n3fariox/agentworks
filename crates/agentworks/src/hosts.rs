@@ -95,19 +95,33 @@ pub(crate) async fn session_directory(
     host_id: &str,
     req: &crate::Create,
 ) -> Result<std::path::PathBuf, (StatusCode, String)> {
-    let roots = host_roots(app, host_id)?;
-    let live = app.hosts.live(host_id).ok_or_else(|| {
-        fail(
-            StatusCode::CONFLICT,
-            "That host is not connected. Reconnect it from the Hosts list.",
-        )
-    })?;
+    host_roots(app, host_id)?;
+    let live = connected(app, host_id)?;
     if !live.has_provider(&req.provider) {
         return Err(fail(
             StatusCode::CONFLICT,
             format!("{} is not available on that host.", req.provider),
         ));
     }
+    remote_directory(app, host_id, &req.cwd).await
+}
+fn connected(app: &App, host_id: &str) -> Result<std::sync::Arc<Live>, (StatusCode, String)> {
+    app.hosts.live(host_id).ok_or_else(|| {
+        fail(
+            StatusCode::CONFLICT,
+            "That host is not connected. Reconnect it from the Hosts list.",
+        )
+    })
+}
+/// Resolves an existing directory on a connected host inside one of the
+/// host's working directories, returning the host's canonical path.
+pub(crate) async fn remote_directory(
+    app: &App,
+    host_id: &str,
+    path: &str,
+) -> Result<std::path::PathBuf, (StatusCode, String)> {
+    let roots = host_roots(app, host_id)?;
+    let live = connected(app, host_id)?;
     if roots.is_empty() {
         return Err(fail(
             StatusCode::CONFLICT,
@@ -115,7 +129,7 @@ pub(crate) async fn session_directory(
         ));
     }
     let cwd = live
-        .check_dir(&req.cwd)
+        .check_dir(path)
         .await
         .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
     let cwd = std::path::PathBuf::from(cwd);
@@ -130,6 +144,25 @@ pub(crate) async fn session_directory(
         StatusCode::FORBIDDEN,
         "That directory is outside this host's working directories.",
     ))
+}
+/// Browse or create directories on a host; the worker enforces the host's roots.
+pub(crate) async fn directories(
+    app: &App,
+    host_id: &str,
+    mut request: Value,
+) -> Result<Value, (StatusCode, String)> {
+    let roots = host_roots(app, host_id)?;
+    let live = connected(app, host_id)?;
+    if live.worker()["directories"] != true {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "Update the worker on this host to browse and create folders there.",
+        ));
+    }
+    request["roots"] = json!(roots);
+    live.workspace(request)
+        .await
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))
 }
 
 /// Validate files and provider availability on the machine owning the path.

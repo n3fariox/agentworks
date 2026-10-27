@@ -64,6 +64,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         "modelProviders": true,
         "sharedModelProviders": true,
         "worktreeCleanup": true,
+        "directories": true,
         "terminal": true,
         "hostMetrics": if crate::metrics::supported() { 1 } else { 0 },
         "home": home(),
@@ -651,6 +652,34 @@ async fn workspace_request(request: &Value) -> Result<Value, String> {
             .map_err(|e| e.1)?;
             Ok(json!({"cwd":cwd,"owned":owned}))
         }
+        Some("browseDirectories" | "createDirectory") => {
+            // `~` is the worker's home; any other path is resolved and contained by
+            // the shared directory policy, which does not reveal why a path failed.
+            let path = |key: &str| {
+                request[key]
+                    .as_str()
+                    .filter(|p| !p.is_empty())
+                    .map(|p| check_dir(p).unwrap_or_else(|_| p.into()))
+            };
+            let (parent, name) = (path("path"), request["name"].as_str().map(String::from));
+            let hidden = request["hidden"].as_bool().unwrap_or(false);
+            let create = request["operation"] == "createDirectory";
+            tokio::task::spawn_blocking(move || {
+                if create {
+                    crate::directories::create(
+                        &context.roots,
+                        parent.as_deref().unwrap_or(""),
+                        name.as_deref().unwrap_or(""),
+                    )
+                    .map(|path| json!({"path":path}))
+                } else {
+                    crate::directories::browse(&context.roots, parent.as_deref(), hidden)
+                }
+            })
+            .await
+            .map_err(|_| "Directory operation failed".to_string())?
+            .map_err(|e| e.1)
+        }
         _ => Err("Unsupported workspace operation".into()),
     }
 }
@@ -814,6 +843,48 @@ mod tests {
         let providers = available_providers(&env);
         assert!(providers.contains(&"claude-rust"));
         assert!(!providers.contains(&"claude"));
+    }
+    #[tokio::test]
+    async fn directory_operations_stay_inside_host_roots() {
+        let dir =
+            std::env::temp_dir().join(format!("agentworks-worker-dirs-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("root")).unwrap();
+        std::fs::create_dir_all(dir.join("outside")).unwrap();
+        let dir = std::fs::canonicalize(dir).unwrap();
+        let root = dir.join("root");
+        let roots = json!([root]);
+        let created = workspace_request(
+            &json!({"operation":"createDirectory","roots":roots,"path":root,"name":"thing"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created["path"], json!(root.join("thing")));
+        let listed =
+            workspace_request(&json!({"operation":"browseDirectories","roots":roots,"path":root}))
+                .await
+                .unwrap();
+        assert_eq!(listed["entries"][0]["name"], "thing");
+        let top = workspace_request(&json!({"operation":"browseDirectories","roots":roots}))
+            .await
+            .unwrap();
+        assert_eq!(top["entries"][0]["path"], json!(root));
+        let outside = dir.join("outside");
+        assert!(
+            workspace_request(
+                &json!({"operation":"createDirectory","roots":roots,"path":outside,"name":"x"})
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            workspace_request(
+                &json!({"operation":"browseDirectories","roots":roots,"path":outside})
+            )
+            .await
+            .is_err()
+        );
+        assert!(!outside.join("x").exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[tokio::test]
     async fn replacement_waits_for_ownership_and_other_hosts_remain_independent() {

@@ -2,6 +2,7 @@
 //! Callers supply filesystem policy and durable mutation reservations through `worktrees::Context`.
 pub mod cleanup;
 pub mod diff;
+pub mod directories;
 pub mod git;
 pub mod worktrees;
 

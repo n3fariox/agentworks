@@ -20,6 +20,14 @@ pub struct Project {
     pub default_communication_role: Option<crate::communication::Role>,
     #[serde(default, rename = "locationIds")]
     pub location_ids: Vec<String>,
+    /// Where new sessions in this project start unless the request names a
+    /// directory. Set only explicitly; grouping never depends on it.
+    #[serde(
+        default,
+        rename = "defaultLocationId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub default_location_id: Option<String>,
     #[serde(default)]
     pub archived: bool,
 }
@@ -145,6 +153,7 @@ impl Catalog {
                 id: Uuid::new_v4().to_string(),
                 name: name.into(),
                 location_ids: Vec::new(),
+                default_location_id: None,
                 workspace_policy: Default::default(),
                 archived: false,
                 default_communication_role: role.flatten(),
@@ -191,6 +200,43 @@ impl Catalog {
         data.projects.retain(|p| p.id != id);
         self.save(data)
             .map_err(|_| "Could not save project metadata".into())
+    }
+    /// Sets or clears the project's default location, recording it as one of
+    /// the project's locations. `None` leaves the location list untouched.
+    pub fn set_default_location(
+        &mut self,
+        project_id: &str,
+        location_id: Option<&str>,
+    ) -> Result<Project, String> {
+        let mut data = self.data.clone();
+        if location_id.is_some_and(|id| !data.locations.iter().any(|l| l.id == id)) {
+            return Err("Directory not found".into());
+        }
+        let project = data
+            .projects
+            .iter_mut()
+            .find(|p| p.id == project_id)
+            .ok_or("Project not found")?;
+        project.default_location_id = location_id.map(String::from);
+        if let Some(id) = location_id
+            && !project.location_ids.iter().any(|l| l == id)
+        {
+            project.location_ids.push(id.into());
+        }
+        let project = project.clone();
+        self.save(data)
+            .map_err(|_| "Could not save project directory")?;
+        Ok(project)
+    }
+    /// The project's default location, if one is set.
+    pub fn default_location(&self, project_id: Option<&str>) -> Option<Location> {
+        let project = self
+            .data
+            .projects
+            .iter()
+            .find(|p| Some(p.id.as_str()) == project_id)?;
+        let id = project.default_location_id.as_deref()?;
+        self.data.locations.iter().find(|l| l.id == id).cloned()
     }
     pub fn attach_location(&mut self, project_id: &str, location_id: &str) -> io::Result<()> {
         let mut data = self.data.clone();
@@ -356,6 +402,13 @@ impl Catalog {
         data.locations.retain(|l| l.host_id != id);
         for project in &mut data.projects {
             project.location_ids.retain(|l| !gone.contains(l));
+            if project
+                .default_location_id
+                .as_ref()
+                .is_some_and(|l| gone.contains(l))
+            {
+                project.default_location_id = None;
+            }
         }
         data.hosts.retain(|h| h.id != id);
         self.save(data).map_err(|_| "Could not save host".into())
@@ -365,6 +418,43 @@ impl Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn default_location_is_explicit_and_survives_reload_and_rename() {
+        let path = std::env::temp_dir().join(format!("agentworks-default-{}.json", Uuid::new_v4()));
+        let mut catalog = Catalog::open(path.clone()).unwrap();
+        let existing = catalog.project(None, "Existing", None).unwrap();
+        let project = catalog.project(None, "Thing", None).unwrap();
+        assert!(catalog.default_location(Some(&project.id)).is_none());
+        let location = catalog.location(Path::new("/srv/thing")).unwrap();
+        assert!(
+            catalog
+                .set_default_location(&project.id, Some("missing"))
+                .is_err()
+        );
+        catalog
+            .set_default_location(&project.id, Some(&location.id))
+            .unwrap();
+        catalog
+            .project(Some(&project.id), "Renamed thing", None)
+            .unwrap();
+        let mut catalog = Catalog::open(path.clone()).unwrap();
+        assert_eq!(
+            catalog.default_location(Some(&project.id)).unwrap().path,
+            Path::new("/srv/thing")
+        );
+        let saved = catalog
+            .data
+            .projects
+            .iter()
+            .find(|p| p.id == project.id)
+            .unwrap();
+        assert_eq!(saved.location_ids, [location.id.clone()]);
+        // Other projects are never changed by setting one project's directory.
+        assert!(catalog.default_location(Some(&existing.id)).is_none());
+        catalog.set_default_location(&project.id, None).unwrap();
+        assert!(catalog.default_location(Some(&project.id)).is_none());
+        let _ = std::fs::remove_file(path);
+    }
     #[test]
     fn communication_defaults_inherit_and_survive_reload() {
         use crate::communication::Role;

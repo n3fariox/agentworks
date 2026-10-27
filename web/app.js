@@ -31,6 +31,7 @@ import {setupQuestions} from './questions.js';
 import {setupMentions} from './mentions.js';
 import {setupAttachments} from './attachments.js';
 import {setupModelProviders} from './model-providers.js';
+import {setupDirectoryPicker,setupProjectDirectory} from './directory-picker.js';
 const $ = id => document.getElementById(id);
 // randomUUID is unavailable on plain HTTP remote origins; getRandomValues is supported.
 const uuid = () => globalThis.crypto.randomUUID?.() ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -38,7 +39,7 @@ const labels = {goose:'Goose · embedded',demo:'Demo agent',claude:'Claude','cla
 const icons = {goose:'◉',demo:'◈',claude:'✳','claude-rust':'✳',codex:'⌘','codex-rust':'⌘',opencode:'▣'};
 function readStorage(storage,key,fallback){try{return JSON.parse(storage.getItem(key))??fallback;}catch{return fallback;}}
 let workspace;
-let projects=[],hosts=[{id:'local',name:'Local',status:'connected'}];
+let projects=[],locations=[],hosts=[{id:'local',name:'Local',status:'connected'}];
 let sidebarView=localStorage.getItem('agentworks-sidebar-view')==='hosts'?'hosts':'projects';
 let collapsedGroups=new Set(readStorage(localStorage,'agentworks-tree-collapsed',[]));
 let editingProject=null,savingProject=false;
@@ -86,6 +87,8 @@ let pendingCreate=readStorage(sessionStorage,'agentworks-pending-create',null);
 let forkSource=null,forkGeneration=0,modelPicked=false,roleLibrary=[];
 const worktrees=setupWorktreeControls({$,api,onChange:()=>{if(config)providerNote();}});
 const policyEditor=setupPolicyEditor({$,api});
+const directoryPicker=setupDirectoryPicker({$,api});
+const projectDirectory=setupProjectDirectory({$,picker:directoryPicker,hosts:()=>hosts});
 const display=setupDisplayPreferences();display.mount($('display-preferences'));
 workLogs=setupWorkLogs({el});workLogs.mount($('display-preferences'),()=>scheduleDraw());
 // U-02: policy lives on the server; the browser only requests permission and shows.
@@ -147,10 +150,10 @@ function openCreate(context={}) {
   const workspaceContext=workspace?.context();
   const projectId=Object.hasOwn(context,'projectId')?context.projectId:workspaceContext?.projectId??active?.projectId??null;
   $('create-project').value=projectId||'';
-  const locations=readStorage(localStorage,'agentworks-project-locations',{});
+  const remembered=readStorage(localStorage,'agentworks-project-locations',{});
   $('create-resume-policy').checked=false;
   $('create-role').value='';api('/api/roles').then(list=>{roleLibrary=Array.isArray(list)?list:[];renderRoles();}).catch(()=>{});
-  $('create-agent-access').value='';updateCommunicationDefault();$('create-error').textContent='';$('directory').value=context.cwd||workspaceContext?.cwd||locations[projectId||'ungrouped']||(active?.hostId==='local'?active.cwd:null)||config.roots[0];$('session-title').value=context.title||'';
+  $('create-agent-access').value='';updateCommunicationDefault();$('create-error').textContent='';$('directory').value=context.cwd||projectDirectoryOn('local',projectId)||workspaceContext?.cwd||remembered[projectId||'ungrouped']||(active?.hostId==='local'?active.cwd:null)||config.roots[0];$('session-title').value=context.title||'';
   if(context.provider&&$('provider').querySelector(`option[value="${context.provider}"]`))$('provider').value=context.provider;
   $('fork-boundary').replaceChildren(new Option('Latest completed turn at submission',''));$('fork-context').value='auto';$('fork-summary').value='';
   renderForkHeader();fillCreateHosts(context.hostId||'local',context.cwd);providerNote();updateRoleNote();
@@ -173,13 +176,21 @@ function fillCreateHosts(selected,cwd){
   createHostChanged(select.value===selected?(cwd||(select.value==='local'?$('directory').value:undefined)):undefined);
 }
 function createHost(){return hosts.find(h=>h.id===$('create-host').value&&h.kind==='remote')||null;}
+// A project's saved directory, when it is on this host. Sessions start there
+// unless the person chooses another directory.
+function projectDirectoryOn(hostId,projectId){
+  const id=projects.find(p=>p.id===projectId)?.defaultLocationId;
+  const location=id&&locations.find(l=>l.id===id);
+  return location&&location.hostId===hostId?location.path:null;
+}
+// The last source directory chosen in this browser for a project on a host.
 function rememberedDirectory(){
   const host=$('create-host').value||'local',project=$('create-project').value||'ungrouped';
   return readStorage(localStorage,'agentworks-project-locations',{})[host==='local'?project:host+':'+project];
 }
 function createHostChanged(cwd){
   const host=createHost(),roots=host?host.roots||[]:config.roots;
-  $('directory').value=cwd||rememberedDirectory()||roots[0]||'';
+  $('directory').value=cwd||projectDirectoryOn($('create-host').value||'local',$('create-project').value||null)||rememberedDirectory()||roots[0]||'';
   $('create-resume-policy').disabled=false;
   worktrees.setHost(host?.id);
   $('project-roots').replaceChildren(...roots.map(root=>{const option=el('option');option.value=root;return option;}));
@@ -191,6 +202,11 @@ function createHostChanged(cwd){
   resetCreateModels();providerNote();modelProviders.loadCreate(forkSource?.provider===$('provider').value&&forkSource?.hostId===($('create-host').value||'local')?forkSource.modelProvider:undefined);
 }
 $('create-host').onchange=()=>createHostChanged();
+$('directory-browse').onclick=async()=>{
+  const hostId=$('create-host').value||'local',host=createHost();
+  const path=await directoryPicker.pick({hostId,hostName:host?.name||'Local',start:$('directory').value.trim()});
+  if(path){$('directory').value=path;$('directory').dispatchEvent(new Event('input'));$('directory').dispatchEvent(new Event('change'));}
+};
 function renderForkHeader(){
   const fork=forkSource;
   $('create-fork-note').hidden=!fork;$('fork-options').hidden=!fork;
@@ -494,7 +510,7 @@ function sidebar(){
 }
 async function refreshSessions(){
   const [list,catalog]=await Promise.all([api('/api/sessions?archived=all'),api('/api/catalog')]);
-  sessions=list;projects=catalog.projects;hosts=catalog.hosts;
+  sessions=list;projects=catalog.projects;locations=catalog.locations||[];hosts=catalog.hosts;
   if(terminalHost&&!hosts.some(host=>host.id===terminalHost.id)){terminalHost=null;if(document.body.dataset.workspaceView==='host-terminal')workspace.showView('sessions');}
   if(active){const current=sessions.find(s=>s.id===active.id);if(current){active.projectId=current.projectId;active.hostId=current.hostId;active.automation=current.automation;active.archived=current.archived;}}
   sidebar();workspace?.sync(catalog,sessions);
@@ -506,6 +522,8 @@ function openProjectDialog(project=null){
   $('project-communication-role').querySelector('option[value=""]').textContent='Use global default · '+communicationLabels[config.defaultCommunicationRole||'participant'];
   $('project-error').textContent='';$('delete-project').hidden=!project;$('archive-project').hidden=!project;$('open-controllers').hidden=!project;
   $('archive-project').textContent=project?.archived?'Unarchive project':'Archive project';
+  const saved=project?.defaultLocationId&&locations.find(l=>l.id===project.defaultLocationId);
+  projectDirectory.open(saved||(!project&&$('create-dialog').open?{hostId:$('create-host').value||'local',path:''}:null));
   policyEditor.open(editingProject);$('project-dialog').showModal();$('project-name').focus();
 }
 function resetTranscript(){eventSeq=null;backgroundJobs.reset();subagents.reset();transcript=[];tools=new Map();approvals=new Map();assistant=null;nodes.clear();turnEnds=new Map();workLogs?.reset();$('messages').replaceChildren();$('approval-area').replaceChildren();}
@@ -1088,19 +1106,19 @@ const enrollment=hostEnrollment({$,api,refresh:refreshSessions,directories:host=
 function openHostDialog(){enrollment.open();}
 $('dismiss-project').onclick=()=>{if(!savingProject)$('project-dialog').close();};
 $('project-dialog').addEventListener('cancel',event=>{if(savingProject)event.preventDefault();});
-$('create-project').onchange=()=>{const remembered=rememberedDirectory();if(remembered)$('directory').value=remembered;worktrees.projectChanged();updateCommunicationDefault();};
+$('create-project').onchange=()=>{const remembered=projectDirectoryOn($('create-host').value||'local',$('create-project').value||null)||rememberedDirectory();if(remembered)$('directory').value=remembered;worktrees.projectChanged();updateCommunicationDefault();};
 $('project-form').onsubmit=async event=>{
   event.preventDefault();if(savingProject)return;savingProject=true;
-  for(const id of ['save-project','project-name','project-default-mode','project-require-worktree','project-communication-role','archive-project','delete-project','dismiss-project'])$(id).disabled=true;
+  for(const id of ['save-project','project-name','project-directory','project-directory-host','project-directory-browse','project-directory-clear','project-default-mode','project-require-worktree','project-communication-role','archive-project','delete-project','dismiss-project'])$(id).disabled=true;
   $('project-error').textContent='';
   try{
-    const policy=policyEditor.value();
-    const project=await api(editingProject?`/api/projects/${editingProject}`:'/api/projects',{method:editingProject?'PATCH':'POST',body:JSON.stringify({name:$('project-name').value,defaultCommunicationRole:$('project-communication-role').value||null})});
-    editingProject=project.id;$('delete-project').hidden=false;$('archive-project').hidden=false;
+    const policy=policyEditor.value(),directory=projectDirectory.value();
+    const project=await api(editingProject?`/api/projects/${editingProject}`:'/api/projects',{method:editingProject?'PATCH':'POST',body:JSON.stringify({name:$('project-name').value,defaultCommunicationRole:$('project-communication-role').value||null,...(directory!==undefined?{defaultLocation:directory}:{})})});
+    editingProject=project.id;projectDirectory.commit();$('delete-project').hidden=false;$('archive-project').hidden=false;
     try{await api(`/api/projects/${project.id}/workspace-policy`,{method:'PUT',body:JSON.stringify(policy)});}
     catch(error){throw new Error(`Project name saved. Workspace policy was not saved: ${error.message}. Retry Save project.`);}
-    await refreshSessions();if($('create-dialog').open){$('create-project').value=project.id;worktrees.projectChanged();updateCommunicationDefault();}$('project-dialog').close();
-  }catch(error){$('project-error').textContent=error.message;}finally{savingProject=false;for(const id of ['save-project','project-name','project-default-mode','project-require-worktree','project-communication-role','archive-project','delete-project','dismiss-project'])$(id).disabled=false;}
+    await refreshSessions();if($('create-dialog').open){$('create-project').value=project.id;const start=projectDirectoryOn($('create-host').value||'local',project.id);if(start){$('directory').value=start;$('directory').dispatchEvent(new Event('input'));$('directory').dispatchEvent(new Event('change'));}worktrees.projectChanged();updateCommunicationDefault();}$('project-dialog').close();
+  }catch(error){$('project-error').textContent=error.message;}finally{savingProject=false;for(const id of ['save-project','project-name','project-directory','project-directory-host','project-directory-browse','project-directory-clear','project-default-mode','project-require-worktree','project-communication-role','archive-project','delete-project','dismiss-project'])$(id).disabled=false;}
 };
 // Archive and delete apply to the project's sessions too unless the user keeps them in Ungrouped.
 let removingProject=null;
@@ -1174,6 +1192,7 @@ $('create-form').onsubmit=async event=>{
   event.preventDefault();if(creating||worktrees.blocked())return;creating=true;providerNote();$('create-error').textContent='';
   const fork=forkSource;
   try{
+    const source=$('directory').value.trim();
     const payload={resumePolicy:{enabled:$('create-resume-policy').checked},provider:$('provider').value,modelProvider:modelProviders.selection(),...worktrees.submission(),title:$('session-title').value,projectId:$('create-project').value||null,hostId:$('create-host').value,model:$('create-model').value,...(!fork&&$('create-role').value?{role:$('create-role').value}:{}),...($('create-agent-access').value?{agentAccess:{communicate:$('create-agent-access').value!=='off',...Object.fromEntries(['startSessions','promptSessions','cancelSessions','runAutomations'].map(key=>[key,$('create-agent-access').value==='coordinator']))}}:{})};
     if(fork)Object.assign(payload,{boundarySeq:$('fork-boundary').value?Number($('fork-boundary').value):null,context:$('fork-context').value,summary:$('fork-context').value==='summary'?$('fork-summary').value:null});
     const signature=JSON.stringify({source:fork?.id||null,payload});
@@ -1182,7 +1201,8 @@ $('create-form').onsubmit=async event=>{
     const path=fork?`/api/sessions/${fork.id}/fork`:'/api/sessions';
     const created=await api(path,{method:'POST',body:JSON.stringify({...payload,requestId:pendingCreate.requestId})});
     pendingCreate=null;sessionStorage.removeItem('agentworks-pending-create');
-    const locations=readStorage(localStorage,'agentworks-project-locations',{});locations[created.hostId&&created.hostId!=='local'?created.hostId+':'+(created.projectId||'ungrouped'):created.projectId||'ungrouped']=created.cwd;localStorage.setItem('agentworks-project-locations',JSON.stringify(locations));
+    // Remember the chosen source directory, never a worktree created from it.
+    const remembered=readStorage(localStorage,'agentworks-project-locations',{});remembered[created.hostId&&created.hostId!=='local'?created.hostId+':'+(created.projectId||'ungrouped'):created.projectId||'ungrouped']=source;try{localStorage.setItem('agentworks-project-locations',JSON.stringify(remembered));}catch{}
     sessions.unshift(created);$('create-dialog').close();selectSession(created);
     if(fork)toast(`Forked from “${fork.title}”. Its recorded history and lineage are preserved; the selected context handoff is applied.`,'success');
   }catch(e){$('create-error').textContent=e.message;}finally{creating=false;providerNote();}

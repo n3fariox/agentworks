@@ -46,7 +46,7 @@ npx playwright test
 
 Browser checks cover desktop/mobile layout, session switching, permission requests across reload, cancellation, images, and Markdown file preview.
 
-After `cargo build --locked`, `npm run verify` starts an isolated server on port 4318, runs the API, remote-host relay, project, settings/model, import, workspace/automation, completion-report, worktree-policy, Git-context and browser suites, checks shutdown with an open browser connection, and stops its server. Use `AGENTWORKS_VERIFY_PORT` to change the main test port; worktree policy owns a separate server on port 4351.
+After `cargo build --locked`, `npm run verify` starts an isolated server on port 4318, runs the API, remote-host relay, project, project-directory, settings/model, import, workspace/automation, completion-report, worktree-policy, Git-context and browser suites, checks shutdown with an open browser connection, and stops its server. Use `AGENTWORKS_VERIFY_PORT` to change the main test port; worktree policy owns a separate server on port 4351. The project-directory smoke (`npm run test:directories`) owns port 4353 and its browser spec uses 4364.
 
 Architecture and follow-up work: [ROADMAP.md](ROADMAP.md), [Rust/ACP assessment](RUST-INTEGRATION.md), and [morsh reuse notes](MORSH-REUSE.md).
 

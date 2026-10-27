@@ -7,6 +7,7 @@ mod communication;
 mod completion;
 mod controllers;
 mod diff;
+mod directories;
 mod elicitation;
 mod enrollment;
 mod fork;
@@ -851,6 +852,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route(
+            "/directory-picker.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/directory-picker.js"),
+                )
+            }),
+        )
+        .route(
             "/attachments.js",
             get(|| async {
                 (
@@ -1031,6 +1041,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route("/api/locations", post(workspace::register_location))
+        .route(
+            "/api/directories",
+            get(directories::browse).post(directories::create),
+        )
         .route("/api/locations/{id}/files", get(workspace::list_files))
         .route("/api/locations/{id}/file", get(workspace::read_file))
         .route(
@@ -1831,28 +1845,92 @@ struct ProjectName {
         deserialize_with = "communication::role_patch"
     )]
     default_communication_role: Option<Option<communication::Role>>,
+    /// Omitted keeps the current directory; `null` clears it.
+    #[serde(
+        default,
+        rename = "defaultLocation",
+        deserialize_with = "location_patch"
+    )]
+    default_location: Option<Option<ProjectLocation>>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectLocation {
+    #[serde(default)]
+    host_id: Option<String>,
+    path: String,
+}
+fn location_patch<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<ProjectLocation>>, D::Error> {
+    Option::<ProjectLocation>::deserialize(deserializer).map(Some)
+}
+/// Validates a requested project directory on its host before anything is saved.
+async fn project_location(
+    app: &App,
+    location: &Option<Option<ProjectLocation>>,
+) -> Result<Option<Option<(String, PathBuf)>>, (StatusCode, String)> {
+    let Some(location) = location else {
+        return Ok(None);
+    };
+    let Some(location) = location else {
+        return Ok(Some(None));
+    };
+    let host = location.host_id.as_deref().unwrap_or("local").to_string();
+    let path = if host == "local" {
+        checked_cwd(app, &location.path)?
+    } else {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(12),
+            hosts::remote_directory(app, &host, &location.path),
+        )
+        .await
+        .map_err(|_| {
+            fail(
+                StatusCode::REQUEST_TIMEOUT,
+                "Remote directory validation timed out",
+            )
+        })??
+    };
+    Ok(Some(Some((host, path))))
+}
+fn save_project(
+    app: &App,
+    id: Option<&str>,
+    req: ProjectName,
+    location: Option<Option<(String, PathBuf)>>,
+) -> ApiResult {
+    let mut catalog = app.catalog.lock().unwrap();
+    let mut project = catalog
+        .project(id, &req.name, req.default_communication_role)
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    if let Some(location) = location {
+        let location = match location {
+            Some((host, path)) => Some(catalog.location_on(&host, &path).map_err(|_| {
+                fail(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Could not save project directory",
+                )
+            })?),
+            None => None,
+        };
+        project = catalog
+            .set_default_location(&project.id, location.as_ref().map(|l| l.id.as_str()))
+            .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
+    Ok(Json(json!(project)))
 }
 async fn create_project(State(app): State<App>, Json(req): Json<ProjectName>) -> ApiResult {
-    let project = app
-        .catalog
-        .lock()
-        .unwrap()
-        .project(None, &req.name, req.default_communication_role)
-        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
-    Ok(Json(json!(project)))
+    let location = project_location(&app, &req.default_location).await?;
+    save_project(&app, None, req, location)
 }
 async fn rename_project(
     State(app): State<App>,
     Path(id): Path<String>,
     Json(req): Json<ProjectName>,
 ) -> ApiResult {
-    let project = app
-        .catalog
-        .lock()
-        .unwrap()
-        .project(Some(&id), &req.name, req.default_communication_role)
-        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
-    Ok(Json(json!(project)))
+    let location = project_location(&app, &req.default_location).await?;
+    save_project(&app, Some(&id), req, location)
 }
 /// What happens to a project's sessions when the project is archived or deleted.
 /// The default applies the same operation; `ungroup` moves them to Ungrouped instead.
@@ -2322,7 +2400,24 @@ fn initial_agent_access(
     explicit.or_else(|| (!automation).then(|| project_role.access()))
 }
 
-async fn create_session_inner(app: &App, req: Create, creation_key: Option<&str>) -> ApiResult {
+async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&str>) -> ApiResult {
+    // A request without a directory starts in the project's directory on that host.
+    if req.cwd.trim().is_empty() {
+        let host = req.host_id.as_deref().unwrap_or("local");
+        req.cwd = app
+            .catalog
+            .lock()
+            .unwrap()
+            .default_location(req.project_id.as_deref())
+            .filter(|l| l.host_id == host)
+            .map(|l| l.path.to_string_lossy().into_owned())
+            .ok_or_else(|| {
+                fail(
+                    StatusCode::BAD_REQUEST,
+                    "Choose a working directory; this project has no directory on that host",
+                )
+            })?;
+    }
     if req.model.as_ref().is_some_and(|m| m.len() > 256) {
         return Err(fail(StatusCode::BAD_REQUEST, "Model ID is too long"));
     }

@@ -1015,6 +1015,7 @@ fn check_hello(hello: &Value) -> Result<Value, String> {
         "modelProviders": hello["modelProviders"] == true,
         "sharedModelProviders": hello["sharedModelProviders"] == true,
         "worktreeCleanup": hello["worktreeCleanup"] == true,
+        "directories": hello["directories"] == true,
         "terminal": hello["terminal"].as_bool().unwrap_or(false),
         "hostMetrics": if hello["hostMetrics"].as_u64() == Some(1) { 1 } else { 0 },
         "home": text("home", 4096),
@@ -1243,14 +1244,16 @@ mod tests {
 
     #[test]
     fn hello_preserves_tool_paths_and_explicit_workspace_support() {
-        let worker = check_hello(&json!({"type":"hello","protocol":PROTOCOL,"providers":["codex"],"tools":{"codex":"/remote/bin/codex"},"workspace":true,"worktreeCleanup":true})).unwrap();
+        let worker = check_hello(&json!({"type":"hello","protocol":PROTOCOL,"providers":["codex"],"tools":{"codex":"/remote/bin/codex"},"workspace":true,"worktreeCleanup":true,"directories":true})).unwrap();
         assert_eq!(worker["tools"]["codex"], "/remote/bin/codex");
         assert_eq!(worker["workspace"], true);
         assert_eq!(worker["worktreeCleanup"], true);
+        assert_eq!(worker["directories"], true);
         let old =
             check_hello(&json!({"type":"hello","protocol":PROTOCOL,"providers":["demo"]})).unwrap();
         assert_eq!(old["workspace"], false);
         assert_eq!(old["worktreeCleanup"], false);
+        assert_eq!(old["directories"], false);
     }
 
     #[test]

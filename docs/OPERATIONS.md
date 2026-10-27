@@ -13,7 +13,7 @@ Use the sidebar's **Hosts / Projects** toggle to browse the same sessions in eit
 
 Sessions run on the Local host. Other machines can be added as remote hosts (below). They appear in the list with their connection status and can run chat sessions. Projects are logical groups, independent of host paths: several directories/worktrees can share a project, and the same model supports grouping across remote hosts.
 
-Use **＋** beside Sessions to create a project, or create one in the new-session dialog. The project's **⋯** button opens rename/delete controls. A session's project selector moves it between groups, including **Ungrouped**, while its agent, working directory, and conversation keep running. Deleting a group moves its sessions to Ungrouped.
+Use **＋** beside Sessions to create a project, or create one in the new-session dialog. The project's **⋯** button opens rename/delete controls. A session's project selector moves it between groups, including **Ungrouped**, while its agent, working directory, and conversation keep running. Deleting a group moves its sessions to Ungrouped. A project can optionally have a **project directory** on one host, where its new sessions start; choose or create it with **Browse…** in project settings. See [project directories](PROJECT-DIRECTORIES.md).
 
 Sidebar view and collapse state are remembered per browser. Switching views preserves the selected session, stream connection, draft, and scroll position. Drafts are remembered per session in the browser tab. Running/waiting counts appear on the parent groups.
 
@@ -65,7 +65,7 @@ By default, sessions can select the current directory or its subdirectories. Use
 AGENTWORKS_ROOTS="$HOME/projects/agentworks:$HOME/projects/morsh" mise exec -- cargo run --locked
 ```
 
-Enter the full project path in the new-session dialog. Paths are canonicalized and checked against the allowed roots. File preview/download routes are restricted to that session's project directory, with a 10 MB limit. Markdown and raster images can be previewed; PDFs and other binary files can be downloaded. This file gateway restriction does not sandbox agent commands; provider permissions still govern agent execution.
+Enter the full project path in the new-session dialog, or use **Browse…** to pick an existing folder or create a new one beneath an allowed root ([folder picker](PROJECT-DIRECTORIES.md)). Paths are canonicalized and checked against the allowed roots. File preview/download routes are restricted to that session's project directory, with a 10 MB limit. Markdown and raster images can be previewed; PDFs and other binary files can be downloaded. This file gateway restriction does not sandbox agent commands; provider permissions still govern agent execution.
 
 Use `AGENTWORKS_PORT=4318` to choose a different port. The default bind address is loopback. For direct access over your private network/VPN:
 
