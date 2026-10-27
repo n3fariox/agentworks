@@ -115,10 +115,11 @@ for(const mobile of [false,true])test(`diff browser ${mobile?'mobile':'desktop'}
   await expect(page.locator('#session-state')).toHaveText('Ready');await page.locator('#prompt').fill('Keep diff draft');const before=sockets;
   if(mobile)await page.locator('#session-more').click();
   await page.getByRole('button',{name:'Diff',exact:true}).click();await expect(page.locator('#diff-status')).toContainText('changed file');
-  await expect(page.locator('#diff-context')).toContainText(nested);await page.locator('#diff-files').selectOption('both.txt');
+  await expect(page.locator('#diff-context')).toContainText(nested);await page.locator('#diff-files button').filter({hasText:/^both.txt$/}).click();
   await expect(page.locator('#diff-patch')).toContainText('-staged version');await expect(page.locator('#diff-patch')).toContainText('+working version');
+  if(!mobile){await expect(page.locator('#workspace-chat-column')).not.toBeVisible();expect(await page.locator('#side-panel').evaluate(n=>n.clientWidth/n.parentElement.clientWidth)).toBeGreaterThan(.95);}
   await page.locator('#diff-mode').selectOption('branch');await page.locator('#diff-base').fill('selectable');await page.getByRole('button',{name:'Refresh diff',exact:true}).click();
-  await expect(page.locator('#diff-comparison')).toContainText(initial);await page.locator('#diff-files').selectOption('branch.txt');await expect(page.locator('#diff-patch')).toContainText('+feature only');
+  await expect(page.locator('#diff-comparison')).toContainText(initial);await page.locator('#diff-files button').filter({hasText:/^branch.txt$/}).click();await expect(page.locator('#diff-patch')).toContainText('+feature only');
   await page.locator('#diff-mode').selectOption('commit');await page.locator('#diff-commit').fill(initial);await page.getByRole('button',{name:'Refresh diff',exact:true}).click();
   await expect(page.locator('#diff-comparison')).toContainText('Empty tree');
   expect(await page.locator('#side-panel').evaluate(n=>{const r=n.getBoundingClientRect();return r.left>=0&&Math.round(r.right)<=innerWidth&&r.height<=innerHeight;})).toBe(true);
@@ -136,7 +137,7 @@ test('diff syntax, add/remove backgrounds, old/new gutters, raw copy and display
   await page.evaluate(()=>{window.copied=null;Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{window.copied=text;}}});});
   await expect(page.locator('#session-state')).toHaveText('Ready');
   await page.getByRole('button',{name:'Diff',exact:true}).click();
-  await page.locator('#diff-files').selectOption('sample.js');
+  await page.locator('#diff-files button').filter({hasText:/^sample.js$/}).click();
   const patch=page.locator('#diff-patch');
   await expect(patch.locator('.diff-add .tok-keyword')).toHaveText('const');
   await expect(patch.locator('.diff-remove .tok-number')).toHaveText('1');
@@ -153,10 +154,50 @@ test('diff syntax, add/remove backgrounds, old/new gutters, raw copy and display
   await expect(page.getByLabel('Raw js block for copying')).toHaveValue(expected);
 
   await page.locator('#nav-settings').evaluate(n=>n.click());await page.locator('#settings-tab-display').click();
+  await page.getByLabel('Syntax color theme').selectOption('monokai');
+  await expect(page.locator('body')).toHaveAttribute('data-code-theme','monokai');
+  expect(await patch.locator('.tok-keyword').first().evaluate(n=>getComputedStyle(n).color)).toBe('rgb(249, 38, 114)');
+  expect(await patch.locator('.diff-hunk').first().evaluate(n=>parseFloat(getComputedStyle(n).paddingLeft))).toBeLessThan(20);
   await page.getByLabel('Syntax highlighting').selectOption('off');await page.locator('#dismiss-settings').click();
   await expect(patch.locator('[class^=tok-]')).toHaveCount(0);
   await expect(patch.locator('.diff-add')).toHaveCount(1);
-  await page.locator('#diff-files').selectOption('binary.dat');
+  await page.locator('#diff-files button').filter({hasText:/^binary.dat$/}).click();
   await expect(patch).toContainText('Binary files');await expect(patch.locator('.source-line, [class^=tok-]')).toHaveCount(0);
-  await page.locator('#diff-files').selectOption('large.txt');await expect(page.locator('#diff-patch-note')).toContainText('limit');
+  await page.locator('#diff-files button').filter({hasText:/^large.txt$/}).click();await expect(page.locator('#diff-patch-note')).toContainText('limit');
+});
+
+test('changed files are grouped in collapsible folders with exact path selection',async({page})=>{
+  await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),session.id);
+  await page.route('**/api/sessions/*/diff?**',route=>{
+    const file=new URL(route.request().url()).searchParams.get('file');
+    return route.fulfill({json:{context:{cwd:nested},mode:'unstaged',bases:[],files:['src/ui/view.js','src/app.js','README.md'],staged:{files:[]},untracked:{files:[]},patch:file?'selected '+file:null}});
+  });
+  await page.goto(base);await expect(page.locator('#session-state')).toHaveText('Ready');
+  await page.getByRole('button',{name:'Diff',exact:true}).click();
+  const folder=page.locator('#diff-files details').filter({has:page.locator(':scope > summary',{hasText:/^src$/})});
+  await expect(folder).toHaveAttribute('open','');
+  await page.locator('#diff-files summary').getByText('ui',{exact:true}).click();
+  await expect(page.locator('#diff-files button[data-path="src/ui/view.js"]')).not.toBeVisible();
+  await page.locator('#diff-files summary').getByText('ui',{exact:true}).click();
+  await page.locator('#diff-files button[data-path="src/ui/view.js"]').click();
+  await expect(page.locator('#diff-patch')).toHaveText('selected src/ui/view.js');
+  await expect(page.locator('#diff-files button[data-path="src/ui/view.js"]')).toHaveAttribute('aria-current','true');
+});
+
+test('mobile tree compacts folder chains and scrolls wide paths locally',async({page})=>{
+  await page.setViewportSize({width:390,height:844});
+  const file='src/features/review/components/deeply-nested-directory/VeryLongFileNameForHorizontalScrolling.js';
+  await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),session.id);
+  await page.route('**/api/sessions/*/diff?**',route=>route.fulfill({json:{context:{cwd:nested},mode:'unstaged',bases:[],files:[file],staged:{files:[]},untracked:{files:[]},patch:null}}));
+  await page.goto(base);await expect(page.locator('#session-state')).toHaveText('Ready');
+  await page.locator('#session-more').click();await page.locator('#session-diff').click();
+  const tree=page.locator('#diff-files');
+  await expect(tree.locator('summary')).toHaveText('src/features/review/components/deeply-nested-directory');
+  expect(await tree.locator('details').evaluate(n=>getComputedStyle(n).marginTop)).toBe('0px');
+  expect(await tree.evaluate(n=>n.scrollWidth>n.clientWidth)).toBe(true);
+  await tree.evaluate(n=>{n.scrollLeft=100;});
+  expect(await tree.evaluate(n=>n.scrollLeft)).toBeGreaterThan(0);
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  await tree.locator('button').click();
+  await expect(tree.locator('button')).toHaveAttribute('aria-current','true');
 });
