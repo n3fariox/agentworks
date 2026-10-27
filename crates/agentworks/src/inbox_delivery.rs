@@ -1090,6 +1090,7 @@ mod tests {
                 restart: Arc::new(crate::service_restart::Manager::new()),
                 notifications: crate::notifications::Hub::new(catalog),
                 hosts: crate::hosts::Hosts::new(),
+                host_usage: Arc::new(crate::host_usage::Hub::default()),
 
                 progress: crate::tool_progress::Hub::empty(),
             };

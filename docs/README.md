@@ -22,6 +22,7 @@ Start with the [quick start](../README.md). Commands in these documents run from
 | Communication | [MCP and permissions](AGENT-COMMUNICATION.md), [external controllers](CONTROLLERS.md), [completion reports](COMPLETION-REPORTS.md), [review queue](REVIEW-QUEUE.md), [inbox delivery](INBOX-DELIVERY.md) |
 | Display | [Tool activity and Bazel progress](TOOL-ACTIVITY.md), [source highlighting](SOURCE-HIGHLIGHTING.md), [Mermaid rendering](MERMAID-MARKDOWN.md), [browser notifications](NOTIFICATIONS.md) |
 | Quotas | [Codex adapter metadata](CODEX-SUBSCRIPTION-QUOTA.md), [dashboard observations and limitations](DASHBOARD-QUOTA-REFRESH.md) |
+| Host usage | [Dashboard metrics, lifecycle, and remote proposal](dashboard-host-usage.md) |
 | Remote execution | [Worker protocol and supported scope](REMOTE-HOSTS.md) |
 | Development workflow | [Bounded coordination and self-updates](SELF-IMPROVEMENT.md) |
 

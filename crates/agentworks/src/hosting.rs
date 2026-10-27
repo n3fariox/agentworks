@@ -36,6 +36,10 @@ pub async fn asset(axum::extract::Path(name): axum::extract::Path<String>) -> Re
             "text/javascript; charset=utf-8",
             include_bytes!("../../../web/dashboard.js"),
         ),
+        "host-usage.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("../../../web/host-usage.js"),
+        ),
         "dashboard.css" => (
             "text/css; charset=utf-8",
             include_bytes!("../../../web/dashboard.css"),
@@ -93,6 +97,11 @@ mod tests {
                 "Operations dashboard",
             ),
             ("dashboard.js", "text/javascript; charset=utf-8", "appUrl"),
+            (
+                "host-usage.js",
+                "text/javascript; charset=utf-8",
+                "startHostUsage",
+            ),
             (
                 "dashboard.css",
                 "text/css; charset=utf-8",

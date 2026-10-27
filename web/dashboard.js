@@ -1,3 +1,4 @@
+import {hostUsageLines, startHostUsage} from './host-usage.js';
 import {appUrl} from './hosting.js';
 import {emptyUsage, applyUsageEvent, STALE_MS, countdown} from './usage-status.js';
 
@@ -58,6 +59,15 @@ async function read(path) {
   if (!response.ok) throw new Error('Read failed');
   return response.json();
 }
+let hostSample = null, hostMetricStatus = 'Waiting for host metrics';
+function renderHostMetrics() {
+  for (const root of document.querySelectorAll('[data-host-metrics]')) {
+    const lines = root.dataset.hostMetrics === 'local'
+      ? (hostSample ? hostUsageLines(hostSample) : [hostMetricStatus])
+      : ['Host metrics unavailable: remote worker protocol has no metrics capability.'];
+    root.replaceChildren(...lines.map(text => el('p', text, 'host-meta')));
+  }
+}
 function renderHosts(catalog, sessions) {
   const root = document.querySelector('#hosts'); root.replaceChildren();
   if (!catalog) { root.append(note('Host status unavailable.')); return; }
@@ -80,8 +90,11 @@ function renderHosts(catalog, sessions) {
       const count = el('p', undefined, 'count'); count.append(String(matching.length), el('small', ' active turns'));
       card.append(count);
     } else card.append(note('Active turn count unavailable.'));
+    const metrics = el('div'); metrics.dataset.hostMetrics = host.id;
+    card.append(metrics);
     root.append(card);
   }
+  renderHostMetrics();
 }
 function renderProjects(catalog, sessions) {
   const root = document.querySelector('#projects'); root.replaceChildren();
@@ -234,6 +247,7 @@ async function refresh({quotaOnly = false} = {}) {
   }
 }
 if (typeof document !== 'undefined') {
+  startHostUsage({onState(sample, status) { hostSample = sample; hostMetricStatus = status; renderHostMetrics(); }});
   document.querySelector('#refresh').addEventListener('click', () => refresh());
   document.querySelector('#refresh-quota').addEventListener('click', () => refresh({quotaOnly:true}));
   refresh();

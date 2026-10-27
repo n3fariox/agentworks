@@ -12,6 +12,7 @@ mod enrollment;
 mod fork;
 mod git_context;
 mod goose_acp;
+mod host_usage;
 mod hosting;
 mod hosts;
 mod inbox_delivery;
@@ -91,6 +92,7 @@ struct App {
     /// U-02 cross-session stream of noteworthy events.
     notifications: notifications::Hub,
     hosts: Arc<hosts::Hosts>,
+    host_usage: Arc<host_usage::Hub>,
 
     /// U-05 progress parser thread and installed scripts.
     progress: tool_progress::Hub,
@@ -631,6 +633,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         restart: Arc::new(service_restart::Manager::new()),
         notifications: notifications::Hub::new(catalog),
         hosts: hosts::Hosts::new(),
+        host_usage: Arc::new(host_usage::Hub::default()),
 
         progress,
     };
@@ -1078,6 +1081,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/api/external-sessions", post(list_external_sessions))
         .route("/api/sessions/import", post(import_session))
+        .route("/api/dashboard/host-usage/events", get(host_usage::events))
         .route("/api/catalog", get(get_catalog))
         .route("/api/hosts", post(hosts::add))
         .route("/api/hosts/enroll/events", get(enrollment::upgrade))
