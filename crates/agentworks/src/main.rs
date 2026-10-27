@@ -1300,7 +1300,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/model-providers/{id}/codex-auth/cancel",
             post(codex_oauth::cancel),
         )
-        .route("/auth/callback", get(codex_oauth::callback))
         .route("/api/sessions/{id}/terminal", post(terminal::open))
         .route("/api/sessions/{id}/terminal/events", get(terminal::events))
         .route("/api/sessions/{id}/events", get(events))

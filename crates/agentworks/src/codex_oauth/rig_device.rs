@@ -91,8 +91,8 @@ pub async fn start(Path(id): Path<String>) -> ApiResult {
         false,
     );
     let mut transactions = TRANSACTIONS.lock().await;
-    transactions.expire();
-    transactions.cancel(&id);
+    transactions.expire().await;
+    transactions.cancel(&id).await;
     if transactions
         .status
         .values()
@@ -177,7 +177,7 @@ pub async fn start(Path(id): Path<String>) -> ApiResult {
             json!({"status":"pending", "verificationUrl":issuer_url(&prompt.verification_uri), "userCode":prompt.user_code, "expiresAt":expires}),
         )),
         _ => {
-            transactions.cancel(&id);
+            transactions.cancel(&id).await;
             Err(bad("Could not start Rig device sign-in. Try again."))
         }
     }

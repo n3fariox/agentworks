@@ -13,6 +13,10 @@ let exchanges=0,refreshes=0,inferences=0,currentAccess='',currentRefresh='',log=
 const codes=new Map(),connections=new Set(),devices=new Map();
 let deviceDisabled=false,devicePollFailure=false,devicePolls=0;
 const direct='http://127.0.0.1:4499';
+const callbackBase='http://localhost:1455';
+async function callbackPortFree(){
+  const probe=tcpServer();return new Promise(resolve=>{probe.once('error',()=>resolve(false));probe.listen(1455,'127.0.0.1',()=>probe.close(()=>resolve(true)));});
+}
 const listen=server=>new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
 async function api(path,body,method){
   const response=await fetch(base+path,{method:method||(body===undefined?'GET':'POST'),headers:{Origin:base,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
@@ -89,16 +93,17 @@ test.beforeAll(async()=>{
 });
 test.afterAll(async()=>{await stopChild(server);for(const socket of connections)socket.destroy();if(tunnel)await new Promise(r=>tunnel.close(r));issuer?.closeAllConnections();if(issuer)await new Promise(r=>issuer.close(r));await removeFixture(dir);});
 
-test('OAuth through the web tunnel feeds local and SSH Goose sessions without worker token files',async({page})=>{
+test('temporary OAuth callback feeds local and SSH Goose sessions without worker token files',async({page})=>{
   const errors=[];page.on('pageerror',error=>errors.push(error.message));
   await page.goto(base+'/?settings');await page.getByRole('tab',{name:'Model providers',exact:true}).click();
   const popupPromise=page.waitForEvent('popup');await page.getByRole('button',{name:'Sign in with ChatGPT',exact:true}).click();const popup=await popupPromise;
   await popup.getByRole('link',{name:'Approve sign-in'}).waitFor();
-  const authorization=new URL(popup.url());expect(authorization.searchParams.get('redirect_uri')).toBe(base+'/auth/callback');expect(base).not.toBe(direct);
+  const authorization=new URL(popup.url());expect(authorization.searchParams.get('redirect_uri')).toBe(callbackBase+'/auth/callback');expect(base).not.toBe(direct);expect(await callbackPortFree()).toBe(false);
+  const wrong=await fetch(callbackBase+'/auth/callback?state=wrong&code=unused');expect(wrong.status).toBe(400);expect(await callbackPortFree()).toBe(false);
   const before=exchanges;await popup.getByRole('link',{name:'Approve sign-in'}).click();await expect(popup.getByRole('heading',{name:'Sign-in complete'})).toBeVisible();
   await expect(page.locator('#codex-oauth-status')).toContainText('Signed in');expect(exchanges).toBe(before+1);await popup.close();
-  const replay=await fetch(base+'/auth/callback?state='+authorization.searchParams.get('state')+'&code=replayed');expect(replay.status).toBe(400);
-  const wrong=await fetch(base+'/auth/callback?state=wrong&code=unused');expect(wrong.status).toBe(400);expect(exchanges).toBe(before+1);
+  expect(await callbackPortFree()).toBe(true);
+  const replay=await fetch(base+'/auth/callback?state='+authorization.searchParams.get('state')+'&code=replayed');expect(replay.status).toBe(404);expect(exchanges).toBe(before+1);
   const publicProfiles=await api('/api/model-providers');expect(publicProfiles.profiles.find(p=>p.id===profile.id).signedIn).toBe(true);expect(JSON.stringify(publicProfiles)).not.toContain('fixture-access');
   const sessions=await Promise.all(['local',remote.id].map(hostId=>api('/api/sessions',{provider:'goose',hostId,cwd:join(dir,'project'),modelProvider:profile.id,title:'Managed Codex'})));
   for(const session of sessions)await expect.poll(async()=>(await snapshot(session.id)).session.status,{timeout:20000}).toBe('idle');
@@ -122,10 +127,10 @@ test('cancellation, denied consent, and superseded attempts never exchange or sa
   const before=exchanges;const path=`/api/model-providers/${profile.id}/codex-auth`;
   const first=await api(path,{},'POST');const old=new URL(first.authorizationUrl);
   const second=await api(path,{},'POST');const active=new URL(second.authorizationUrl);
-  const stale=await fetch(base+'/auth/callback?state='+old.searchParams.get('state')+'&code=stale');expect(stale.status).toBe(400);
-  await api(path+'/cancel',{},'POST');const cancelled=await fetch(base+'/auth/callback?state='+active.searchParams.get('state')+'&code=cancelled');expect(cancelled.status).toBe(400);
+  const stale=await fetch(callbackBase+'/auth/callback?state='+old.searchParams.get('state')+'&code=stale');expect(stale.status).toBe(400);
+  await api(path+'/cancel',{},'POST');const cancelled=await fetch(base+'/auth/callback?state='+active.searchParams.get('state')+'&code=cancelled');expect(cancelled.status).toBe(404);expect(await callbackPortFree()).toBe(true);
   const third=new URL((await api(path,{},'POST')).authorizationUrl);
-  const denied=await fetch(base+'/auth/callback?state='+third.searchParams.get('state')+'&error=access_denied');expect(denied.status).toBe(400);
+  const denied=await fetch(callbackBase+'/auth/callback?state='+third.searchParams.get('state')+'&error=access_denied');expect(denied.status).toBe(400);expect(await callbackPortFree()).toBe(true);
   const status=await api(path);expect(status.status).toBe('error');expect(status.error).toContain('declined');expect(status.signedIn).toBe(false);expect(exchanges).toBe(before);
 });
 
@@ -138,7 +143,7 @@ test('cancelling an in-flight code exchange cannot restore credentials',async()=
   const started=new Promise(resolve=>exchangeStarted=resolve);
   const completion=fetch(callback);
   try{
-    await started;await api(path+'/cancel',{},'POST');release();
+    await started;expect(await callbackPortFree()).toBe(true);await api(path+'/cancel',{},'POST');release();
     expect((await completion).status).toBe(400);
     const status=await api(path);expect(status.signedIn).toBe(false);expect(status.status).toBe('disconnected');
   }finally{release();exchangeStarted=null;holdExchange=null;}
@@ -153,6 +158,7 @@ test('device button shows a code and saves approval without a browser callback',
   const code=await page.locator('#codex-device-code').textContent();
   expect(page.context().pages()).toHaveLength(1);
   await expect(page.locator('#codex-oauth-link')).toHaveAttribute('href',`http://127.0.0.1:${issuer.address().port}/codex/device`);
+  expect(await callbackPortFree()).toBe(true);
   const pending=await api(path);expect(pending.status).toBe('pending');expect(pending.signedIn).toBe(false);
   expect(JSON.stringify(pending)).not.toContain(code);expect(JSON.stringify(pending)).not.toContain('device_auth_id');
   const before=exchanges;[...devices.values()].find(device=>device.code===code).approved=true;
@@ -292,4 +298,28 @@ test('existing and Rig device login can run independently on separate connection
   await expect.poll(async()=>(await api(original)).signedIn).toBe(true);
   await api(original,undefined,'DELETE');expect((await api(rig)).signedIn).toBe(true);
   await api('/api/model-providers',{operation:'delete',id:other.id});
+});
+
+
+test('temporary callback releases its port on every cancellation path and leaves other apps alone',async()=>{
+  const path=`/api/model-providers/${profile.id}/codex-auth`;
+  expect(await callbackPortFree()).toBe(true);
+  const occupied=tcpServer();await new Promise((resolve,reject)=>{occupied.once('error',reject);occupied.listen(1455,'127.0.0.1',resolve);});
+  try{
+    const response=await fetch(base+path,{method:'POST',headers:{Origin:base}});expect(response.status).toBe(409);expect(await response.text()).toContain('already in use');
+    expect(occupied.listening).toBe(true);
+  }finally{await new Promise(resolve=>occupied.close(resolve));}
+  for(const stop of ['cancel','disconnect','device','device-rig']){
+    await api(path,{},'POST');expect(await callbackPortFree()).toBe(false);
+    if(stop==='disconnect')await api(path,undefined,'DELETE');
+    else await api(path+'/'+stop,{},'POST');
+    expect(await callbackPortFree()).toBe(true);
+    await api(path+'/cancel',{},'POST');
+  }
+  const attempt=new URL((await api(path,{},'POST')).authorizationUrl);
+  const failed=await fetch(callbackBase+'/auth/callback?state='+attempt.searchParams.get('state')+'&code=invalid-code');
+  expect(failed.status).toBe(400);expect(await callbackPortFree()).toBe(true);
+  const deleted=await api('/api/model-providers',{operation:'save',profile:{name:'Callback deletion',kind:'chatgpt_codex',defaultModel:'gpt-6.1-sol',hostIds:['local']}});
+  await api(`/api/model-providers/${deleted.id}/codex-auth`,{},'POST');expect(await callbackPortFree()).toBe(false);
+  await api('/api/model-providers',{operation:'delete',id:deleted.id});expect(await callbackPortFree()).toBe(true);
 });

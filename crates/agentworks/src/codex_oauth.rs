@@ -4,7 +4,7 @@ use agentworks_runtime::{codex_auth as credentials, model_providers};
 use axum::{
     Json,
     extract::{Path, Query},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::{Html, IntoResponse, Response},
 };
 use base64::Engine;
@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::LazyLock};
 use tokio::sync::Mutex;
 
+mod browser;
 mod rig_device;
 pub use rig_device::start as start_rig_device;
 
@@ -33,6 +34,7 @@ struct Status {
 struct Transactions {
     pending: HashMap<String, Attempt>,
     rig_tasks: HashMap<String, tokio::task::AbortHandle>,
+    browser: Option<browser::Binding>,
     status: HashMap<String, Status>,
 }
 static TRANSACTIONS: LazyLock<Mutex<Transactions>> =
@@ -59,33 +61,26 @@ fn random() -> String {
         uuid::Uuid::new_v4().simple()
     )
 }
-pub fn redirect_uri(origin: &str) -> Result<String, String> {
-    let url: reqwest::Url = origin.parse().map_err(|_| "Invalid browser origin")?;
-    if url.scheme() != "http"
-        || !matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || url.path() != "/"
-    {
-        return Err("Open Agentworks through an HTTP localhost or loopback address to sign in. An SSH web tunnel is supported.".into());
-    }
-    Ok(format!(
-        "{}/auth/callback",
-        url.origin().ascii_serialization()
-    ))
-}
 impl Transactions {
-    fn cancel(&mut self, id: &str) {
+    async fn cancel(&mut self, id: &str) {
+        self.close_browser(id).await;
         if let Some(task) = self.rig_tasks.remove(id) {
             task.abort();
         }
         self.pending.retain(|_, attempt| attempt.profile != id);
         self.status.remove(id);
     }
-    fn expire(&mut self) {
+    async fn expire(&mut self) {
         let now = credentials::now();
+        let expired: Vec<_> = self
+            .status
+            .iter()
+            .filter(|(_, status)| status.expires <= now)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in expired {
+            self.close_browser(&id).await;
+        }
         self.pending.retain(|_, attempt| attempt.expires > now);
         for (id, status) in &mut self.status {
             if matches!(status.phase, "pending" | "exchanging") && status.expires <= now {
@@ -98,13 +93,9 @@ impl Transactions {
         }
     }
 }
-pub async fn start(Path(id): Path<String>, headers: HeaderMap) -> ApiResult {
+pub async fn start(Path(id): Path<String>) -> ApiResult {
     profile(&id)?;
-    let origin = headers
-        .get("origin")
-        .and_then(|h| h.to_str().ok())
-        .ok_or_else(|| bad("Missing browser origin"))?;
-    let redirect = redirect_uri(origin).map_err(bad)?;
+    let redirect = browser::REDIRECT.to_owned();
     let state = random();
     let verifier = random();
     let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -126,11 +117,14 @@ pub async fn start(Path(id): Path<String>, headers: HeaderMap) -> ApiResult {
     ]);
     let expires = credentials::now() + 600;
     let mut transactions = TRANSACTIONS.lock().await;
-    transactions.expire();
-    transactions.cancel(&id);
+    transactions.expire().await;
+    transactions.cancel(&id).await;
     if transactions.pending.len() >= 128 {
         return Err(bad("Too many pending sign-ins"));
     }
+    transactions
+        .bind_browser(&id, &state, std::time::Duration::from_secs(600))
+        .await?;
     transactions.pending.insert(
         state.clone(),
         Attempt {
@@ -214,8 +208,8 @@ pub async fn start_device(Path(id): Path<String>) -> ApiResult {
     let expires = credentials::now() + 900;
     {
         let mut transactions = TRANSACTIONS.lock().await;
-        transactions.expire();
-        transactions.cancel(&id);
+        transactions.expire().await;
+        transactions.cancel(&id).await;
         if transactions
             .status
             .values()
@@ -282,7 +276,7 @@ pub async fn start_device(Path(id): Path<String>) -> ApiResult {
         loop {
             {
                 let mut transactions = TRANSACTIONS.lock().await;
-                transactions.expire();
+                transactions.expire().await;
                 if !active(&transactions, &id, &state) {
                     return;
                 }
@@ -321,7 +315,7 @@ pub async fn start_device(Path(id): Path<String>) -> ApiResult {
             }
             .await;
             let mut transactions = TRANSACTIONS.lock().await;
-            transactions.expire();
+            transactions.expire().await;
             if !active(&transactions, &id, &state) {
                 return;
             }
@@ -356,7 +350,7 @@ pub async fn start_device(Path(id): Path<String>) -> ApiResult {
 pub async fn status(Path(id): Path<String>) -> ApiResult {
     profile(&id)?;
     let mut transactions = TRANSACTIONS.lock().await;
-    transactions.expire();
+    transactions.expire().await;
     let status = transactions.status.get(&id);
     let signed_in = credentials::has_credentials(&id);
     Ok(Json(
@@ -365,17 +359,17 @@ pub async fn status(Path(id): Path<String>) -> ApiResult {
 }
 pub async fn cancel(Path(id): Path<String>) -> ApiResult {
     profile(&id)?;
-    TRANSACTIONS.lock().await.cancel(&id);
+    TRANSACTIONS.lock().await.cancel(&id).await;
     Ok(Json(json!({"ok":true})))
 }
 pub async fn disconnect(Path(id): Path<String>) -> ApiResult {
     profile(&id)?;
-    TRANSACTIONS.lock().await.cancel(&id);
+    TRANSACTIONS.lock().await.cancel(&id).await;
     credentials::disconnect(&id).await.map_err(bad)?;
     Ok(Json(json!({"ok":true})))
 }
 pub async fn remove(id: &str) {
-    TRANSACTIONS.lock().await.cancel(id);
+    TRANSACTIONS.lock().await.cancel(id).await;
 }
 
 #[derive(Deserialize)]
@@ -390,10 +384,11 @@ pub async fn callback(Query(query): Query<Callback>) -> Response {
     };
     let attempt = {
         let mut transactions = TRANSACTIONS.lock().await;
-        transactions.expire();
+        transactions.expire().await;
         let Some(attempt) = transactions.pending.remove(&state) else {
             return bad("Sign-in expired, cancelled, or already completed").into_response();
         };
+        transactions.close_browser(&attempt.profile).await;
         if let Some(status) = transactions.status.get_mut(&attempt.profile) {
             status.phase = "exchanging";
         }
@@ -460,26 +455,6 @@ fn account_id(token: Option<&str>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn callback_uses_browser_port_and_rejects_non_loopback_origins() {
-        assert_eq!(
-            redirect_uri("http://localhost:5555").unwrap(),
-            "http://localhost:5555/auth/callback"
-        );
-        assert_eq!(
-            redirect_uri("http://127.0.0.1:8080").unwrap(),
-            "http://127.0.0.1:8080/auth/callback"
-        );
-        for origin in [
-            "https://example.com",
-            "http://localhost.evil:5555",
-            "http://user@localhost:5555",
-            "http://localhost:5555/other",
-            "http://localhost:5555?x=y",
-        ] {
-            assert!(redirect_uri(origin).is_err());
-        }
-    }
     #[tokio::test]
     async fn rig_tasks_stop_on_expiry_and_cancellation() {
         for expired in [false, true] {
@@ -498,17 +473,17 @@ mod tests {
                 },
             );
             if expired {
-                transactions.expire();
+                transactions.expire().await;
             } else {
-                transactions.cancel("profile");
+                transactions.cancel("profile").await;
             }
             assert!(task.await.unwrap_err().is_cancelled());
             assert!(transactions.rig_tasks.is_empty());
             assert!(!active(&transactions, "profile", "state"));
         }
     }
-    #[test]
-    fn device_approval_requires_current_unexpired_attempt() {
+    #[tokio::test]
+    async fn device_approval_requires_current_unexpired_attempt() {
         let mut transactions = Transactions::default();
         transactions.status.insert(
             "profile".into(),
@@ -523,14 +498,14 @@ mod tests {
         assert!(!active(&transactions, "profile", "superseded"));
         transactions.status.get_mut("profile").unwrap().expires = 0;
         assert!(!active(&transactions, "profile", "current"));
-        transactions.expire();
+        transactions.expire().await;
         assert_eq!(transactions.status["profile"].phase, "error");
         assert!(!active(&transactions, "profile", "current"));
-        transactions.cancel("profile");
+        transactions.cancel("profile").await;
         assert!(!active(&transactions, "profile", "current"));
     }
-    #[test]
-    fn expired_and_cancelled_transactions_cannot_be_redeemed() {
+    #[tokio::test]
+    async fn expired_and_cancelled_transactions_cannot_be_redeemed() {
         let mut transactions = Transactions::default();
         transactions.pending.insert(
             "expired".into(),
@@ -550,10 +525,10 @@ mod tests {
                 expires: 0,
             },
         );
-        transactions.expire();
+        transactions.expire().await;
         assert!(transactions.pending.is_empty());
         assert_eq!(transactions.status["profile"].phase, "error");
-        transactions.cancel("profile");
+        transactions.cancel("profile").await;
         assert!(transactions.status.is_empty());
     }
 }

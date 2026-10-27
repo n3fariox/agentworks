@@ -152,7 +152,7 @@ test('save subscription providers and run native Claude login on local and remot
 });
 
 
-test('Codex sign-in uses the browser-facing web port and supports cancellation',async({page})=>{
+test('Codex sign-in uses a temporary fixed callback port and supports cancellation',async({page})=>{
   const profile=await api('/api/model-providers',{operation:'save',profile:{kind:'chatgpt_codex',name:'Codex OAuth test',defaultModel:'gpt-6.1-sol',hostIds:['local']}});
   // Prevent navigation to a real provider; this test exercises URL generation only.
   await page.context().route('https://auth.openai.com/**',route=>route.fulfill({body:'OAuth provider fixture'}));
@@ -162,11 +162,11 @@ test('Codex sign-in uses the browser-facing web port and supports cancellation',
   const popup=await popupPromise;
   await expect(page.locator('#codex-oauth-link')).toBeVisible();
   const url=new URL(await page.locator('#codex-oauth-link').getAttribute('href'));
-  expect(url.searchParams.get('redirect_uri')).toBe(base+'/auth/callback');
+  expect(url.searchParams.get('redirect_uri')).toBe('http://localhost:1455/auth/callback');
   expect(url.searchParams.get('code_challenge_method')).toBe('S256');
   await page.locator('#codex-oauth-cancel').click();
   await expect(page.locator('#codex-oauth-status')).toHaveText('Sign-in cancelled.');
   const callback=await fetch(base+'/auth/callback?code=unused&state='+url.searchParams.get('state'));
-  expect(callback.status).toBe(400);await popup.close();
+  expect(callback.status).toBe(404);await popup.close();
   expect(JSON.stringify((await api('/api/model-providers')).profiles)).not.toContain('access_token');
 });
