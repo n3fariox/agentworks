@@ -45,6 +45,10 @@ pub async fn run(args: &[String]) -> Result<(), String> {
     )
     .await
     .map_err(|e| format!("WebSocket handshake with the server failed: {e}"))?;
+    let (out, mut outgoing) = mpsc::channel::<Message>(256);
+    let mcp = crate::mcp_relay::WorkerBridge::start(out.clone())
+        .await
+        .map_err(|e| e.to_string())?;
     let base = mise_env(&home()).await;
     let providers = available_providers(&base);
     let hello = json!({
@@ -55,6 +59,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         "hostname": hostname().unwrap_or_default(),
         "providers": providers,
         "tools": discovered_tools(&base),
+        "mcpRelay": {"endpoint":mcp.address,"command":std::env::current_exe().map_err(|e| e.to_string())?},
         "workspace": true,
         "modelProviders": true,
         "sharedModelProviders": true,
@@ -94,7 +99,6 @@ pub async fn run(args: &[String]) -> Result<(), String> {
     eprintln!("agentworks agent: connected ({})", providers.join(", "));
 
     let (mut sink, mut frames) = ws.split();
-    let (out, mut outgoing) = mpsc::channel::<Message>(256);
     let writer = tokio::spawn(async move {
         while let Some(message) = outgoing.recv().await {
             if sink.send(message).await.is_err() {
@@ -143,6 +147,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
                 };
                 let channel = request["channel"].as_u64().unwrap_or(0) as u32;
                 match request["type"].as_str() {
+                    Some("mcpReply") => mcp.reply(&request),
                     Some("terminalOpen") => {
                         let cwd = PathBuf::from(request["cwd"].as_str().unwrap_or(""));
                         if terminals.contains_key(&channel) {

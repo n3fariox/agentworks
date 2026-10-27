@@ -431,6 +431,8 @@ pub struct Live {
     requests: Mutex<HashMap<u64, oneshot::Sender<Result<String, String>>>>,
     next_request: AtomicU64,
     worker: Value,
+    mcp: Mutex<HashMap<u32, (std::net::SocketAddr, String)>>,
+    mcp_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl Live {
@@ -449,6 +451,8 @@ impl Live {
             requests: Default::default(),
             next_request: AtomicU64::new(0),
             worker,
+            mcp: Default::default(),
+            mcp_slots: Arc::new(tokio::sync::Semaphore::new(16)),
         }
     }
     pub fn has_provider(&self, provider: &str) -> bool {
@@ -471,6 +475,44 @@ impl Live {
                     return;
                 };
                 match value["type"].as_str() {
+                    Some("mcpRequest") => {
+                        if !value["request"].as_u64().is_some_and(|id| id > 0) {
+                            return;
+                        }
+                        let Ok(slot) = self.mcp_slots.clone().try_acquire_owned() else {
+                            let _ = self.out.try_send(Message::text(json!({"type":"mcpReply","request":value["request"],"result":crate::mcp_relay::unavailable()}).to_string()));
+                            return;
+                        };
+                        let binding = if self.closed.load(Ordering::Acquire)
+                            || !crate::mcp_relay::valid_call(&value["call"])
+                        {
+                            None
+                        } else {
+                            let token = value["call"]["token"].as_str().unwrap_or("");
+                            self.mcp
+                                .lock()
+                                .unwrap()
+                                .values()
+                                .find(|(_, t)| t == token)
+                                .cloned()
+                        };
+                        let out = self.out.clone();
+                        tokio::spawn(async move {
+                            let _slot = slot;
+                            let result = if let Some((endpoint, token)) = binding {
+                                crate::mcp_relay::forward(
+                                    endpoint,
+                                    &token,
+                                    value["call"]["operation"].as_str().unwrap_or(""),
+                                    value["call"]["arguments"].clone(),
+                                )
+                                .await
+                            } else {
+                                crate::mcp_relay::denied()
+                            };
+                            let _ = out.try_send(Message::text(json!({"type":"mcpReply","request":value["request"],"result":result}).to_string()));
+                        });
+                    }
                     Some("terminalFrame") => {
                         let channel = value["channel"].as_u64().unwrap_or(0) as u32;
                         if let Ok(mut frame) =
@@ -492,6 +534,7 @@ impl Live {
                     }
                     Some("exit") => {
                         let channel = value["channel"].as_u64().unwrap_or(0) as u32;
+                        self.mcp.lock().unwrap().remove(&channel);
                         if let Some(tx) = self.channels.lock().unwrap().remove(&channel) {
                             let message = value["message"].as_str().unwrap_or("");
                             if !message.is_empty() {
@@ -521,6 +564,7 @@ impl Live {
     }
     fn close(&self, reason: &str) {
         self.closed.store(true, Ordering::Release);
+        self.mcp.lock().unwrap().clear();
         for (_, tx) in self.channels.lock().unwrap().drain() {
             let _ = tx.unbounded_send(Err(io::Error::other(reason.to_string())));
         }
@@ -742,8 +786,26 @@ pub struct Spawned {
     channel: u32,
     forward: tokio::task::JoinHandle<()>,
 }
+impl Spawned {
+    /// Bind only this live ACP channel to the session's existing bridge credential.
+    pub fn bind_mcp(&self, endpoint: std::net::SocketAddr, token: String) {
+        let mut bindings = self.live.mcp.lock().unwrap();
+        if self.live.worker["mcpRelay"].is_object()
+            && !self.live.closed.load(Ordering::Acquire)
+            && self
+                .live
+                .channels
+                .lock()
+                .unwrap()
+                .contains_key(&self.channel)
+        {
+            bindings.insert(self.channel, (endpoint, token));
+        }
+    }
+}
 impl Drop for Spawned {
     fn drop(&mut self) {
+        self.live.mcp.lock().unwrap().remove(&self.channel);
         self.forward.abort();
         if self
             .live
@@ -866,6 +928,7 @@ fn check_hello(hello: &Value) -> Result<Value, String> {
         "hostname": text("hostname", 80),
         "providers": providers,
         "tools": hello["tools"],
+        "mcpRelay": hello["mcpRelay"],
         "workspace": hello["workspace"] == true,
         "modelProviders": hello["modelProviders"] == true,
         "sharedModelProviders": hello["sharedModelProviders"] == true,
@@ -932,6 +995,36 @@ async fn skip_preamble(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn mcp_credentials_are_scoped_to_live_channels_and_links() {
+        let (out, mut frames) = mpsc::channel(16);
+        let live = Arc::new(Live::new(out, json!({"mcpRelay":{},"providers":["demo"]})));
+        let (_lines, guard) = live.spawn("demo", "/remote", false).unwrap();
+        frames.recv().await.unwrap();
+        guard.bind_mcp("127.0.0.1:1".parse().unwrap(), "session-token".into());
+        assert_eq!(live.mcp.lock().unwrap().len(), 1);
+        live.receive(Message::text(json!({"type":"mcpRequest","request":1,"call":{"token":"other-host-token","operation":"read_inbox","arguments":{}}}).to_string()));
+        let reply: Value =
+            serde_json::from_str(frames.recv().await.unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(reply["result"]["error"]["status"], 403);
+        live.receive(Message::text(
+            json!({"type":"exit","channel":guard.channel}).to_string(),
+        ));
+        assert!(live.mcp.lock().unwrap().is_empty());
+        guard.bind_mcp("127.0.0.1:1".parse().unwrap(), "stale".into());
+        assert!(live.mcp.lock().unwrap().is_empty());
+        drop(guard);
+        let (_lines, guard) = live.spawn("demo", "/remote", false).unwrap();
+        guard.bind_mcp("127.0.0.1:1".parse().unwrap(), "live".into());
+        drop(guard);
+        assert!(live.mcp.lock().unwrap().is_empty());
+        let (_lines, guard) = live.spawn("demo", "/remote", false).unwrap();
+        guard.bind_mcp("127.0.0.1:1".parse().unwrap(), "live".into());
+        live.close("disconnected");
+        guard.bind_mcp("127.0.0.1:1".parse().unwrap(), "stale".into());
+        assert!(live.mcp.lock().unwrap().is_empty());
+    }
 
     #[tokio::test]
     async fn aborting_a_connection_closes_sessions_and_pending_directory_checks() {

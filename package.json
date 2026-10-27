@@ -16,6 +16,7 @@
     "test:workspace": "node scripts/workspace-smoke.mjs",
     "test:communication": "node scripts/communication-smoke.mjs",
     "test:remote-hosts": "node scripts/remote-host-smoke.mjs",
+    "test:remote-mcp": "node scripts/remote-mcp-smoke.mjs",
     "test:remote-plumbing": "node scripts/remote-plumbing-smoke.mjs",
     "test:remote-partitions": "node scripts/remote-partition-smoke.mjs",
     "test:mcp-wire": "node scripts/mcp-wire-smoke.mjs",

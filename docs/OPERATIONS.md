@@ -46,7 +46,7 @@ Remote sessions support chat, model discovery in the new-session dialog, and cre
 
 Remote sessions also support queued inputs, browsing/importing CLI conversations, forks, manual automations, authorized quota continuation, and authorized inbox turns. Native forks stay on the provider history’s host; cross-host forks carry transcript/summary context into a fresh native session. Dispatch rechecks the owning host’s roots and provider availability. Link loss pauses queues and revokes inbox delivery; uncertain turns are never replayed automatically. Quota continuation uses structured ACP reset evidence or a human-selected reset time.
 
-File browsing/previews/downloads, Git context/diffs, Agentworks MCP tools, remote Codex account probes, and explicit remote API-key mode remain unavailable. See Phase 6 in the roadmap for the plan.
+Remote Agentworks MCP supports peer discovery and inbox read/send/acknowledgment through the permission-checked worker relay. File browsing/previews/downloads, Git context/diffs, coordinator/completion MCP tools, remote Codex account probes, and explicit remote API-key mode remain unavailable. See [the relay contract](REMOTE-HOSTS.md#agentworks-mcp-messaging-relay) and Phase 6 in the roadmap.
 
 Manual setup requirements:
 

@@ -6,6 +6,8 @@ The separate [review and merge queue](REVIEW-QUEUE.md) pins proposals, independe
 
 ## MCP tools
 
+The [remote messaging relay](REMOTE-HOSTS.md#agentworks-mcp-messaging-relay) currently excludes `report_completion` and `get_completion`. Remote sessions can still use the human completion endpoint/dialog; agent-authored completion over remote MCP remains deferred.
+
 `report_completion` records a report for the authenticated MCP session only. Participant (`communicate`) access is required on every call, including retries. No actor, author, recipient, or session ID can be supplied. Unknown fields and invalid types are rejected.
 
 ```json

@@ -11,7 +11,7 @@ Chat attachments (L-03) are implemented. L-06 is considered covered by the exist
 | GitHub triggers (A-02) | A small supported event set, authenticated polling/webhooks, durable event IDs, and existing run/approval limits. |
 | Retention and recovery (R-02) | Keep-count retention and staged backup restore/upgrade are implemented; see [R-02](RETENTION-RECOVERY.md). Remaining: age/space/default policy, portable exports including attachments/native context, and promotion tooling. |
 | Authentication and isolation (R-03) | Stronger human authentication and process boundaries beyond the existing trusted-user/private-network model. |
-| Remote hosts (H-01/H-02) | Worker-side file browsing, Git views/diffs, and MCP relay. Remote chat, worktree launch/cleanup, queued inputs, continuation, and inbox turns are implemented; see [supported scope](REMOTE-HOSTS.md#supported-scope-and-verification). |
+| Remote hosts (H-01/H-02) | Worker-side file browsing, Git views/diffs, and MCP capabilities beyond messaging. Remote chat, worktree launch/cleanup, queued inputs, continuation, inbox turns, and permission-checked MCP peer discovery/read/send/acknowledgment are implemented; see [supported scope](REMOTE-HOSTS.md#supported-scope-and-verification). |
 | Portability | Native Windows delivery and host-specific validation. Linux remains the supported deployment. |
 | Experiment E-01 | Starlark was adopted for typed U-05 progress parsing, with explicit [routing order](experiments/001-starlark.md#routing-order) (priority, filename, declaration). Agent script writes need the decisions in [agent-proposed scripts](SCRIPT-PROPOSALS.md) first. Workflow interpretation remains prototype-only; see the [experiment record](experiments/001-starlark.md). |
 

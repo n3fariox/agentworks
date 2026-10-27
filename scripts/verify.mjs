@@ -32,6 +32,7 @@ try{
   await run('node',['scripts/mcp-wire-smoke.mjs']);
   await run('node',['scripts/remote-host-smoke.mjs']);
   await run('node',['scripts/remote-plumbing-smoke.mjs']);
+  await run('node',['scripts/remote-mcp-smoke.mjs']);
   await run('node',['scripts/remote-partition-smoke.mjs']);
   await run('node',['scripts/smoke.mjs']);
   await run('node',['scripts/progress-smoke.mjs']);

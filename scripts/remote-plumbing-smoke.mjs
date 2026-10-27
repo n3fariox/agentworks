@@ -105,7 +105,7 @@ try{
  await remove(quota.id);
  console.log('PASS remote continuation: ACP reset evidence, bounded resubmission, manually supplied reset');
 
- // Server-injected inbox turns work even before the separate remote MCP tunnel exists.
+ // Server-injected inbox turns remain independent of the agent-initiated MCP relay.
  const sender=await create({agentAccess:{communicate:true}}),recipient=await create({agentAccess:{communicate:true}});
  await api(`/api/sessions/${recipient.id}/inbox-delivery`,{enabled:true,requestId:crypto.randomUUID(),maxTurns:1,cooldownSeconds:5,maxBatch:1},'PUT');
  await api(`/api/hosts/${box.id}/roots`,{roots:[outside]},'PUT');

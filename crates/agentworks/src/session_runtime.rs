@@ -412,6 +412,7 @@ pub async fn run(
             host_profile,
             connection.as_ref(),
         )?;
+        guard.bind_mcp(s.mcp_endpoint, s.mcp_token.lock().unwrap().clone());
         // Keep the worker process alive until this runtime returns or is cancelled.
         (DynConnectTo::new(lines), Some(guard))
     };

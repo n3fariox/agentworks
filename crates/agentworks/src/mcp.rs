@@ -15,19 +15,35 @@ use tokio::{
 };
 
 pub fn configuration(s: &Session) -> Vec<McpServer> {
-    // The stdio executable and loopback bridge are only available on this server.
-    if s.host_id != "local" {
-        return Vec::new();
-    }
-    let server = McpServerStdio::new(
-        "agentworks",
-        std::env::current_exe().expect("executable path"),
-    )
-    .args(vec!["mcp".into()])
-    .env(vec![
-        EnvVariable::new("AGENTWORKS_MCP_ENDPOINT", s.mcp_endpoint.to_string()),
-        EnvVariable::new("AGENTWORKS_MCP_TOKEN", s.mcp_token.lock().unwrap().clone()),
-    ]);
+    let (command, endpoint) = if s.host_id == "local" {
+        (
+            std::env::current_exe().expect("executable path"),
+            s.mcp_endpoint.to_string(),
+        )
+    } else {
+        let Some(live) = crate::hosts::registry().and_then(|hosts| hosts.live(&s.host_id)) else {
+            return Vec::new();
+        };
+        let relay = &live.worker()["mcpRelay"];
+        let (Some(command), Some(endpoint)) =
+            (relay["command"].as_str(), relay["endpoint"].as_str())
+        else {
+            return Vec::new();
+        };
+        let Ok(address) = endpoint.parse::<SocketAddr>() else {
+            return Vec::new();
+        };
+        if !address.ip().is_loopback() || !std::path::Path::new(command).is_absolute() {
+            return Vec::new();
+        }
+        (command.into(), endpoint.to_owned())
+    };
+    let server = McpServerStdio::new("agentworks", command)
+        .args(vec!["mcp".into()])
+        .env(vec![
+            EnvVariable::new("AGENTWORKS_MCP_ENDPOINT", endpoint),
+            EnvVariable::new("AGENTWORKS_MCP_TOKEN", s.mcp_token.lock().unwrap().clone()),
+        ]);
     vec![McpServer::Stdio(server)]
 }
 #[derive(Clone)]

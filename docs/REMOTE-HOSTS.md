@@ -1,7 +1,7 @@
 # Remote hosts: implementation and protocol
 
 This describes the implemented **protocol 3** chat-worker link. For setup, see
-[remote hosts](OPERATIONS.md#remote-hosts). Planned file/Git views and MCP support
+[remote hosts](OPERATIONS.md#remote-hosts). Planned file/Git views and additional MCP capabilities
 are listed in [future work](BACKLOG.md).
 
 ## Architecture and ownership
@@ -105,7 +105,7 @@ to one live link and are not durable session IDs or prompt idempotency keys.
 
 | Direction | Type | Fields and meaning |
 | --- | --- | --- |
-| Worker → server | `hello` | `protocol`: integer; `version`: application version string; `platform`, `hostname`: strings; `providers`: provider-name array; `tools`: discovered CLI paths; `workspace`: worker-side worktree support; `worktreeCleanup`: inspection, removal and restore support |
+| Worker → server | `hello` | `protocol`: integer; `version`: application version string; `platform`, `hostname`: strings; `providers`: provider-name array; `tools`: discovered CLI paths; `workspace`: worker-side worktree support; `worktreeCleanup`: inspection, removal and restore support; optional `mcpRelay`: worker-loopback `endpoint` and absolute native facade `command` |
 | Server → worker | `welcome` | `protocol`: matching integer; `hostId`: stable catalog UUID used for ownership |
 | Worker → server | `ready` | `protocol`: matching integer; worker has acquired ownership |
 | Server → worker | `error` | `message`: handshake rejection diagnostic |
@@ -115,6 +115,8 @@ to one live link and are not durable session IDs or prompt idempotency keys.
 | Server → worker | `spawn` | `channel`: channel ID; `provider`: one of `demo`, `claude`, `codex`, `opencode`; `cwd`: remote path; `hostProfile`: boolean passed to adapter configuration |
 | Server → worker | `kill` | `channel`: stop this adapter's process group |
 | Worker → server | `exit` | `channel`; `message`: startup/exit diagnostic; ends that channel |
+| Worker → server | `mcpRequest` | Link-scoped positive `request`; `call` contains `token`, `operation`, `arguments` in the existing native facade bridge format |
+| Server → worker | `mcpReply` | Same `request`; `result` contains the facade response or structured `error` |
 | Both | Binary | Four-byte unsigned channel ID in network byte order, followed by UTF-8 ACP line bytes, without a trailing newline |
 | Both | WebSocket control frames | Ping/Pong for liveness; Close for link termination |
 
@@ -194,6 +196,55 @@ kill the adapter. Killed or replaced channels move into a retiring collection;
 leaving the active channel map does not release their cleanup ownership. On link
 shutdown the worker stops and awaits both active and retiring tasks before
 releasing the host lock. Finished tasks are periodically removed.
+
+## Agentworks MCP messaging relay
+
+A worker advertises optional `mcpRelay: {"endpoint":"127.0.0.1:<port>",
+"command":"/absolute/path/to/agentworks"}`. The server supplies this native stdio
+facade in ACP new/load/resume/fork configuration. Its endpoint is a worker-owned
+loopback listener; the facade still runs `agentworks mcp`. Only its small existing
+bridge requests cross the authenticated SSH WebSocket. No SSH port forwarding,
+public registration route, server filesystem path, or arbitrary network destination
+is exposed. The worker loopback port is separate from the stdio worker link.
+
+This slice permits exactly `tools/list`, `list_sessions`, `read_inbox`,
+`send_message`, and `acknowledge_message`. Both relay ends reject other operations;
+the server filters discovery to the intersection of this list and the caller's
+current grants. Coordinator operations and completion tools remain unavailable
+through this relay even when granted locally. The bridge format is the boundary:
+adding worker-native inbox/send commands would duplicate the server's durable mail,
+project scoping, permission and audit logic, and would not configure an MCP client
+for the provider. The native MCP facade continues to translate MCP `tools/call`
+into an authorized bridge operation.
+
+The server binds the existing session credential and server-loopback bridge address
+to that session's active ACP channel. Neither actor identity nor server destination
+comes from a worker call. Unknown credentials, other links' credentials, discovery
+channels without a session binding, and ended channels fail closed. Channel exit,
+runtime guard drop and link close remove bindings. Requests already admitted can
+have executed when a channel/link is lost; teardown does not roll back mutations.
+The main bridge resolves the credential and checks live grants/project/peer access
+on every request, under the same communication lock and audit path as Local.
+Project/session roles and explicit grants are unchanged; relay availability grants
+no permission. Sending persists mail without waking a peer. Server-authorized inbox
+turns remain a separate feature.
+
+The worker admits at most 16 concurrent sockets/calls, each with an 18-second total
+read/reply/write deadline and a 64 KiB newline-terminated request limit. The server
+admits at most 16 relays per link, bounds bridge replies at 2 MiB and waits at most
+15 seconds. Saturation, malformed/oversized replies, socket errors and timeout
+fail closed; a lost reply may leave a mutation's outcome uncertain. There is no
+automatic retry. Use the original stable `requestId` when deliberately reconciling
+or retrying a send. Unknown/late correlation IDs are ignored; pending requests and
+worker sockets are discarded on teardown. Reconnect/resume installs fresh facade
+configuration and a new runtime credential; no call is replayed.
+
+The capability is additive within protocol 3. An older worker without `mcpRelay`
+continues chat with an empty Agentworks MCP configuration. An older server ignores
+the capability. Upgrade both binaries and deliberately resume sessions to enable
+messaging. The remote OS account, executable and provider remain trusted: this is
+an application permission boundary, not isolation between processes of the same
+Unix user. Remote provider-specific MCP behavior still needs real-host validation.
 
 ## Disconnect, ownership transfer and resume
 
@@ -333,23 +384,24 @@ revokes inbox authorization; resuming a session alone does not drain its queue.
 Quota timers may resume an authorized saved native context once the host is available,
 but claimed/uncertain requests are never automatically replayed. Reset evidence comes
 from ACP or a human-selected time; local Codex probes are never run for remote errors.
-Inbox context is injected by the server; remote agents still lack the separate MCP
-connection needed to read/send messages and invoke coordinator tools themselves.
+Inbox context is injected by the server. Remote agents can independently discover peers,
+read/send and acknowledge messages through the MCP relay described above; coordinator
+MCP tools remain outside this bounded slice.
 
-File/Git views, Agentworks MCP, remote account/quota probes and explicit remote
-API-key mode remain unavailable. See the roadmap for worker-side file/Git operations
-and MCP relay.
+File/Git views, additional Agentworks MCP operations, remote account/quota probes and
+explicit remote API-key mode remain unavailable. See the roadmap for remaining enrichment.
 
 Implementation entry points:
 
 - [crates/agentworks-runtime/src/remote.rs](../crates/agentworks-runtime/src/remote.rs): SSH supervisor, handshake, link registry and channel relay.
+- [crates/agentworks-runtime/src/mcp_relay.rs](../crates/agentworks-runtime/src/mcp_relay.rs): bounded worker loopback facade bridge and allowlisted server forwarding.
 - [crates/agentworks-runtime/src/worker.rs](../crates/agentworks-runtime/src/worker.rs): worker handshake/lock, heartbeat, adapter groups, environment and directory operations.
 - [crates/agentworks-runtime/src/acp.rs](../crates/agentworks-runtime/src/acp.rs): shared ACP negotiation and model/history discovery.
 - [crates/agentworks/src/session_runtime.rs](../crates/agentworks/src/session_runtime.rs): local/remote transport selection and session prompt coordination.
 - [crates/agentworks/src/hosts.rs](../crates/agentworks/src/hosts.rs): host HTTP API and session/workspace coordination.
 - [crates/agentworks/src/main.rs](../crates/agentworks/src/main.rs): host routes, session admission/resume and local-path guards.
 - [crates/agentworks/src/catalog.rs](../crates/agentworks/src/catalog.rs): durable host and host-local location configuration.
-- [crates/agentworks/src/mcp.rs](../crates/agentworks/src/mcp.rs): local-only Agentworks MCP configuration.
+- [crates/agentworks/src/mcp.rs](../crates/agentworks/src/mcp.rs): native Agentworks MCP facade, local/remote configuration and authoritative permission dispatcher.
 
 After a locked build, `npm run test:remote-hosts` checks the API/relay through an
 SSH stand-in, including paths, two hosts, slow mise, approvals/questions,
@@ -368,3 +420,12 @@ closed handles and ownership locking. [tests/hosts.spec.mjs](../tests/hosts.spec
 covers desktop/mobile controls and remote/local policy behavior. These checks do
 not replace fresh real-SSH and provider-specific validation in the deployment
 environment; current end-to-end fixtures use the demo agent and no paid inference.
+
+`npm run test:remote-mcp` exercises real native stdio MCP launched by the demo adapter
+on two SSH-stand-in workers, with remote paths outside the server's roots. It checks
+peer discovery, remote/remote and remote/local mail, acknowledgments, default roles,
+off access, live revocation, spoof/cross-project denial, mutation retries/conflicts,
+coordinator method exclusion, and deliberate reconnect/native resume. It also runs
+in `npm run verify`. Runtime unit tests cover credential/channel/link binding,
+malformed and truncated frames/replies, method/destination restrictions, discovery
+filtering, lost replies/timeouts without replay, correlation and teardown cleanup.

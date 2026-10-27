@@ -19,3 +19,6 @@ tokio-tungstenite = { version = "0.29", default-features = false, features = ["h
 uuid.workspace = true
 
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
