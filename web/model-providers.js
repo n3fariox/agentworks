@@ -93,7 +93,12 @@ export function setupModelProviders({$,api,el,getHosts,selectionChanged,socketUr
       if(!result.profiles.length)listElement.append(el('p','field-note','No providers configured. Add a provider, then choose which hosts can use it.'));
       for(const p of result.profiles){
         const card=el('div','model-provider-card'),copy=el('div');
-        copy.append(el('strong','',p.name),el('p','field-note',p.kind==='chatgpt_codex'?'ChatGPT subscription · Codex OAuth':p.kind==='claude-code'?'Claude subscription · Claude Code':p.baseUrl),el('p','field-note',`${p.defaultModel} · ${p.kind==='chatgpt_codex'?(p.signedIn?'Signed in · shared with enabled hosts':'Not signed in'):p.kind==='claude-code'?'Sign-in managed on each host':p.keyConfigured?'API key configured':'No API key'}`),el('p','field-note','Available on: '+(p.hostIds?.map(hostName).join(', ')||'No hosts')));
+        const status=el('p','field-note');status.append(document.createTextNode(p.defaultModel+' · '));
+        if(p.kind==='chatgpt_codex'){
+          const text=el('span','model-provider-auth-status',p.signedIn?'Signed in':'Not signed in');text.dataset.signedIn=String(Boolean(p.signedIn));status.append(text);
+          if(p.signedIn)status.append(document.createTextNode(' · shared with enabled hosts'));
+        }else status.append(document.createTextNode(p.kind==='claude-code'?'Sign-in managed on each host':p.keyConfigured?'API key configured':'No API key'));
+        copy.append(el('strong','',p.name),el('p','field-note',p.kind==='chatgpt_codex'?'ChatGPT subscription · Codex OAuth':p.kind==='claude-code'?'Claude subscription · Claude Code':p.baseUrl),status,el('p','field-note','Available on: '+(p.hostIds?.map(hostName).join(', ')||'No hosts')));
         const actions=el('div','model-provider-actions'),edit=el('button','text-button','Edit'),remove=el('button','text-button','Delete');edit.type=remove.type='button';
         edit.onclick=()=>editor(p);
         remove.onclick=async()=>{

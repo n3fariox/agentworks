@@ -468,3 +468,6 @@ dialog.image-viewer{width:96vw;max-width:96vw;height:92dvh;max-height:92dvh;padd
 #provider-auth-cell-measure{position:absolute;visibility:hidden;pointer-events:none;font:14px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace}
 
 #codex-oauth{margin-top:20px;padding:12px;border:1px solid var(--border);border-radius:8px}#codex-oauth a{margin-right:16px}
+
+.model-provider-auth-status[data-signed-in="true"]{color:var(--green)}
+.model-provider-auth-status[data-signed-in="false"]{color:#ddb878}
