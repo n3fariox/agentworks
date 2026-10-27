@@ -183,3 +183,21 @@ test('changed files are grouped in collapsible folders with exact path selection
   await expect(page.locator('#diff-patch')).toHaveText('selected src/ui/view.js');
   await expect(page.locator('#diff-files button[data-path="src/ui/view.js"]')).toHaveAttribute('aria-current','true');
 });
+
+test('mobile tree compacts folder chains and scrolls wide paths locally',async({page})=>{
+  await page.setViewportSize({width:390,height:844});
+  const file='src/features/review/components/deeply-nested-directory/VeryLongFileNameForHorizontalScrolling.js';
+  await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),session.id);
+  await page.route('**/api/sessions/*/diff?**',route=>route.fulfill({json:{context:{cwd:nested},mode:'unstaged',bases:[],files:[file],staged:{files:[]},untracked:{files:[]},patch:null}}));
+  await page.goto(base);await expect(page.locator('#session-state')).toHaveText('Ready');
+  await page.locator('#session-more').click();await page.locator('#session-diff').click();
+  const tree=page.locator('#diff-files');
+  await expect(tree.locator('summary')).toHaveText('src/features/review/components/deeply-nested-directory');
+  expect(await tree.locator('details').evaluate(n=>getComputedStyle(n).marginTop)).toBe('0px');
+  expect(await tree.evaluate(n=>n.scrollWidth>n.clientWidth)).toBe(true);
+  await tree.evaluate(n=>{n.scrollLeft=100;});
+  expect(await tree.evaluate(n=>n.scrollLeft)).toBeGreaterThan(0);
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  await tree.locator('button').click();
+  await expect(tree.locator('button')).toHaveAttribute('aria-current','true');
+});

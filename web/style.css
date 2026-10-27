@@ -30,10 +30,10 @@
 #diff-file-label h3{font-size:12px;font-weight:500;color:var(--muted);margin:0 0 8px}
 #diff-files{max-height:280px;overflow:auto;font:12px/1.6 monospace;border:1px solid var(--border);border-radius:6px;padding:6px;background:#101216}
 #diff-files ul{list-style:none;margin:0;padding:0 0 0 14px}
-#diff-files>ul{padding:0}
-#diff-files details{margin:0}
-#diff-files summary{padding:5px 4px;overflow-wrap:anywhere}
-#diff-files button{display:block;width:100%;padding:5px 8px;text-align:left;font:inherit;border:0;border-radius:4px;background:transparent;overflow-wrap:anywhere;white-space:pre-wrap}
+#diff-files>ul{padding:0;min-width:100%;width:max-content}
+#side-diff #diff-files details{margin:0}
+#diff-files summary{padding:5px 4px;white-space:pre;overflow-wrap:normal}
+#diff-files button{display:block;width:100%;padding:5px 8px;text-align:left;font:inherit;border:0;border-radius:4px;background:transparent;overflow-wrap:normal;white-space:pre}
 #diff-files button:hover{background:#24262d}
 #diff-files button[aria-current=true]{background:#2a2539;color:#d2c5f2}
 #diff-files :is(button,summary):focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
@@ -44,7 +44,7 @@
 #side-diff details{margin-top:12px}
 #side-diff summary{cursor:pointer;font-size:12px}
 @media(min-width:1000px){.diff-layout{grid-template-columns:minmax(180px,240px) minmax(0,1fr);align-items:start}#diff-files{max-height:60dvh;position:sticky;top:0}}
-@media(max-width:650px){#diff-files{max-height:200px}#diff-files :is(button,summary){min-height:44px}}
+@media(max-width:650px){#diff-files{max-height:200px;overscroll-behavior:contain}#diff-files ul{padding-left:10px}#diff-files>ul{padding-left:0}#diff-files :is(button,summary){min-height:40px;padding-top:10px;padding-bottom:10px}}
 .palette-entry{margin-bottom:0}
 #palette-search{font-size:20px}
 #palette-dialog{width:560px;padding:26px 0 20px;overflow:hidden}

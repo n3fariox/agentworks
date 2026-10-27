@@ -22,11 +22,18 @@ export function setupDiff({api,root,enhanceBlocks}) {
     }
     function branch(children){
       const list=document.createElement('ul');
-      for(const node of [...children.values()].sort((a,b)=>Number(!!b.children.size)-Number(!!a.children.size)||a.name.localeCompare(b.name))){
+      for(let node of [...children.values()].sort((a,b)=>Number(!!b.children.size)-Number(!!a.children.size)||a.name.localeCompare(b.name))){
+        let name=node.name;
+        // Compact directory-only chains without losing the exact file path.
+        while(node.children.size===1){
+          const child=node.children.values().next().value;
+          if(!child.children.size)break;
+          name+='/'+child.name;node=child;
+        }
         const item=document.createElement('li');
         if(node.children.size){
           const folder=document.createElement('details'),label=document.createElement('summary');
-          folder.open=!collapsed.has(node.path);label.textContent=node.name;
+          folder.open=!collapsed.has(node.path);label.textContent=name;label.title=node.path;
           folder.addEventListener('toggle',()=>{if(folder.open)collapsed.delete(node.path);else collapsed.add(node.path);});
           folder.append(label,branch(node.children));item.append(folder);
         }else{
