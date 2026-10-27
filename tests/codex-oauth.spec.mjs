@@ -35,32 +35,33 @@ test.beforeAll(async()=>{
     }
     let text='';for await(const chunk of req)text+=chunk;
     if(url.pathname==='/api/accounts/deviceauth/usercode'){
-      if(deviceDisabled){res.writeHead(403);res.end('{}');return;}
+      if(deviceDisabled){res.writeHead(403);res.end('{"error_description":"fixture-refresh-private"}');return;}
       const body=JSON.parse(text);if(body.client_id!=='app_EMoamEEZ73f0CkXaXp7hrann'){res.writeHead(400);res.end('{}');return;}
       const id=randomUUID(),code='TEST-'+devices.size;devices.set(id,{code,approved:false});
       res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({device_auth_id:id,user_code:code,interval:'1'}));return;
     }
     if(url.pathname==='/api/accounts/deviceauth/token'){
       devicePolls++;
-      if(devicePollFailure){res.writeHead(410);res.end('{}');return;}
+      if(devicePollFailure){res.writeHead(410);res.end('{"error_description":"fixture-refresh-private"}');return;}
       const body=JSON.parse(text),device=devices.get(body.device_auth_id);
       if(!device||device.code!==body.user_code||!device.approved){res.writeHead(403);res.end('{}');return;}
       const code=randomUUID(),verifier=randomUUID();
-      codes.set(code,{redirect:`http://127.0.0.1:${issuer.address().port}/deviceauth/callback`,challenge:createHash('sha256').update(verifier).digest('base64url')});
+      codes.set(code,{device:true,redirect:`http://127.0.0.1:${issuer.address().port}/deviceauth/callback`,challenge:createHash('sha256').update(verifier).digest('base64url')});
       res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({authorization_code:code,code_verifier:verifier}));return;
     }
     if(url.pathname==='/oauth/token'){
       const form=new URLSearchParams(text);
       if(form.get('grant_type')==='authorization_code'){
         const code=codes.get(form.get('code'));codes.delete(form.get('code'));
-        if(!code||code.redirect!==form.get('redirect_uri')||code.challenge!==createHash('sha256').update(form.get('code_verifier')||'').digest('base64url')){res.writeHead(400);res.end('{}');return;}
+        if(!code||![code.redirect,...(code.device?['https://auth.openai.com/deviceauth/callback']:[])].includes(form.get('redirect_uri'))||code.challenge!==createHash('sha256').update(form.get('code_verifier')||'').digest('base64url')){res.writeHead(400);res.end('{}');return;}
         if(holdExchange){const pending=holdExchange;holdExchange=null;exchangeStarted?.();await pending;}
         exchanges++;currentAccess='fixture-access-initial';currentRefresh='fixture-refresh-initial';
       }else{
         if(form.get('refresh_token')!==currentRefresh){res.writeHead(400);res.end('{}');return;}
         refreshes++;await new Promise(r=>setTimeout(r,80));currentAccess='fixture-access-rotated-'+refreshes;currentRefresh='fixture-refresh-rotated-'+refreshes;
       }
-      const claims=Buffer.from(JSON.stringify({'https://api.openai.com/auth':{chatgpt_account_id:'fixture-workspace'}})).toString('base64url');
+      const claims=Buffer.from(JSON.stringify({exp:Math.floor(Date.now()/1000)+(refreshes?3600:1),'https://api.openai.com/auth':{chatgpt_account_id:'fixture-workspace'}})).toString('base64url');
+      currentAccess=currentAccess+'.'+claims+'.signature';
       res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({access_token:currentAccess,refresh_token:currentRefresh,id_token:'fixture.'+claims+'.signature',expires_in:refreshes?3600:1}));return;
     }
     if(url.pathname==='/codex/responses'){
@@ -209,4 +210,86 @@ test('disabled device login and polling failures show actionable errors',async()
     await api(path+'/device',{},'POST');await expect.poll(async()=>(await api(path)).status).toBe('error');
     expect((await api(path)).error).toContain('HTTP 410');expect((await api(path)).signedIn).toBe(false);
   }finally{devicePollFailure=false;}
+});
+
+
+for(const backend of ['device','device-rig'])test(`${backend}: cancel and retry across backends preserve the existing account`,async()=>{
+  const path=`/api/model-providers/${profile.id}/codex-auth`,other=backend==='device'?'device-rig':'device';
+  const pending=await api(path+'/'+backend,{},'POST');const before=exchanges;
+  const next=await api(path+'/'+other,{},'POST');
+  [...devices.values()].find(d=>d.code===pending.userCode).approved=true;
+  await new Promise(r=>setTimeout(r,1200));expect(exchanges).toBe(before);
+  expect((await api(path)).status).toBe('pending');
+  await api(path+'/cancel',{},'POST');[...devices.values()].find(d=>d.code===next.userCode).approved=true;
+  await new Promise(r=>setTimeout(r,1200));expect(exchanges).toBe(before);expect((await api(path)).signedIn).toBe(false);
+});
+
+test('Rig button stages approval in memory and shares credentials with Goose and existing login',async({page})=>{
+  const path=`/api/model-providers/${profile.id}/codex-auth`;
+  await page.goto(base+'/?settings');await page.getByRole('tab',{name:'Model providers',exact:true}).click();
+  await expect(page.getByRole('button',{name:'Device code',exact:true})).toBeVisible();
+  await page.getByRole('button',{name:'Device code · Rig',exact:true}).click();
+  await expect(page.locator('#codex-device-code')).toContainText('TEST-');
+  await expect(page.locator('#codex-oauth-title')).toContainText('Rig');
+  const code=await page.locator('#codex-device-code').textContent();
+  expect(page.context().pages()).toHaveLength(1);
+  const before=exchanges;[...devices.values()].find(d=>d.code===code).approved=true;
+  await expect(page.locator('#codex-oauth-status')).toContainText('Signed in');expect(exchanges).toBe(before+1);
+  const stored=await readFile(join(dir,'providers','codex-oauth.json'),'utf8');expect(stored).toContain('fixture-refresh-initial');
+  expect((await stat(join(dir,'providers','codex-oauth.json'))).mode&0o777).toBe(0o600);
+  const session=await api('/api/sessions',{provider:'goose',hostId:'local',cwd:join(dir,'project'),modelProvider:profile.id,title:'Rig device login'});
+  await expect.poll(async()=>(await snapshot(session.id)).session.status,{timeout:20000}).toBe('idle');
+  await api(`/api/sessions/${session.id}/prompt`,{text:'Reply CODEX_OAUTH_OK without tools.',requestId:randomUUID()});
+  await expect.poll(async()=>JSON.stringify((await snapshot(session.id)).events).includes('CODEX_OAUTH_OK'),{timeout:10000}).toBe(true);
+  for(const backend of ['device','device-rig']){
+    const pending=await api(path+'/'+backend,{},'POST');await api(path+'/cancel',{},'POST');
+    expect((await api(path)).signedIn).toBe(true);
+    expect([...devices.values()].find(d=>d.code===pending.userCode).approved).toBe(false);
+  }
+  expect(log).not.toContain('fixture-access');expect(log).not.toContain('fixture-refresh');
+  const snapshotText=JSON.stringify(await api('/api/sessions/'+session.id));expect(snapshotText).not.toContain('fixture-access');
+  await api(path,undefined,'DELETE');
+});
+
+test('Rig late exchange, disconnect, and profile deletion cannot resurrect credentials',async()=>{
+  const path=`/api/model-providers/${profile.id}/codex-auth`;
+  const pending=await api(path+'/device-rig',{},'POST');
+  let release;holdExchange=new Promise(resolve=>release=resolve);const started=new Promise(resolve=>exchangeStarted=resolve);
+  try{
+    [...devices.values()].find(d=>d.code===pending.userCode).approved=true;await started;
+    await api(path,undefined,'DELETE');release();await new Promise(r=>setTimeout(r,100));expect((await api(path)).signedIn).toBe(false);
+  }finally{release();exchangeStarted=null;holdExchange=null;}
+  const deleted=await api('/api/model-providers',{operation:'save',profile:{name:'Deleted Rig profile',kind:'chatgpt_codex',defaultModel:'gpt-6.1-sol',hostIds:['local']}});
+  const next=await api(`/api/model-providers/${deleted.id}/codex-auth/device-rig`,{},'POST');const before=exchanges;
+  await api('/api/model-providers',{operation:'delete',id:deleted.id});[...devices.values()].find(d=>d.code===next.userCode).approved=true;
+  await new Promise(r=>setTimeout(r,1200));expect(exchanges).toBe(before);
+});
+
+test('Rig failures are sanitized and can be retried using the existing implementation',async()=>{
+  const path=`/api/model-providers/${profile.id}/codex-auth`;
+  deviceDisabled=true;
+  try{
+    const response=await fetch(base+path+'/device-rig',{method:'POST',headers:{Origin:base}});expect(response.status).toBe(400);
+    expect(await response.text()).toContain('workspace admin');expect((await api(path)).status).toBe('error');
+  }finally{deviceDisabled=false;}
+  devicePollFailure=true;
+  try{
+    const response=await fetch(base+path+'/device-rig',{method:'POST',headers:{Origin:base}});expect([200,400]).toContain(response.status);
+    expect(await response.text()).not.toContain('fixture-refresh-private');await expect.poll(async()=>(await api(path)).status).toBe('error');
+    expect((await api(path)).error).not.toContain('fixture-refresh-private');expect((await api(path)).error).toContain('Rig');expect((await api(path)).signedIn).toBe(false);
+  }finally{devicePollFailure=false;}
+  await api(path+'/device',{},'POST');expect((await api(path)).status).toBe('pending');await api(path+'/cancel',{},'POST');
+});
+
+test('existing and Rig device login can run independently on separate connections',async()=>{
+  const other=await api('/api/model-providers',{operation:'save',profile:{name:'Rig comparison account',kind:'chatgpt_codex',defaultModel:'gpt-6.1-sol',hostIds:['local']}});
+  const original=`/api/model-providers/${profile.id}/codex-auth`,rig=`/api/model-providers/${other.id}/codex-auth`;
+  const [nativePending,rigPending]=await Promise.all([api(original+'/device',{},'POST'),api(rig+'/device-rig',{},'POST')]);
+  [...devices.values()].find(d=>d.code===rigPending.userCode).approved=true;
+  await expect.poll(async()=>(await api(rig)).signedIn).toBe(true);
+  expect((await api(original)).status).toBe('pending');expect((await api(original)).signedIn).toBe(false);
+  [...devices.values()].find(d=>d.code===nativePending.userCode).approved=true;
+  await expect.poll(async()=>(await api(original)).signedIn).toBe(true);
+  await api(original,undefined,'DELETE');expect((await api(rig)).signedIn).toBe(true);
+  await api('/api/model-providers',{operation:'delete',id:other.id});
 });

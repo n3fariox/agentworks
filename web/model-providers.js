@@ -21,11 +21,11 @@ export function setupModelProviders({$,api,el,getHosts,selectionChanged,socketUr
   async function signInCodex(p,device=false){
     stopCodexPoll();const generation=codexGeneration;codexAuth=p.id;codexDevice=device;
     const popup=device?null:window.open('about:blank','_blank');if(popup)popup.opener=null;
-    $('codex-oauth').hidden=false;$('codex-oauth-title').textContent=p.name+' · ChatGPT sign-in';
+    $('codex-oauth').hidden=false;$('codex-oauth-title').textContent=p.name+(device==='rig'?' · ChatGPT sign-in · Rig':' · ChatGPT sign-in');
     $('codex-device-instructions').hidden=true;$('codex-device-code').textContent='';$('codex-oauth-status').textContent='Starting sign-in…';$('codex-oauth-link').hidden=true;$('codex-oauth-cancel').hidden=true;
     $('codex-oauth').scrollIntoView({block:'center'});
     try{
-      const result=await api(codexPath(p.id)+(device?'/device':''),{method:'POST'});if(generation!==codexGeneration){popup?.close();return;}
+      const result=await api(codexPath(p.id)+(device===true?'/device':device==='rig'?'/device-rig':''),{method:'POST'});if(generation!==codexGeneration){popup?.close();return;}
       if(device){$('codex-device-code').textContent=result.userCode;$('codex-device-instructions').hidden=false;}
       $('codex-oauth-link').href=result.verificationUrl||result.authorizationUrl;$('codex-oauth-link').hidden=false;$('codex-oauth-cancel').hidden=false;
       if(popup)popup.location.href=result.authorizationUrl;
@@ -98,6 +98,7 @@ export function setupModelProviders({$,api,el,getHosts,selectionChanged,socketUr
         if(p.kind==='chatgpt_codex'){
           const signin=el('button','text-button',p.signedIn?'Sign in again':'Sign in with ChatGPT');signin.type='button';signin.onclick=()=>signInCodex(p);actions.append(signin);
           const device=el('button','text-button','Device code');device.type='button';device.title='Experimental device-code sign-in';device.onclick=()=>signInCodex(p,true);actions.append(device);
+          const rigDevice=el('button','text-button','Device code · Rig');rigDevice.type='button';rigDevice.title='Compare Rig’s experimental device-code sign-in';rigDevice.onclick=()=>signInCodex(p,'rig');actions.append(rigDevice);
           if(p.signedIn){const disconnect=el('button','text-button','Disconnect');disconnect.type='button';disconnect.onclick=async()=>{try{stopCodexPoll();await api(codexPath(p.id),{method:'DELETE'});$('codex-oauth').hidden=true;await list();}catch(error){message(error.message);}};actions.append(disconnect);}
         }
         if(p.kind==='claude-code')for(const hostId of p.hostIds||[]){

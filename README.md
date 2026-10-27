@@ -6,7 +6,7 @@ A small, local Rust prototype for running independent Claude, Codex, Goose, Open
 
 ## Run
 
-Requires [mise](https://mise.jdx.dev/) and Node (use a current LTS supported by the adapters). The repository pins Rust 1.98.1 (installed through rustup, with the `x86_64-pc-windows-gnu` target) and Zig 0.15.2 in `mise.toml`; the build and start commands install/select them through mise so neither has to be added to your shell `PATH` manually. The crates' minimum supported Rust is 1.94.1. To check the Windows build from Linux: `mise exec -- cargo check --target x86_64-pc-windows-gnu -p agentworks-terminal` (other crates do not build for Windows yet). The first Rust build fetches Ghostty’s pinned native sources and Zig dependencies.
+Requires [mise](https://mise.jdx.dev/) and Node (use a current LTS supported by the adapters). The repository pins Rust 1.98.1 (installed through rustup, with the `x86_64-pc-windows-gnu` target) and Zig 0.15.2 in `mise.toml`; the build and start commands install/select them through mise so neither has to be added to your shell `PATH` manually. The crates' minimum supported Rust is 1.97.1. To check the Windows build from Linux: `mise exec -- cargo check --target x86_64-pc-windows-gnu -p agentworks-terminal` (other crates do not build for Windows yet). The first Rust build fetches Ghostty’s pinned native sources and Zig dependencies.
 
 ```bash
 mise trust mise.toml # once per checkout, if mise asks

@@ -14,6 +14,9 @@ use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::LazyLock};
 use tokio::sync::Mutex;
 
+mod rig_device;
+pub use rig_device::start as start_rig_device;
+
 struct Attempt {
     profile: String,
     redirect: String,
@@ -29,6 +32,7 @@ struct Status {
 #[derive(Default)]
 struct Transactions {
     pending: HashMap<String, Attempt>,
+    rig_tasks: HashMap<String, tokio::task::AbortHandle>,
     status: HashMap<String, Status>,
 }
 static TRANSACTIONS: LazyLock<Mutex<Transactions>> =
@@ -74,14 +78,20 @@ pub fn redirect_uri(origin: &str) -> Result<String, String> {
 }
 impl Transactions {
     fn cancel(&mut self, id: &str) {
+        if let Some(task) = self.rig_tasks.remove(id) {
+            task.abort();
+        }
         self.pending.retain(|_, attempt| attempt.profile != id);
         self.status.remove(id);
     }
     fn expire(&mut self) {
         let now = credentials::now();
         self.pending.retain(|_, attempt| attempt.expires > now);
-        for status in self.status.values_mut() {
+        for (id, status) in &mut self.status {
             if matches!(status.phase, "pending" | "exchanging") && status.expires <= now {
+                if let Some(task) = self.rig_tasks.remove(id) {
+                    task.abort();
+                }
                 status.phase = "error";
                 status.error = Some("Sign-in expired. Try again.".into());
             }
@@ -468,6 +478,33 @@ mod tests {
             "http://localhost:5555?x=y",
         ] {
             assert!(redirect_uri(origin).is_err());
+        }
+    }
+    #[tokio::test]
+    async fn rig_tasks_stop_on_expiry_and_cancellation() {
+        for expired in [false, true] {
+            let task = tokio::spawn(std::future::pending::<()>());
+            let mut transactions = Transactions::default();
+            transactions
+                .rig_tasks
+                .insert("profile".into(), task.abort_handle());
+            transactions.status.insert(
+                "profile".into(),
+                Status {
+                    state: "state".into(),
+                    phase: "pending",
+                    error: None,
+                    expires: if expired { 0 } else { credentials::now() + 900 },
+                },
+            );
+            if expired {
+                transactions.expire();
+            } else {
+                transactions.cancel("profile");
+            }
+            assert!(task.await.unwrap_err().is_cancelled());
+            assert!(transactions.rig_tasks.is_empty());
+            assert!(!active(&transactions, "profile", "state"));
         }
     }
     #[test]
