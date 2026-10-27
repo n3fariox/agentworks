@@ -1,3 +1,15 @@
+// Root-to-current crumbs for canonical server paths. Windows hosts answer with
+// `\` (including `C:\` and `\\?\C:\` roots); POSIX hosts with `/`. Each crumb's
+// path extends the root with the host's own separator.
+export function breadcrumbs(root,path){
+  const sep=root.includes('\\')&&!root.includes('/')?'\\':'/';
+  const base=root.endsWith(sep)?root:root+sep;
+  const crumbs=[[root,root]];
+  if(!path.startsWith(base))return crumbs;
+  const parts=path.slice(base.length).split(/[\\/]/).filter(Boolean);
+  parts.forEach((name,i)=>crumbs.push([name,base+parts.slice(0,i+1).join(sep)]));
+  return crumbs;
+}
 // Folder picker for project and session directories. The server lists and
 // creates folders only beneath the host's allowed roots; paths shown here are
 // the server's canonical answers, never trusted browser input.
@@ -10,9 +22,7 @@ export function setupDirectoryPicker({$,api}) {
     const crumb=(label,path)=>{const b=document.createElement('button');b.type='button';b.className='text-button';b.textContent=label;b.onclick=()=>load(path);crumbs.append(b);};
     crumb('Allowed roots',null);
     if(at){
-      crumb(listing.root,listing.root);
-      const rest=at.slice(listing.root.length).split('/').filter(Boolean);
-      rest.forEach((name,i)=>crumb(name,listing.root.replace(/\/$/,'')+'/'+rest.slice(0,i+1).join('/')));
+      for(const [label,path] of breadcrumbs(listing.root,at))crumb(label,path);
       crumbs.lastElementChild.setAttribute('aria-current','location');
     }
     const list=$('directory-picker-list');list.replaceChildren();

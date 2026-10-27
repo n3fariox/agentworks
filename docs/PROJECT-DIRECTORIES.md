@@ -5,7 +5,7 @@ Projects are logical groups. A project can also have one optional **project dire
 ## Using it
 
 - **New project / Project settings → Project directory.** Choose the host, then either type an absolute path or use **Browse…**. The field is optional. Saving other project settings leaves the directory as it is; **Clear** removes it. Existing projects have no directory until you set one, and nothing sets one for them automatically.
-- **Browse…** opens the folder picker. It starts at the current path if that path is inside an allowed root, and otherwise at the list of allowed roots. Open folders to go deeper, and use the breadcrumbs or **↑ Up** to go back. Up stops at the root. **Create folder** makes one new folder inside the folder you are viewing and opens it. **Use this folder** selects the folder you are viewing.
+- **Browse…** opens the folder picker. It starts at the current path if that path is inside an allowed root, and otherwise at the list of allowed roots. Open folders to go deeper, and use the breadcrumbs or **↑ Up** to go back. Up stops at the root. **Create folder** makes one new folder inside the folder you are viewing and opens it. **Use this folder** selects the folder you are viewing. Breadcrumbs are built from the server's canonical paths using the host's own separator: `/` on Linux and macOS, and `\` on Windows (including `C:\` and `\\?\C:\` roots). The browser never joins a Windows path with `/`.
 - **New session → Working directory** has the same **Browse…** button. It uses the host selected in the dialog.
 
 ### Which directory a new session starts in

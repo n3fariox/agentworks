@@ -152,3 +152,52 @@ test('session Browse uses the selected host and shows its limits',async({page})=
   await expect(page.locator('#create-dialog')).toBeVisible();
   expect(s.browses.some(b=>b.host==='box')).toBe(true);
 });
+test('Windows host paths render and navigate with backslash breadcrumbs',async({page})=>{
+  const s=await fixture(page);
+  // Canonical answers from a Windows worker: verbatim root, backslash separators.
+  const root='\\\\?\\C:\\Users\\me\\projects';
+  const tree={[root]:['new thing'],[root+'\\new thing']:['src'],[root+'\\new thing\\src']:[]};
+  const seen=[];
+  await page.route('**/api/directories**',route=>{
+    const url=new URL(route.request().url()),at=url.searchParams.get('path');seen.push(at);
+    if(!at)return route.fulfill({json:{path:null,root:null,parent:null,entries:[{name:root,path:root}]}});
+    if(!tree[at])return route.fulfill({status:404,body:'No such directory inside the allowed roots'});
+    const parent=at===root?null:at.slice(0,at.lastIndexOf('\\'));
+    return route.fulfill({json:{path:at,root,parent,entries:tree[at].map(name=>({name,path:`${at}\\${name}`})),truncated:false}});
+  });
+  await page.locator('#welcome-new').click();
+  await page.locator('#directory-browse').click();
+  await page.locator('#directory-picker-list button',{hasText:'projects'}).click();
+  await page.locator('#directory-picker-list button',{hasText:'new thing'}).click();
+  await page.locator('#directory-picker-list button',{hasText:'src'}).click();
+  await expect(page.locator('#directory-picker-current')).toHaveText(root+'\\new thing\\src');
+  const crumbs=page.locator('#directory-picker-crumbs button');
+  await expect(crumbs).toHaveText(['Allowed roots',root,'new thing','src']);
+  // A middle crumb navigates to the exact canonical Windows path, not a `/`-joined one.
+  await crumbs.nth(2).click();
+  await expect(page.locator('#directory-picker-current')).toHaveText(root+'\\new thing');
+  expect(seen.at(-1)).toBe(root+'\\new thing');
+  // Every Windows path the picker requested used backslashes only (the first request is the dialog's POSIX default start path).
+  const windows=seen.filter(p=>p?.startsWith(root));expect(windows.length).toBeGreaterThan(3);expect(windows.filter(p=>p.includes('/'))).toEqual([]);
+  await page.locator('#directory-picker-list button',{hasText:'↑ Up'}).click();
+  await expect(page.locator('#directory-picker-current')).toHaveText(root);
+  await page.locator('#directory-picker-list button',{hasText:'new thing'}).click();
+  await page.locator('#directory-picker-select').click();
+  await expect(page.locator('#directory')).toHaveValue(root+'\\new thing');
+  expect(s.creates).toHaveLength(0);
+});
+test('breadcrumb paths use the host separator',async({page})=>{
+  await page.goto(base);
+  const result=await page.evaluate(async()=>{const {breadcrumbs}=await import('./directory-picker.js');return {
+    posix:breadcrumbs('/home/captain/projects','/home/captain/projects/thing/src'),
+    slashRoot:breadcrumbs('/','/srv/x'),
+    drive:breadcrumbs('C:\\','C:\\work\\x'),
+    verbatim:breadcrumbs('\\\\?\\C:\\Users\\me','\\\\?\\C:\\Users\\me\\a b\\c'),
+    atRoot:breadcrumbs('D:\\code','D:\\code'),
+  };});
+  expect(result.posix).toEqual([['/home/captain/projects','/home/captain/projects'],['thing','/home/captain/projects/thing'],['src','/home/captain/projects/thing/src']]);
+  expect(result.slashRoot).toEqual([['/','/'],['srv','/srv'],['x','/srv/x']]);
+  expect(result.drive).toEqual([['C:\\','C:\\'],['work','C:\\work'],['x','C:\\work\\x']]);
+  expect(result.verbatim).toEqual([['\\\\?\\C:\\Users\\me','\\\\?\\C:\\Users\\me'],['a b','\\\\?\\C:\\Users\\me\\a b'],['c','\\\\?\\C:\\Users\\me\\a b\\c']]);
+  expect(result.atRoot).toEqual([['D:\\code','D:\\code']]);
+});
