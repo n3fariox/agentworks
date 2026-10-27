@@ -22,6 +22,7 @@ async function api(path,body,method){
   const response=await fetch(base+path,{method:method||(body===undefined?'GET':'POST'),headers:{Origin:base,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
   expect(response.ok,await response.clone().text()).toBeTruthy();return response.json();
 }
+function providerCard(page,p=profile){return page.locator('.model-provider-card').filter({has:page.getByText(p.name,{exact:true})});}
 async function snapshot(id){const result=await api('/api/sessions/'+id);expect(result.session.status,JSON.stringify(result.events.filter(e=>e.kind==='error'))).not.toBe('error');expect(result.events.filter(e=>e.kind==='error')).toEqual([]);return result;}
 async function files(path){let out=[];for(const entry of await readdir(path,{withFileTypes:true})){const name=join(path,entry.name);out.push(...entry.isDirectory()?await files(name):[name]);}return out;}
 
@@ -101,7 +102,7 @@ test('temporary OAuth callback feeds local and SSH Goose sessions without worker
   const authorization=new URL(popup.url());expect(authorization.searchParams.get('redirect_uri')).toBe(callbackBase+'/auth/callback');expect(base).not.toBe(direct);expect(await callbackPortFree()).toBe(false);
   const wrong=await fetch(callbackBase+'/auth/callback?state=wrong&code=unused');expect(wrong.status).toBe(400);expect(await callbackPortFree()).toBe(false);
   const before=exchanges;await popup.getByRole('link',{name:'Approve sign-in'}).click();await expect(popup.getByRole('heading',{name:'Sign-in complete'})).toBeVisible();
-  await expect(page.locator('#codex-oauth-status')).toContainText('Signed in');expect(exchanges).toBe(before+1);await popup.close();
+  await expect(page.locator('#codex-oauth')).toBeHidden();await expect(providerCard(page)).toContainText('Signed in ·');expect(exchanges).toBe(before+1);await popup.close();
   expect(await callbackPortFree()).toBe(true);
   const replay=await fetch(base+'/auth/callback?state='+authorization.searchParams.get('state')+'&code=replayed');expect(replay.status).toBe(404);expect(exchanges).toBe(before+1);
   const publicProfiles=await api('/api/model-providers');expect(publicProfiles.profiles.find(p=>p.id===profile.id).signedIn).toBe(true);expect(JSON.stringify(publicProfiles)).not.toContain('fixture-access');
@@ -153,6 +154,8 @@ test('cancelling an in-flight code exchange cannot restore credentials',async()=
 test('device button shows a code and saves approval without a browser callback',async({page})=>{
   const path=`/api/model-providers/${profile.id}/codex-auth`;
   await page.goto(base+'/?settings');await page.getByRole('tab',{name:'Model providers',exact:true}).click();
+  await expect(page.getByRole('button',{name:'Device code',exact:true})).toHaveCount(1);
+  await expect(page.getByRole('button',{name:'Device code · Rig',exact:true})).toHaveCount(0);
   await page.getByRole('button',{name:'Device code',exact:true}).click();
   await expect(page.locator('#codex-device-code')).toContainText('TEST-');
   const code=await page.locator('#codex-device-code').textContent();
@@ -162,7 +165,7 @@ test('device button shows a code and saves approval without a browser callback',
   const pending=await api(path);expect(pending.status).toBe('pending');expect(pending.signedIn).toBe(false);
   expect(JSON.stringify(pending)).not.toContain(code);expect(JSON.stringify(pending)).not.toContain('device_auth_id');
   const before=exchanges;[...devices.values()].find(device=>device.code===code).approved=true;
-  await expect(page.locator('#codex-oauth-status')).toContainText('Signed in');expect(exchanges).toBe(before+1);
+  await expect(page.locator('#codex-oauth')).toBeHidden();await expect(providerCard(page)).toContainText('Signed in ·');expect(exchanges).toBe(before+1);
   await expect(page.locator('#codex-device-instructions')).toBeHidden();
   const stored=await readFile(join(dir,'providers','codex-oauth.json'),'utf8');expect(stored).toContain('fixture-refresh-initial');
   expect(log).not.toContain('fixture-refresh');expect(log).not.toContain(code);
@@ -172,9 +175,13 @@ test('device button shows a code and saves approval without a browser callback',
   await expect.poll(async()=>JSON.stringify((await snapshot(session.id)).events).includes('CODEX_OAUTH_OK'),{timeout:10000}).toBe(true);
   // Cancelling another attempt preserves the current login.
   await page.getByRole('button',{name:'Device code',exact:true}).click();await expect(page.locator('#codex-device-instructions')).toBeVisible();
-  await page.getByRole('button',{name:'Cancel sign-in',exact:true}).click();await expect(page.locator('#codex-oauth-status')).toHaveText('Sign-in cancelled.');
+  await page.getByRole('button',{name:'Cancel sign-in',exact:true}).click();await expect(page.locator('#codex-oauth')).toBeHidden();
   expect((await api(path)).signedIn).toBe(true);
-  await api(path,undefined,'DELETE');
+  await providerCard(page).getByRole('button',{name:'Disconnect',exact:true}).click();
+  await expect(providerCard(page)).toContainText('Not signed in');
+  await expect(providerCard(page).getByRole('button',{name:'Disconnect',exact:true})).toHaveCount(0);
+  await expect(page.locator('#model-provider-message')).not.toContainText('not a function');
+  expect((await api(path)).signedIn).toBe(false);
 });
 
 test('late device approval cannot survive cancellation, retry, deletion, or disconnect',async()=>{
@@ -204,7 +211,21 @@ test('device approval cancelled during token exchange does not replace credentia
   }finally{release();exchangeStarted=null;holdExchange=null;}
 });
 
-test('disabled device login and polling failures show actionable errors',async()=>{
+test('Rig late exchange, disconnect, and profile deletion cannot resurrect credentials',async()=>{
+  const path=`/api/model-providers/${profile.id}/codex-auth`;
+  const pending=await api(path+'/device',{},'POST');
+  let release;holdExchange=new Promise(resolve=>release=resolve);const started=new Promise(resolve=>exchangeStarted=resolve);
+  try{
+    [...devices.values()].find(d=>d.code===pending.userCode).approved=true;await started;
+    await api(path,undefined,'DELETE');release();await new Promise(r=>setTimeout(r,100));expect((await api(path)).signedIn).toBe(false);
+  }finally{release();exchangeStarted=null;holdExchange=null;}
+  const deleted=await api('/api/model-providers',{operation:'save',profile:{name:'Deleted Rig profile',kind:'chatgpt_codex',defaultModel:'gpt-6.1-sol',hostIds:['local']}});
+  const next=await api(`/api/model-providers/${deleted.id}/codex-auth/device`,{},'POST');const before=exchanges;
+  await api('/api/model-providers',{operation:'delete',id:deleted.id});[...devices.values()].find(d=>d.code===next.userCode).approved=true;
+  await new Promise(r=>setTimeout(r,1200));expect(exchanges).toBe(before);
+});
+
+test('device failures are sanitized and can be retried',async()=>{
   const path=`/api/model-providers/${profile.id}/codex-auth`;
   deviceDisabled=true;
   try{
@@ -213,84 +234,17 @@ test('disabled device login and polling failures show actionable errors',async()
   }finally{deviceDisabled=false;}
   devicePollFailure=true;
   try{
-    await api(path+'/device',{},'POST');await expect.poll(async()=>(await api(path)).status).toBe('error');
-    expect((await api(path)).error).toContain('HTTP 410');expect((await api(path)).signedIn).toBe(false);
-  }finally{devicePollFailure=false;}
-});
-
-
-for(const backend of ['device','device-rig'])test(`${backend}: cancel and retry across backends preserve the existing account`,async()=>{
-  const path=`/api/model-providers/${profile.id}/codex-auth`,other=backend==='device'?'device-rig':'device';
-  const pending=await api(path+'/'+backend,{},'POST');const before=exchanges;
-  const next=await api(path+'/'+other,{},'POST');
-  [...devices.values()].find(d=>d.code===pending.userCode).approved=true;
-  await new Promise(r=>setTimeout(r,1200));expect(exchanges).toBe(before);
-  expect((await api(path)).status).toBe('pending');
-  await api(path+'/cancel',{},'POST');[...devices.values()].find(d=>d.code===next.userCode).approved=true;
-  await new Promise(r=>setTimeout(r,1200));expect(exchanges).toBe(before);expect((await api(path)).signedIn).toBe(false);
-});
-
-test('Rig button stages approval in memory and shares credentials with Goose and existing login',async({page})=>{
-  const path=`/api/model-providers/${profile.id}/codex-auth`;
-  await page.goto(base+'/?settings');await page.getByRole('tab',{name:'Model providers',exact:true}).click();
-  await expect(page.getByRole('button',{name:'Device code',exact:true})).toBeVisible();
-  await page.getByRole('button',{name:'Device code · Rig',exact:true}).click();
-  await expect(page.locator('#codex-device-code')).toContainText('TEST-');
-  await expect(page.locator('#codex-oauth-title')).toContainText('Rig');
-  const code=await page.locator('#codex-device-code').textContent();
-  expect(page.context().pages()).toHaveLength(1);
-  const before=exchanges;[...devices.values()].find(d=>d.code===code).approved=true;
-  await expect(page.locator('#codex-oauth-status')).toContainText('Signed in');expect(exchanges).toBe(before+1);
-  const stored=await readFile(join(dir,'providers','codex-oauth.json'),'utf8');expect(stored).toContain('fixture-refresh-initial');
-  expect((await stat(join(dir,'providers','codex-oauth.json'))).mode&0o777).toBe(0o600);
-  const session=await api('/api/sessions',{provider:'goose',hostId:'local',cwd:join(dir,'project'),modelProvider:profile.id,title:'Rig device login'});
-  await expect.poll(async()=>(await snapshot(session.id)).session.status,{timeout:20000}).toBe('idle');
-  await api(`/api/sessions/${session.id}/prompt`,{text:'Reply CODEX_OAUTH_OK without tools.',requestId:randomUUID()});
-  await expect.poll(async()=>JSON.stringify((await snapshot(session.id)).events).includes('CODEX_OAUTH_OK'),{timeout:10000}).toBe(true);
-  for(const backend of ['device','device-rig']){
-    const pending=await api(path+'/'+backend,{},'POST');await api(path+'/cancel',{},'POST');
-    expect((await api(path)).signedIn).toBe(true);
-    expect([...devices.values()].find(d=>d.code===pending.userCode).approved).toBe(false);
-  }
-  expect(log).not.toContain('fixture-access');expect(log).not.toContain('fixture-refresh');
-  const snapshotText=JSON.stringify(await api('/api/sessions/'+session.id));expect(snapshotText).not.toContain('fixture-access');
-  await api(path,undefined,'DELETE');
-});
-
-test('Rig late exchange, disconnect, and profile deletion cannot resurrect credentials',async()=>{
-  const path=`/api/model-providers/${profile.id}/codex-auth`;
-  const pending=await api(path+'/device-rig',{},'POST');
-  let release;holdExchange=new Promise(resolve=>release=resolve);const started=new Promise(resolve=>exchangeStarted=resolve);
-  try{
-    [...devices.values()].find(d=>d.code===pending.userCode).approved=true;await started;
-    await api(path,undefined,'DELETE');release();await new Promise(r=>setTimeout(r,100));expect((await api(path)).signedIn).toBe(false);
-  }finally{release();exchangeStarted=null;holdExchange=null;}
-  const deleted=await api('/api/model-providers',{operation:'save',profile:{name:'Deleted Rig profile',kind:'chatgpt_codex',defaultModel:'gpt-6.1-sol',hostIds:['local']}});
-  const next=await api(`/api/model-providers/${deleted.id}/codex-auth/device-rig`,{},'POST');const before=exchanges;
-  await api('/api/model-providers',{operation:'delete',id:deleted.id});[...devices.values()].find(d=>d.code===next.userCode).approved=true;
-  await new Promise(r=>setTimeout(r,1200));expect(exchanges).toBe(before);
-});
-
-test('Rig failures are sanitized and can be retried using the existing implementation',async()=>{
-  const path=`/api/model-providers/${profile.id}/codex-auth`;
-  deviceDisabled=true;
-  try{
-    const response=await fetch(base+path+'/device-rig',{method:'POST',headers:{Origin:base}});expect(response.status).toBe(400);
-    expect(await response.text()).toContain('workspace admin');expect((await api(path)).status).toBe('error');
-  }finally{deviceDisabled=false;}
-  devicePollFailure=true;
-  try{
-    const response=await fetch(base+path+'/device-rig',{method:'POST',headers:{Origin:base}});expect([200,400]).toContain(response.status);
+    const response=await fetch(base+path+'/device',{method:'POST',headers:{Origin:base}});expect([200,400]).toContain(response.status);
     expect(await response.text()).not.toContain('fixture-refresh-private');await expect.poll(async()=>(await api(path)).status).toBe('error');
-    expect((await api(path)).error).not.toContain('fixture-refresh-private');expect((await api(path)).error).toContain('Rig');expect((await api(path)).signedIn).toBe(false);
+    expect((await api(path)).error).not.toContain('fixture-refresh-private');expect((await api(path)).error).toContain('Device sign-in failed');expect((await api(path)).signedIn).toBe(false);
   }finally{devicePollFailure=false;}
   await api(path+'/device',{},'POST');expect((await api(path)).status).toBe('pending');await api(path+'/cancel',{},'POST');
 });
 
-test('existing and Rig device login can run independently on separate connections',async()=>{
+test('device logins can run independently on separate connections',async()=>{
   const other=await api('/api/model-providers',{operation:'save',profile:{name:'Rig comparison account',kind:'chatgpt_codex',defaultModel:'gpt-6.1-sol',hostIds:['local']}});
   const original=`/api/model-providers/${profile.id}/codex-auth`,rig=`/api/model-providers/${other.id}/codex-auth`;
-  const [nativePending,rigPending]=await Promise.all([api(original+'/device',{},'POST'),api(rig+'/device-rig',{},'POST')]);
+  const [nativePending,rigPending]=await Promise.all([api(original+'/device',{},'POST'),api(rig+'/device',{},'POST')]);
   [...devices.values()].find(d=>d.code===rigPending.userCode).approved=true;
   await expect.poll(async()=>(await api(rig)).signedIn).toBe(true);
   expect((await api(original)).status).toBe('pending');expect((await api(original)).signedIn).toBe(false);
@@ -309,7 +263,7 @@ test('temporary callback releases its port on every cancellation path and leaves
     const response=await fetch(base+path,{method:'POST',headers:{Origin:base}});expect(response.status).toBe(409);expect(await response.text()).toContain('already in use');
     expect(occupied.listening).toBe(true);
   }finally{await new Promise(resolve=>occupied.close(resolve));}
-  for(const stop of ['cancel','disconnect','device','device-rig']){
+  for(const stop of ['cancel','disconnect','device']){
     await api(path,{},'POST');expect(await callbackPortFree()).toBe(false);
     if(stop==='disconnect')await api(path,undefined,'DELETE');
     else await api(path+'/'+stop,{},'POST');
@@ -322,4 +276,35 @@ test('temporary callback releases its port on every cancellation path and leaves
   const deleted=await api('/api/model-providers',{operation:'save',profile:{name:'Callback deletion',kind:'chatgpt_codex',defaultModel:'gpt-6.1-sol',hostIds:['local']}});
   await api(`/api/model-providers/${deleted.id}/codex-auth`,{},'POST');expect(await callbackPortFree()).toBe(false);
   await api('/api/model-providers',{operation:'delete',id:deleted.id});expect(await callbackPortFree()).toBe(true);
+});
+
+
+for(const mode of ['browser','device'])test(`deleting a provider during ${mode} sign-in removes the card and sign-in panel immediately`,async({page})=>{
+  const p=await api('/api/model-providers',{operation:'save',profile:{name:'Delete '+mode+' provider',kind:'chatgpt_codex',defaultModel:'gpt-6.1-sol',hostIds:['local']}});
+  const errors=[];page.on('pageerror',error=>errors.push(error.message));
+  await page.goto(base+'/?settings');await page.getByRole('tab',{name:'Model providers',exact:true}).click();
+  const card=providerCard(page,p);let popup;
+  if(mode==='browser'){
+    const opened=page.waitForEvent('popup');await card.getByRole('button',{name:'Sign in with ChatGPT',exact:true}).click();popup=await opened;
+    await popup.getByRole('link',{name:'Approve sign-in'}).waitFor();
+  }else{
+    await card.getByRole('button',{name:'Device code',exact:true}).click();await expect(page.locator('#codex-device-instructions')).toBeVisible();
+  }
+  await expect(page.locator('#codex-oauth')).toBeVisible();
+  page.once('dialog',dialog=>dialog.accept());await card.getByRole('button',{name:'Delete',exact:true}).click();
+  await expect(card).toHaveCount(0);await expect(page.locator('#codex-oauth')).toBeHidden();
+  await expect(page.locator('#model-provider-message')).not.toContainText('not a function');expect(await callbackPortFree()).toBe(true);
+  expect((await api('/api/model-providers')).profiles.some(item=>item.id===p.id)).toBe(false);expect(errors).toEqual([]);await popup?.close();
+});
+
+test('deleting an OAuth-signed-in provider updates Settings without reopening',async({page})=>{
+  const p=await api('/api/model-providers',{operation:'save',profile:{name:'Delete signed-in provider',kind:'chatgpt_codex',defaultModel:'gpt-6.1-sol',hostIds:['local']}});
+  await page.goto(base+'/?settings');await page.getByRole('tab',{name:'Model providers',exact:true}).click();
+  const card=providerCard(page,p),opened=page.waitForEvent('popup');await card.getByRole('button',{name:'Sign in with ChatGPT',exact:true}).click();const popup=await opened;
+  await popup.getByRole('link',{name:'Approve sign-in'}).click();await expect(card).toContainText('Signed in ·');
+  await expect(page.locator('#codex-oauth')).toBeHidden();await popup.close();
+  page.once('dialog',dialog=>dialog.accept());await card.getByRole('button',{name:'Delete',exact:true}).click();
+  await expect(card).toHaveCount(0);await expect(page.locator('#codex-oauth')).toBeHidden();
+  await expect(page.locator('#settings-dialog')).toBeVisible();
+  const stored=JSON.parse(await readFile(join(dir,'providers','codex-oauth.json'),'utf8'));expect(stored[p.id]).toBeUndefined();
 });

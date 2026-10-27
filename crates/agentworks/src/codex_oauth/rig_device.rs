@@ -66,8 +66,8 @@ fn auth_error(error: rig_core::providers::chatgpt::auth::AuthError) -> String {
     // Rig can include raw response bodies in errors. Expose only the status.
     match error {
         rig_core::providers::chatgpt::auth::AuthError::Http(error) => error.non_success_status()
-            .map(device_error).unwrap_or_else(|| "Could not reach OpenAI device sign-in (Rig).".into()),
-        _ => "Rig device sign-in failed. Try again, enable device-code login in ChatGPT, or use the existing sign-in option.".into(),
+            .map(device_error).unwrap_or_else(|| "Could not reach OpenAI device sign-in.".into()),
+        _ => "Device sign-in failed. Try again, enable device-code login in ChatGPT, or use browser sign-in.".into(),
     }
 }
 pub async fn start(Path(id): Path<String>) -> ApiResult {

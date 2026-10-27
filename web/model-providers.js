@@ -5,6 +5,11 @@ export function setupModelProviders({$,api,el,getHosts,selectionChanged,socketUr
   let auth=null,codexAuth=null,codexPoll=null,codexGeneration=0,codexDevice=false;
   const codexPath=id=>`/api/model-providers/${encodeURIComponent(id)}/codex-auth`;
   function stopCodexPoll(){clearTimeout(codexPoll);codexPoll=null;codexGeneration++;}
+  function hideCodexAuth(id=codexAuth){
+    if(id!==codexAuth)return;stopCodexPoll();codexAuth=null;
+    $('codex-oauth').hidden=true;$('codex-oauth-title').textContent='ChatGPT sign-in';$('codex-oauth-status').textContent='';$('codex-device-code').textContent='';
+    $('codex-oauth-link').hidden=true;$('codex-oauth-link').removeAttribute('href');$('codex-oauth-cancel').hidden=true;$('codex-device-instructions').hidden=true;
+  }
   async function pollCodex(id,generation){
     try{
       const result=await api(codexPath(id));if(generation!==codexGeneration)return;
@@ -13,26 +18,26 @@ export function setupModelProviders({$,api,el,getHosts,selectionChanged,socketUr
         codexPoll=setTimeout(()=>pollCodex(id,generation),1000);
       }else{
         $('codex-oauth-cancel').hidden=true;$('codex-oauth-link').hidden=true;$('codex-device-instructions').hidden=true;
-        $('codex-oauth-status').textContent=result.error||(result.signedIn?'Signed in. Enabled hosts can use this ChatGPT account.':'Sign-in cancelled.');
-        await list();await loadCreate();
+        if(!result.error)hideCodexAuth(id);else $('codex-oauth-status').textContent=result.error;
+        await refreshProviders();await loadCreate();
       }
     }catch(error){if(generation===codexGeneration)$('codex-oauth-status').textContent=error.message;}
   }
   async function signInCodex(p,device=false){
     stopCodexPoll();const generation=codexGeneration;codexAuth=p.id;codexDevice=device;
     const popup=device?null:window.open('about:blank','_blank');if(popup)popup.opener=null;
-    $('codex-oauth').hidden=false;$('codex-oauth-title').textContent=p.name+(device==='rig'?' · ChatGPT sign-in · Rig':' · ChatGPT sign-in');
+    $('codex-oauth').hidden=false;$('codex-oauth-title').textContent=p.name+' · ChatGPT sign-in';
     $('codex-device-instructions').hidden=true;$('codex-device-code').textContent='';$('codex-oauth-status').textContent='Starting sign-in…';$('codex-oauth-link').hidden=true;$('codex-oauth-cancel').hidden=true;
     $('codex-oauth').scrollIntoView({block:'center'});
     try{
-      const result=await api(codexPath(p.id)+(device===true?'/device':device==='rig'?'/device-rig':''),{method:'POST'});if(generation!==codexGeneration){popup?.close();return;}
+      const result=await api(codexPath(p.id)+(device?'/device':''),{method:'POST'});if(generation!==codexGeneration){popup?.close();return;}
       if(device){$('codex-device-code').textContent=result.userCode;$('codex-device-instructions').hidden=false;}
       $('codex-oauth-link').href=result.verificationUrl||result.authorizationUrl;$('codex-oauth-link').hidden=false;$('codex-oauth-cancel').hidden=false;
       if(popup)popup.location.href=result.authorizationUrl;
       pollCodex(p.id,generation);
-    }catch(error){popup?.close();$('codex-oauth-status').textContent=error.message;}
+    }catch(error){popup?.close();if(generation===codexGeneration)$('codex-oauth-status').textContent=error.message;}
   }
-  $('codex-oauth-cancel').onclick=async()=>{const id=codexAuth;stopCodexPoll();try{await api(codexPath(id)+'/cancel',{method:'POST'});$('codex-oauth-status').textContent='Sign-in cancelled.';$('codex-oauth-cancel').hidden=true;$('codex-oauth-link').hidden=true;$('codex-device-instructions').hidden=true;}catch(error){$('codex-oauth-status').textContent=error.message;}};
+  $('codex-oauth-cancel').onclick=async()=>{const id=codexAuth;stopCodexPoll();const generation=codexGeneration;try{await api(codexPath(id)+'/cancel',{method:'POST'});if(generation===codexGeneration)hideCodexAuth(id);}catch(error){$('codex-oauth-status').textContent=error.message;}};
   addEventListener('pagehide',stopCodexPoll);
   const authPath=id=>`/api/model-providers/${encodeURIComponent(id)}/auth`;
   const authTerminal=setupTerminal({$:id=>$(id==='session-terminal'?'provider-auth-terminal':id.replace(/^terminal-/,'provider-auth-')),api,getActive:()=>auth,socketUrl,tabs:false,runningStatus:'Sign-in running',exitStatus:frame=>frame.code===0?'Sign-in completed':frame.code==null?'Sign-in stopped':'Sign-in failed',
@@ -78,13 +83,14 @@ export function setupModelProviders({$,api,el,getHosts,selectionChanged,socketUr
     $('model-provider-key-note').textContent=p?.keyConfigured?'A key is saved for this provider and supplied only to enabled hosts. Its value is never returned.':'No API key is stored for this provider.';
     renderHosts(p?.hostIds||['local']);message('');$('model-provider-name').focus();
   }
-  async function list(){
+  async function refreshProviders(){
     const generation=++settingsGeneration;
     $('model-provider-list').replaceChildren(el('p','field-note','Loading providers…'));
     try{
       const result=await api('/api/model-providers');if(generation!==settingsGeneration)return;
-      const list=$('model-provider-list');list.replaceChildren();
-      if(!result.profiles.length)list.append(el('p','field-note','No providers configured. Add a provider, then choose which hosts can use it.'));
+      const listElement=$('model-provider-list');listElement.replaceChildren();
+      if(codexAuth&&!result.profiles.some(p=>p.id===codexAuth))hideCodexAuth();
+      if(!result.profiles.length)listElement.append(el('p','field-note','No providers configured. Add a provider, then choose which hosts can use it.'));
       for(const p of result.profiles){
         const card=el('div','model-provider-card'),copy=el('div');
         copy.append(el('strong','',p.name),el('p','field-note',p.kind==='chatgpt_codex'?'ChatGPT subscription · Codex OAuth':p.kind==='claude-code'?'Claude subscription · Claude Code':p.baseUrl),el('p','field-note',`${p.defaultModel} · ${p.kind==='chatgpt_codex'?(p.signedIn?'Signed in · shared with enabled hosts':'Not signed in'):p.kind==='claude-code'?'Sign-in managed on each host':p.keyConfigured?'API key configured':'No API key'}`),el('p','field-note','Available on: '+(p.hostIds?.map(hostName).join(', ')||'No hosts')));
@@ -92,20 +98,19 @@ export function setupModelProviders({$,api,el,getHosts,selectionChanged,socketUr
         edit.onclick=()=>editor(p);
         remove.onclick=async()=>{
           if(!confirm(`Delete provider “${p.name}” and its stored key?`))return;
-          try{await api('/api/model-providers',{method:'POST',body:JSON.stringify({operation:'delete',id:p.id})});if(editing?.id===p.id)closeEditor();await list();await loadCreate();}
+          try{await api('/api/model-providers',{method:'POST',body:JSON.stringify({operation:'delete',id:p.id})});if(editing?.id===p.id)closeEditor();hideCodexAuth(p.id);await refreshProviders();await loadCreate();}
           catch(e){message(e.message);}
         };
         if(p.kind==='chatgpt_codex'){
           const signin=el('button','text-button',p.signedIn?'Sign in again':'Sign in with ChatGPT');signin.type='button';signin.onclick=()=>signInCodex(p);actions.append(signin);
           const device=el('button','text-button','Device code');device.type='button';device.title='Experimental device-code sign-in';device.onclick=()=>signInCodex(p,true);actions.append(device);
-          const rigDevice=el('button','text-button','Device code · Rig');rigDevice.type='button';rigDevice.title='Compare Rig’s experimental device-code sign-in';rigDevice.onclick=()=>signInCodex(p,'rig');actions.append(rigDevice);
-          if(p.signedIn){const disconnect=el('button','text-button','Disconnect');disconnect.type='button';disconnect.onclick=async()=>{try{stopCodexPoll();await api(codexPath(p.id),{method:'DELETE'});$('codex-oauth').hidden=true;await list();}catch(error){message(error.message);}};actions.append(disconnect);}
+          if(p.signedIn){const disconnect=el('button','text-button','Disconnect');disconnect.type='button';disconnect.onclick=async()=>{try{await api(codexPath(p.id),{method:'DELETE'});hideCodexAuth(p.id);message('');await refreshProviders();await loadCreate();}catch(error){message(error.message);}};actions.append(disconnect);}
         }
         if(p.kind==='claude-code')for(const hostId of p.hostIds||[]){
           const host=hostOptions().find(h=>h.id===hostId),signin=el('button','text-button','Sign in · '+hostName(hostId));signin.type='button';signin.disabled=host?.status!=='connected';
           signin.onclick=()=>{auth={id:p.id+':'+hostId,profileId:p.id,hostId};$('provider-auth-title').textContent=p.name+' · '+hostName(hostId);$('provider-auth-terminal').hidden=false;$('provider-auth-surface').scrollIntoView({block:'center'});authTerminal.open();};actions.append(signin);
         }
-        actions.append(edit,remove);card.append(copy,actions);list.append(card);
+        actions.append(edit,remove);card.append(copy,actions);listElement.append(card);
       }
     }catch(e){if(generation===settingsGeneration){$('model-provider-list').replaceChildren();message(e.message);}}
   }
@@ -121,7 +126,7 @@ export function setupModelProviders({$,api,el,getHosts,selectionChanged,socketUr
       const result=await api(operation==='save'?'/api/model-providers':endpoint(selectedHost),{method:'POST',body:JSON.stringify({operation,profile:p})});
       if(generation!==settingsGeneration)return;
       if(operation==='save'){
-        closeEditor();await list();await loadCreate();message('Provider saved. Available on '+(p.hostIds.map(hostName).join(', ')||'no hosts')+'.');
+        closeEditor();await refreshProviders();await loadCreate();message('Provider saved. Available on '+(p.hostIds.map(hostName).join(', ')||'no hosts')+'.');
       }else{
         $('model-provider-models').replaceChildren(...result.options.map(o=>new Option(o.name||o.value,o.value)));
         message(`Connected from ${hostName(selectedHost)}. Model listing accepted${p.apiKey||editing?.keyConfigured?' the API key':''}; ${result.options.length} models found. No inference request was sent.`);
@@ -129,7 +134,7 @@ export function setupModelProviders({$,api,el,getHosts,selectionChanged,socketUr
     }catch(e){if(generation===settingsGeneration)message(e.message);}
     finally{busy=false;for(const button of $('model-provider-editor').querySelectorAll('button'))button.disabled=false;}
   }
-  async function loadSettings(){closeEditor();message('');await list();}
+  async function loadSettings(){closeEditor();message('');await refreshProviders();}
   async function loadCreate(preferred){
     const generation=++createGeneration,select=$('create-model-provider');
     const previous=preferred===undefined?select.value:preferred;

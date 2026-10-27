@@ -16,7 +16,7 @@ use tokio::sync::Mutex;
 
 mod browser;
 mod rig_device;
-pub use rig_device::start as start_rig_device;
+pub use rig_device::start as start_device;
 
 struct Attempt {
     profile: String,
@@ -147,48 +147,6 @@ pub async fn start(Path(id): Path<String>) -> ApiResult {
         json!({"authorizationUrl":url.as_str(),"status":"pending"}),
     ))
 }
-// Mirrors Codex CLI's public implementation. These endpoints are not a stable
-// third-party API; keep device login separate from the existing browser flow.
-#[derive(Deserialize)]
-struct DeviceCode {
-    device_auth_id: String,
-    #[serde(alias = "usercode")]
-    user_code: String,
-    #[serde(default)]
-    interval: Value,
-}
-#[derive(Deserialize)]
-struct DeviceApproval {
-    authorization_code: String,
-    code_verifier: String,
-}
-async fn device_request(
-    client: &reqwest::Client,
-    path: &str,
-    body: Value,
-) -> Result<reqwest::Response, String> {
-    client
-        .post(format!(
-            "{}/api/accounts/deviceauth/{path}",
-            credentials::issuer()
-        ))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|_| "Could not reach OpenAI device sign-in".into())
-}
-async fn device_json<T: serde::de::DeserializeOwned>(
-    response: reqwest::Response,
-) -> Result<T, String> {
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|_| "Could not read device sign-in response")?;
-    if bytes.len() > 256 * 1024 {
-        return Err("Device sign-in response is too large".into());
-    }
-    serde_json::from_slice(&bytes).map_err(|_| "Invalid device sign-in response".into())
-}
 fn device_error(status: StatusCode) -> String {
     format!(
         "OpenAI device sign-in returned HTTP {}. Device-code login may need enabling in ChatGPT security settings or by your workspace admin. You can also use browser sign-in.",
@@ -201,151 +159,6 @@ fn active(transactions: &Transactions, id: &str, state: &str) -> bool {
             && s.expires > credentials::now()
             && matches!(s.phase, "pending" | "exchanging")
     })
-}
-pub async fn start_device(Path(id): Path<String>) -> ApiResult {
-    profile(&id)?;
-    let state = random();
-    let expires = credentials::now() + 900;
-    {
-        let mut transactions = TRANSACTIONS.lock().await;
-        transactions.expire().await;
-        transactions.cancel(&id).await;
-        if transactions
-            .status
-            .values()
-            .filter(|s| matches!(s.phase, "pending" | "exchanging"))
-            .count()
-            >= 128
-        {
-            return Err(bad("Too many pending sign-ins"));
-        }
-        transactions.status.insert(
-            id.clone(),
-            Status {
-                state: state.clone(),
-                phase: "pending",
-                error: None,
-                expires,
-            },
-        );
-    }
-    let setup = async {
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .map_err(|_| "Could not initialize OAuth client".to_owned())?;
-        let response = device_request(
-            &client,
-            "usercode",
-            json!({"client_id": credentials::CLIENT_ID}),
-        )
-        .await?;
-        if !response.status().is_success() {
-            return Err(device_error(response.status()));
-        }
-        let code: DeviceCode = device_json(response).await?;
-        if code.device_auth_id.is_empty() || code.user_code.is_empty() {
-            return Err("Device sign-in response did not include a code".into());
-        }
-        Ok((client, code))
-    }
-    .await;
-    let mut transactions = TRANSACTIONS.lock().await;
-    if !active(&transactions, &id, &state) {
-        return Err(bad("Sign-in was cancelled or superseded"));
-    }
-    let (client, code) = match setup {
-        Ok(result) => result,
-        Err(error) => {
-            let status = transactions.status.get_mut(&id).unwrap();
-            status.phase = "error";
-            status.error = Some(error.clone());
-            return Err(bad(error));
-        }
-    };
-    let result = json!({"status":"pending", "verificationUrl":format!("{}/codex/device", credentials::issuer()), "userCode":code.user_code, "expiresAt":expires});
-    drop(transactions);
-    tokio::spawn(async move {
-        let interval = code
-            .interval
-            .as_u64()
-            .or_else(|| code.interval.as_str().and_then(|s| s.trim().parse().ok()))
-            .unwrap_or(5)
-            .max(1);
-        loop {
-            {
-                let mut transactions = TRANSACTIONS.lock().await;
-                transactions.expire().await;
-                if !active(&transactions, &id, &state) {
-                    return;
-                }
-            }
-            let result = async {
-                let response = device_request(
-                    &client,
-                    "token",
-                    json!({"device_auth_id":code.device_auth_id, "user_code":code.user_code}),
-                )
-                .await?;
-                if matches!(
-                    response.status(),
-                    StatusCode::FORBIDDEN | StatusCode::NOT_FOUND
-                ) {
-                    return Ok(None);
-                }
-                if !response.status().is_success() {
-                    return Err(device_error(response.status()));
-                }
-                let approval: DeviceApproval = device_json(response).await?;
-                {
-                    let mut transactions = TRANSACTIONS.lock().await;
-                    if !active(&transactions, &id, &state) {
-                        return Ok(None);
-                    }
-                    transactions.status.get_mut(&id).unwrap().phase = "exchanging";
-                }
-                credentials::exchange_code(
-                    &approval.authorization_code,
-                    &format!("{}/deviceauth/callback", credentials::issuer()),
-                    &approval.code_verifier,
-                )
-                .await
-                .map(Some)
-            }
-            .await;
-            let mut transactions = TRANSACTIONS.lock().await;
-            transactions.expire().await;
-            if !active(&transactions, &id, &state) {
-                return;
-            }
-            let result = match result {
-                Ok(None) => {
-                    drop(transactions);
-                    let remaining = expires.saturating_sub(credentials::now());
-                    tokio::time::sleep(std::time::Duration::from_secs(interval.min(remaining)))
-                        .await;
-                    continue;
-                }
-                Ok(Some(mut token)) => {
-                    token.account_id = account_id(token.id_token.as_deref())
-                        .or_else(|| account_id(Some(&token.access_token)));
-                    credentials::save(&id, token).await
-                }
-                Err(error) => Err(error),
-            };
-            let status = transactions.status.get_mut(&id).unwrap();
-            match result {
-                Ok(()) => status.phase = "connected",
-                Err(error) => {
-                    status.phase = "error";
-                    status.error = Some(error);
-                }
-            }
-            return;
-        }
-    });
-    Ok(Json(result))
 }
 pub async fn status(Path(id): Path<String>) -> ApiResult {
     profile(&id)?;

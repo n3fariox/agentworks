@@ -1293,10 +1293,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(codex_oauth::start_device),
         )
         .route(
-            "/api/model-providers/{id}/codex-auth/device-rig",
-            post(codex_oauth::start_rig_device),
-        )
-        .route(
             "/api/model-providers/{id}/codex-auth/cancel",
             post(codex_oauth::cancel),
         )
