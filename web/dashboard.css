@@ -343,3 +343,34 @@
     padding:16px;
   }
 }
+
+/* Host resources: percentages and bars first, exact counters second. */
+.operations-dashboard .host-usage { margin-top:20px; border-top:1px solid var(--border); padding-top:18px; }
+.operations-dashboard .metrics-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:14px; }
+.operations-dashboard .metrics-eyebrow { color:var(--muted); font-size:10px; font-weight:600; letter-spacing:1.5px; }
+.operations-dashboard .metrics-freshness { display:flex; align-items:center; gap:6px; font-size:11px; color:#8edfb8; }
+.operations-dashboard .metrics-freshness::before { content:''; width:6px; height:6px; border-radius:50%; background:currentColor; }
+.operations-dashboard .metrics-freshness[data-state=stale],.operations-dashboard .metrics-freshness[data-state=ahead] { color:#f3c77c; }
+.operations-dashboard .host-metric-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr)); gap:12px; }
+.operations-dashboard .metric-tile { background:rgba(127,127,160,.045); border:1px solid var(--border); border-radius:8px; padding:16px; min-width:0; }
+.operations-dashboard .metric-heading { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
+.operations-dashboard .metric-name { font-size:13px; font-weight:500; overflow-wrap:anywhere; }
+.operations-dashboard .metric-value { font-size:30px; line-height:1.2; letter-spacing:-1px; font-variant-numeric:tabular-nums; }
+.operations-dashboard .metric-track { height:8px; background:rgba(127,127,160,.16); border-radius:8px; overflow:hidden; margin:14px 0 9px; }
+.operations-dashboard .metric-track > span { display:block; height:100%; background:#a89afb; border-radius:inherit; }
+.operations-dashboard .metric-tile:nth-child(2) .metric-track > span { background:#64c6c9; }
+.operations-dashboard .metric-tile:nth-child(3) .metric-track > span { background:#8199e9; }
+.operations-dashboard .host-usage [data-tone=high] .metric-track > span { background:#e8b766; }
+.operations-dashboard .host-usage [data-tone=critical] .metric-track > span { background:#ee828c; }
+.operations-dashboard [data-tone=unknown] .metric-track { background:repeating-linear-gradient(110deg,rgba(127,127,160,.14) 0 6px,rgba(127,127,160,.05) 6px 12px); }
+.operations-dashboard .metric-caption { display:block; color:var(--muted); font-size:11px; line-height:1.5; }
+.operations-dashboard .host-storage { margin-top:20px; }
+.operations-dashboard .disk-metric { padding-top:12px; }
+.operations-dashboard .disk-metric .metric-value { font-size:16px; letter-spacing:0; }
+.operations-dashboard .disk-metric .metric-track { margin:7px 0 4px; height:6px; }
+.operations-dashboard .mount-details { border-top:1px solid var(--border); margin-top:14px; }
+.operations-dashboard .mount-details > summary { padding:10px 0; min-height:40px; font-size:12px; color:var(--muted); }
+.operations-dashboard .metrics-unavailable { font-size:13px; }
+.operations-dashboard .count { font-size:18px; margin-top:8px; }
+
+.operations-dashboard .host-usage[data-freshness=stale] .host-metric-grid,.operations-dashboard .host-usage[data-freshness=stale] .host-storage { opacity:.6; }

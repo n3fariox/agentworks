@@ -83,6 +83,20 @@ subscription IDs are ignored, and reconnecting creates a fresh subscription and
 baseline. Disconnected hosts get an explicit reason. Absent events remain waiting;
 old timestamped events become stale rather than being labeled fresh by a renewal.
 
+## Visual display
+
+Host cards show CPU, memory, and swap as large percentages with accessible usage
+bars. Bars turn amber at 80% and red at 95% (90% for storage). Unknown values use a
+dash and a reason; absent swap is labeled not configured. A compact live/stale
+indicator exposes the source timestamp in its tooltip.
+
+The storage overview shows up to three mounts, prioritizing the system volume and
+build/workspace/data paths. Other capacity summaries fill the overview; repeated
+capacity values and unavailable mounts stay in an expandable list. This is display
+selection only: equal counters do not establish that mounts share a filesystem,
+and every reported mount remains accessible. Mount expansion and keyboard focus
+survive sample updates. The layout adapts to phone widths.
+
 ## Values, freshness, and mounts
 
 - CPU uses sysinfo's interval deltas, respecting `MINIMUM_CPU_UPDATE_INTERVAL`.

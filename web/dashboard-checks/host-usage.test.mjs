@@ -1,19 +1,37 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {hostUsageLines, startHostUsage} from '../host-usage.js';
+import {hostUsageModel, startHostUsage} from '../host-usage.js';
 
-test('host usage labels freshness, zero swap, scope, warmup and failures', () => {
-  const sample = {sampledAt:1000,cpu:{reason:'Warming up'},memory:{used:1024,total:2048},swap:{used:0,total:0},disks:[{path:'/build',reason:'Denied'}]};
-  assert.match(hostUsageLines(sample, 17000).join('\n'), /stale/);
-  assert.match(hostUsageLines(sample, 2000).join('\n'), /fresh/);
-  assert.match(hostUsageLines(sample, 0).join('\n'), /source clock ahead/);
-  assert.match(hostUsageLines(sample).join('\n'), /CPU unavailable: Warming up/);
-  assert.match(hostUsageLines(sample).join('\n'), /no swap configured/);
-  assert.match(hostUsageLines(sample).join('\n'), /Disk \/build unavailable: Denied/);
-  sample.cpu = {percent:12.345}; sample.disks = [{path:'/',used:1,total:2},{path:'/build',used:1,total:2}];
-  assert.match(hostUsageLines(sample).join('\n'), /12.3%/);
-  assert.match(hostUsageLines(sample).join('\n'), /Disk \/build:/);
-  assert.deepEqual(hostUsageLines({reason:'Linux only'}), ['Host metrics unavailable: Linux only']);
+test('visual metrics preserve freshness, unknown values and real percentages', () => {
+  const sample={sampledAt:1000,cpu:{reason:'Warming up'},memory:{used:85,total:100},swap:{used:0,total:0},disks:[]};
+  let model=hostUsageModel(sample,2000);
+  assert.equal(model.freshness,'live');
+  assert.equal(model.tiles[0].percent,null);
+  assert.match(model.tiles[0].detail,/Warming up/);
+  assert.equal(model.tiles[1].value,'85%');
+  assert.equal(model.tiles[1].tone,'high');
+  assert.equal(model.tiles[2].value,'—');
+  assert.equal(model.tiles[2].detail,'Not configured');
+  assert.equal(hostUsageModel(sample,17000).freshness,'stale');
+  assert.equal(hostUsageModel(sample,0).freshness,'ahead');
+  sample.cpu={percent:12.345}; sample.memory={used:101,total:100};
+  model=hostUsageModel(sample,2000);
+  assert.equal(model.tiles[0].percent,12.345);
+  assert.equal(model.tiles[1].percent,null);
+  assert.deepEqual(hostUsageModel({reason:'Unsupported'}),{reason:'Unsupported'});
+});
+test('storage overview surfaces build mounts and retains every other mount in details', () => {
+  const sample={sampledAt:1,cpu:{percent:1},memory:{used:1,total:2},swap:{used:0,total:0},disks:[
+    {path:'/',used:85,total:100},{path:'/home',used:85,total:100},{path:'/build',used:95,total:100},
+    {path:'/boot',used:1,total:100},{path:'/container/long/path',reason:'Denied'}
+  ]};
+  const model=hostUsageModel(sample,2);
+  assert.deepEqual(model.disks.map(d=>d.path),['/','/build','/boot']);
+  assert.equal(model.disks[1].tone,'critical');
+  assert.deepEqual(model.moreDisks.map(d=>d.path),['/home','/container/long/path']);
+  assert.equal(model.moreDisks[1].percent,null);
+  assert.equal(model.moreDisks[1].detail,'Denied');
+  assert.equal(model.disks.length+model.moreDisks.length,sample.disks.length);
 });
 
 function fixture(hidden = false) {

@@ -1,4 +1,4 @@
-import {hostUsageLines, startHostUsage} from './host-usage.js';
+import {renderHostUsage, startHostUsage} from './host-usage.js';
 import {appUrl} from './hosting.js';
 import {emptyUsage, applyUsageEvent, STALE_MS, countdown} from './usage-status.js';
 
@@ -63,8 +63,7 @@ let hostSample = null, hostMetricStatus = 'Waiting for host metrics';
 function renderHostMetrics() {
   for (const root of document.querySelectorAll('[data-host-metrics]')) {
     const sample = hostSample?.hosts?.[root.dataset.hostMetrics];
-    const lines = sample ? hostUsageLines(sample) : [hostSample?.reason || hostMetricStatus];
-    root.replaceChildren(...lines.map(text => el('p', text, 'host-meta')));
+    renderHostUsage(root, sample, hostSample?.reason || hostMetricStatus);
   }
 }
 function renderHosts(catalog, sessions) {
