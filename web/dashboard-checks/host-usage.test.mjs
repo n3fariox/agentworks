@@ -23,10 +23,10 @@ test('visual metrics preserve freshness, unknown values and real percentages', (
 test('storage overview surfaces build mounts and retains every other mount in details', () => {
   const sample={sampledAt:1,cpu:{percent:1},memory:{used:1,total:2},swap:{used:0,total:0},disks:[
     {path:'/',used:85,total:100},{path:'/home',used:85,total:100},{path:'/build',used:95,total:100},
-    {path:'/boot',used:1,total:100},{path:'/container/long/path',reason:'Denied'}
+    {path:'/scratch',used:1,total:100},{path:'/container/long/path',reason:'Denied'}
   ]};
   const model=hostUsageModel(sample,2);
-  assert.deepEqual(model.disks.map(d=>d.path),['/','/build','/boot']);
+  assert.deepEqual(model.disks.map(d=>d.path),['/','/build','/scratch']);
   assert.equal(model.disks[1].tone,'critical');
   assert.deepEqual(model.moreDisks.map(d=>d.path),['/home','/container/long/path']);
   assert.equal(model.moreDisks[1].percent,null);

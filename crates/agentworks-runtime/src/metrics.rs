@@ -129,7 +129,7 @@ fn interesting(path: &str, fs: &str, removable: bool) -> bool {
                 | "autofs"
                 | "fuse.sshfs"
         )
-        && !["/proc", "/sys", "/dev", "/run"]
+        && !["/proc", "/sys", "/dev", "/run", "/boot", "/efi"]
             .iter()
             .any(|root| path == *root || path.starts_with(&format!("{root}/")))
 }
@@ -211,10 +211,16 @@ mod tests {
         assert_eq!(capacity(0, 0, true), json!({"used":0,"total":0}));
         assert!(capacity(2, 1, false)["reason"].is_string());
         assert!(interesting("/mnt/build", "ext4", false));
+        assert!(interesting("/", "btrfs", false));
+        assert!(interesting("/boot-build", "ext4", false));
         assert!(interesting("D:\\", "NTFS", false));
         assert!(interesting("/Volumes/build", "apfs", false));
         for (path, fs, removable) in [
             ("/proc", "proc", false),
+            ("/boot", "ext4", false),
+            ("/boot/efi", "vfat", false),
+            ("/efi", "vfat", false),
+            ("/efi/EFI", "vfat", false),
             ("/mnt/nfs", "nfs", false),
             ("/media/usb", "ext4", true),
             ("/run/something", "ext4", false),

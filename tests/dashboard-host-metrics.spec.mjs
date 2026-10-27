@@ -5,7 +5,7 @@ import {resolve} from 'node:path';
 test('host bars show pressure, retain mount expansion, and fit a phone viewport', async ({page}) => {
   let socket;
   const sample = () => ({hosts:{local:{sampledAt:Date.now(),cpu:{percent:12.3},memory:{used:95,total:100},swap:{used:0,total:0},disks:[
-    {path:'/',used:85,total:100}, {path:'/build',used:95,total:100}, {path:'/boot',used:1,total:100},
+    {path:'/',used:85,total:100}, {path:'/build',used:95,total:100}, {path:'/scratch',used:1,total:100},
     {path:'/home',used:85,total:100}, {path:`/container/${'a'.repeat(150)}`,reason:'Permission denied'}
   ]},old:{reason:'Update this host’s worker to enable host metrics'}}});
   await page.route('http://metrics.test/**', async route => {

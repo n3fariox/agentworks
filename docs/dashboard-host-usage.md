@@ -107,7 +107,9 @@ survive sample updates. The layout adapts to phone widths.
   configured swap. Memory state is recreated per read so failed capacity refreshes
   cannot retain an old successful value; missing/invalid totals show a reason.
 - Disk policy is automatic: local storage mount points/volumes, including separate
-  build mounts and read-only system volumes. Removable media, tmpfs, common pseudo
+  build mounts and read-only system volumes. Boot-only mounts at `/boot`, `/efi`,
+  and their descendants are skipped before capacity queries; `/` remains included.
+  Removable media, tmpfs, common pseudo
   filesystems, network filesystems, and FUSE mounts are excluded. Sysinfo also
   applies backend-specific enumeration filters. Mounts are rediscovered per read,
   filtered before capacity queries, deduplicated by mount point, sorted, and
