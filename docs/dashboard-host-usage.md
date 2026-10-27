@@ -106,12 +106,14 @@ survive sample updates. The layout adapts to phone widths.
   this is not a cross-platform accounting identity. A zero swap total means no
   configured swap. Memory state is recreated per read so failed capacity refreshes
   cannot retain an old successful value; missing/invalid totals show a reason.
-- Disk policy is automatic: local storage mount points/volumes, including separate
-  build mounts and read-only system volumes. Boot-only mounts at `/boot`, `/efi`,
+- Disk policy automatically selects storage mount points/volumes, including
+  separate build mounts and read-only system volumes. Boot-only mounts at `/boot`, `/efi`,
   and their descendants are skipped before capacity queries; `/` remains included.
-  Removable media, tmpfs, common pseudo
-  filesystems, network filesystems, and FUSE mounts are excluded. Sysinfo also
-  applies backend-specific enumeration filters. Mounts are rediscovered per read,
+  Removable media, tmpfs, common pseudo filesystems, and FUSE mounts are excluded.
+  The common network filesystem types `nfs`, `nfs4`, `cifs`, `smbfs`, and `autofs`
+  are filtered when reported by the platform backend. Sysinfo also applies
+  backend-specific enumeration filters; these checks do not identify every
+  possible network-backed filesystem. Mounts are rediscovered per read,
   filtered before capacity queries, deduplicated by mount point, sorted, and
   limited to 64 and the event byte budget. Truncation is labeled. Bind mounts or
   APFS volumes can share underlying storage; figures must not be summed.
@@ -126,10 +128,12 @@ survive sample updates. The layout adapts to phone widths.
   Sysinfo refresh methods do not expose every native OS failure as a `Result`;
   CPU read failures may be indistinguishable from a retained native counter value.
   Freshness is the sampler timestamp, not proof that each OS counter advanced.
-- Network/FUSE/tmpfs build storage is intentionally excluded in this slice. There
-  is no explicit mount allowlist UI. Kernel filesystem calls can block even on a
-  selected local volume; updates then become stale. No userspace timeout can
-  forcibly cancel a kernel read. Lease expiry still prevents ongoing remote work.
+- Build storage using the filtered common network filesystem types, FUSE, or
+  tmpfs is omitted. There is no explicit mount allowlist UI. Kernel filesystem
+  calls can block on selected storage, including network-backed mounts that the
+  backend/type filters do not recognize; updates then become stale. No userspace
+  timeout can forcibly cancel a kernel read. Lease expiry still prevents ongoing
+  remote work.
 
 ## Focused checks
 
