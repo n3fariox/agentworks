@@ -58,6 +58,14 @@ struct ManagedAuth {
     endpoint: String,
 }
 static MANAGED_AUTH: std::sync::OnceLock<ManagedAuth> = std::sync::OnceLock::new();
+// Observe only response headers; the embedding host owns quota presentation.
+pub type ResponseObserver = Arc<dyn Fn(&reqwest::header::HeaderMap) + Send + Sync>;
+static RESPONSE_OBSERVER: std::sync::OnceLock<ResponseObserver> = std::sync::OnceLock::new();
+pub fn set_response_observer(observer: ResponseObserver) -> Result<()> {
+    RESPONSE_OBSERVER
+        .set(observer)
+        .map_err(|_| anyhow!("Codex response observer was already configured"))
+}
 pub fn set_managed_auth(tokens: ManagedTokenProvider, endpoint: Option<String>) -> Result<()> {
     MANAGED_AUTH
         .set(ManagedAuth {
@@ -987,6 +995,9 @@ impl ChatGptCodexProvider {
         )
         .await?;
 
+        if let Some(observer) = RESPONSE_OBSERVER.get() {
+            observer(response.headers());
+        }
         handle_status(response).await
     }
 }

@@ -1,4 +1,4 @@
-//! ACP compatibility for the pinned Goose runtime, without modifying its sources.
+//! ACP compatibility for the pinned Goose runtime.
 //! Goose owns execution and storage. We adapt ACP system prompts and exact forks
 //! to its public session APIs, retaining all other requests and notifications.
 use agent_client_protocol::{
@@ -20,6 +20,8 @@ use std::{
     sync::{Arc, OnceLock},
 };
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+
+mod usage;
 
 type Result<T> = std::result::Result<T, Error>;
 const PROMPT_KEY: &str = "agentworks.acp.systemPrompt";
@@ -223,6 +225,12 @@ pub async fn run() -> Result<()> {
         enable_scheduler: false,
     });
     let outer: Arc<OnceLock<ConnectionTo<Client>>> = Arc::default();
+    let quota = Arc::new(std::sync::Mutex::new(usage::Quota::default()));
+    let observed_quota = quota.clone();
+    goose::providers::chatgpt_codex::set_response_observer(Arc::new(move |headers| {
+        observed_quota.lock().unwrap().observe(headers);
+    }))
+    .map_err(failure)?;
     if std::env::var("AGENTWORKS_CODEX_MANAGED").is_ok_and(|v| v == "1") {
         let credentials = outer.clone();
         goose::providers::chatgpt_codex::set_managed_auth(Arc::new(move || {
@@ -263,7 +271,20 @@ pub async fn run() -> Result<()> {
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_notification(
-            async move |notification: UntypedMessage, _cx| {
+            async move |mut notification: UntypedMessage, _cx| {
+                if notification.method == "session/update"
+                    && notification.params["update"]["sessionUpdate"] == "usage_update"
+                    && let Some(id) = notification.params["sessionId"].as_str()
+                    && let Ok(session) = SessionManager::new(Paths::data_dir())
+                        .get_session(id, false)
+                        .await
+                    && session.provider_name.as_deref() == Some("chatgpt_codex")
+                {
+                    quota
+                        .lock()
+                        .unwrap()
+                        .attach(&mut notification.params["update"]);
+                }
                 notifications
                     .get()
                     .ok_or_else(|| failure("ACP client is not connected"))?

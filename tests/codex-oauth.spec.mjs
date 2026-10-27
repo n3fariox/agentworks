@@ -75,7 +75,11 @@ test.beforeAll(async()=>{
       inferences++;
       const events=[{type:'response.created',sequence_number:0,response:{id:'response',object:'response',created_at:1,status:'in_progress',model:request.model,output:[]}},{type:'response.output_text.delta',sequence_number:1,item_id:'message',output_index:0,content_index:0,delta:'CODEX_OAUTH_OK'},
         {type:'response.completed',sequence_number:2,response:{id:'response',object:'response',created_at:1,status:'completed',model:request.model,output:[],usage:{input_tokens:4,output_tokens:3,total_tokens:7}}}];
-      res.writeHead(200,{'Content-Type':'text/event-stream'});res.end(events.map(event=>'data: '+JSON.stringify(event)+'\n\n').join('')+'data: [DONE]\n\n');return;
+      res.writeHead(200,{'Content-Type':'text/event-stream',
+        'x-codex-primary-used-percent':'12.5','x-codex-primary-window-minutes':'300','x-codex-primary-reset-at':'1800000000',
+        'x-codex-secondary-used-percent':'25','x-codex-secondary-window-minutes':'10080','x-codex-secondary-reset-at':'1800500000',
+        'x-codex-fast-primary-used-percent':'80','x-codex-fast-primary-window-minutes':'60','x-codex-fast-limit-name':'Fast model',
+      });res.end(events.map(event=>'data: '+JSON.stringify(event)+'\n\n').join('')+'data: [DONE]\n\n');return;
     }
     res.writeHead(404);res.end();
   });await listen(issuer);
@@ -111,6 +115,21 @@ test('temporary OAuth callback feeds local and SSH Goose sessions without worker
   await Promise.all(sessions.map(session=>api(`/api/sessions/${session.id}/prompt`,{text:'Reply CODEX_OAUTH_OK without tools.',requestId:randomUUID()})));
   for(const session of sessions){try{await expect.poll(async()=>{const state=await snapshot(session.id);return state.events.some(e=>e.kind==='turn_end')&&JSON.stringify(state.events).includes('CODEX_OAUTH_OK');},{timeout:10000}).toBe(true);}catch(error){const state=await api('/api/sessions/'+session.id);console.log('Codex fixture diagnostic',JSON.stringify({exchanges,refreshes,inferences,session:state.session,events:state.events.slice(-12)}));throw error;}}
   expect(refreshes).toBe(1);expect(inferences).toBe(2);
+  for(const session of sessions){
+    const state=await snapshot(session.id);
+    const usage=state.events.filter(e=>e.kind==='acp'&&e.data?.sessionUpdate==='usage_update').at(-1)?.data;
+    expect(usage.used).toBe(7);expect(usage.size).toBeGreaterThan(0);
+    const quota=usage._meta['_codex/subscriptionLimits'];expect(quota.version).toBe(1);
+    const limits=quota.limits.find(l=>l.limitId==='codex');
+    expect(limits.primary.usedPercent.value).toBe(12.5);expect(limits.primary.windowDurationMins.value).toBe(300);
+    expect(limits.primary.resetsAt.value).toBe(1800000000);expect(limits.primary.usedPercent.observedAtMs).toBeGreaterThan(0);
+    expect(limits.secondary.usedPercent.value).toBe(25);expect(limits.secondary.windowDurationMins.value).toBe(10080);
+    expect(quota.limits.find(l=>l.limitId==='codex_fast').limitName).toBe('Fast model');
+  }
+  await page.evaluate(id=>localStorage.setItem('agentworks-session',id),sessions[0].id);
+  await page.goto(base+'/');
+  await expect(page.locator('.usage-status-toggle')).toContainText('codex primary (5h) 88% left');
+  await expect(page.locator('.usage-status-toggle')).toContainText('codex secondary (7d) 75% left');
   const stored=await readFile(join(dir,'providers','codex-oauth.json'),'utf8');expect(stored).toContain('fixture-refresh-rotated-1');expect((await stat(join(dir,'providers','codex-oauth.json'))).mode&0o777).toBe(0o600);
   const workerFiles=await files(remoteProviders);expect(workerFiles.some(path=>/codex-oauth\.json|tokens\.json/.test(path))).toBe(false);
   for(const session of sessions){const publicState=JSON.stringify(await api('/api/sessions/'+session.id));expect(publicState).not.toContain('fixture-access');expect(publicState).not.toContain('fixture-refresh');}

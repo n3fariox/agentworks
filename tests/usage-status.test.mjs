@@ -62,4 +62,10 @@ assert.equal(s.quota['5h'].usedPercent,30);
 assert.deepEqual(replay(events),replay(events));
 const base=emptyUsage();
 assert.equal(applyUsageEvent(base,{kind:'user',data:{text:'x'}}),base);
+// Goose reports Codex subscription windows through the shared metadata format.
+const goose=applyUsageEvent(emptyUsage(),{kind:'acp',data:{sessionUpdate:'usage_update',used:7,size:200000,_meta:{'_codex/subscriptionLimits':{version:1,limits:[{limitId:'codex',primary:{usedPercent:{value:12.5,observedAtMs:now},windowDurationMins:{value:300,observedAtMs:now}}}]}}}},now);
+const gooseView=usageView(goose,{now,provider:'goose'});
+assert.match(gooseView.label,/codex primary \(5h\) 88% left/);
+assert.ok(gooseView.details.some(d=>d.includes('12.5% used / 87.5% remaining')));
+assert.ok(!gooseView.details.some(d=>d.includes('quota: not reported')));
 console.log('usage-status: all checks passed');
