@@ -40,6 +40,19 @@ fn message(method: &str, params: Value) -> UntypedMessage {
         params,
     }
 }
+fn model_option(response: &Value, current: Value) -> Result<Value> {
+    let models = response["data"]
+        .as_array()
+        .ok_or_else(|| failure("Codex returned no model list"))?;
+    let options: Vec<_> = models
+        .iter()
+        .filter(|m| m["hidden"] != true)
+        .map(|m| json!({"value":m["model"],"name":m["displayName"]}))
+        .collect();
+    Ok(
+        json!({"id":"model","name":"Model","category":"model","type":"select","currentValue":current,"options":options}),
+    )
+}
 fn update(cx: &ConnectionTo<Client>, id: &str, update: Value) -> Result<()> {
     cx.send_notification(message(
         "session/update",
@@ -137,7 +150,8 @@ impl Bridge {
                     .await?;
                 let mut response = json!({"protocolVersion":1,"agentInfo":{"name":"agentworks-codex-acp","version":env!("CARGO_PKG_VERSION")},
                     "agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"embeddedContext":true},"mcpCapabilities":{"http":true},"sessionCapabilities":{"list":{},"close":{},"delete":{},"fork":{},"resume":{},"systemPrompt":{},"additionalDirectories":{},"subagents":{}}},
-                    "authMethods":[{"id":"api-key","name":"API key"}]});
+                    "authMethods":[{"id":"api-key","name":"API key"}],
+                    "_meta":{"agentworks":{"modelDiscovery":true,"permissionModeOnOpen":true}}});
                 self.negotiate_tasks(&p, &mut response);
                 Ok(response)
             }
@@ -159,6 +173,10 @@ impl Bridge {
                 self.rpc("account/login/start", json!({"type":"apiKey","apiKey":key}))
                     .await?;
                 Ok(json!({}))
+            }
+            "_agentworks/models/list" => {
+                let response = self.rpc("model/list", json!({})).await?;
+                Ok(json!({"configOptions":[model_option(&response, Value::Null)?]}))
             }
             "session/new" | "session/load" | "session/resume" | "session/fork" => {
                 let prompt = system_prompt(&p)?; // Validate before touching native state.
@@ -190,6 +208,23 @@ impl Bridge {
                 let config = session_config(&p)?;
                 let mut params =
                     json!({"cwd":field(&p,"cwd")?,"config":config,"runtimeWorkspaceRoots":roots});
+                // Apply the caller's selected policy before native thread initialization,
+                // which may itself need to run sandboxed filesystem helpers.
+                if let Some(mode) = p.pointer("/_meta/agentworks/permissionMode") {
+                    let mode = mode
+                        .as_str()
+                        .ok_or_else(|| invalid("Invalid permission mode"))?;
+                    if mode != "host" {
+                        let policy = mode_policy(mode, &roots)?;
+                        params["sandbox"] = json!(match mode {
+                            "agent-full-access" => "danger-full-access",
+                            "agent" => "workspace-write",
+                            _ => mode,
+                        });
+                        params["approvalPolicy"] = policy["approvalPolicy"].clone();
+                        params["approvalsReviewer"] = policy["approvalsReviewer"].clone();
+                    }
+                }
                 if let Some(prompt) = prompt {
                     // The native field replaces configured developer_instructions. Preserve
                     // the effective config (including project layers) before appending ours.
@@ -457,11 +492,6 @@ impl Bridge {
         let models = response["data"]
             .as_array()
             .ok_or_else(|| failure("Codex returned no model list"))?;
-        let options: Vec<_> = models
-            .iter()
-            .filter(|m| m["hidden"] != true)
-            .map(|m| json!({"value":m["model"],"name":m["displayName"]}))
-            .collect();
         let current = models.iter().find(|m| m["model"] == s.settings["model"]);
         let efforts: Vec<_> = current
             .into_iter()
@@ -473,9 +503,7 @@ impl Bridge {
             })
             .map(|e| json!({"value":e["reasoningEffort"],"name":e["reasoningEffort"]}))
             .collect();
-        let mut result = vec![
-            json!({"id":"model","name":"Model","category":"model","type":"select","currentValue":s.settings["model"],"options":options}),
-        ];
+        let mut result = vec![model_option(&response, s.settings["model"].clone())?];
         if !efforts.is_empty() {
             result.push(json!({"id":"reasoning_effort","name":"Reasoning effort","category":"thought_level","type":"select","currentValue":s.settings["effort"].as_str().or_else(||current.and_then(|m|m["defaultReasoningEffort"].as_str())),"options":efforts}));
         }

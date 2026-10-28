@@ -148,6 +148,7 @@ async fn open_session(
     s.data.lock().unwrap().prompt_capabilities = if caps.is_object() { caps } else { json!({}) };
     s.emit("attachment_policy", crate::attachments::session_policy(s));
     let system_prompt = role_prompt(s, &init)?;
+    let open_meta = opening_metadata(&s.provider, &s.data.lock().unwrap(), &init);
     let saved = s.data.lock().unwrap().provider_session_id.clone();
     let Some(id) = saved else {
         let lineage = s.data.lock().unwrap().lineage.clone();
@@ -176,7 +177,9 @@ async fn open_session(
                             .data("Could not persist native fork intent")
                     })?;
             }
-            let meta = json!({"jetbrains":{"air":{"fork":{"version":1,"messageId":lineage.source_message_id}}}});
+            let mut meta = json!(open_meta);
+            meta["jetbrains"] =
+                json!({"air":{"fork":{"version":1,"messageId":lineage.source_message_id}}});
             let response = connection
                 .send_request(
                     ForkSessionRequest::new(lineage.source_session_id.unwrap(), s.cwd.clone())
@@ -229,7 +232,8 @@ async fn open_session(
                 .send_request(
                     NewSessionRequest::new(s.cwd.clone())
                         .mcp_servers(crate::mcp::configuration(s))
-                        .system_prompt(system_prompt.clone()),
+                        .system_prompt(system_prompt.clone())
+                        .meta(open_meta.clone()),
                 )
                 .block_task()
                 .await?,
@@ -246,7 +250,8 @@ async fn open_session(
             .send_request(
                 LoadSessionRequest::new(id.clone(), s.cwd.clone())
                     .mcp_servers(crate::mcp::configuration(s))
-                    .system_prompt(system_prompt.clone()),
+                    .system_prompt(system_prompt.clone())
+                    .meta(open_meta.clone()),
             )
             .block_task()
             .await
@@ -256,7 +261,8 @@ async fn open_session(
             .send_request(
                 ResumeSessionRequest::new(id.clone(), s.cwd.clone())
                     .mcp_servers(crate::mcp::configuration(s))
-                    .system_prompt(system_prompt.clone()),
+                    .system_prompt(system_prompt.clone())
+                    .meta(open_meta.clone()),
             )
             .block_task()
             .await
@@ -266,7 +272,8 @@ async fn open_session(
             .send_request(
                 LoadSessionRequest::new(id.clone(), s.cwd.clone())
                     .mcp_servers(crate::mcp::configuration(s))
-                    .system_prompt(system_prompt.clone()),
+                    .system_prompt(system_prompt.clone())
+                    .meta(open_meta.clone()),
             )
             .block_task()
             .await
@@ -289,7 +296,8 @@ async fn open_session(
                     .send_request(
                         NewSessionRequest::new(s.cwd.clone())
                             .mcp_servers(crate::mcp::configuration(s))
-                            .system_prompt(system_prompt.clone()),
+                            .system_prompt(system_prompt.clone())
+                            .meta(open_meta.clone()),
                     )
                     .block_task()
                     .await?,
@@ -301,7 +309,30 @@ async fn open_session(
     config["sessionId"] = json!(id);
     Ok(config)
 }
-/// Starts a temporary ACP session to ask the harness for its actual model list. No prompt/inference.
+// Send only an explicitly selected policy, and only to adapters that support it.
+// Saved modes take precedence; imports/old rows never inherit today's default.
+fn opening_metadata(
+    provider: &str,
+    data: &crate::SessionData,
+    init: &Value,
+) -> serde_json::Map<String, Value> {
+    let mut meta = serde_json::Map::new();
+    if cli_provider(provider) == "codex"
+        && init["_meta"]["agentworks"]["permissionModeOnOpen"] == true
+    {
+        let mode = data.permission_modes["currentValue"].as_str().or_else(|| {
+            (data.provider_session_id.is_none() && !data.external)
+                .then(|| data.initial_codex_permission_mode.map(|m| m.id()))
+                .flatten()
+        });
+        if let Some(mode) = mode {
+            meta.insert("agentworks".into(), json!({"permissionMode":mode}));
+        }
+    }
+    meta
+}
+
+/// Ask the harness for models without inference; adapters may require a temporary session.
 pub async fn discover_on(
     provider: &str,
     cwd: PathBuf,
@@ -745,6 +776,37 @@ fn attachment_block(attachment: crate::attachments::Payload) -> ContentBlock {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn opening_policy_requires_capability_and_preserves_saved_or_host_permissions() {
+        let mut data: crate::SessionData = serde_json::from_value(serde_json::json!({
+            "status":"starting","seq":0,"requests":[],"models":null,
+            "available_commands":[],"turn_active":false
+        }))
+        .unwrap();
+        let init = serde_json::json!({"_meta":{"agentworks":{"permissionModeOnOpen":true}}});
+        let metadata =
+            |data: &crate::SessionData| super::opening_metadata("codex-rust", data, &init);
+        // Old saved rows and imports have no captured default to infer.
+        assert!(metadata(&data).is_empty());
+        data.initial_codex_permission_mode =
+            Some(crate::permission_modes::CodexDefault::FullAccess);
+        assert_eq!(
+            metadata(&data)["agentworks"]["permissionMode"],
+            "agent-full-access"
+        );
+        assert!(super::opening_metadata("codex-rust", &data, &serde_json::json!({})).is_empty());
+        assert!(super::opening_metadata("claude-rust", &data, &init).is_empty());
+        data.external = true;
+        assert!(metadata(&data).is_empty());
+        data.external = false;
+        data.provider_session_id = Some("saved-thread".into());
+        assert!(metadata(&data).is_empty());
+        data.permission_modes = serde_json::json!({"currentValue":"read-only"});
+        assert_eq!(metadata(&data)["agentworks"]["permissionMode"], "read-only");
+        data.permission_modes = serde_json::json!({"currentValue":"host"});
+        assert_eq!(metadata(&data)["agentworks"]["permissionMode"], "host");
+    }
+
     #[test]
     fn attachment_blocks_use_acp_embedded_content() {
         use crate::attachments::Payload;

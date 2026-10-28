@@ -36,7 +36,7 @@ class HarnessTests(unittest.TestCase):
         self.until(lambda:self.request("/api/status"))
 
     def start(self):
-        self.process=subprocess.Popen([str(self.root/"target/debug/agentworks")],env=self.env,stdin=subprocess.DEVNULL,stdout=self.log,stderr=self.log)
+        self.process=subprocess.Popen([os.environ.get("AGENTWORKS_TEST_BIN",str(self.root/"target/debug/agentworks"))],env=self.env,stdin=subprocess.DEVNULL,stdout=self.log,stderr=self.log)
 
     def stop(self):
         if self.process.poll() is None:
@@ -126,6 +126,59 @@ class HarnessTests(unittest.TestCase):
 
     def native_lifecycle(self):
         return [v for line in (self.cwd/"native.jsonl").read_text().splitlines() if (v:=json.loads(line)).get("method") in ("thread/start","thread/resume","thread/fork")]
+
+    def test_discovery_works_when_thread_sandbox_cannot_start(self):
+        self.stop()
+        self.env["ACP_FIXTURE_NO_THREAD"]="1"
+        self.start()
+        self.until(lambda:self.request("/api/status"))
+        models=self.request("/api/models","POST",dict(provider="codex-rust",cwd=str(self.cwd)))
+        self.assertEqual(models["options"][0]["value"],"test-model")
+        self.assertEqual(self.native_lifecycle(),[])
+
+    def test_full_access_default_is_sent_before_open_and_saved_policy_wins_on_resume(self):
+        self.stop()
+        self.env["ACP_FIXTURE_REQUIRE_OPEN_SANDBOX"]="danger-full-access"
+        self.start()
+        self.until(lambda:self.request("/api/status"))
+        created=self.request("/api/sessions","POST",dict(provider="codex-rust",cwd=str(self.cwd)))
+        path="/api/sessions/"+created["id"]
+        snapshot=self.until(lambda:(s if (s:=self.request(path))["session"]["status"]=="idle" else None))
+        self.assertEqual(snapshot["permissionModes"]["currentValue"],"agent-full-access")
+        self.assertEqual(self.native_lifecycle()[-1]["params"]["sandbox"],"danger-full-access")
+        self.request(path+"/suspend","POST",{})
+        self.until(lambda:self.request(path)["session"]["status"]=="suspended")
+        settings=self.request("/api/settings")
+        settings["codexDefaultPermissionMode"]="read-only"
+        self.request("/api/settings","PUT",settings)
+        self.stop()
+        self.start()
+        self.until(lambda:self.request(path))
+        self.request(path+"/resume","POST",{})
+        self.until(lambda:self.request(path)["session"]["status"]=="idle")
+        self.assertEqual(self.native_lifecycle()[-1]["method"],"thread/resume")
+        self.assertEqual(self.native_lifecycle()[-1]["params"]["sandbox"],"danger-full-access")
+
+    def test_restrictive_default_is_sent_before_open_and_not_broadened_on_resume(self):
+        settings=self.request("/api/settings")
+        settings["codexDefaultPermissionMode"]="read-only"
+        self.request("/api/settings","PUT",settings)
+        self.stop()
+        self.env["ACP_FIXTURE_REQUIRE_OPEN_SANDBOX"]="read-only"
+        self.start()
+        self.until(lambda:self.request("/api/status"))
+        created=self.request("/api/sessions","POST",dict(provider="codex-rust",cwd=str(self.cwd)))
+        path="/api/sessions/"+created["id"]
+        self.until(lambda:self.request(path)["session"]["status"]=="idle")
+        self.assertEqual(self.native_lifecycle()[-1]["params"]["sandbox"],"read-only")
+        settings["codexDefaultPermissionMode"]="agent-full-access"
+        self.request("/api/settings","PUT",settings)
+        self.request(path+"/suspend","POST",{})
+        self.until(lambda:self.request(path)["session"]["status"]=="suspended")
+        self.request(path+"/resume","POST",{})
+        snapshot=self.until(lambda:(s if (s:=self.request(path))["session"]["status"]=="idle" else None))
+        self.assertEqual(snapshot["permissionModes"]["currentValue"],"read-only")
+        self.assertEqual(self.native_lifecycle()[-1]["params"]["sandbox"],"read-only")
 
     def test_role_and_shared_context_survive_resume_restart_and_native_fork(self):
         providers={p["id"]:p for p in self.request("/api/status")["providers"]}
