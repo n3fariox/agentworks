@@ -5,7 +5,7 @@ import {hostEnrollment} from './host-enrollment.js';
 import {appUrl, socketUrl, localState as localStorage, sessionState as sessionStorage} from './hosting.js';
 import {setupInboxDelivery} from './inbox-delivery.js';
 import {setupDiff} from './diff.js';
-import {setupWorktreeControls,setupPolicyEditor} from './worktree-controls.js';
+import {setupWorktreeControls,setupPolicyEditor,setupGitSettings} from './worktree-controls.js';
 import {setupGitContext} from './git-context.js';
 import {setupWorktreeOwnership} from './worktree-ownership.js';
 import {setupControllers} from './controllers.js';
@@ -1259,7 +1259,7 @@ async function deleteSession(session,providerHistory=false){
   if(!session)return;
   const question=providerHistory
     ? `Permanently delete “${session.title}” from Agentworks and its provider’s conversation history? Its harness will stop. Worktree files and branches remain. This cannot be undone.`
-    : `Permanently delete “${session.title}” and its Agentworks transcript? Its harness will stop. Provider conversation history, worktree files and branches remain. This cannot be undone.`;
+    : `Permanently delete “${session.title}” and its Agentworks transcript? Its harness will stop. Provider conversation history remains. Worktree files and branches remain. This cannot be undone.`;
   if(!confirm(question))return;
   const id=session.id;
   try{
@@ -1313,6 +1313,8 @@ $('settings-form').addEventListener('invalid',event=>{
   const panel=event.target.closest('[role="tabpanel"]');
   if(panel)selectSettingsCategory(panel.id.replace('settings-panel-',''));
 },true);
+const gitSettings=setupGitSettings({$,api,picker:directoryPicker,getHosts:()=>hosts,getLocations:()=>locations,getActive:()=>active});
+$('project-git-settings').onclick=async()=>{const cwd=$('project-directory').value.trim(),host=$('project-directory-host').value||'local';await openSettings();selectSettingsCategory('git');await gitSettings.repository(cwd,host);};
 $('add-root').onclick=()=>addRoot().focus();
 async function openSettings(){
   const timeoutsReady=timeoutControls.load();
@@ -1321,6 +1323,7 @@ async function openSettings(){
   try{
     modelProviders.loadSettings();
     const settings=await api('/api/settings');$('settings-roots').replaceChildren();for(const root of settings.roots)addRoot(root);$('settings-error').textContent='';$('settings-saved').textContent='Save applies global defaults and host settings. Display, notifications, model providers and parsers save immediately.';
+    gitSettings.populate(settings.git);
     $('default-communication-role').value=settings.defaultCommunicationRole||'participant';
     const fields=$('default-model-fields');fields.replaceChildren();
     // Node and Rust harnesses for one CLI share its permission default; show the picker once per CLI.
@@ -1374,7 +1377,7 @@ $('settings-form').onsubmit=async event=>{
   try{
     const defaultModels={};for(const input of $('default-model-fields').querySelectorAll('input')){if(input.value.trim())defaultModels[input.dataset.provider]=input.value.trim();}
     const timeouts=timeoutControls.pendingDefault();
-    const settings=await api('/api/settings',{method:'PUT',body:JSON.stringify({roots:rootValues().filter(Boolean),defaultModels,claudeDefaultPermissionMode:$('claude-default-permission-mode')?.value,codexDefaultPermissionMode:$('codex-default-permission-mode')?.value,defaultCommunicationRole:$('default-communication-role').value,...(timeouts?{timeouts}:{})})});
+    const settings=await api('/api/settings',{method:'PUT',body:JSON.stringify({git:gitSettings.value(),roots:rootValues().filter(Boolean),defaultModels,claudeDefaultPermissionMode:$('claude-default-permission-mode')?.value,codexDefaultPermissionMode:$('codex-default-permission-mode')?.value,defaultCommunicationRole:$('default-communication-role').value,...(timeouts?{timeouts}:{})})});
     if(timeouts)timeoutControls.acceptDefault(timeouts);
     config.roots=settings.roots;config.defaultModels=settings.defaultModels;config.defaultCommunicationRole=settings.defaultCommunicationRole||'participant';applyRoots();
     $('settings-dialog').close();toast('Settings saved. They apply to new sessions.','success');

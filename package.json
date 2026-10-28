@@ -30,6 +30,7 @@
     "test:controllers": "node scripts/controller-smoke.mjs",
     "test:fork": "node scripts/fork-smoke.mjs",
     "test:roles": "node scripts/roles-smoke.mjs && playwright test tests/roles.spec.mjs",
+    "test:git-settings": "node scripts/git-settings-smoke.mjs && AGENTWORKS_GIT_REMOTE=1 node scripts/git-settings-smoke.mjs && playwright test tests/git-settings.spec.mjs",
     "test:worktree-ui": "playwright test tests/worktree-launch.spec.mjs",
     "test:limit-resume": "node scripts/limit-resume-smoke.mjs",
     "test:acp-lifecycle": "node scripts/acp-lifecycle-smoke.mjs",

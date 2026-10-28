@@ -33,6 +33,8 @@ AGENTWORKS_ENROLL_REAL_MISE=1 npm run test:host-enrollment
 
 The browser flow is covered by `npx playwright test tests/hosts.spec.mjs`, including mobile layout, terminal input, setup errors/retries, cancellation, and directory selection.
 
+`npm run test:git-settings` owns ports 4531–4533 and disposable repositories: local and fake-SSH CoW/hooks checks plus desktop/mobile Git settings. It uses only the demo harness.
+
 The smoke test uses the demo agent to exercise ACP streaming, multiple turns, disconnect survival, idempotency, approval allow/stale/invalid responses, cancellation, Markdown sanitization, and directory/origin checks. Workspace checks also cover file boundaries, manual automation runs, approval/concurrency handling, and retained run history. They make no paid model requests.
 
 Compact tool snapshots, tool bodies on demand, reconnect resume and tool headers: `npm run test:tool-bodies` (smoke against `AGENTWORKS_URL`, then an isolated browser check on port 4458).

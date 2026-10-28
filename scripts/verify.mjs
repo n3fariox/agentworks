@@ -45,6 +45,8 @@ try{
   await run('node',['scripts/completion-smoke.mjs']);
   await run('node',['scripts/review-queue-smoke.mjs']);
   await run('node',['scripts/worktree-policy-smoke.mjs']);
+  await run('node',['scripts/git-settings-smoke.mjs']);
+  await run('node',['scripts/git-settings-smoke.mjs'],{AGENTWORKS_GIT_REMOTE:'1'});
   await run('node',['scripts/worktree-cleanup-smoke.mjs']);
   await run('node',['scripts/worktree-cleanup-smoke.mjs'],{AGENTWORKS_CLEANUP_REMOTE:'1'});
   await run('node',['scripts/limit-resume-smoke.mjs']);

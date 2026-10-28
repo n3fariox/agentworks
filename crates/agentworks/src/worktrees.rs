@@ -83,6 +83,16 @@ pub fn creation_payload(req: &Create) -> String {
 }
 
 impl Context for App {
+    fn git_settings(&self) -> agentworks_workspace::config::Settings {
+        self.catalog
+            .lock()
+            .unwrap()
+            .data
+            .settings
+            .git
+            .clone()
+            .unwrap_or_default()
+    }
     fn safe_error(&self, message: &str) -> String {
         agentworks_runtime::provider::safe_error(message)
     }

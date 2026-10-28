@@ -10,7 +10,8 @@ http.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "process", "time", "macros", "rt"] }
+toml = "1.1.8"
 uuid.workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc.workspace = true

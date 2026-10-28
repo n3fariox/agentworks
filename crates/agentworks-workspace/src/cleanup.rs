@@ -17,6 +17,12 @@ pub struct Owned {
     /// Milliseconds since the epoch when archive cleanup removed the checkout.
     #[serde(default)]
     pub removed: Option<u64>,
+    #[serde(default)]
+    pub hooks: Option<crate::hooks::State>,
+    #[serde(default)]
+    pub population: Option<String>,
+    #[serde(default)]
+    pub settings: Option<crate::config::Settings>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize)]
@@ -66,7 +72,7 @@ fn utf8(path: &std::path::Path) -> Result<&str, Error> {
 }
 
 /// Confirms the path is still the recorded linked checkout of the recorded repository.
-async fn verify(app: &(impl worktrees::Context + ?Sized), o: &Owned) -> Result<(), String> {
+pub async fn verify(app: &(impl worktrees::Context + ?Sized), o: &Owned) -> Result<(), String> {
     let path = utf8(&o.path).map_err(|e| e.1)?;
     if app.checked(path).map_err(|e| e.1)? != o.path {
         return Err("Worktree path no longer resolves to its recorded location".into());
@@ -254,7 +260,7 @@ pub async fn restore_in(
             // Adopt only the same repository's checkout of the recorded branch.
             if verify(app, &o).await.is_ok() {
                 return Ok(Some(
-                    json!({"outcome":"adopted","path":o.path,"branch":o.branch}),
+                    json!({"outcome":"adopted","path":o.path,"branch":o.branch,"population":"unknown (adopted)"}),
                 ));
             }
             return Err(conflict(format!(
@@ -304,21 +310,25 @@ pub async fn restore_in(
     std::fs::create_dir(&path).map_err(|_| {
         conflict("Restore path appeared concurrently; inspect it, then unarchive again")
     })?;
-    let path_str = utf8(&path)?;
-    if let Err((_, message)) = worktrees::git(
+    let commit = worktrees::git(
         app,
         &o.main_top,
-        &["worktree", "add", "--", path_str, &o.branch],
+        &["rev-parse", "--verify", &format!("refs/heads/{}", o.branch)],
     )
-    .await
-    {
-        // Only the empty directory reserved above is removed; remove_dir refuses content.
-        let _ = std::fs::remove_dir(&path);
-        return Err(conflict(format!("Could not recreate worktree: {message}")));
-    }
+    .await?;
+    let settings = o.settings.clone().unwrap_or_default();
+    let population =
+        match worktrees::populate(app, &repo, &path, &commit, &o.branch, false, &settings).await {
+            Ok(population) => population,
+            Err((_, message)) => {
+                // Only the empty directory reserved above is removed; remove_dir refuses content.
+                let _ = std::fs::remove_dir(&path);
+                return Err(conflict(format!("Could not recreate worktree: {message}")));
+            }
+        };
     verify(app, &o).await.map_err(conflict)?;
     Ok(Some(
-        json!({"outcome":"restored","path":o.path,"branch":o.branch}),
+        json!({"outcome":"restored","path":o.path,"branch":o.branch,"population":population}),
     ))
 }
 

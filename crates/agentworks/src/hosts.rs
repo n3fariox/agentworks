@@ -317,6 +317,13 @@ pub(crate) async fn worktree_operation(
             "Update the worker on this host to enable worktree cleanup and restore",
         ));
     }
+    if matches!(operation, "gitConfig" | "runWorktreeHooks") && live.worker()["gitSettings"] != true
+    {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "Update this host's worker to enable Git settings and worktree hooks",
+        ));
+    }
     request["operation"] = json!(operation);
     request["roots"] = json!(roots);
     live.workspace(request)
@@ -377,11 +384,26 @@ pub(crate) async fn prepare_workspace(
             "Update the worker on this host to enable remote worktrees.",
         ));
     }
+    if mode == crate::worktrees::Mode::NewWorktree && live.worker()["gitSettings"] != true {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "Update this host's worker to create worktrees with Git settings",
+        ));
+    }
+    let git_settings = app
+        .catalog
+        .lock()
+        .unwrap()
+        .data
+        .settings
+        .git
+        .clone()
+        .unwrap_or_default();
     // Reserve durably before the worker can mutate Git. Never replay a lost mutation.
     if mode == crate::worktrees::Mode::NewWorktree {
         crate::worktrees::arm_creation(app, key)?;
     }
-    let result = live.workspace(json!({"operation":"prepare","cwd":source,"roots":roots,"policy":policy,"workspace":if req.external_id.is_some() { json!({"mode":"directory"}) } else { json!(req.workspace) }})).await
+    let result = live.workspace(json!({"gitSettings":git_settings,"operation":"prepare","cwd":source,"roots":roots,"policy":policy,"workspace":if req.external_id.is_some() { json!({"mode":"directory"}) } else { json!(req.workspace) }})).await
         .map_err(|e| fail(StatusCode::CONFLICT, format!("{e} Inspect retained remote branches/files before retrying.")))?;
     let path = result["cwd"]
         .as_str()

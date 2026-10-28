@@ -778,11 +778,14 @@ impl Live {
     async fn request(&self, mut request: Value) -> Result<String, String> {
         // Lifecycle operations perform several bounded Git checks plus adapter
         // shutdown. Directory validation retains its shorter deadline.
-        let timeout = if request["type"] == "workspace" {
-            Duration::from_secs(120)
-        } else {
-            Duration::from_secs(15)
-        };
+        let timeout =
+            if request["type"] == "workspace" && request["operation"] == "runWorktreeHooks" {
+                Duration::from_secs(360)
+            } else if request["type"] == "workspace" {
+                Duration::from_secs(120)
+            } else {
+                Duration::from_secs(15)
+            };
         let id = self.next_request.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = oneshot::channel();
         {
@@ -1035,6 +1038,7 @@ fn check_hello(hello: &Value) -> Result<Value, String> {
         "tools": hello["tools"],
         "mcpRelay": hello["mcpRelay"],
         "workspace": hello["workspace"] == true,
+        "gitSettings": hello["gitSettings"] == true,
         "modelProviders": hello["modelProviders"] == true,
         "sharedModelProviders": hello["sharedModelProviders"] == true,
         "worktreeCleanup": hello["worktreeCleanup"] == true,
