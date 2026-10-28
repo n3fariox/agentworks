@@ -6,6 +6,13 @@ The built-in default is Full access. The API/catalog key is
 Changing it affects only newly created native Codex sessions, including automation
 runs. Imports and existing sessions do not acquire the current global default.
 
+The Rust Codex bridge also receives the captured default during thread creation,
+before native initialization. On resume it receives the session's saved mode
+instead. Rust model discovery uses native model listing without opening a thread.
+These capabilities are negotiated with the adapter, including on remote workers;
+older adapters retain their existing initialization behavior. See
+[the Rust bridge protocol](RUST-CODEX-ACP.md).
+
 Verified against the pinned `@agentclientprotocol/codex-acp`
 `2.2.2-agentworks.1` in `vendor/codex-acp/dist/index.js` (`AgentMode`,
 `toConfigOption`, `applyModeChange`, and `sendPrompt`):

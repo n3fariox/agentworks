@@ -48,9 +48,26 @@ cancelled before either operation. These methods match the ACP State client's
 new lifecycle interfaces without requiring its changes to be copied into this
 branch.
 
-The host's sandbox and approval settings remain in effect until a mode is explicitly
-selected. The host preset restores the policy captured when this adapter opened
-the session. Subscription-window push notifications use the same timestamped
+Agentworks passes a captured default or saved permission mode in
+`_meta.agentworks.permissionMode` when opening a session, after negotiating
+`_meta.agentworks.permissionModeOnOpen` in the initialize response. The bridge
+sets native sandbox and approval overrides on `thread/start`, `thread/resume`,
+and `thread/fork`, before native initialization can invoke filesystem helpers.
+The usual settings update still confirms the mode before readiness or a prompt.
+Saved modes take precedence over defaults; imports and old saved rows without a
+captured mode retain the native policy. With no explicit mode (or `host`), the
+host's sandbox and approval settings remain in effect. The host preset restores
+the policy captured at thread opening.
+
+Model discovery negotiates `_meta.agentworks.modelDiscovery`, then calls
+`_agentworks/models/list`, which maps directly to native `model/list`. It never
+creates a native thread, starts MCP servers, or executes a model turn. Clients
+using older adapters without this capability retain temporary-session discovery;
+errors from the advertised extension propagate without retrying through a thread.
+The same ACP negotiation and metadata work through remote worker transports;
+update the worker executable to use these capabilities on another host.
+
+Subscription-window push notifications use the same timestamped
 `_codex/subscriptionLimits` metadata contract as the vendored adapter: sparse
 updates retain older field times and attach only to genuine session usage events.
 No account polling or quota-only events are added.
