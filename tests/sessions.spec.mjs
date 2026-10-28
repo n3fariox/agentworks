@@ -189,7 +189,7 @@ test('project hierarchies preserve draft, stream, selection and independent expa
   await project.locator(':scope > summary .tree-label').click();
   await page.locator('#new-project').click();await page.locator('#project-name').fill('Browser test Beta');await page.locator('#save-project').click();
   await expect(page.locator('#project-dialog')).not.toBeVisible();
-  await page.locator('#session-project').selectOption({label:'Browser test Beta'});
+  await page.locator('#lifecycle-menu > summary').click();await page.locator('#session-project').selectOption({label:'Browser test Beta'});
   await expect(page.locator('#session-project')).toHaveValue(await page.locator('#create-project option',{hasText:'Browser test Beta'}).getAttribute('value'));
   await expect(page.locator('#prompt')).toHaveValue('A draft stays here');
   expect(sockets).toBe(currentSockets);
@@ -500,7 +500,7 @@ test('agent access and inbox: grants, safe drafts, activity, mobile layout',asyn
   await page.reload();await page.getByRole('button',{name:/Browser test inbox/}).click();
   await expect(page.locator('#session-state')).toHaveText('Ready');
   await page.locator('#prompt').fill('Existing draft');
-  await page.locator('#session-agents').click();
+  await page.locator('#lifecycle-menu > summary').click();await page.locator('#session-agents').click();
   await expect(page.locator('#agent-preset')).toHaveValue('participant');
   await expect(page.locator('#agent-inbox')).toContainText('Review this peer message <script>unsafe()</script>');
   await expect(page.locator('#agent-inbox script')).toHaveCount(0);
@@ -511,10 +511,10 @@ test('agent access and inbox: grants, safe drafts, activity, mobile layout',asyn
   await expect(page.locator('#prompt')).toHaveValue(/Existing draft/);
   await expect(page.locator('#prompt')).toHaveValue(/peer-provided context/);
   await expect(page.locator('#messages')).not.toContainText('Local session, turn');
-  await page.locator('#session-agents').click();await page.locator('#agent-preset').selectOption('coordinator');
+  await page.locator('#lifecycle-menu > summary').click();await page.locator('#session-agents').click();await page.locator('#agent-preset').selectOption('coordinator');
   await page.locator('#save-agent-access').click();await expect(page.locator('#save-agent-access')).toBeEnabled();
   await page.locator('#dismiss-agents').click();await expect(page.locator('#session-state')).toHaveText('Ready');
-  await page.locator('#session-agents').click();await expect(page.locator('#agent-preset')).toHaveValue('coordinator');
+  await page.locator('#lifecycle-menu > summary').click();await page.locator('#session-agents').click();await expect(page.locator('#agent-preset')).toHaveValue('coordinator');
   await page.setViewportSize({width:390,height:844});
   const overflow=await page.locator('#agents-dialog').evaluate(n=>n.scrollWidth>n.clientWidth+2);expect(overflow).toBeFalsy();
   await page.screenshot({path:'.cache/prototype-agent-inbox-mobile.png'});

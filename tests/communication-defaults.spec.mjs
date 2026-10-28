@@ -108,6 +108,7 @@ for(const mobile of [false,true])test(`role defaults and scoped settings ${mobil
   await page.locator('#create-submit').click();await expect(page.locator('#session-state')).toHaveText('Ready');
   const created=(await api('/api/sessions'))[0];expect(await access(created)).toEqual(coordinator);
   if(await page.locator('#session-more').isVisible())await page.locator('#session-more').click();
+  await page.locator('#lifecycle-menu > summary').click();
   await page.locator('#session-settings').click();
   await expect(page.locator('#session-settings-dialog')).toBeVisible();
   await expect(page.locator('#session-settings-scope')).toContainText('Role UI session');

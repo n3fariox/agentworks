@@ -47,6 +47,7 @@ const policy=()=>api(`/api/sessions/${session.id}/inbox-delivery`);
 const authorize=page=>page.getByRole('button',{name:'Authorize standing inbox turns',exact:true});
 async function openInbox(page){
   if(await page.locator('#session-more').isVisible())await page.locator('#session-more').click();
+  await page.locator('#lifecycle-menu > summary').click();
   await page.locator('#session-agents').click();
   await expect(authorize(page)).toBeEnabled();
 }
@@ -134,6 +135,7 @@ for(const mobile of [false,true])test(`inbox settings persist and reload capped,
   await expect(page.locator('#inbox-delivery-status')).toContainText('Off');
   await closeInbox(page);
   if(await page.locator('#session-more').isVisible())await page.locator('#session-more').click();
+  await page.locator('#lifecycle-menu > summary').click();
   await page.locator('#session-settings').click();
   await page.locator('[data-field="override"]').check();
   await expect(page.locator('#session-settings-dialog')).toBeVisible();
@@ -172,6 +174,7 @@ test('failed initial load blocks saving stale fields and recovers on polling',as
   await openSession(page);
   await page.route('**/inbox-delivery',route=>route.fulfill({status:503,body:'Load unavailable'}));
   if(await page.locator('#session-more').isVisible())await page.locator('#session-more').click();
+  await page.locator('#lifecycle-menu > summary').click();
   await page.locator('#session-agents').click();
   await expect(page.locator('#inbox-delivery-status')).toContainText('Cannot load inbox settings');
   await expect(authorize(page)).toBeDisabled();

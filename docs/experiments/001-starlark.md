@@ -200,6 +200,55 @@ Formatters can return the same Markdown links anywhere in a message; the UI
 resolves the display name from the session list when available.
 
 
+### Chat line formatting
+
+`chat.agent` and `chat.user` formatters rewrite how the session's own agent
+messages and your prompts are displayed, one Markdown line at a time, for
+example to link ticket keys:
+
+```python
+load("@agentworks//chat.star", "ChatContext")
+
+def format_line(ctx: ChatContext, line: str) -> str | None:
+    return map_prose(line, lambda text: regex_replace(
+        "\\b([A-Z][A-Z0-9]+-[0-9]+)\\b", text, "[$1](https://jira.example.com/browse/$1)"))
+
+agent.register_formatter(format_line, message_type = "chat.agent",
+                         text_pattern = "\\b[A-Z][A-Z0-9]+-[0-9]+\\b")
+```
+
+- Lines are passed in order. Lines inside fenced code blocks and lines past the
+  2,000th never are. Without `text_pattern`, no regex runs and every line, blank
+  ones included, reaches the function. With one, only matching lines do.
+  `None` keeps the line; a returned string replaces it and may span several
+  lines.
+- `chat.user` lines keep showing exactly as typed unless a formatter rewrites
+  them; only rewritten lines render as Markdown (inline when they are a single
+  paragraph). Agent and user formatters never see each other's messages.
+- `ctx.provider` is the harness ID and `ctx.cwd` the session directory without a
+  trailing slash. `ctx.state` starts empty for each message and carries the
+  formatter's plain data from one line to the next, so a formatter can react to
+  earlier lines (a heading, an open list, a blank line). It sees only lines that
+  match its `text_pattern`; leave `text_pattern` out to see every line, blank
+  ones included. Each formatter has its own state, and none carries between messages.
+- Every enabled matching `chat.agent` formatter applies, in routing order, each
+  to the previous result, so independent scripts compose. This differs from the
+  other hooks, where the first match wins.
+- A result over 8 KiB, a runtime error or a limit keeps that formatter's input
+  and state for that line. The whole message falls back to its original text if
+  formatting takes over one second. A result can only replace its own line:
+  it cannot remove or rewrite lines already shown above it.
+- Two helpers are available to all hook scripts: `regex_replace(pattern, text,
+  replacement)` replaces every match (`$1`, `${name}`, `$$`), and
+  `map_prose(line, f)` applies `f` only outside inline code spans, Markdown
+  links and images, autolinks, bare URLs and HTML tags.
+- Display only. The stored transcript and what the agent sees are unchanged;
+  inbox deliveries and Markdown file previews are never formatted. Output is sanitized like
+  any other Markdown, and bare URLs are linked afterwards. Results are cached
+  by line and incoming state until scripts change, so a streaming message only
+  runs its new lines; already rendered messages update on reload.
+
+
 ### Registered presentation hooks
 
 One installed `.star` module can register any combination of progress and
@@ -220,9 +269,12 @@ agent.register_formatter(
 ```
 
 `command_pattern` matches the tool command. `text_pattern` matches the delivered
-message excerpt and defaults to `.*`; `inbox.peer` is the currently supported
-message type. Progress handlers retain the `LineContext, str -> Progress | None`
-contract; formatters retain `MessageContext, PeerMessage -> str`. Modules may load
+message excerpt; without it no regex runs and every message reaches the
+formatter. `inbox.peer`, `chat.agent` and `chat.user` (see
+[Chat line formatting](#chat-line-formatting)) are the supported message types.
+Progress handlers retain the `LineContext, str -> Progress | None` contract;
+`inbox.peer` formatters retain `MessageContext, PeerMessage -> str`, and chat
+formatters take `ChatContext, str -> str | None`. Modules may load
 both presentation preludes but cannot load workflow action constructors.
 
 Rust collects at most 32 registrations per module, validates every callback and

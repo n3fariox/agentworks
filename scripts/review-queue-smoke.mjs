@@ -46,7 +46,7 @@ try {
  // Real browser opens the separate ledger and renders untrusted evidence as text.
  const {chromium}=await import('@playwright/test');const browser=await chromium.launch({headless:true});
  try {
-  const page=await browser.newPage();await page.goto(base);await page.getByRole('button',{name:/Queue worker/}).click();await page.setViewportSize({width:390,height:844});await page.click('#session-more');await page.click('#session-agents');await page.locator('#review-queue summary').click();
+  const page=await browser.newPage();await page.goto(base);await page.getByRole('button',{name:/Queue worker/}).click();await page.setViewportSize({width:390,height:844});await page.click('#session-more');await page.click('#lifecycle-menu > summary');await page.click('#session-agents');await page.locator('#review-queue summary').click();
   await page.locator('#review-queue article strong').filter({hasText:proposal.title}).waitFor();assert.equal(await page.locator('#review-queue img').count(),0);
   assert(await page.locator('#agents-dialog').evaluate(n=>n.scrollWidth<=n.clientWidth),'Fits mobile dialog');
   await page.selectOption('#review-queue [name=action]','begin');await page.fill('#review-queue [name=note]','Human begins manual integration; no Git command dispatched');await page.locator('#review-queue button[type=submit]').click();

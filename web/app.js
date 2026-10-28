@@ -161,6 +161,8 @@ function openCreate(context={}) {
   // position; the base revision is filled in from Git once the policy has loaded.
   worktrees.projectChanged(context.workspaceMode);
   $('create-dialog').showModal();
+  // Typing a name and pressing Enter creates a session with the defaults.
+  $('session-title').focus();
   return generation;
 }
 // Remote hosts appear once connected; sessions there use the host's own
@@ -1002,6 +1004,42 @@ const decorateMarkdown=setupChatReferences({getSession:()=>active,getSessions:()
   try{const target=sessions.find(s=>s.id===id)||(await api('/api/sessions/'+encodeURIComponent(id))).session;selectSession(target);}
   catch(e){toast('Cannot open session: '+e.message);}
 },openFile:(session,path,line)=>workspace?.openSideFile(session,path,line),fileUrl,imageViewer});
+// chat.user formatting is known per session after its first reply: off skips
+// further requests for this page load, and on asks once per user message.
+const userFormatting=new Map();
+async function formatUserLines(sessionId,text){
+  let state=userFormatting.get(sessionId);
+  if(state instanceof Promise){await state;state=userFormatting.get(sessionId);}
+  if(state==='off')return null;
+  const request=api(`/api/sessions/${sessionId}/user-format`,{method:'POST',body:JSON.stringify({text})}).then(r=>r.lines||null);
+  if(state===undefined)userFormatting.set(sessionId,request.then(lines=>userFormatting.set(sessionId,lines?'on':'off'),()=>userFormatting.delete(sessionId)));
+  return request;
+}
+// User messages show exactly as typed, apart from session links and lines a
+// chat.user formatter rewrote, which arrive as sanitized HTML.
+function paintUserLines(body,text,lines){
+  body.replaceChildren();
+  text.split('\n').forEach((line,i)=>{
+    if(i)body.append('\n');
+    if(lines?.[i]==null){const literal=document.createElement('span');renderUserReferences(literal,line);body.append(...literal.childNodes);return;}
+    const block=/^<(p|ul|ol|pre|h[1-6]|blockquote|table|hr)\b/.test(lines[i]);
+    const formatted=el(block?'div':'span','user-formatted');formatted.innerHTML=lines[i];body.append(formatted);
+  });
+}
+function renderUserMessage(message,body){
+  if(body.dataset.source!==message.text){
+    body.dataset.source=message.text;paintUserLines(body,message.text,message.userLines);
+    const id=active?.id;
+    if(id&&message.userLines===undefined&&!message.userFormatPending){
+      message.userFormatPending=true;
+      formatUserLines(id,message.text).then(lines=>{
+        message.userLines=lines;
+        if(lines&&body.dataset.source===message.text){paintUserLines(body,message.text,lines);decorateMarkdown(body);}
+      }).catch(()=>{}).finally(()=>{message.userFormatPending=false;});
+    }
+  }
+  decorateMarkdown(body);
+}
 function updateMarkdown(message,body){
   if(body.dataset.source===message.text)return;
   body.dataset.source=message.text;
@@ -1012,7 +1050,8 @@ function updateMarkdown(message,body){
     message.markdownTimer=null;
     const text=message.text;message.markdownPending=true;
     try{
-      const result=await api('/api/markdown',{method:'POST',body:JSON.stringify({text})});
+      // Agent messages name their session so its chat.agent formatters apply; inbox deliveries don't.
+      const result=await api('/api/markdown',{method:'POST',body:JSON.stringify({text,...(message.inboxDelivery||!active?{}:{sessionId:active.id})})});
       message.html=result.html;body.innerHTML=result.html;body.classList.add('markdown');decorateMarkdown(body,message.referenceCwd?message.referenceCwd.replace(/\/$/,'')+'/':'');enhanceMermaid(body,result.mermaidClass);display.enhance(body,message.id);
     }catch{body.textContent=message.text;}finally{
       message.markdownPending=false;
@@ -1051,7 +1090,7 @@ function draw(){
     }else if(!node.isConnected)area.append(node);
     if(item.type==='message'){
       const body=node.querySelector('.message-body');
-      if(item.role==='user'&&!item.inboxDelivery){renderUserReferences(body,item.text);decorateMarkdown(body);if(item.attachments&&!node.querySelector('.message-attachments')){const sent=el('div','message-attachments');attachments.renderSent(sent,active.id,item.attachments);for(const img of sent.querySelectorAll('img'))imageViewer.decorate(img);body.after(sent);}}else updateMarkdown(item,body);
+      if(item.role==='user'&&!item.inboxDelivery){renderUserMessage(item,body);if(item.attachments&&!node.querySelector('.message-attachments')){const sent=el('div','message-attachments');attachments.renderSent(sent,active.id,item.attachments);for(const img of sent.querySelectorAll('img'))imageViewer.decorate(img);body.after(sent);}}else updateMarkdown(item,body);
     }else if(item.type==='tool'){
       renderToolActivity(node,item,['running','waiting','cancelling'].includes(status));
     }else if(item.type==='job')renderJobResult(node,item);
@@ -1322,6 +1361,7 @@ async function openSettings(){
     modelProviders.loadSettings();
     const settings=await api('/api/settings');$('settings-roots').replaceChildren();for(const root of settings.roots)addRoot(root);$('settings-error').textContent='';$('settings-saved').textContent='Save applies global defaults and host settings. Display, notifications, model providers and parsers save immediately.';
     $('default-communication-role').value=settings.defaultCommunicationRole||'participant';
+    $('max-active-sessions').value=settings.maxActiveSessions;
     const fields=$('default-model-fields');fields.replaceChildren();
     // Node and Rust harnesses for one CLI share its permission default; show the picker once per CLI.
     const modeFamilies=new Set();
@@ -1374,7 +1414,7 @@ $('settings-form').onsubmit=async event=>{
   try{
     const defaultModels={};for(const input of $('default-model-fields').querySelectorAll('input')){if(input.value.trim())defaultModels[input.dataset.provider]=input.value.trim();}
     const timeouts=timeoutControls.pendingDefault();
-    const settings=await api('/api/settings',{method:'PUT',body:JSON.stringify({roots:rootValues().filter(Boolean),defaultModels,claudeDefaultPermissionMode:$('claude-default-permission-mode')?.value,codexDefaultPermissionMode:$('codex-default-permission-mode')?.value,defaultCommunicationRole:$('default-communication-role').value,...(timeouts?{timeouts}:{})})});
+    const settings=await api('/api/settings',{method:'PUT',body:JSON.stringify({roots:rootValues().filter(Boolean),defaultModels,claudeDefaultPermissionMode:$('claude-default-permission-mode')?.value,codexDefaultPermissionMode:$('codex-default-permission-mode')?.value,defaultCommunicationRole:$('default-communication-role').value,maxActiveSessions:Number.isInteger($('max-active-sessions').valueAsNumber)?$('max-active-sessions').valueAsNumber:undefined,...(timeouts?{timeouts}:{})})});
     if(timeouts)timeoutControls.acceptDefault(timeouts);
     config.roots=settings.roots;config.defaultModels=settings.defaultModels;config.defaultCommunicationRole=settings.defaultCommunicationRole||'participant';applyRoots();
     $('settings-dialog').close();toast('Settings saved. They apply to new sessions.','success');
@@ -1449,8 +1489,14 @@ setupPalettes({
     workspaceInfo:()=>{if(active)$('session-workspace').click();},
     diff:()=>sidePanel.open('diff'),
     sessionFiles:()=>sidePanel.open('files'),
-    lifecycle:()=>{if(active){$('lifecycle-menu').open=true;$('lifecycle-menu').querySelector('button').focus();}},
+    lifecycle:()=>{if(active){$('lifecycle-menu').open=true;[...$('lifecycle-menu').querySelectorAll('.lifecycle-actions :is(button,select)')].find(c=>c.offsetParent)?.focus();}},
     forkSession:()=>{if(active)openFork();},
+    rename:()=>{if(active)$('rename-session').click();},
+    sessionSettings:()=>{if(active)$('session-settings').click();},
+    archive:()=>{if(active)archiveSession(active);},
+    suspend:()=>{if(active&&!$('suspend-session').disabled)$('suspend-session').click();},
+    editProject:()=>{const project=projects.find(p=>p.id===active?.projectId);if(project)openProjectDialog(project);},
+    deleteEverywhere:()=>{if(active)deleteSession(active,true);},
     resume:()=>{if(active&&connected&&['suspended','error'].includes(status))resumeSession(active.id);},
     stop:()=>{if(active&&connected&&['running','waiting'].includes(status))$('stop').click();},
     usage:()=>{if(active&&connected&&status==='idle')$('show-usage').click();},
@@ -1560,6 +1606,9 @@ $('suspend-session').onclick=async()=>{
 
 $('dismiss-lifecycle').onclick=()=>{$('lifecycle-menu').open=false;$('lifecycle-menu').querySelector('summary').focus();};
 $('lifecycle-menu').addEventListener('keydown',event=>{if(event.key==='Escape'){$('dismiss-lifecycle').click();event.stopPropagation();}});
+// Toolbar dropdowns close on an outside press; Session actions also closes once an action is chosen.
+document.addEventListener('pointerdown',event=>{for(const menu of [$('lifecycle-menu'),$('session-config-options')])if(menu.open&&!menu.contains(event.target))menu.open=false;});
+$('lifecycle-menu').querySelector('.lifecycle-actions').addEventListener('click',event=>{if(event.target.closest('button')&&event.target.id!=='dismiss-lifecycle')$('lifecycle-menu').open=false;});
 
 // Polling never submits or replays a restart request. Identity is server-owned and durable.
 const serviceSection=document.createElement('fieldset');serviceSection.id='service-controls';

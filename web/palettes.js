@@ -164,6 +164,13 @@ export function actionItems(state={},handlers={}){
     if(handlers.sessionFiles)add('session-files','Session files','Current session','Browse this session’s directory beside the chat',handlers.sessionFiles);
     if(handlers.lifecycle)add('session-actions','Session actions','Current session','Rename, archive, suspend or delete history',handlers.lifecycle);
     if(handlers.forkSession)add('session-fork','Fork session','Current session','Carry this conversation into a new session, agent or worktree',handlers.forkSession);
+    // The Session actions and Session options menus, entry for entry.
+    if(handlers.rename)add('session-rename','Rename session','Current session','Change the name shown for this session',handlers.rename);
+    if(handlers.sessionSettings)add('session-settings','Session settings','Current session','Timeouts for this session’s turns',handlers.sessionSettings);
+    if(handlers.archive)add('session-archive',active.archived?'Unarchive session':'Archive session','Current session','Stop the terminal and save its scrollback; harness work continues',handlers.archive);
+    if(handlers.suspend)add('session-suspend','Suspend harness','Current session','Release the harness; history and workspace remain',handlers.suspend,
+      !connected?{disabled:true,reason:'Not connected to this session yet'}:['suspended','closed'].includes(status)?{disabled:true,reason:'Already suspended'}:{});
+    if(handlers.editProject&&active.projectId)add('project-edit','Edit project','Current session','Name, default location and communication role of this session’s project',handlers.editProject);
     add('session-agents','Agents and inbox','Current session','Access, messages and control activity',()=>handlers.agents?.());
     add('session-workspace','Workspace info','Current session','Directory, branch and commit',()=>handlers.workspaceInfo?.());
     if(['suspended','error'].includes(status))
@@ -177,6 +184,8 @@ export function actionItems(state={},handlers={}){
     if(state.usageAvailable)
       add('session-usage','Usage','Current session','Ask this harness for reported usage',()=>handlers.usage?.(),ready);
     add('session-delete','Delete session','Current session','Stops the agent; files and branches remain',()=>handlers.deleteSession?.());
+    if(handlers.deleteEverywhere&&active.providerCapabilities?.delete)
+      add('session-delete-everywhere','Delete everywhere','Current session','Also delete the harness’s own saved history',handlers.deleteEverywhere);
   }
   for(const command of commands||[]){
     const text=commandText(command);

@@ -8,7 +8,9 @@ use starlark::values::tuple::{AllocTuple, TupleRef};
 #[derive(Clone, Debug, Serialize)]
 pub struct HookInfo {
     pub hook: &'static str,
-    pub pattern: String,
+    /// Absent for a formatter without `text_pattern`, which sees every message or line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -24,7 +26,7 @@ fn register<'v>(
     eval: &mut Evaluator<'v, '_, '_>,
     function: Value<'v>,
     kind: &str,
-    pattern: &str,
+    pattern: Option<&str>,
     label: &str,
     message_type: &str,
 ) -> anyhow::Result<NoneType> {
@@ -38,7 +40,7 @@ fn register<'v>(
     let row = heap.alloc(AllocTuple([
         heap.alloc(kind),
         function,
-        heap.alloc(pattern),
+        pattern.map_or(Value::new_none(), |p| heap.alloc(p)),
         heap.alloc(label),
         heap.alloc(message_type),
     ]));
@@ -56,16 +58,24 @@ pub(super) fn registration_helpers(builder: &mut GlobalsBuilder) {
         #[starlark(require = named, default = "Progress")] display_name: &str,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        register(eval, function, "progress", command_pattern, display_name, "")
+        register(eval, function, "progress", Some(command_pattern), display_name, "")
     }
 
     fn register_formatter<'v>(
         #[starlark(require = pos)] function: Value<'v>,
         #[starlark(require = named)] message_type: &str,
-        #[starlark(require = named, default = ".*")] text_pattern: &str,
+        #[starlark(require = named, default = NoneOr::None)] text_pattern: NoneOr<&str>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        register(eval, function, "formatter", text_pattern, "", message_type)
+        // Without a pattern no regex runs; the function sees everything.
+        register(
+            eval,
+            function,
+            "formatter",
+            text_pattern.into_option(),
+            "",
+            message_type,
+        )
     }
 
     fn register_tool_header<'v>(
@@ -73,7 +83,7 @@ pub(super) fn registration_helpers(builder: &mut GlobalsBuilder) {
         #[starlark(require = named, default = ".*")] title_pattern: &str,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        register(eval, function, "tool_header", title_pattern, "", "")
+        register(eval, function, "tool_header", Some(title_pattern), "", "")
     }
 }
 
@@ -129,13 +139,18 @@ impl Engine {
         let started = Instant::now();
         let ast = AstModule::parse(name, source.to_owned(), &dialect())
             .map_err(|e| fail(DiagnosticKind::Syntax, e.to_string()))?;
-        let preludes = [&self.parser_prelude, &self.message_prelude, &self.tool_prelude];
+        let preludes = [
+            &self.parser_prelude,
+            &self.message_prelude,
+            &self.tool_prelude,
+            &self.chat_prelude,
+        ];
         for load in ast.loads() {
             if !preludes.iter().any(|p| load.module_id == p.id) {
                 return Err(fail(
                     DiagnosticKind::Capability,
                     format!(
-                        "hook scripts may only load progress.star, message.star and tool.star, not {:?}",
+                        "hook scripts may only load progress.star, message.star, tool.star and chat.star, not {:?}",
                         load.module_id
                     ),
                 ));
@@ -191,13 +206,20 @@ impl Engine {
             let row = TupleRef::from_value(row).expect("host registration tuple").content();
             let (kind, pattern, label, message_type) = (
                 row[0].unpack_str().unwrap(),
-                row[2].unpack_str().unwrap(),
+                row[2].unpack_str(),
                 row[3].unpack_str().unwrap(),
                 row[4].unpack_str().unwrap(),
             );
+            if kind == "formatter" && !["inbox.peer", "chat.agent", "chat.user"].contains(&message_type) {
+                return Err(fail(
+                    DiagnosticKind::Type,
+                    format!("unknown message_type {message_type:?}; supported: inbox.peer, chat.agent, chat.user"),
+                ));
+            }
             let capability = match kind {
                 "progress" => Capability::Parser,
                 "tool_header" => Capability::ToolHeader,
+                _ if message_type.starts_with("chat.") => Capability::ChatFormatter,
                 _ => Capability::MessageFormatter,
             };
             let signature = Ty::of_value(row[1]).to_string();
@@ -211,25 +233,22 @@ impl Engine {
                     ),
                 ));
             }
-            if pattern.len() > 512 {
+            if pattern.is_some_and(|p| p.len() > 512) {
                 return Err(fail(DiagnosticKind::Type, "hook pattern exceeds 512 bytes".into()));
             }
-            let regex = Arc::new(
-                regex::RegexBuilder::new(pattern)
-                    .size_limit(1 << 20)
-                    .build()
-                    .map_err(|e| fail(DiagnosticKind::Type, format!("invalid {kind} pattern: {e}")))?,
-            );
+            let regex = pattern
+                .map(|pattern| {
+                    regex::RegexBuilder::new(pattern)
+                        .size_limit(1 << 20)
+                        .build()
+                        .map(Arc::new)
+                        .map_err(|e| fail(DiagnosticKind::Type, format!("invalid {kind} pattern: {e}")))
+                })
+                .transpose()?;
             if kind == "progress" && (label.is_empty() || label.len() > 32) {
                 return Err(fail(
                     DiagnosticKind::Type,
                     "progress display_name must be 1..=32 bytes".into(),
-                ));
-            }
-            if kind == "formatter" && message_type != "inbox.peer" {
-                return Err(fail(
-                    DiagnosticKind::Type,
-                    format!("unknown message_type {message_type:?}; supported: inbox.peer"),
                 ));
             }
             let entry = registry.map(|root| {
@@ -251,9 +270,9 @@ impl Engine {
                 } else {
                     name.to_owned()
                 },
-                command_pattern: (kind == "progress").then(|| regex.clone()),
+                command_pattern: regex.clone().filter(|_| kind == "progress"),
                 // Formatters route on message text, tool headers on the tool title.
-                text_pattern: (kind != "progress").then(|| regex.clone()),
+                text_pattern: regex.filter(|_| kind != "progress"),
                 message_type: (kind == "formatter").then(|| message_type.to_owned()),
                 compile_time: started.elapsed(),
             }));
@@ -263,7 +282,7 @@ impl Engine {
                     "tool_header" => "tool_header",
                     _ => "formatter",
                 },
-                pattern: pattern.to_owned(),
+                pattern: pattern.map(str::to_owned),
                 message_type: (kind == "formatter").then(|| message_type.to_owned()),
                 display_name: (kind == "progress").then(|| label.to_owned()),
             });

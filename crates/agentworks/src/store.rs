@@ -526,6 +526,7 @@ impl Store {
                 prompt_capabilities: serde_json::Value::Null,
                 worktree: None,
                 role: None,
+                native_rename: false,
             };
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO sessions(id,metadata,state) VALUES (?1,?2,?3)",
@@ -848,6 +849,7 @@ mod tests {
             prompt_capabilities: serde_json::Value::Null,
             worktree: None,
             role: None,
+            native_rename: false,
         };
         {
             let mut store = Store::open(&path).unwrap();

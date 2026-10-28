@@ -57,7 +57,12 @@ pub struct Settings {
     /// U-02 saved notification policy; absent keeps the default (off).
     #[serde(default)]
     pub notifications: crate::notifications::Settings,
+    /// Harnesses allowed to run at once; absent keeps the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_active_sessions: Option<u32>,
 }
+pub const DEFAULT_ACTIVE_SESSIONS: u32 = 32;
+pub const MAX_ACTIVE_SESSIONS: u32 = 256;
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct CatalogData {
     pub projects: Vec<Project>,
@@ -620,9 +625,11 @@ mod tests {
                 codex_default_permission_mode: None,
                 default_communication_role: None,
                 notifications: Default::default(),
+                max_active_sessions: Some(48),
             })
             .unwrap();
         let mut reopened = Catalog::open(path.clone()).unwrap();
+        assert_eq!(reopened.data.settings.max_active_sessions, Some(48));
         assert_eq!(reopened.data.projects[0].name, "Renamed");
         assert!(reopened.data.projects[0].archived);
         assert_eq!(

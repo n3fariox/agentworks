@@ -90,6 +90,9 @@ pub struct SessionData {
     /// on every new/load/resume/fork, because harnesses do not persist it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<RoleSnapshot>,
+    /// The running turn is a native `/rename`; its reported title is adopted.
+    #[serde(skip)]
+    pub native_rename: bool,
 }
 
 /// The resolved text of a role at the time a session was created. Later edits

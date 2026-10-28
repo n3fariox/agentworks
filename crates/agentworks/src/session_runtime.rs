@@ -432,7 +432,7 @@ pub async fn run(
                 if staged.1>32*1024*1024 || staged.0.len()>=50000 {staged.2=true;}else{staged.0.push(update.clone());}
             }
             if !notify_replaying.load(Ordering::SeqCst) || (!import_pending && update["sessionUpdate"].as_str().is_some_and(|kind| kind.starts_with("async_task_"))) || (!is_child && matches!(update["sessionUpdate"].as_str(),Some("available_commands_update"|"config_option_update"|"current_mode_update"))) {
-                if !is_child {crate::limit_resume::observe(&notify_s, &update);}
+                if !is_child {crate::limit_resume::observe(&notify_s, &update);crate::native_rename::observe(&notify_s, &update);}
                 crate::timeouts::observe(&notify_s.id,&update,crate::timeouts::now_ms());
                 notify_s.emit("acp",update);
             }
