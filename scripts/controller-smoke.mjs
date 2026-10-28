@@ -47,7 +47,7 @@ try{
  await api(`/api/projects/${p.id}/controllers`,'POST',{name:' '},400);
  await api('/api/projects/missing/controllers','POST',{name:'Nowhere'},404);
  const messenger=await api(`/api/projects/${p.id}/controllers`,'POST',{name:'Coordinating conversation'});
- assert.match(messenger.token,/^awc_[0-9a-f]{64}$/);assert.deepEqual(messenger.controller.access,{communicate:true,startSessions:false,promptSessions:false,cancelSessions:false,runAutomations:false,restartService:false,manageReviewQueue:false,archiveSessions:false});
+ assert.match(messenger.token,/^awc_[0-9a-f]{64}$/);assert.deepEqual(messenger.controller.access,{communicate:true,startSessions:false,promptSessions:false,cancelSessions:false,runAutomations:false,restartService:false,manageReviewQueue:false,archiveSessions:false,manageAutomations:false});
  assert.equal(messenger.mcpServer.env.AGENTWORKS_MCP_ENDPOINT_FILE,endpointFile);
  const listed=JSON.stringify(await api(`/api/projects/${p.id}/controllers`));assert(!listed.includes(messenger.token)&&!listed.includes('token'),'Listing must not expose tokens');
  assert(!(await readFile(db)).includes(Buffer.from(messenger.token)),'Database must hold only token digests');
@@ -80,7 +80,7 @@ try{
  const started=await c.call('start_session',{provider:'demo',cwd:root,title:'Started externally',requestId:'start-1'});
  assert.equal(started.projectId,p.id);assert.equal(started.initiatedBy.actor,'controller:'+coordinator.controller.id);assert.equal(started.initiatedBy.actorTitle,'Release driver');
  assert.equal((await c.call('start_session',{provider:'demo',cwd:root,title:'Started externally',requestId:'start-1'})).id,started.id);
- assert.deepEqual(await api(`/api/sessions/${started.id}/agent-access`),{communicate:true,startSessions:false,promptSessions:false,cancelSessions:false,runAutomations:false,restartService:false,manageReviewQueue:false,archiveSessions:false},'Started sessions use project defaults without copying controller grants');
+ assert.deepEqual(await api(`/api/sessions/${started.id}/agent-access`),{communicate:true,startSessions:false,promptSessions:false,cancelSessions:false,runAutomations:false,restartService:false,manageReviewQueue:false,archiveSessions:false,manageAutomations:false},'Started sessions use project defaults without copying controller grants');
  await idle(started.id);
  assert.equal((await c.call('prompt_session',{sessionId:a.id,text:'Please continue',requestId:'turn-1'})).accepted,true);
  const turned=await idle(a.id);const user=turned.events.filter(e=>e.kind==='user').at(-1);

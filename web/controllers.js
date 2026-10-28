@@ -1,5 +1,5 @@
 // C-01: named, revocable external MCP controllers per project. Tokens are shown once.
-const GRANTS=[['communicate','Project messages'],['startSessions','Start sessions'],['promptSessions','Start turns'],['cancelSessions','Cancel turns'],['archiveSessions','Archive sessions'],['runAutomations','Run automations'],['manageReviewQueue','Manage review queue']];
+const GRANTS=[['communicate','Project messages'],['startSessions','Start sessions'],['promptSessions','Start turns'],['cancelSessions','Cancel turns'],['archiveSessions','Archive sessions'],['runAutomations','Run automations'],['manageAutomations','Manage automations'],['manageReviewQueue','Manage review queue']];
 export function setupControllers({api,toast,getProject}){
   const $=id=>document.getElementById(id);
   const dialog=$('controllers-dialog'),list=$('controllers-list'),grants=$('controller-grants');

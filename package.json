@@ -28,6 +28,7 @@
     "test:remote-worktree-cleanup": "AGENTWORKS_CLEANUP_REMOTE=1 node scripts/worktree-cleanup-smoke.mjs",
     "test:controller-archive": "node scripts/controller-archive-smoke.mjs",
     "test:controllers": "node scripts/controller-smoke.mjs",
+    "test:automation-manager": "node scripts/automation-manager-smoke.mjs",
     "test:fork": "node scripts/fork-smoke.mjs",
     "test:roles": "node scripts/roles-smoke.mjs && playwright test tests/roles.spec.mjs",
     "test:git-settings": "node scripts/git-settings-smoke.mjs && AGENTWORKS_GIT_REMOTE=1 node scripts/git-settings-smoke.mjs && playwright test tests/git-settings.spec.mjs",

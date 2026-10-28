@@ -8,9 +8,10 @@ use std::{
     time::Duration,
 };
 
-// v10 introduced A-01 schedules; v11 is the combined A-01/R-02 release marker.
+// v10 introduced A-01 schedules; v11 is the combined A-01/R-02 release marker;
+// v12 adds the manageAutomations grant and agent automation request ledger.
 // Recovery adds no tables and preserves every v10 schedule/slot ledger row.
-pub const SCHEMA_VERSION: i64 = 11;
+pub const SCHEMA_VERSION: i64 = 12;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 #[derive(Serialize, Deserialize)]
@@ -286,6 +287,27 @@ impl Store {
             .map(|s| serde_json::from_str(&s))
             .collect::<serde_json::Result<Vec<_>>>()?)
     }
+    /// Definitions that deserialize. A row that does not is logged and left
+    /// out, so one bad definition cannot stop listing or scheduling the rest.
+    /// Restore validation keeps the strict [`Store::automations`].
+    pub fn usable_automations(&self) -> Result<Vec<crate::automations::Definition>> {
+        let mut stmt = self
+            .connection
+            .prepare("SELECT id,definition FROM automations ORDER BY id")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id, s)| match serde_json::from_str(&s) {
+                Ok(def) => Some(def),
+                Err(error) => {
+                    eprintln!("Skipping unreadable automation {id}: {error}");
+                    None
+                }
+            })
+            .collect())
+    }
     pub fn automation(&self, id: &str) -> Result<Option<crate::automations::Definition>> {
         use rusqlite::OptionalExtension;
         let value = self
@@ -299,15 +321,20 @@ impl Store {
         Ok(value.map(|s| serde_json::from_str(&s)).transpose()?)
     }
     /// Saves a definition; `arm` atomically resets its schedule cursor. A
-    /// definition without a schedule has no cursor.
+    /// definition without a schedule has no cursor. An agent's `ledger` entry
+    /// commits with it.
     pub fn save_automation(
         &mut self,
         definition: &crate::automations::Definition,
         arm: Option<i64>,
+        ledger: Option<&crate::automations::Ledger>,
     ) -> Result<()> {
         let tx = self.connection.transaction()?;
+        if let Some(ledger) = ledger {
+            record_automation_request(&tx, ledger)?;
+        }
         tx.execute("INSERT INTO automations(id,definition) VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET definition=excluded.definition",params![definition.id,serde_json::to_string(definition)?])?;
-        if definition.schedule().is_none() {
+        if definition.timed().is_none() {
             tx.execute(
                 "DELETE FROM automation_schedules WHERE automation_id=?1",
                 [&definition.id],
@@ -334,7 +361,9 @@ impl Store {
         Ok(())
     }
     /// Records the outcome of one occurrence and advances the cursor past it.
-    /// The first outcome recorded for an occurrence is kept.
+    /// The first outcome recorded for an occurrence is kept. A one-time
+    /// definition's `finish` (completed or deleted) commits with it.
+    #[allow(clippy::too_many_arguments)]
     pub fn claim_slot(
         &mut self,
         id: &str,
@@ -343,10 +372,32 @@ impl Store {
         outcome: &str,
         detail: Option<&str>,
         now: i64,
+        finish: Option<&crate::automations::Finish>,
     ) -> Result<()> {
+        use crate::automations::Finish;
         let tx = self.connection.transaction()?;
         tx.execute("INSERT OR IGNORE INTO automation_slots(automation_id,slot,request_id,outcome,detail,created) VALUES (?1,?2,?3,?4,?5,?6)",params![id,slot,request_id,outcome,detail,now])?;
         tx.execute("INSERT INTO automation_schedules(automation_id,cursor) VALUES (?1,?2) ON CONFLICT(automation_id) DO UPDATE SET cursor=MAX(cursor,excluded.cursor)",params![id,slot])?;
+        match finish {
+            None => {}
+            Some(Finish::Complete(definition)) => {
+                tx.execute(
+                    "UPDATE automations SET definition=?2 WHERE id=?1",
+                    params![id, serde_json::to_string(definition)?],
+                )?;
+                tx.execute(
+                    "DELETE FROM automation_schedules WHERE automation_id=?1",
+                    [id],
+                )?;
+            }
+            Some(Finish::Delete) => {
+                tx.execute("DELETE FROM automations WHERE id=?1", [id])?;
+                tx.execute(
+                    "DELETE FROM automation_schedules WHERE automation_id=?1",
+                    [id],
+                )?;
+            }
+        }
         tx.commit()?;
         Ok(())
     }
@@ -354,8 +405,15 @@ impl Store {
         self.connection.execute("UPDATE automations SET definition=json_set(definition,'$.projectId',NULL) WHERE json_extract(definition,'$.projectId')=?1",[id])?;
         Ok(())
     }
-    pub fn delete_automation(&mut self, id: &str) -> Result<()> {
+    pub fn delete_automation(
+        &mut self,
+        id: &str,
+        ledger: Option<&crate::automations::Ledger>,
+    ) -> Result<()> {
         let tx = self.connection.transaction()?;
+        if let Some(ledger) = ledger {
+            record_automation_request(&tx, ledger)?;
+        }
         tx.execute("DELETE FROM automations WHERE id=?1", [id])?;
         tx.execute(
             "DELETE FROM automation_schedules WHERE automation_id=?1",
@@ -372,6 +430,22 @@ impl Store {
           UNION ALL SELECT 'slot:'||slot,NULL,NULL,NULL,created,outcome,slot,detail FROM automation_slots WHERE automation_id=?1 AND outcome<>'started'
           ORDER BY 5 DESC LIMIT 100")?;
         Ok(stmt.query_map([id],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"sessionId":r.get::<_,Option<String>>(1)?,"name":r.get::<_,Option<String>>(2)?,"provider":r.get::<_,Option<String>>(3)?,"created":r.get::<_,i64>(4)?,"status":r.get::<_,String>(5)?,"scheduledFor":r.get::<_,Option<i64>>(6)?,"detail":r.get::<_,Option<String>>(7)?})))?.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+    /// A previously recorded agent request: `(operation, payload, result)`.
+    pub fn automation_request(
+        &self,
+        actor: &str,
+        request_id: &str,
+    ) -> Result<Option<(String, String, String)>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT operation,payload,result FROM automation_agent_requests WHERE actor=?1 AND request_id=?2",
+                params![actor, request_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?)
     }
     pub fn run_session(&self, id: &str, request_id: &str) -> Result<Option<String>> {
         use rusqlite::OptionalExtension;
@@ -555,6 +629,13 @@ impl Store {
     }
 }
 
+fn record_automation_request(
+    tx: &rusqlite::Transaction,
+    ledger: &crate::automations::Ledger,
+) -> Result<()> {
+    tx.execute("INSERT INTO automation_agent_requests(actor,request_id,operation,payload,result,created) VALUES (?1,?2,?3,?4,?5,?6)",params![ledger.actor,ledger.request_id,ledger.operation,ledger.payload,ledger.result,std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64])?;
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
