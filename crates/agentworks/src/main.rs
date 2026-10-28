@@ -14,6 +14,7 @@ mod elicitation;
 mod enrollment;
 mod fork;
 mod git_context;
+mod git_settings;
 mod goose_acp;
 mod host_usage;
 mod hosting;
@@ -1310,6 +1311,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/{id}/file", get(file))
         .route("/api/sessions/{id}/workspace", get(git_context::workspace))
         .route("/api/sessions/{id}/worktree", get(worktree_cleanup::status))
+        .route("/api/git/config", post(git_settings::repository))
+        .route(
+            "/api/sessions/{id}/worktree/hooks/retry",
+            post(git_settings::retry),
+        )
         .route(
             "/api/sessions/{id}/worktree/remove",
             post(worktree_cleanup::remove),
@@ -1532,7 +1538,7 @@ async fn get_settings(State(app): State<App>) -> Json<Value> {
     let roots = effective_roots(&app);
     let settings = app.catalog.lock().unwrap().data.settings.clone();
     Json(
-        json!({"roots":roots,"maxActiveSessions":settings.max_active_sessions.unwrap_or(catalog::DEFAULT_ACTIVE_SESSIONS),"defaultModels":settings.default_models,"claudeDefaultPermissionMode":settings.claude_default_permission_mode.unwrap_or_default(),"codexDefaultPermissionMode":settings.codex_default_permission_mode.unwrap_or_default(),"defaultCommunicationRole":settings.default_communication_role.unwrap_or_default()}),
+        json!({"git":settings.git.unwrap_or_default(),"roots":roots,"maxActiveSessions":settings.max_active_sessions.unwrap_or(catalog::DEFAULT_ACTIVE_SESSIONS),"defaultModels":settings.default_models,"claudeDefaultPermissionMode":settings.claude_default_permission_mode.unwrap_or_default(),"codexDefaultPermissionMode":settings.codex_default_permission_mode.unwrap_or_default(),"defaultCommunicationRole":settings.default_communication_role.unwrap_or_default()}),
     )
 }
 
@@ -1638,6 +1644,7 @@ async fn save_settings(State(app): State<App>, Json(mut settings): Json<Settings
         settings.timeouts = settings.timeouts.take().or(current.timeouts.clone());
         settings.max_active_sessions = settings.max_active_sessions.or(current.max_active_sessions);
         settings.notifications = current.notifications.clone();
+        settings.git = settings.git.take().or(current.git.clone());
         settings
     })?;
     Ok(get_settings(State(app.clone())).await)
@@ -1704,6 +1711,10 @@ fn persist_settings(
     if let Some(policy) = &next.timeouts {
         policy
             .validate()
+            .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    }
+    if let Some(git) = &next.git {
+        git.validate()
             .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
     }
     let policy = next.timeouts.clone().unwrap_or_default();
@@ -2081,6 +2092,9 @@ async fn delete_project(
     if req.sessions == ProjectSessions::Cascade {
         // Delete sessions before the project so a failure leaves a retryable project.
         for s in &affected {
+            inbox_delivery::revoke_related(&app, s, "Project deletion requested")?;
+            let _ = lifecycle::suspend_locked(s).await?;
+            git_settings::exit_locked(&app, s, "delete").await?;
             delete_session_locked(&app, s).await?;
         }
     }
@@ -2119,6 +2133,19 @@ async fn archive_project(
         ungroup_sessions(&app, &affected, "Project archived")?;
     } else {
         for s in &affected {
+            let (was_archived, hooks) = {
+                let data = s.data.lock().unwrap();
+                (
+                    data.lifecycle.archived,
+                    data.worktree.as_ref().is_some_and(|o| o.hooks.is_some()),
+                )
+            };
+            if req.archived && !was_archived {
+                git_settings::exit(&app, s, "archive").await?;
+            }
+            if !req.archived && was_archived && hooks {
+                worktree_cleanup::restore(&app, s).await?;
+            }
             let _ = lifecycle::apply(s, None, Some(req.archived)).await?;
         }
     }
@@ -2622,7 +2649,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
         hosts::prepare_workspace(app, host, &req, source, creation_key).await?
     } else {
         tokio::time::timeout(
-            std::time::Duration::from_secs(12),
+            std::time::Duration::from_secs(120),
             worktrees::prepare(app, &req, source, creation_key),
         )
         .await
@@ -2844,6 +2871,16 @@ fn start_worker(app: &App, s: &Arc<Session>) {
     let worker_s = s.clone();
     let app_for_diagnostics = app.clone();
     let worker = tokio::spawn(async move {
+        let entered = {
+            let _run = app_for_diagnostics.run_lock.lock().await;
+            let _workspace = app_for_diagnostics.workspace_lock.lock().await;
+            git_settings::run(&app_for_diagnostics, &worker_s, "enter", "create").await
+        };
+        if let Err((_, message)) = entered {
+            worker_s.emit("error", json!({"message":message}));
+            worker_s.status("error");
+            return;
+        }
         if let Err(error) = session_runtime::run(worker_s.clone(), rx).await {
             worker_s.clear_approvals();
             // A dropped host link is handled like a server restart: the turn
@@ -3216,11 +3253,12 @@ async fn delete_session(
     let _gate = app.communication_lock.lock().await;
     let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
+    inbox_delivery::revoke_related(&app, &s, "Session deletion requested")?;
+    let _ = lifecycle::suspend_locked(&s).await?;
+    git_settings::exit(&app, &s, "delete").await?;
     if options.provider_history {
         // Stop the active adapter before asking a separate connection to delete
         // its durable session, so it cannot rewrite history after deletion.
-        inbox_delivery::revoke_related(&app, &s, "Provider history deletion requested")?;
-        let _ = lifecycle::suspend_locked(&s).await?;
         if let Err(error) = session_runtime::delete_provider_history(&s).await {
             let message = agentworks_runtime::provider::safe_error(&error.to_string());
             s.emit("session_updated", s.meta());
@@ -3231,10 +3269,9 @@ async fn delete_session(
     delete_session_locked(&app, &s).await?;
     Ok(Json(json!({"ok":true})))
 }
-/// Callers hold the communication and run locks.
+/// Callers hold the communication and run locks, have stopped the harness, and completed exit hooks.
 async fn delete_session_locked(app: &App, s: &Session) -> Result<(), (StatusCode, String)> {
     inbox_delivery::revoke_related(app, s, "Session deleted")?;
-    let _ = lifecycle::suspend_locked(s).await?;
     app.store.lock().unwrap().delete(&s.id).map_err(|_| {
         fail(
             StatusCode::INTERNAL_SERVER_ERROR,

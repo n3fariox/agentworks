@@ -61,6 +61,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         "tools": discovered_tools(&base),
         "mcpRelay": {"endpoint":mcp.address,"command":std::env::current_exe().map_err(|e| e.to_string())?},
         "workspace": true,
+        "gitSettings": true,
         "modelProviders": true,
         "sharedModelProviders": true,
         "worktreeCleanup": true,
@@ -246,7 +247,8 @@ pub async fn run(args: &[String]) -> Result<(), String> {
                     Some("workspace") => {
                         let out = out.clone();
                         let lock = workspace_lock.clone();
-                        let removing = request["operation"] == "removeWorktree";
+                        let removing = request["operation"] == "removeWorktree"
+                            || request["operation"] == "runWorktreeHooks";
                         let path = request["owned"]["path"].as_str().map(PathBuf::from);
                         let affected = |process: &&Process| {
                             path.as_ref().is_some_and(|p| process.cwd.starts_with(p))
@@ -581,8 +583,12 @@ fn discovered_tools(env: &HashMap<String, String>) -> Value {
 
 struct WorkspaceContext {
     roots: Vec<PathBuf>,
+    git: agentworks_workspace::config::Settings,
 }
 impl crate::worktrees::Context for WorkspaceContext {
+    fn git_settings(&self) -> agentworks_workspace::config::Settings {
+        self.git.clone()
+    }
     fn safe_error(&self, message: &str) -> String {
         crate::provider::safe_error(message)
     }
@@ -610,8 +616,41 @@ async fn workspace_request(request: &Value) -> Result<Value, String> {
         .filter_map(|r| check_dir(r).ok())
         .map(PathBuf::from)
         .collect();
-    let context = WorkspaceContext { roots };
+    let context = WorkspaceContext {
+        roots,
+        git: serde_json::from_value(request["gitSettings"].clone()).unwrap_or_default(),
+    };
     match request["operation"].as_str() {
+        Some("gitConfig") => {
+            let cwd = context
+                .checked(request["cwd"].as_str().unwrap_or_default())
+                .map_err(|e| e.1)?;
+            crate::worktrees::configuration_in(
+                &context,
+                &cwd,
+                request["text"].as_str(),
+                request["fingerprint"].as_str(),
+            )
+            .await
+            .map_err(|e| e.1)
+        }
+        Some("runWorktreeHooks") => {
+            let owned = serde_json::from_value(request["owned"].clone())
+                .map_err(|_| "Invalid worktree ownership")?;
+            Ok(
+                match agentworks_workspace::hooks::run(
+                    &context,
+                    &owned,
+                    request["event"].as_str().unwrap_or_default(),
+                    request["reason"].as_str().unwrap_or_default(),
+                )
+                .await
+                {
+                    Ok(message) => json!({"ok":true,"message":message}),
+                    Err((_, message)) => json!({"ok":false,"message":message}),
+                },
+            )
+        }
         Some("inspectWorktree" | "removeWorktree" | "restoreWorktree") => {
             let owned: crate::worktree_cleanup::Owned =
                 serde_json::from_value(request["owned"].clone())

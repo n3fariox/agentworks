@@ -42,6 +42,8 @@ pub use agentworks_runtime::remote::{DEFAULT_REMOTE_COMMAND, Host};
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<agentworks_workspace::config::Settings>,
     pub roots: Option<Vec<PathBuf>>,
     #[serde(default)]
     pub default_models: HashMap<String, String>,
@@ -626,6 +628,7 @@ mod tests {
                 default_communication_role: None,
                 notifications: Default::default(),
                 max_active_sessions: Some(48),
+                git: None,
             })
             .unwrap();
         let mut reopened = Catalog::open(path.clone()).unwrap();

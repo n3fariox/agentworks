@@ -39,6 +39,9 @@ fn conflict(message: impl Into<String>) -> Error {
 
 /// Filesystem policy shared by the server and the remote worker.
 pub trait Context: Sync {
+    fn git_settings(&self) -> crate::config::Settings {
+        crate::config::Settings::default()
+    }
     fn roots(&self) -> Vec<PathBuf>;
     fn checked(&self, path: &str) -> Result<PathBuf, Error>;
     /// Reserve a creation durably before any filesystem mutation.
@@ -63,10 +66,18 @@ pub(crate) async fn git(
     cwd: &FsPath,
     args: &[&str],
 ) -> Result<String, Error> {
+    git_limit(app, cwd, args, 256 * 1024).await
+}
+pub(crate) async fn git_limit(
+    app: &(impl Context + ?Sized),
+    cwd: &FsPath,
+    args: &[&str],
+    limit: u64,
+) -> Result<String, Error> {
     let root = allowed(app, cwd)?;
     let (ok, out, err, _) = tokio::time::timeout(
         Duration::from_secs(10),
-        crate::git::git_bounded(cwd, &root, args, 256 * 1024),
+        crate::git::git_bounded(cwd, &root, args, limit),
     )
     .await
     .map_err(|_| {
@@ -125,7 +136,7 @@ pub async fn list_in(
     app: &(impl Context + ?Sized),
     cwd: &FsPath,
 ) -> Result<serde_json::Value, Error> {
-    repository(app, cwd).await?;
+    let cache_root = repository(app, cwd).await?.common.join("agentworks-cow");
     let output = git(app, cwd, &["worktree", "list", "--porcelain", "-z"]).await?;
     let mut worktrees = Vec::new();
     for (index, record) in output.split("\0\0").filter(|r| !r.is_empty()).enumerate() {
@@ -148,6 +159,9 @@ pub async fn list_in(
             prunable |= field == "prunable" || field.starts_with("prunable ");
         }
         if let Some(path) = path {
+            if FsPath::new(path).starts_with(&cache_root) {
+                continue;
+            }
             // Missing/prunable paths cannot be safely canonicalized and are omitted.
             if let Ok(path) = app.checked(path) {
                 worktrees.push(json!({"path":path,"branch":branch,"commit":commit,"isMain":index==0,"locked":locked,"prunable":prunable}));
@@ -242,6 +256,8 @@ pub async fn prepare_in(
         }
         Mode::NewWorktree => {
             let repo = repository(app, &source).await?;
+            let config = crate::config::parse(&crate::config::read(app, &repo.main_top)?)?;
+            let settings = app.git_settings().resolve(&config);
             let unique = format!("session-{}", uuid::Uuid::new_v4());
             let branch = workspace
                 .and_then(|w| w.branch.clone())
@@ -307,7 +323,7 @@ pub async fn prepare_in(
                 }
             })?;
             app.checked(path_str)?;
-            git(app, &repo.top, &["worktree", "add", "--no-track", "-b", &branch, "--", path_str, &commit]).await
+            let population = populate(app, &repo, &path, &commit, &branch, true, &settings).await
                 .map_err(|(code, message)| (code, format!("{message}. Destination {} and any branch/files are retained; no cleanup was attempted", path.display())))?;
             let cwd = app.checked(path_str)?;
             // Only checkouts created here are owned; selected/directory worktrees never are.
@@ -318,6 +334,14 @@ pub async fn prepare_in(
                 main_top: repo.main_top.clone(),
                 base_commit: commit,
                 removed: None,
+                hooks: (settings.run_hooks
+                    && (!config.hooks.enter.is_empty() || !config.hooks.exit.is_empty()))
+                .then_some(crate::hooks::State {
+                    definitions: config.hooks,
+                    ..Default::default()
+                }),
+                population: Some(population),
+                settings: Some(settings),
             });
             cwd
         }
@@ -333,4 +357,52 @@ pub async fn prepare_in(
             .ok_or_else(|| bad("Working directory must be UTF-8"))?,
     )?;
     Ok((cwd, owned))
+}
+
+pub(crate) async fn populate(
+    app: &(impl Context + ?Sized),
+    repo: &Repository,
+    path: &FsPath,
+    commit: &str,
+    branch: &str,
+    new: bool,
+    settings: &crate::config::Settings,
+) -> Result<String, Error> {
+    match crate::cow::populate(app, repo, path, commit, branch, new, settings).await? {
+        None => Ok("cow".into()),
+        Some(reason) => {
+            let path = path
+                .to_str()
+                .ok_or_else(|| bad("Worktree path must be UTF-8"))?;
+            let mut args = vec!["worktree", "add"];
+            if new {
+                args.extend(["--no-track", "-b", branch]);
+            }
+            args.extend(["--", path, if new { commit } else { branch }]);
+            git(app, &repo.top, &args).await?;
+            Ok(reason)
+        }
+    }
+}
+
+pub async fn configuration_in(
+    app: &(impl Context + ?Sized),
+    cwd: &FsPath,
+    text: Option<&str>,
+    fingerprint: Option<&str>,
+) -> Result<serde_json::Value, Error> {
+    let repo = repository(app, cwd).await?;
+    if let Some(text) = text {
+        crate::config::write(
+            app,
+            &repo.main_top,
+            text,
+            fingerprint.ok_or_else(|| bad("Supply the configuration fingerprint before saving"))?,
+        )?;
+    }
+    let text = crate::config::read(app, &repo.main_top)?;
+    let config = crate::config::parse(&text)?;
+    Ok(
+        json!({"repository":repo.main_top,"path":repo.main_top.join(crate::config::CONFIG_PATH),"fingerprint":crate::sha256::hex(text.as_bytes()),"text":text,"git":config,"effective":app.git_settings().resolve(&config)}),
+    )
 }

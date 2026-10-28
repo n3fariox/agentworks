@@ -22,7 +22,7 @@ fn now() -> u64 {
 fn conflict(message: impl Into<String>) -> Error {
     fail(StatusCode::CONFLICT, message)
 }
-async fn inspect(app: &App, s: &Session) -> Inspection {
+pub(crate) async fn inspect(app: &App, s: &Session) -> Inspection {
     let (owned, busy) = {
         let d = s.data.lock().unwrap();
         (
@@ -91,6 +91,8 @@ fn view(s: &Session, i: &Inspection) -> Value {
         "branch": i.owned.as_ref().map(|o| &o.branch),
         "baseCommit": i.owned.as_ref().map(|o| &o.base_commit),
         "removedAt": i.owned.as_ref().and_then(|o| o.removed),
+        "population": i.owned.as_ref().and_then(|o| o.population.as_ref()),
+        "hooks": i.owned.as_ref().and_then(|o| o.hooks.as_ref()),
         "dirty": i.dirty,
         "fingerprint": i.fingerprint,
         "locked": i.locked,
@@ -145,6 +147,16 @@ pub async fn cleanup(
         "removed" => return Ok(json!({"outcome":"removed","worktree":summary})),
         _ => {}
     }
+    // Validate dirty-removal consent before an exit hook can change files.
+    if mode == Cleanup::Remove
+        && first.dirty.as_ref().is_some_and(Dirty::any)
+        && confirm != first.fingerprint.as_deref()
+    {
+        return Err(conflict(
+            "Worktree changes differ from the confirmed state; review them and confirm again",
+        ));
+    }
+    crate::git_settings::exit(app, s, "archive").await?;
     if mode == Cleanup::Keep {
         return Ok(json!({"outcome":"retained","reason":"Kept by request","worktree":summary}));
     }
@@ -224,7 +236,17 @@ pub async fn restore(app: &App, s: &Session) -> Result<Option<Value>, Error> {
     };
     if let Some(w) = s.data.lock().unwrap().worktree.as_mut() {
         w.removed = None;
+        if let Some(population) = result.as_ref().and_then(|v| v["population"].as_str()) {
+            w.population = Some(population.to_owned());
+        }
+        if let Some(hooks) = &mut w.hooks {
+            if hooks.exit == agentworks_workspace::hooks::Status::Succeeded {
+                hooks.enter = agentworks_workspace::hooks::Status::Pending;
+                hooks.exit = agentworks_workspace::hooks::Status::Pending;
+            }
+        }
     }
+    crate::git_settings::run(app, s, "enter", "unarchive").await?;
     Ok(result)
 }
 

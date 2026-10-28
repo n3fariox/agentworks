@@ -6,6 +6,8 @@ Branches are never deleted, reset, merged or pushed. Cleanup removes the checkou
 
 ## Archive and restore
 
+Sessions with configured [worktree lifecycle hooks](COW-WORKTREES.md) run exit before archive/delete, including archive that keeps the checkout. Hook failure blocks the action. Unarchive runs enter again after restore/adoption; ordinary suspension/resume does not rerun successful hooks.
+
 - **Clean owned worktree:** archive suspends the harness (no turn may be active) and runs `git worktree remove` without `--force`. The session is archived with `worktree.removed=true` and stays explicitly suspended. Its branch and path metadata are kept.
 - **Dirty owned worktree** (staged, unstaged or untracked files): a plain archive archives the session and keeps the worktree. The browser checks first and asks **Archive, delete changes**, **Archive, keep worktree** or **Cancel**. Cancel changes nothing; Keep archives and retains every file.
 - **Delete changes:** the request carries the status fingerprint the human saw. The fingerprint covers HEAD, porcelain status and the size and mtime of each dirty path. If anything changed since then, the request returns 409 and the session is not archived. The harness is suspended and the state re-inspected before `git worktree remove --force` runs.
