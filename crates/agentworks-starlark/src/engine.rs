@@ -35,6 +35,7 @@ const PROGRESS_PRELUDE: &str = "@agentworks//progress.star";
 const MESSAGE_PRELUDE: &str = "@agentworks//message.star";
 const WORKFLOW_PRELUDE: &str = "@agentworks//workflow.star";
 const TOOL_PRELUDE: &str = "@agentworks//tool.star";
+const CHAT_PRELUDE: &str = "@agentworks//chat.star";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -47,6 +48,9 @@ pub enum Capability {
     MessageFormatter,
     /// Chooses the one-line header shown for a tool card. Display only.
     ToolHeader,
+    /// Rewrites one line of an agent (`chat.agent`) or user (`chat.user`)
+    /// chat message as Markdown. Display only.
+    ChatFormatter,
 }
 
 impl Capability {
@@ -56,6 +60,7 @@ impl Capability {
             Capability::MessageFormatter => (MESSAGE_PRELUDE, include_str!("../host/message.star")),
             Capability::Workflow => (WORKFLOW_PRELUDE, include_str!("../host/workflow.star")),
             Capability::ToolHeader => (TOOL_PRELUDE, include_str!("../host/tool.star")),
+            Capability::ChatFormatter => (CHAT_PRELUDE, include_str!("../host/chat.star")),
         }
     }
     fn entry(self) -> &'static str {
@@ -64,6 +69,7 @@ impl Capability {
             Capability::Workflow => "on_event",
             Capability::MessageFormatter => "format_message",
             Capability::ToolHeader => "tool_header",
+            Capability::ChatFormatter => "format_line",
         }
     }
     /// Host API v1 entry signature, as rendered by the starlark typechecker.
@@ -73,6 +79,7 @@ impl Capability {
             Capability::Workflow => "def(ctx: WorkflowContext, event: Event) -> list[Action]",
             Capability::MessageFormatter => "def(ctx: MessageContext, message: PeerMessage) -> str",
             Capability::ToolHeader => "def(ctx: ToolContext, tool: ToolCall) -> None | str",
+            Capability::ChatFormatter => "def(ctx: ChatContext, line: str) -> None | str",
         }
     }
     /// Prelude record type for the hook's `ctx` argument.
@@ -82,6 +89,7 @@ impl Capability {
             Capability::Workflow => "WorkflowContext",
             Capability::MessageFormatter => "MessageContext",
             Capability::ToolHeader => "ToolContext",
+            Capability::ChatFormatter => "ChatContext",
         }
     }
 }
@@ -129,7 +137,7 @@ impl Limits {
         match capability {
             Capability::Parser => Self::parser(),
             Capability::Workflow => Self::workflow(),
-            Capability::MessageFormatter | Capability::ToolHeader => Self::parser(),
+            Capability::MessageFormatter | Capability::ToolHeader | Capability::ChatFormatter => Self::parser(),
         }
     }
 }
@@ -228,6 +236,94 @@ fn parser_helpers(builder: &mut GlobalsBuilder) {
             ),
         })
     }
+
+    /// Replaces every match of `pattern` in `text`; `$1` or `${name}` in
+    /// `replacement` refer to capture groups, and `$$` is a literal `$`.
+    fn regex_replace(
+        #[starlark(require = pos)] pattern: &str,
+        #[starlark(require = pos)] text: &str,
+        #[starlark(require = pos)] replacement: &str,
+    ) -> anyhow::Result<String> {
+        Ok(cached_regex(pattern)?.replace_all(text, replacement).into_owned())
+    }
+
+    /// Applies `function` to the parts of one Markdown line outside inline code,
+    /// links, images, autolinks, bare URLs and HTML tags, which stay as they are.
+    fn map_prose<'v>(
+        #[starlark(require = pos)] line: &str,
+        #[starlark(require = pos)] function: starlark::values::Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<String> {
+        let mut out = String::with_capacity(line.len());
+        for (prose, part) in prose_segments(line) {
+            if !prose {
+                out.push_str(part);
+                continue;
+            }
+            let part = eval.heap().alloc(part);
+            let value = eval
+                .eval_function(function, &[part], &[])
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            out.push_str(
+                value
+                    .unpack_str()
+                    .ok_or_else(|| anyhow::anyhow!("map_prose function must return str"))?,
+            );
+        }
+        Ok(out)
+    }
+}
+
+/// Splits a Markdown line into `(is_prose, text)` runs. Code spans follow
+/// CommonMark: a backtick run closes only at a run of the same length.
+pub fn prose_segments(line: &str) -> Vec<(bool, &str)> {
+    static PROTECTED: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"!?\[[^\]]*\]\([^)]*\)|<[^\s<>]+>|https?://[^\s<>]+").unwrap());
+    let ticks = |from: usize| line[from..].bytes().take_while(|&b| b == b'`').count();
+    let mut segments = Vec::new();
+    let mut push = |from: usize, to: usize, prose: bool| {
+        if to > from {
+            segments.push((prose, &line[from..to]));
+        }
+    };
+    let (mut prose_start, mut at) = (0, 0);
+    while at < line.len() {
+        if line.as_bytes()[at] == b'`' {
+            let width = ticks(at);
+            let mut search = at + width;
+            let mut end = None;
+            while let Some(offset) = line[search..].find('`') {
+                let run = search + offset;
+                let length = ticks(run);
+                if length == width {
+                    end = Some(run + length);
+                    break;
+                }
+                search = run + length;
+            }
+            match end {
+                Some(end) => {
+                    push(prose_start, at, true);
+                    push(at, end, false);
+                    (prose_start, at) = (end, end);
+                }
+                None => at += width,
+            }
+            continue;
+        }
+        let next_tick = line[at..].find('`').map_or(line.len(), |i| at + i);
+        match PROTECTED.find(&line[at..next_tick]) {
+            Some(found) => {
+                let (start, end) = (at + found.start(), at + found.end());
+                push(prose_start, start, true);
+                push(start, end, false);
+                (prose_start, at) = (end, end);
+            }
+            None => at = next_tick,
+        }
+    }
+    push(prose_start, line.len(), true);
+    segments
 }
 
 /// Shared through `Arc`: cloning a `Regex` would give each call a cold match cache.
@@ -262,7 +358,7 @@ fn globals(capability: Capability) -> Globals {
             .with(parser_helpers)
             .with_namespace("agent", registration::registration_helpers)
             .build(),
-        Capability::MessageFormatter | Capability::ToolHeader => builder
+        Capability::MessageFormatter | Capability::ToolHeader | Capability::ChatFormatter => builder
             .with_namespace("agent", registration::registration_helpers)
             .build(),
         Capability::Workflow => builder.build(),
@@ -291,6 +387,7 @@ pub struct Compiled {
     pub display_name: String,
     /// Parser scripts: `COMMAND_PATTERN`. Rust routes only matching commands' output.
     pub command_pattern: Option<Arc<regex::Regex>>,
+    /// Formatters and tool headers: only matching text reaches the hook; None matches everything.
     pub text_pattern: Option<Arc<regex::Regex>>,
     pub message_type: Option<String>,
     pub compile_time: Duration,
@@ -323,6 +420,8 @@ pub struct Engine {
     workflow_prelude: Prelude,
     message_prelude: Prelude,
     tool_prelude: Prelude,
+    chat_globals: Globals,
+    chat_prelude: Prelude,
     cache: Mutex<HashMap<String, Arc<Compiled>>>,
     hook_globals: Globals,
     hook_cache: Mutex<HashMap<(String, String), Arc<RegisteredScript>>>,
@@ -336,6 +435,8 @@ impl Engine {
         let message_prelude = prelude(Capability::MessageFormatter, &message_globals)?;
         let tool_globals = globals(Capability::ToolHeader);
         let tool_prelude = prelude(Capability::ToolHeader, &tool_globals)?;
+        let chat_globals = globals(Capability::ChatFormatter);
+        let chat_prelude = prelude(Capability::ChatFormatter, &chat_globals)?;
         let parser_prelude = prelude(Capability::Parser, &parser_globals)?;
         let workflow_prelude = prelude(Capability::Workflow, &workflow_globals)?;
         Ok(Engine {
@@ -345,6 +446,8 @@ impl Engine {
             message_prelude,
             tool_globals,
             tool_prelude,
+            chat_globals,
+            chat_prelude,
             parser_prelude,
             workflow_prelude,
             cache: Mutex::default(),
@@ -359,6 +462,7 @@ impl Engine {
             Capability::Workflow => (&self.workflow_globals, &self.workflow_prelude),
             Capability::MessageFormatter => (&self.message_globals, &self.message_prelude),
             Capability::ToolHeader => (&self.tool_globals, &self.tool_prelude),
+            Capability::ChatFormatter => (&self.chat_globals, &self.chat_prelude),
         }
     }
 
@@ -492,9 +596,10 @@ impl Engine {
                     })?;
                 (display, Some(Arc::new(regex)))
             }
-            Capability::Workflow | Capability::MessageFormatter | Capability::ToolHeader => {
-                (install.name.clone(), None)
-            }
+            Capability::Workflow
+            | Capability::MessageFormatter
+            | Capability::ToolHeader
+            | Capability::ChatFormatter => (install.name.clone(), None),
         };
         let compiled = Arc::new(Compiled {
             name: install.name.clone(),
@@ -663,6 +768,7 @@ fn cap_name(c: Capability) -> &'static str {
         Capability::Workflow => "workflow",
         Capability::MessageFormatter => "message_formatter",
         Capability::ToolHeader => "tool_header",
+        Capability::ChatFormatter => "chat_formatter",
     }
 }
 
@@ -685,7 +791,7 @@ fn prelude(capability: Capability, globals: &Globals) -> Result<Prelude, String>
     })?;
     let context = module.get(capability.context_type()).map_err(|e| e.to_string())?;
     let event = match capability {
-        Capability::Parser => None,
+        Capability::Parser | Capability::ChatFormatter => None,
         Capability::MessageFormatter => Some(module.get("message_from_json").map_err(|e| e.to_string())?),
         Capability::ToolHeader => Some(module.get("tool_from_json").map_err(|e| e.to_string())?),
         Capability::Workflow => Some(module.get("event_from_json").map_err(|e| e.to_string())?),

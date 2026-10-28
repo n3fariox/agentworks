@@ -108,6 +108,22 @@ class HarnessTests(unittest.TestCase):
         self.request(path+"/resume","POST",{})
         self.until(lambda:self.request(path)["session"]["status"]=="idle")
 
+    def test_native_rename_names_the_session_in_both_places(self):
+        created=self.request("/api/sessions","POST",dict(provider="codex-rust",cwd=str(self.cwd),title="Before rename"))
+        path="/api/sessions/"+created["id"]
+        self.until(lambda:self.request(path)["session"]["status"]=="idle")
+        turns=lambda n:(s if (s:=self.request(path))["session"]["status"]=="idle" and len([e for e in s["events"] if e["kind"]=="turn_end"])>=n else None)
+        # The fixture app-server accepts only this name for thread/name/set.
+        self.request(path+"/prompt","POST",dict(text="/rename New conversation name",requestId=str(uuid4())))
+        snapshot=self.until(lambda:turns(1))
+        self.assertEqual(snapshot["session"]["title"],"New conversation name")
+        native=[json.loads(line) for line in (self.cwd/"native.jsonl").read_text().splitlines()]
+        self.assertTrue(any(v.get("method")=="thread/name/set" for v in native))
+        # Codex refuses a bare /rename, so the session keeps its name.
+        self.request(path+"/prompt","POST",dict(text="/rename",requestId=str(uuid4())))
+        self.until(lambda:self.request(path)["session"]["status"] in ("idle","error"))
+        self.assertEqual(self.request(path)["session"]["title"],"New conversation name")
+
     def native_lifecycle(self):
         return [v for line in (self.cwd/"native.jsonl").read_text().splitlines() if (v:=json.loads(line)).get("method") in ("thread/start","thread/resume","thread/fork")]
 

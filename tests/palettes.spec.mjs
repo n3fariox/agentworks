@@ -220,6 +220,17 @@ test('actions expose existing UI work and refuse commands until the session is r
   expect(actionItems({active:{id:'a'},status:'suspended',connected:false},handlers).find(i=>i.id==='session-resume')).toMatchObject({disabled:true,reason:'Not connected to this session yet'});
   const usage=actionItems({active:{id:'a',provider:'claude'},status:'idle',connected:true,usageAvailable:true},handlers);
   expect(usage.map(i=>i.id)).toContain('session-usage');
+  // Session menu entries appear when their handlers exist, with the same availability as the menu.
+  const menus={rename:()=>called.push('rename'),archive:()=>{},suspend:()=>{},sessionSettings:()=>{},editProject:()=>{},deleteEverywhere:()=>{}};
+  const menuItems=actionItems({active:{id:'a',projectId:'p',archived:true,providerCapabilities:{delete:true}},status:'idle',connected:true},menus);
+  const menuById=Object.fromEntries(menuItems.map(item=>[item.id,item]));
+  for(const id of ['session-rename','session-settings','session-archive','session-suspend','project-edit','session-delete-everywhere'])expect(menuById[id],id).toBeDefined();
+  expect(menuById['session-archive'].label).toBe('Unarchive session');
+  menuById['session-rename'].run();expect(called).toContain('rename');
+  expect(rankItems('rename',menuItems)[0].id).toBe('session-rename');
+  const bare=actionItems({active:{id:'a'},status:'suspended',connected:true},menus).map(i=>i.id);
+  expect(bare).not.toContain('project-edit');expect(bare).not.toContain('session-delete-everywhere');
+  expect(actionItems({active:{id:'a'},status:'suspended',connected:true},menus).find(i=>i.id==='session-suspend')).toMatchObject({disabled:true,reason:'Already suspended'});
   expect(commandText({name:'\$demo-skill'})).toBe('$demo-skill');
   expect(commandText({name:'/usage'})).toBe('/usage');
 });

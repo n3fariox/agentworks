@@ -46,6 +46,7 @@ async function openGlobalTimeouts(page){
 }
 async function openSessionTimeouts(page){
   if(await page.locator('#session-more').isVisible())await page.locator('#session-more').click();
+  await page.locator('#lifecycle-menu > summary').click();
   await page.locator('#session-settings').click();
   await expect(page.locator('#session-settings-dialog')).toBeVisible();
 }

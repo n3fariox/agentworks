@@ -17,7 +17,7 @@ use agentworks_starlark::progress::{StarlarkParser, ToolProgress};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, mpsc};
 use tokio::sync::broadcast;
 
@@ -336,6 +336,13 @@ enum Message {
         messages: Vec<Value>,
         reply: mpsc::SyncSender<Vec<Option<String>>>,
     },
+    FormatChat {
+        /// `chat.agent` or `chat.user`.
+        kind: String,
+        context: Value,
+        lines: Vec<String>,
+        reply: mpsc::SyncSender<Vec<Option<String>>>,
+    },
     Forget(String),
 }
 
@@ -346,13 +353,26 @@ pub struct Hub {
     tx: mpsc::Sender<Message>,
     views: Views,
     headers: Headers,
+    /// Chat message types with an enabled formatter, so rendering skips the thread otherwise.
+    chat: Arc<Mutex<HashSet<String>>>,
 }
+
+/// Formatted chat lines remembered across renders of a streaming message.
+const CHAT_CACHE_LINES: usize = 4096;
+/// A formatted line longer than this keeps its original text.
+const MAX_CHAT_LINE_BYTES: usize = 8 * 1024;
+
+/// `(context, each formatter's incoming state, line)`: a line's result depends on
+/// the lines before it only through state, so streaming renders still hit.
+type ChatCache = HashMap<(String, String, String), (Option<String>, Vec<Value>)>;
 
 impl Hub {
     pub fn new(engine: Arc<Engine>, parsers: Vec<StarlarkParser>) -> Self {
         let (views, headers) = (Views::default(), Headers::default());
         let (tx, rx) = mpsc::channel::<Message>();
         let mut formatters: Vec<Arc<Compiled>> = Vec::new();
+        let mut chat_formatters: Vec<Arc<Compiled>> = Vec::new();
+        let mut chat_cache = ChatCache::new();
         let mut tracker = Tracker::new(parsers, views.clone());
         let mut header_tracker = HeaderTracker::new(engine.clone(), headers.clone());
         let interpreter = engine.clone();
@@ -386,6 +406,8 @@ impl Hub {
                         Message::Reload(hooks) => {
                             tracker.parsers = hooks.parsers;
                             formatters = hooks.formatters;
+                            chat_formatters = hooks.chat;
+                            chat_cache.clear();
                             header_tracker.reload(hooks.headers);
                         }
                         Message::FormatInbox { messages, reply } => {
@@ -394,7 +416,7 @@ impl Hub {
                                 .map(|message| {
                                     let script = formatters.iter().find(|script| {
                                         script.message_type.as_deref() == Some("inbox.peer")
-                                            && script.text_pattern.as_ref().is_some_and(|pattern| {
+                                            && script.text_pattern.as_ref().is_none_or(|pattern| {
                                                 pattern.is_match(
                                                     message["text"].as_str().unwrap_or_default(),
                                                 )
@@ -420,6 +442,49 @@ impl Hub {
                                 .collect();
                             let _ = reply.send(formatted);
                         }
+                        Message::FormatChat {
+                            kind,
+                            context,
+                            lines,
+                            reply,
+                        } => {
+                            let key = format!("{kind}\u{1f}{context}");
+                            let active: Vec<_> = chat_formatters
+                                .iter()
+                                .filter(|f| f.message_type.as_deref() == Some(kind.as_str()))
+                                .cloned()
+                                .collect();
+                            // Each formatter's `ctx.state` starts empty for a message and
+                            // carries from line to line in order.
+                            let mut states = vec![json!({}); active.len()];
+                            let formatted = lines
+                                .into_iter()
+                                .map(|line| {
+                                    let cache_key = (
+                                        key.clone(),
+                                        Value::from(states.clone()).to_string(),
+                                        line,
+                                    );
+                                    if let Some((result, next)) = chat_cache.get(&cache_key) {
+                                        states = next.clone();
+                                        return result.clone();
+                                    }
+                                    let result = format_line(
+                                        &interpreter,
+                                        &active,
+                                        &context,
+                                        &mut states,
+                                        &cache_key.2,
+                                    );
+                                    if chat_cache.len() >= CHAT_CACHE_LINES {
+                                        chat_cache.clear();
+                                    }
+                                    chat_cache.insert(cache_key, (result.clone(), states.clone()));
+                                    result
+                                })
+                                .collect();
+                            let _ = reply.send(formatted);
+                        }
                         Message::Forget(session) => {
                             tracker.forget(&session);
                             header_tracker.forget(&session);
@@ -433,6 +498,7 @@ impl Hub {
             tx,
             views,
             headers,
+            chat: Arc::default(),
         }
     }
 
@@ -522,6 +588,40 @@ impl Hub {
             .unwrap_or_else(|_| vec![None; messages.len()])
     }
 
+    /// `kind` (`chat.agent` or `chat.user`) formatting for the lines of one
+    /// message, on the interpreter thread. None when no formatter of that kind is
+    /// enabled; otherwise None keeps a line, and a timeout keeps them all.
+    pub fn format_chat(
+        &self,
+        kind: &str,
+        provider: &str,
+        cwd: &str,
+        lines: Vec<String>,
+    ) -> Option<Vec<Option<String>>> {
+        let count = lines.len();
+        if !self.chat.lock().unwrap().contains(kind) {
+            return None;
+        }
+        let (reply, rx) = mpsc::sync_channel(1);
+        let context = json!({"provider": provider, "cwd": cwd.trim_end_matches('/'), "state": {}});
+        if self
+            .tx
+            .send(Message::FormatChat {
+                kind: kind.to_owned(),
+                context,
+                lines,
+                reply,
+            })
+            .is_err()
+        {
+            return Some(vec![None; count]);
+        }
+        Some(
+            rx.recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap_or_else(|_| vec![None; count]),
+        )
+    }
+
     /// Validate a script before it is saved.
     pub fn check(&self, name: &str, source: &str) -> Result<(), Diagnostic> {
         self.engine.compile_registered(name, source).map(|_| ())
@@ -530,6 +630,11 @@ impl Hub {
     /// Recompile enabled scripts from the store and swap them in.
     pub fn reload(&self, db: &Connection) -> rusqlite::Result<Vec<Diagnostic>> {
         let (hooks, errors) = compile_hooks(&self.engine, db)?;
+        *self.chat.lock().unwrap() = hooks
+            .chat
+            .iter()
+            .filter_map(|f| f.message_type.clone())
+            .collect();
         let _ = self.tx.send(Message::Reload(hooks));
         Ok(errors)
     }
@@ -541,6 +646,51 @@ struct Hooks {
     parsers: Vec<StarlarkParser>,
     formatters: Vec<Arc<Compiled>>,
     headers: Vec<Arc<Compiled>>,
+    chat: Vec<Arc<Compiled>>,
+}
+
+/// Every matching `chat.agent` formatter runs in order, each on the previous
+/// result, so independent scripts compose. A result may span several lines.
+/// A failing or oversized result keeps that formatter's input and state.
+fn format_line(
+    engine: &Engine,
+    formatters: &[Arc<Compiled>],
+    context: &Value,
+    states: &mut [Value],
+    line: &str,
+) -> Option<String> {
+    let mut current = line.to_owned();
+    for (script, state) in formatters.iter().zip(states) {
+        if !script
+            .text_pattern
+            .as_ref()
+            .is_none_or(|p| p.is_match(&current))
+        {
+            continue;
+        }
+        let mut context = context.clone();
+        context["state"] = state.clone();
+        match engine.call(script, &context, &json!(current)) {
+            Ok((value, _))
+                if value["result"]
+                    .as_str()
+                    .is_some_and(|r| r.len() > MAX_CHAT_LINE_BYTES) =>
+            {
+                eprintln!(
+                    "Chat formatter {} exceeded {MAX_CHAT_LINE_BYTES} bytes; keeping its input",
+                    script.name
+                );
+            }
+            Ok((value, _)) => {
+                *state = value["state"].clone();
+                if let Some(next) = value["result"].as_str() {
+                    current = next.to_owned();
+                }
+            }
+            Err(error) => eprintln!("Chat formatter failed; keeping its input: {error}"),
+        }
+    }
+    (current != line).then_some(current)
 }
 
 /// Compile enabled modules in `list` order (priority, then filename), then route
@@ -562,6 +712,7 @@ fn compile_hooks(
                         }),
                         Capability::MessageFormatter => hooks.formatters.push(handler.clone()),
                         Capability::ToolHeader => hooks.headers.push(handler.clone()),
+                        Capability::ChatFormatter => hooks.chat.push(handler.clone()),
                         Capability::Workflow => {
                             unreachable!("workflow registrations are not exposed")
                         }
@@ -859,6 +1010,132 @@ mod tests {
                 .message_type
                 .as_deref(),
             Some("inbox.peer")
+        );
+    }
+
+    #[test]
+    fn chat_formatters_chain_in_order_and_skip_invalid_results() {
+        let db = db();
+        let script = |body: &str, pattern: &str| {
+            format!(
+                "load(\"@agentworks//chat.star\", \"ChatContext\")\ndef format_line(ctx: ChatContext, line: str) -> str | None:\n    {body}\nagent.register_formatter(format_line, message_type = \"chat.agent\", text_pattern = \"{pattern}\")\n"
+            )
+        };
+        let hub = start(&db).unwrap();
+        assert_eq!(
+            hub.format_chat("chat.agent", "claude", "/w", vec!["OPS-1".into()]),
+            None,
+            "no chat formatters"
+        );
+        save(
+            &db,
+            "a_tickets.star",
+            &script(
+                "return regex_replace(\"(OPS-[0-9]+)\", line, \"[$1](https://j/$1)\")",
+                "OPS-",
+            ),
+        )
+        .unwrap();
+        save(
+            &db,
+            "b_tag.star",
+            &script("return ctx.provider + \" \" + line", "^\\["),
+        )
+        .unwrap();
+        save(&db, "c_broken.star", &script("return str(1 // 0)", ".*")).unwrap();
+        hub.reload(&db).unwrap();
+        assert_eq!(
+            hub.format_chat(
+                "chat.agent",
+                "claude",
+                "/w/",
+                vec!["OPS-1 done".into(), "plain".into()]
+            ),
+            Some(vec![
+                Some("claude [OPS-1](https://j/OPS-1) done".into()),
+                None
+            ])
+        );
+        assert_eq!(
+            hub.format_chat("chat.user", "claude", "/w", vec!["OPS-1".into()]),
+            None,
+            "agent formatters never see user messages"
+        );
+        save(
+            &db,
+            "d_user.star",
+            &script("return \"> \" + line", "")
+                .replace("chat.agent", "chat.user")
+                .replace(", text_pattern = \"\"", ""),
+        )
+        .unwrap();
+        hub.reload(&db).unwrap();
+        let saved = list(&db)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.name == "d_user.star")
+            .unwrap();
+        let registered = hub
+            .engine
+            .compile_registered(&saved.name, &saved.source)
+            .unwrap();
+        assert!(registered.hooks[0].pattern.is_none());
+        assert!(
+            registered.handlers[0].text_pattern.is_none(),
+            "no text_pattern means no regex"
+        );
+        assert_eq!(
+            hub.format_chat("chat.user", "claude", "/w", vec!["OPS-1".into(), "".into()]),
+            Some(vec![Some("> OPS-1".into()), Some("> ".into())]),
+            "without a pattern every line, blank ones included, reaches the function"
+        );
+    }
+
+    #[test]
+    fn chat_formatter_state_carries_through_one_message_and_results_may_span_lines() {
+        let db = db();
+        // Under a "Tickets:" heading, bare numbers in the list become ticket links;
+        // a blank line ends the list. The heading itself gains a second line.
+        let source = r#"load("@agentworks//chat.star", "ChatContext")
+def format_line(ctx: ChatContext, line: str) -> str | None:
+    if line == "Tickets:":
+        ctx.state["tickets"] = True
+        return line + "\n\n_linked below_"
+    if line.strip() == "":
+        ctx.state["tickets"] = False
+        return None
+    if ctx.state.get("tickets", False):
+        return regex_replace("^- ([0-9]+)$", line, "- [OPS-$1](https://j/OPS-$1)")
+    return None
+agent.register_formatter(format_line, message_type = "chat.agent")
+"#;
+        save(&db, "tickets.star", source).unwrap();
+        let hub = start(&db).unwrap();
+        let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let message = lines(&["- 1", "Tickets:", "- 2", "- 3", "", "- 4"]);
+        let expected = vec![
+            None,
+            Some("Tickets:\n\n_linked below_".into()),
+            Some("- [OPS-2](https://j/OPS-2)".into()),
+            Some("- [OPS-3](https://j/OPS-3)".into()),
+            None,
+            None,
+        ];
+        let expected = Some(expected);
+        assert_eq!(
+            hub.format_chat("chat.agent", "claude", "/w", message.clone()),
+            expected
+        );
+        // Cached lines replay their state: a later render, or the same line in
+        // another context, gets the same answer as a cold one.
+        assert_eq!(
+            hub.format_chat("chat.agent", "claude", "/w", message),
+            expected
+        );
+        assert_eq!(
+            hub.format_chat("chat.agent", "claude", "/w", lines(&["- 2"])),
+            Some(vec![None]),
+            "state is per message"
         );
     }
 

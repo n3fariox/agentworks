@@ -92,34 +92,40 @@ pub async fn apply(s: &Session, title: Option<String>, archived: Option<bool>) -
     if archived == Some(true) {
         crate::inbox_delivery::cancel(s, "Recipient archived")?;
     }
-    {
-        let mut data = s.data.lock().unwrap();
-        let mut next = data.clone();
-        if let Some(title) = title {
-            next.lifecycle.title = Some(title);
-        }
-        if let Some(archived) = archived {
-            next.lifecycle.archived = archived;
-        }
-        // Commit before publishing: failed metadata changes are never acknowledged.
-        s.store
-            .lock()
-            .unwrap()
-            .save_state(&s.id, &next)
-            .map_err(|_| {
-                fail(
-                    StatusCode::INSUFFICIENT_STORAGE,
-                    "Could not save lifecycle metadata",
-                )
-            })?;
-        *data = next;
-    }
+    commit(s, title, archived)?;
     if archived == Some(true) {
         let _ = crate::terminal::archive(s).await?;
     }
     let meta = s.meta();
     s.emit("session_updated", meta.clone());
     Ok(Json(meta))
+}
+/// Commit before publishing: failed metadata changes are never acknowledged.
+pub fn commit(
+    s: &Session,
+    title: Option<String>,
+    archived: Option<bool>,
+) -> Result<(), (StatusCode, String)> {
+    let mut data = s.data.lock().unwrap();
+    let mut next = data.clone();
+    if let Some(title) = title {
+        next.lifecycle.title = Some(title);
+    }
+    if let Some(archived) = archived {
+        next.lifecycle.archived = archived;
+    }
+    s.store
+        .lock()
+        .unwrap()
+        .save_state(&s.id, &next)
+        .map_err(|_| {
+            fail(
+                StatusCode::INSUFFICIENT_STORAGE,
+                "Could not save lifecycle metadata",
+            )
+        })?;
+    *data = next;
+    Ok(())
 }
 pub async fn stop_worker(s: &Session) {
     let worker = s.worker.lock().unwrap().take();

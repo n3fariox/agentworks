@@ -3,6 +3,7 @@ mod attachments;
 mod automations;
 mod browser_origin;
 mod catalog;
+mod chat_format;
 mod codex_oauth;
 mod communication;
 mod completion;
@@ -23,6 +24,7 @@ mod lifecycle;
 mod limit_resume;
 mod mcp;
 mod model_providers;
+mod native_rename;
 mod notifications;
 mod permission_modes;
 mod recovery;
@@ -292,6 +294,7 @@ impl Session {
             if matches!(status, "idle" | "error" | "closed" | "suspended") {
                 data.turn_active = false;
                 data.inbox_turn = None;
+                data.native_rename = false;
             }
         }
         self.emit("status", json!({"status":status}));
@@ -1313,6 +1316,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/api/sessions/{id}/diff", get(diff::view))
         .route("/api/markdown", post(markdown))
+        .route("/api/sessions/{id}/user-format", post(format_user))
         .route("/{name}", get(hosting::asset))
         .layer(DefaultBodyLimit::max(128 * 1024))
         .layer(middleware::from_fn_with_state(app.clone(), guard))
@@ -1475,6 +1479,17 @@ async fn status(State(app): State<App>) -> Json<Value> {
     }
     Json(status)
 }
+/// Harnesses that may run at once; suspended, failed and closed sessions don't count.
+/// Read before taking the sessions lock, which is never held while locking the catalog.
+fn active_limit(app: &App) -> usize {
+    app.catalog
+        .lock()
+        .unwrap()
+        .data
+        .settings
+        .max_active_sessions
+        .unwrap_or(catalog::DEFAULT_ACTIVE_SESSIONS) as usize
+}
 fn effective_roots(app: &App) -> Vec<PathBuf> {
     app.catalog
         .lock()
@@ -1517,7 +1532,7 @@ async fn get_settings(State(app): State<App>) -> Json<Value> {
     let roots = effective_roots(&app);
     let settings = app.catalog.lock().unwrap().data.settings.clone();
     Json(
-        json!({"roots":roots,"defaultModels":settings.default_models,"claudeDefaultPermissionMode":settings.claude_default_permission_mode.unwrap_or_default(),"codexDefaultPermissionMode":settings.codex_default_permission_mode.unwrap_or_default(),"defaultCommunicationRole":settings.default_communication_role.unwrap_or_default()}),
+        json!({"roots":roots,"maxActiveSessions":settings.max_active_sessions.unwrap_or(catalog::DEFAULT_ACTIVE_SESSIONS),"defaultModels":settings.default_models,"claudeDefaultPermissionMode":settings.claude_default_permission_mode.unwrap_or_default(),"codexDefaultPermissionMode":settings.codex_default_permission_mode.unwrap_or_default(),"defaultCommunicationRole":settings.default_communication_role.unwrap_or_default()}),
     )
 }
 
@@ -1579,6 +1594,18 @@ async fn save_settings(State(app): State<App>, Json(mut settings): Json<Settings
             normalized.push(path);
         }
     }
+    if settings
+        .max_active_sessions
+        .is_some_and(|n| !(1..=catalog::MAX_ACTIVE_SESSIONS).contains(&n))
+    {
+        return Err(fail(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Allow between 1 and {} active sessions",
+                catalog::MAX_ACTIVE_SESSIONS
+            ),
+        ));
+    }
     for (provider, model) in &settings.default_models {
         if !agentworks_runtime::remote::PROVIDERS.contains(&provider.as_str())
             || model.is_empty()
@@ -1609,6 +1636,7 @@ async fn save_settings(State(app): State<App>, Json(mut settings): Json<Settings
             .default_communication_role
             .or(current.default_communication_role);
         settings.timeouts = settings.timeouts.take().or(current.timeouts.clone());
+        settings.max_active_sessions = settings.max_active_sessions.or(current.max_active_sessions);
         settings.notifications = current.notifications.clone();
         settings
     })?;
@@ -2569,6 +2597,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
         }
     }
     worktrees::verify_import(app, &req, &source).await?;
+    let limit = active_limit(app);
     if app
         .sessions
         .lock()
@@ -2581,11 +2610,11 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
             )
         })
         .count()
-        >= 12
+        >= limit
     {
         return Err(fail(
             StatusCode::CONFLICT,
-            "Limit: 12 active harnesses. Suspend idle sessions first.",
+            format!("Limit: {limit} active harnesses. Suspend idle sessions first."),
         ));
     }
     // Prepare workspaces on the machine that owns their files.
@@ -2721,6 +2750,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
             prompt_capabilities: Value::Null,
             worktree: owned_worktree,
             role,
+            native_rename: false,
         }),
         tx,
         commands: Mutex::new(None),
@@ -2737,6 +2767,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
     // catalog before reading other sessions, so turn completion can run while
     // another session is created.
     drop(catalog);
+    let limit = active_limit(app);
     {
         let mut sessions = app.sessions.lock().unwrap();
         if let Some(id) = &req.external_id {
@@ -2768,11 +2799,13 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
                 )
             })
             .count()
-            >= 12
+            >= limit
         {
             return Err(fail(
                 StatusCode::CONFLICT,
-                "Limit: 12 active harnesses. Restart the server to suspend idle sessions first.",
+                format!(
+                    "Limit: {limit} active harnesses. Restart the server to suspend idle sessions first."
+                ),
             ));
         }
         if let Some(seed) = fork {
@@ -2898,6 +2931,7 @@ async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
             "This session's host is not connected, or no longer offers this harness",
         ));
     }
+    let limit = active_limit(&app);
     {
         let sessions = app.sessions.lock().unwrap();
         let mut data = s.data.lock().unwrap();
@@ -2921,9 +2955,12 @@ async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
                     )
             })
             .count()
-            >= 12
+            >= limit
         {
-            return Err(fail(StatusCode::CONFLICT, "Limit: 12 active harnesses"));
+            return Err(fail(
+                StatusCode::CONFLICT,
+                format!("Limit: {limit} active harnesses"),
+            ));
         }
         data.lifecycle.suspended = false;
         data.status = "resuming".into();
@@ -2999,6 +3036,7 @@ fn accept_prompt(
     initiator_title: Option<String>,
     attachments: Vec<(attachments::Meta, attachments::Payload)>,
 ) -> ApiResult {
+    let rename = native_rename::parse(&s.provider, &text);
     {
         let mut data = s.data.lock().unwrap();
         if data.requests.contains(&request_id) {
@@ -3025,7 +3063,12 @@ fn accept_prompt(
         data.input_queue.begin_turn(&text);
         data.status = "running".into();
         data.turn_active = true;
+        data.native_rename = rename.is_some();
         data.requests.insert(request_id.clone());
+    }
+    // Claude stores the named title as given; a bare `/rename` reports its choice later.
+    if let Some(Some(title)) = rename {
+        native_rename::adopt(s, title);
     }
     let mut user = json!({"text":text,"requestId":request_id,"initiatedBy":initiated_by,"initiatorTitle":initiator_title});
     let command = if attachments.is_empty() {
@@ -3435,12 +3478,74 @@ async fn file(
 #[derive(Deserialize)]
 struct Markdown {
     text: String,
+    /// Agent messages name their session so its `chat.agent` formatters apply.
+    #[serde(default, rename = "sessionId")]
+    session_id: Option<String>,
 }
-async fn markdown(Json(req): Json<Markdown>) -> Json<Value> {
+async fn markdown(State(app): State<App>, Json(req): Json<Markdown>) -> Json<Value> {
+    let session = req
+        .session_id
+        .as_deref()
+        .and_then(|id| app.sessions.lock().unwrap().get(id).cloned());
+    let text = match session {
+        Some(s) => {
+            let (hub, text) = (app.progress.clone(), req.text.clone());
+            tokio::task::spawn_blocking(move || {
+                chat_format::apply(&hub, &s.provider, &s.cwd.to_string_lossy(), &text)
+            })
+            .await
+            .unwrap_or(req.text)
+        }
+        None => req.text,
+    };
+    let req = Markdown {
+        text,
+        session_id: None,
+    };
     let marker = format!("awmermaid-{}", &Uuid::new_v4().simple().to_string()[..16]);
     Json(
         json!({"html":render_markdown_with_marker(&req.text, &marker), "mermaidClass":format!("language-{marker}")}),
     )
+}
+#[derive(Deserialize)]
+struct UserFormat {
+    text: String,
+}
+/// `chat.user` formatting of a user message. Each line a formatter rewrote is
+/// sanitized HTML; null lines are shown as typed. `lines` is null when no
+/// `chat.user` formatter is enabled.
+async fn format_user(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(req): Json<UserFormat>,
+) -> ApiResult {
+    let s = session(&app, &id)?;
+    let hub = app.progress.clone();
+    let (provider, cwd) = (s.provider.clone(), s.cwd.to_string_lossy().into_owned());
+    let lines = tokio::task::spawn_blocking(move || {
+        chat_format::format(&hub, "chat.user", &provider, &cwd, &req.text)
+    })
+    .await
+    .unwrap_or(None)
+    .map(|lines| {
+        lines
+            .into_iter()
+            .map(|line| line.map(|markdown| inline_html(&markdown)))
+            .collect::<Vec<_>>()
+    });
+    Ok(Json(json!({ "lines": lines })))
+}
+/// One paragraph renders inline, so a formatted line sits among literal ones.
+fn inline_html(markdown: &str) -> String {
+    let html = render_markdown_with_marker(markdown, "awmermaid-user");
+    let html = html.trim();
+    match html
+        .strip_prefix("<p>")
+        .and_then(|inner| inner.strip_suffix("</p>"))
+    {
+        Some(inner) if !inner.contains("<p>") => inner.to_owned(),
+        _ => html.to_owned(),
+    }
 }
 #[cfg(test)]
 fn render_markdown(text: &str) -> String {
@@ -3487,6 +3592,20 @@ fn render_markdown_with_marker(text: &str, marker: &str) -> String {
         }
         event => event,
     });
+    // Prose outside code and existing links gets GitHub-style bare URL links.
+    let (mut code, mut link) = (0usize, 0usize);
+    let parser = pulldown_cmark::TextMergeStream::new(parser).flat_map(move |event| {
+        use pulldown_cmark::{Event, Tag, TagEnd};
+        match &event {
+            Event::Start(Tag::CodeBlock(_)) => code += 1,
+            Event::End(TagEnd::CodeBlock) => code = code.saturating_sub(1),
+            Event::Start(Tag::Link { .. } | Tag::Image { .. }) => link += 1,
+            Event::End(TagEnd::Link | TagEnd::Image) => link = link.saturating_sub(1),
+            Event::Text(text) if code == 0 && link == 0 => return autolink(text),
+            _ => {}
+        }
+        vec![event]
+    });
     pulldown_cmark::html::push_html(&mut out, parser);
     ammonia::Builder::default()
         .url_relative(ammonia::UrlRelative::PassThrough)
@@ -3517,9 +3636,103 @@ fn render_markdown_with_marker(text: &str, marker: &str) -> String {
         .to_string()
 }
 
+/// Splits bare `http(s)://` URLs out of a text run as links. Trailing sentence
+/// punctuation and unbalanced closing brackets stay outside the link.
+fn autolink<'a>(text: &pulldown_cmark::CowStr<'a>) -> Vec<pulldown_cmark::Event<'a>> {
+    use pulldown_cmark::{CowStr, Event, LinkType, Tag, TagEnd};
+    let mut events = Vec::new();
+    let (mut rest, mut plain) = (text.as_ref(), String::new());
+    while let Some(start) = ["https://", "http://"]
+        .iter()
+        .filter_map(|scheme| {
+            rest.match_indices(scheme)
+                .map(|(i, _)| i)
+                .find(|&i| !rest[..i].ends_with(|c: char| c.is_alphanumeric()))
+        })
+        .min()
+    {
+        let candidate = &rest[start..];
+        let mut end = candidate
+            .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '`'))
+            .unwrap_or(candidate.len());
+        loop {
+            let url = &candidate[..end];
+            let unbalanced = |open, close| {
+                url.ends_with(close) && url.matches(close).count() > url.matches(open).count()
+            };
+            if url.ends_with(['.', ',', ':', ';', '!', '?', '\'', '*', '_'])
+                || unbalanced('(', ')')
+                || unbalanced('[', ']')
+            {
+                end -= 1;
+            } else {
+                break;
+            }
+        }
+        let url = &candidate[..end];
+        // A scheme alone is prose, not a link.
+        if !url
+            .split_once("://")
+            .is_some_and(|(_, host)| host.chars().next().is_some_and(char::is_alphanumeric))
+        {
+            plain.push_str(&rest[..start + 1]);
+            rest = &rest[start + 1..];
+            continue;
+        }
+        plain.push_str(&rest[..start]);
+        if !plain.is_empty() {
+            events.push(Event::Text(CowStr::from(std::mem::take(&mut plain))));
+        }
+        events.push(Event::Start(Tag::Link {
+            link_type: LinkType::Autolink,
+            dest_url: CowStr::from(url.to_owned()),
+            title: CowStr::Borrowed(""),
+            id: CowStr::Borrowed(""),
+        }));
+        events.push(Event::Text(CowStr::from(url.to_owned())));
+        events.push(Event::End(TagEnd::Link));
+        rest = &rest[start + end..];
+    }
+    if events.is_empty() {
+        return vec![Event::Text(text.clone())];
+    }
+    plain.push_str(rest);
+    if !plain.is_empty() {
+        events.push(Event::Text(CowStr::from(plain)));
+    }
+    events
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn markdown_links_bare_urls_outside_code() {
+        let html = render_markdown(
+            "See https://example.com/a_(b)?q=1, (http://x.io/path). Also `https://code.example` and [named](https://n.example).\n\n```\nhttps://fenced.example\n```\nnohttps://nope and https:// alone",
+        );
+        assert!(html.contains(r#"<a href="https://example.com/a_(b)?q=1" rel="noopener noreferrer">https://example.com/a_(b)?q=1</a>, "#), "{html}");
+        assert!(
+            html.contains(
+                r#"(<a href="http://x.io/path" rel="noopener noreferrer">http://x.io/path</a>)."#
+            ),
+            "{html}"
+        );
+        assert!(html.contains("<code>https://code.example</code>"), "{html}");
+        assert!(
+            html.contains(r#">named</a>"#) && !html.contains(">https://n.example<"),
+            "{html}"
+        );
+        assert!(
+            html.contains("https://fenced.example\n</code>")
+                && !html.contains(r#"href="https://fenced"#),
+            "{html}"
+        );
+        assert!(
+            !html.contains(r#"href="https://nope"#) && html.contains("https:// alone"),
+            "{html}"
+        );
+    }
     #[test]
     fn agent_sessions_use_project_role_without_inheriting_controller_grants() {
         let participant = initial_agent_access(None, false, communication::Role::Participant)

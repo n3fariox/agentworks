@@ -147,6 +147,10 @@ def harness():
             send(type="rate_limit_event", rate_limit_info=dict(status="rejected", resetsAt=1800000000, rateLimitType="five_hour"))
             send(type="assistant", parent_tool_use_id=None, error="rate_limit", message=dict(id="msg-limit", model="<synthetic>", content=[dict(type="text", text="You've hit your limit")]))
             result(is_error=True, value="You've hit your limit", output=0)
+        elif prompt.startswith("/rename "):
+            # Claude Code reports a custom title as a system event, without a model turn.
+            send(type="system", subtype="session_title_changed", title=prompt[len("/rename "):].strip())
+            result(value="", output=0)
         elif prompt == "/usage":
             send(type="assistant", parent_tool_use_id=None, message=dict(id="msg-usage", model="<synthetic>", content=[dict(type="text", text="Current session: 23% used")]))
             result(value="Current session: 23% used", output=0)

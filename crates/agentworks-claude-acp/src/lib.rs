@@ -866,6 +866,17 @@ impl Session {
                     }
                     self.job_started(v, cx, bridge)?;
                 }
+                // Only the custom title (`/rename`) is reported here, never a generated one;
+                // the CLI also repeats an existing custom title at startup.
+                Some("session_title_changed") => {
+                    if let Some(title) = nonblank(&v["title"]) {
+                        update(
+                            cx,
+                            &self.id,
+                            json!({"sessionUpdate":"session_info_update","title":title}),
+                        )?;
+                    }
+                }
                 Some("task_progress") => self.job_progress(v, cx)?,
                 Some("task_updated") => self.job_patch(v, cx)?,
                 Some("background_tasks_changed") => self.jobs_level(v, cx)?,

@@ -86,7 +86,7 @@ Traefik example](HOSTING.md).
 
 ## Runtime limits
 
-- At most 12 active harnesses; saved inactive sessions do not count toward that limit.
+- At most 32 active harnesses by default (Settings → Models & permissions → Active sessions, 1–256); saved inactive sessions do not count toward that limit.
 - The browser loads the most recent 3,000 events / approximately 4 MB. The full event log stays in SQLite, without automatic transcript expiration.
 - One ACP adapter process per session. Cancellation clears pending approvals; stopping the server ends its harness processes and terminals.
 - File previews follow live paths rather than keeping artifact snapshots. Concurrent filesystem replacement is outside the trusted-project boundary.

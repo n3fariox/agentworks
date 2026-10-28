@@ -164,6 +164,7 @@ pub async fn scheduler(app: App) {
                 s.emit("continuation",json!({"decision":"workspace or harness unavailable; manual intervention required"}));
                 continue;
             }
+            let limit = crate::active_limit(&app);
             let active_capacity = sessions
                 .iter()
                 .filter(|other| {
@@ -189,7 +190,7 @@ pub async fn scheduler(app: App) {
                 continue;
             }
             if matches!(data.status.as_str(), "suspended" | "error") {
-                if active_capacity >= 12 {
+                if active_capacity >= limit {
                     continue;
                 }
                 // Clear deadline before opening: failed native resume must not loop or create context.

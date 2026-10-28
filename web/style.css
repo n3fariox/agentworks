@@ -180,12 +180,12 @@ body[data-code-wrap=scroll] .tool-card pre,body[data-code-wrap=scroll] .approval
   .session-menu{display:none;position:absolute;z-index:6;overflow-y:auto;background:var(--panel);border:1px solid #3b3d46;border-radius:12px;padding:6px 12px;box-shadow:0 8px 28px #0008}
   .session-menu.open{display:block}
   .session-menu{top:calc(100% - 4px);right:12px;width:min(300px,calc(100% - 24px));max-height:70dvh}
-  .session-menu>*{display:block;width:100%;margin:0}
-  .session-menu>[hidden]{display:none}
-  .session-menu>select{order:0;max-width:none;margin:6px 0;min-height:40px;font-size:14px}
-  .session-menu>.text-button{text-align:left;min-height:44px;font-size:14px;border-top:1px solid var(--border);border-radius:0}
+  .session-menu>*,.session-menu>.toolbar-group>*{display:block;width:100%;margin:0}
+  .session-menu>[hidden],.session-menu>.toolbar-group>[hidden]{display:none}
+  .session-menu>.toolbar-group>select{order:0;max-width:none;margin:6px 0;min-height:40px;font-size:14px}
+  .session-menu>.text-button,.session-menu>.toolbar-group>.text-button{text-align:left;min-height:44px;font-size:14px;border-top:1px solid var(--border);border-radius:0}
   .session-bar .session-menu .text-button,.composer-menu .composer-actions .text-button{font-size:14px;color:var(--text)}
-  .session-bar .session-menu>select,.session-menu>#session-project{width:100%;max-width:none;font-size:14px;padding:8px}
+  .session-bar .session-menu>.toolbar-group>select,.session-menu #session-project{width:100%;max-width:none;font-size:14px;padding:8px}
   .session-menu #lifecycle-menu{border-top:1px solid var(--border);font-size:14px}
   .session-menu #lifecycle-menu>summary{border:0;padding:12px 0;min-height:44px}
   .session-menu #project-path{order:0;white-space:normal;overflow-wrap:anywhere;border-top:1px solid var(--border);padding:10px 0 6px}

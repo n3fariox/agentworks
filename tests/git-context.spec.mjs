@@ -92,7 +92,7 @@ for(const mobile of [false,true])test(`Workspace dialog ${mobile?'mobile':'deskt
   await expect(page.locator('#messages')).toContainText('Local session, turn 1');
   await page.locator('#prompt').fill('Keep this draft');const before=sockets;
   if(mobile)await page.locator('#session-more').click();
-  await page.getByRole('button',{name:'Workspace info',exact:true}).click();
+  await page.getByRole('button',{name:'Workspace',exact:true}).click();
   await expect(page.getByRole('dialog',{name:'Workspace info'})).toBeVisible();
   await expect(page.locator('#workspace-info-status')).toHaveText('Detached HEAD');
   await expect(page.locator('#workspace-info-fields')).toContainText(nested);

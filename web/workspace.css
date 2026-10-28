@@ -102,3 +102,40 @@ body[data-workspace-view=host-terminal] .workspace-context{display:none}
 #workspace-session-area:has(#side-panel[data-tab=diff]:not([hidden])) #workspace-chat-column{display:none}
 #side-panel[data-tab=diff]{width:100%;min-width:0;max-width:none;flex:1;border-left:0}
 #side-panel[data-tab=diff] #side-panel-resize{display:none}
+
+/* Session toolbar, wider than phones: agent controls share one chip style,
+   views are matching toggles, and less-used session actions sit behind ⋯ at
+   the far right. Phones keep the session ⋯ popover from style.css. */
+.overflow-label{display:none}
+.lifecycle-label{display:block;font-size:11px;color:var(--muted);margin:2px 0 4px}
+.lifecycle-actions #session-project{width:100%;max-width:none;margin-bottom:6px}
+.lifecycle-actions hr{border:0;border-top:1px solid var(--border);margin:8px 0}
+@media(min-width:651px){
+  .toolbar-group{display:flex;align-items:center;gap:6px}
+  .toolbar-group:not(:has(>:not([hidden]))){display:none}
+  .session-bar :is(#model-picker,#permission-mode-picker){margin:0;height:30px;padding:0 8px;font-size:12px;border:1px solid var(--border);border-radius:7px;background:#1b1d22;color:var(--text)}
+  .session-config-options>summary{list-style:none;display:flex;align-items:center;height:30px;padding:0 10px;font-size:12px;border:1px solid var(--border);border-radius:7px;background:#1b1d22}
+  .session-config-options>summary::-webkit-details-marker{display:none}
+  .session-config-options>summary::after{content:'▾';margin-left:6px;color:var(--muted)}
+  .session-config-options[open]>summary{border-color:#5b5370}
+  .view-toggles{gap:2px;padding-left:10px;border-left:1px solid var(--border)}
+  .session-bar .view-toggles .text-button{font-size:12px;padding:6px 10px;border-radius:7px;color:#b9bec8}
+  .session-bar .view-toggles .text-button:hover{background:#202226;color:var(--text)}
+  .session-bar .view-toggles .text-button[aria-expanded=true]{background:#25212e;color:var(--accent)}
+  #lifecycle-menu{margin-left:auto}
+  #lifecycle-menu>summary{list-style:none;display:flex;align-items:center;justify-content:center;width:32px;min-height:0;height:30px;padding:0;font-size:16px}
+  #lifecycle-menu>summary::-webkit-details-marker{display:none}
+  #lifecycle-menu[open]>summary{border-color:#5b5370;background:#25212e}
+  #dismiss-lifecycle{display:none}
+  .lifecycle-actions{top:calc(100% + 6px)}
+  .lifecycle-actions .text-button{min-height:36px}
+}
+@media(max-width:650px){
+  .overflow-dots{display:none}
+  .overflow-label{display:inline}
+}
+
+/* Lines a chat.user formatter rewrote render as Markdown among the literal ones. */
+.message-body .user-formatted{white-space:normal}
+.message-body div.user-formatted>:first-child{margin-top:0}
+.message-body div.user-formatted>:last-child{margin-bottom:0}
