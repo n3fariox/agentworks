@@ -39,3 +39,4 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 
 rig-core = { version = "=0.45.0", default-features = false }
 rig-reqwest = { version = "=0.45.0", default-features = false }
+octocrab = { version = "0.54.6", default-features = false, features = ["default-client", "rustls", "rustls-aws-lc-rs", "timeout", "reqwest"] }

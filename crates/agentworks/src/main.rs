@@ -15,6 +15,7 @@ mod enrollment;
 mod fork;
 mod git_context;
 mod git_settings;
+mod github;
 mod goose_acp;
 mod host_usage;
 mod hosting;
@@ -98,6 +99,7 @@ struct App {
     notifications: notifications::Hub,
     hosts: Arc<hosts::Hosts>,
     host_usage: Arc<host_usage::Hub>,
+    github: Arc<github::Hub>,
 
     /// U-05 progress parser thread and installed scripts.
     progress: tool_progress::Hub,
@@ -665,6 +667,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         notifications: notifications::Hub::new(catalog),
         hosts: hosts::Hosts::new(),
         host_usage: Arc::new(host_usage::Hub::default()),
+        github: Arc::new(github::Hub::default()),
 
         progress,
     };
@@ -977,6 +980,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (
                     [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
                     include_str!("../../../web/diff.js"),
+                )
+            }),
+        )
+        .route(
+            "/github.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/github.js"),
                 )
             }),
         )
@@ -1312,6 +1324,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/{id}/workspace", get(git_context::workspace))
         .route("/api/sessions/{id}/worktree", get(worktree_cleanup::status))
         .route("/api/git/config", post(git_settings::repository))
+        .route(
+            "/api/github/connections",
+            get(github::connections).post(github::save_connection),
+        )
+        .route("/api/github/verify", post(github::verify))
+        .route(
+            "/api/sessions/{id}/github",
+            get(github::context).post(github::save_binding),
+        )
         .route(
             "/api/sessions/{id}/worktree/hooks/retry",
             post(git_settings::retry),

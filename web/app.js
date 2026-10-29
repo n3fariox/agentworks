@@ -6,6 +6,7 @@ import {appUrl, socketUrl, localState as localStorage, sessionState as sessionSt
 import {setupInboxDelivery} from './inbox-delivery.js';
 import {setupDiff} from './diff.js';
 import {setupWorktreeControls,setupPolicyEditor,setupGitSettings} from './worktree-controls.js';
+import {setupGithub} from './github.js';
 import {setupGitContext} from './git-context.js';
 import {setupWorktreeOwnership} from './worktree-ownership.js';
 import {setupControllers} from './controllers.js';
@@ -553,6 +554,7 @@ function selectSession(s) {
   clearTimeout(retryTimer);generation++;socket?.close();socket=null;connected=false;
   active=s;storedEvents=[];older={mode:'none',loading:false,error:''};currentUserSeq=null;promptRecovery.render();status=s.status;modelConfig=null;permissionModes=null;sessionConfig=null;availableCommands=[];commandsOpen=false;renderCommands();mentions.close();composerMenu.close();sessionMenu.close();resetTranscript();usageStatus.reset();inputQueue.reset();
   localStorage.setItem('agentworks-session',s.id);$('welcome').hidden=true;$('conversation').hidden=false;
+  github.sessionChanged();
   setTitle(s.title);$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;
   $('session-notice').hidden=true;document.body.classList.remove('menu-open');sidebarPin.close();sidebar();updateControls();connect(generation);
   workspace?.sessionSelected(s);sidePanel?.sessionChanged();sessionTerminal?.sessionChanged();promptResize.size();
@@ -1309,7 +1311,7 @@ async function deleteSession(session,providerHistory=false){
 }
 $('close-session').onclick=()=>deleteSession(active);
 $('delete-provider-history').onclick=()=>deleteSession(active,true);
-function closeActive(){generation++;socket?.close();clearTimeout(retryTimer);active=null;localStorage.removeItem('agentworks-session');$('conversation').hidden=true;$('welcome').hidden=false;setTitle('Overview');}
+function closeActive(){generation++;socket?.close();clearTimeout(retryTimer);active=null;github.sessionChanged();localStorage.removeItem('agentworks-session');$('conversation').hidden=true;$('welcome').hidden=false;setTitle('Overview');}
 function applyRoots(){
   $('project-roots').replaceChildren();
   for(const root of config.roots){const option=el('option');option.value=root;$('project-roots').append(option);}
@@ -1462,6 +1464,7 @@ init().catch(error=>toast('Cannot reach the local server: '+error.message));
 setupCommunication({api,getActive:()=>active,getSessions:()=>sessions,selectSession,toast,uuid});
 setupInboxDelivery({api,getActive:()=>active,toast,uuid});
 
+const github=setupGithub({api,getActive:()=>active});
 setupGitContext({api,getActive:()=>active});
 const worktreeOwnership=setupWorktreeOwnership({api,toast});
 setupControllers({api,toast,getProject:()=>editingProject});
