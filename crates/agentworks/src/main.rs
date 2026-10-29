@@ -634,11 +634,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
-                .join(".agentworks/catalog.json")
+                // Never the live service's store: install requires explicit paths in service.env.
+                .join(".agentworks/dev/catalog.json")
         });
     let db_path = std::env::var_os("AGENTWORKS_DB_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|| catalog_path.with_extension("sessions.sqlite3"));
+    // The catalog is not tied to the database path, so it needs its own lock.
+    if let Some(parent) = catalog_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _catalog_lock = store::exclusive(
+        &catalog_path.with_extension("json.lock"),
+        "Another Agentworks process is already using this catalog",
+    )
+    .map_err(|e| e.to_string())?;
     let mut store = store::Store::open(&db_path).map_err(|e| e.to_string())?;
     store
         .import_legacy(&db_path.with_file_name("legacy-sessions.json"))

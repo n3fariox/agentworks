@@ -18,7 +18,7 @@ AGENTWORKS_CATALOG_PATH=/absolute/existing/catalog.json
 AGENTWORKS_DB_PATH=/absolute/existing/sessions.sqlite3
 ```
 
-systemd rereads this file before every start, including the start that follows a restart request, so edits apply on the next restart.
+`AGENTWORKS_CATALOG_PATH` and `AGENTWORKS_DB_PATH` are required: the built-in default is reserved for development runs, and `--install` refuses an environment file without both. systemd rereads this file before every start, including the start that follows a restart request, so edits apply on the next restart.
 
 Then install from the build you want to run:
 
@@ -31,6 +31,7 @@ target/debug/agentworks service --install --restart  # also switch to it now
 
 - copies the running executable into the release directory as `agentworks-<sha256 prefix>` (mode 0500), or uses it in place if it is already there; `--release NAME` picks the name;
 - points the `current` and `stable` links in the release directory at it;
+- checks that `service.env` sets absolute `AGENTWORKS_CATALOG_PATH` and `AGENTWORKS_DB_PATH`;
 - renders `scripts/service/agentworks.service.in` (embedded in the binary) into `$XDG_CONFIG_HOME/systemd/user/agentworks.service`, keeping a differing previous unit as `agentworks.service.bak`;
 - runs `systemctl --user daemon-reload` and `enable`, and with `--restart` queues `systemctl --user restart --no-block` (safe to run from a session inside the service).
 

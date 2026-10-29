@@ -25,6 +25,19 @@ pub struct Metadata {
     pub host_id: String,
     pub location_id: String,
 }
+/// Holds an exclusive lock on `path` for as long as the returned file is open.
+pub fn exclusive(path: &Path, busy: &str) -> Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let lock = options.open(path)?;
+    lock.try_lock().map_err(|_| busy.to_string())?;
+    Ok(lock)
+}
 pub struct Store {
     pub(crate) connection: Connection,
     _lock: std::fs::File,
@@ -34,17 +47,10 @@ impl Store {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)?;
         }
-        let lock_path = path.with_extension("sqlite3.lock");
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true).write(true).create(true).truncate(false);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let lock = options.open(lock_path)?;
-        lock.try_lock()
-            .map_err(|_| "Another Agentworks process is already using this session database")?;
+        let lock = exclusive(
+            &path.with_extension("sqlite3.lock"),
+            "Another Agentworks process is already using this session database",
+        )?;
         let connection = Connection::open(path)?;
         #[cfg(unix)]
         {

@@ -17,7 +17,7 @@ Use **＋** beside Sessions to create a project, or create one in the new-sessio
 
 Sidebar view and collapse state are remembered per browser. Switching views preserves the selected session, stream connection, draft, and scroll position. Drafts are remembered per session in the browser tab. Running/waiting counts appear on the parent groups.
 
-Projects, settings, and host-local location IDs are saved in `.agentworks/catalog.json`; session metadata and transcripts are saved in `.agentworks/catalog.sessions.sqlite3`. `AGENTWORKS_CATALOG_PATH` can point to another catalog file. This catalog provides organization; file access still follows the server's allowed roots.
+Projects, settings, and host-local location IDs are saved in the catalog; session metadata and transcripts are saved in the session database beside it. Without `AGENTWORKS_CATALOG_PATH` and `AGENTWORKS_DB_PATH`, a server uses `.agentworks/dev/catalog.json` and `.agentworks/dev/catalog.sessions.sqlite3` in the checkout it was built from. That default is for development runs: `agentworks service --install` refuses a `service.env` that does not set both paths, so a test binary never opens the live store. Each server holds exclusive locks on the catalog (`catalog.json.lock`) and the database (`*.sqlite3.lock`); a second server pointed at either exits at startup. This catalog provides organization; file access still follows the server's allowed roots.
 
 ### Remote hosts
 

@@ -144,6 +144,24 @@ fn unit_path(path: &Path) -> Result<String> {
     Ok(text.into())
 }
 
+/// The built-in store location belongs to development runs, so the service must name its own.
+fn explicit_store(env: &str) -> Result<()> {
+    for key in ["AGENTWORKS_CATALOG_PATH", "AGENTWORKS_DB_PATH"] {
+        let value = env
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix(key)?.strip_prefix('='))
+            .last()
+            .map(|v| v.trim().trim_matches(|c| c == '"' || c == '\''));
+        if !value.is_some_and(|v| Path::new(v).is_absolute()) {
+            return Err(format!(
+                "service.env must set {key} to an absolute path; the built-in default is for development runs only"
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 fn private_dir(path: &Path) -> Result<PathBuf> {
     fs::DirBuilder::new()
         .recursive(true)
@@ -252,6 +270,11 @@ fn install(options: Install) -> Result<()> {
         .replace("@RELEASE_DIRECTORY@", &unit_path(&releases)?)
         .replace("@SERVICE_DIRECTORY@", &unit_path(&service)?);
 
+    let env = home()?.join(".config/agentworks/service.env");
+    let env =
+        fs::read_to_string(&env).map_err(|e| format!("Cannot read {}: {e}", env.display()))?;
+    explicit_store(&env)?;
+
     let release = install_release(&releases, options.release.as_deref())?;
     point(&releases, CURRENT, &release)?;
     point(&releases, STABLE, &release)?;
@@ -268,13 +291,6 @@ fn install(options: Install) -> Result<()> {
     fs::rename(&temp, &unit_file)?;
     println!("Unit: {}", unit_file.display());
 
-    let env = home()?.join(".config/agentworks/service.env");
-    if !env.exists() {
-        eprintln!(
-            "Warning: {} does not exist; the service will not start until it does.",
-            env.display()
-        );
-    }
     systemctl(&["daemon-reload"])?;
     systemctl(&["enable", UNIT])?;
     if options.restart {
@@ -336,6 +352,21 @@ mod tests {
             (Some("/r".into()), Some("/c".into()), Some("/w".into()))
         );
         assert!(!rendered.contains('@'));
+    }
+    #[test]
+    fn requires_explicit_store_paths() {
+        assert!(explicit_store("AGENTWORKS_PORT=4318\n").is_err());
+        assert!(explicit_store("AGENTWORKS_CATALOG_PATH=/c.json\n").is_err());
+        assert!(
+            explicit_store(
+                "AGENTWORKS_CATALOG_PATH=/c.json\nAGENTWORKS_DB_PATH=relative.sqlite3\n"
+            )
+            .is_err()
+        );
+        assert!(
+            explicit_store("AGENTWORKS_CATALOG_PATH=\"/c.json\"\nAGENTWORKS_DB_PATH=/d.sqlite3\n")
+                .is_ok()
+        );
     }
     #[test]
     fn rejects_paths_unit_files_would_expand() {
