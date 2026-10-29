@@ -42,7 +42,7 @@ async function startServer(){
   const env={...process.env,
     AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:'4413',AGENTWORKS_ROOTS:fixture,
     AGENTWORKS_CATALOG_PATH:join(fixture,'catalog.json'),AGENTWORKS_DB_PATH:join(fixture,'sessions.sqlite3'),AGENTWORKS_DEMO_STATE_DIR:join(fixture,'demo')};
-  for(const key of ['AGENTWORKS_SUPERVISOR_DIR','AGENTWORKS_SUPERVISOR_TOKEN','AGENTWORKS_RELEASE_DIR','AGENTWORKS_RELEASE'])delete env[key];
+  for(const key of ['AGENTWORKS_SERVICE_DIR','NOTIFY_SOCKET','AGENTWORKS_RELEASE_DIR','INVOCATION_ID'])delete env[key];
   server=spawn(resolve('target/debug/agentworks'),[],{env,stdio:['ignore','pipe','pipe']});
   server.on('error',e=>{log+=e.message;exited=true;});server.on('exit',()=>exited=true);
   for(const stream of [server.stdout,server.stderr])stream.on('data',s=>{log+=String(s);});

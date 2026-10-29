@@ -52,7 +52,6 @@ try{
   await run('node',['scripts/roles-smoke.mjs']);
   await run('node',['scripts/lifecycle-smoke.mjs']);
   await run('node',['scripts/project-lifecycle-smoke.mjs']);
-  await run('python3',['scripts/service/supervisor-test.py']);
   await run('node',['scripts/service-restart-smoke.mjs']);
   await run('node',['node_modules/@playwright/test/cli.js','test']);
   const config=await (await fetch(base+'/api/status')).json();

@@ -1,4 +1,5 @@
-//! Durable restart decisions. Only the external supervisor can launch the successor.
+//! Durable restart decisions. Only systemd launches the successor: the manager repoints
+//! the release directory's `current` link, writes a dispatch ticket and exits 75.
 use crate::*;
 use rusqlite::{OptionalExtension, params};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -6,18 +7,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub struct Manager {
     pub instance: String,
     blocked: AtomicBool,
+    ready: AtomicBool,
     fault: Mutex<Option<String>>,
     control: Option<PathBuf>,
     releases: Option<PathBuf>,
+    supervised: bool,
 }
 impl Manager {
     pub fn new() -> Self {
         Self {
             instance: Uuid::new_v4().to_string(),
             blocked: AtomicBool::new(false),
+            ready: AtomicBool::new(false),
             fault: Mutex::new(None),
-            control: std::env::var_os("AGENTWORKS_SUPERVISOR_DIR").map(PathBuf::from),
+            control: std::env::var_os("AGENTWORKS_SERVICE_DIR").map(PathBuf::from),
             releases: std::env::var_os("AGENTWORKS_RELEASE_DIR").map(PathBuf::from),
+            supervised: crate::service_unit::under_systemd(),
         }
     }
     #[cfg(test)]
@@ -25,28 +30,8 @@ impl Manager {
         self.blocked.store(true, Ordering::SeqCst);
     }
     fn supported(&self) -> bool {
-        let Some(dir) = &self.control else {
-            return false;
-        };
-        // A flag alone cannot turn an unsupervised invocation into a supported service.
-        let Ok(raw) = std::fs::read_to_string(dir.join("owner.json")) else {
-            return false;
-        };
-        let Ok(v) = serde_json::from_str::<Value>(&raw) else {
-            return false;
-        };
-        let parent = std::fs::read_to_string("/proc/self/status")
-            .unwrap_or_default()
-            .lines()
-            .find_map(|l| {
-                l.strip_prefix("PPid:")
-                    .and_then(|s| s.trim().parse::<u64>().ok())
-            });
-        v["heartbeat"]
-            .as_u64()
-            .is_some_and(|t| now().saturating_sub(t) < 2000)
-            && parent == v["pid"].as_u64()
-            && v["token"].as_str() == std::env::var("AGENTWORKS_SUPERVISOR_TOKEN").ok().as_deref()
+        // Environment alone cannot turn a direct invocation into a supported service.
+        self.supervised && self.control.is_some() && self.releases.is_some()
     }
     fn release(&self, name: Option<&str>) -> Result<PathBuf, String> {
         let root = self
@@ -112,6 +97,9 @@ struct Record {
     executable: PathBuf,
     #[serde(default)]
     handoff_phase: String,
+    /// The successor instance that loaded this request's dispatch ticket.
+    #[serde(default)]
+    ready_instance: String,
 }
 fn now() -> u64 {
     SystemTime::now()
@@ -145,6 +133,7 @@ fn pending(r: &Record) -> bool {
 }
 /// Fence admission before the process begins graceful adapter shutdown.
 pub fn begin_shutdown(app: &App) {
+    let _ = crate::service_unit::notify("STOPPING=1");
     app.host_usage.shutdown();
     app.restart.blocked.store(true, Ordering::SeqCst);
 }
@@ -161,18 +150,46 @@ pub fn allow_start(app: &App) -> Result<(), (StatusCode, String)> {
 }
 pub fn initialize(app: &App) -> Result<(), String> {
     app.store.lock().unwrap().connection.execute_batch("CREATE TABLE IF NOT EXISTS service_restarts(actor TEXT NOT NULL,request_id TEXT NOT NULL,payload TEXT NOT NULL,record TEXT NOT NULL,UNIQUE(actor,request_id));").map_err(|e|e.to_string())?;
+    // Every start consumes the ticket, so a later cold start never reuses it.
+    let ticket = app.restart.control.as_ref().and_then(|dir| {
+        let path = dir.join("dispatch.json");
+        let ticket = std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+        let _ = std::fs::remove_file(path);
+        ticket
+    });
+    let executable = std::env::current_exe().and_then(|p| p.canonicalize()).ok();
     for mut r in records(app).map_err(|e| e.1)? {
         if r.instance != app.restart.instance && pending(&r) {
+            let identity = format!("{}:{}", r.actor, r.request.request_id);
+            let ticketed = ticket.as_ref().is_some_and(|t| {
+                t["identity"] == identity
+                    && t["instance"] == r.instance
+                    && t["at"]
+                        .as_u64()
+                        .is_some_and(|at| now().saturating_sub(at) < 600_000)
+            });
             if r.phase == "dispatching"
+                && ticketed
                 && app.restart.supported()
-                && std::env::var("AGENTWORKS_RESTART_REQUEST").ok().as_deref()
-                    == Some(&format!("{}:{}", r.actor, r.request.request_id))
+                && executable.as_ref() == Some(&r.executable)
             {
                 r.phase = "ready".into();
                 r.detail = "Successor loaded saved state and is ready".into();
+                r.ready_instance = app.restart.instance.clone();
                 if r.request.handoff {
                     r.handoff_phase = "pending".into();
                 }
+            } else if r.phase == "dispatching" && ticketed {
+                r.phase = "uncertain".into();
+                r.detail = format!(
+                    "Release {} did not become ready; systemd started {} instead. Inspect journalctl --user -u agentworks before retrying",
+                    r.executable.display(),
+                    executable
+                        .as_ref()
+                        .map_or("an unknown executable".into(), |p| p.display().to_string())
+                );
             } else {
                 r.phase = "uncertain".into();
                 r.detail =
@@ -189,6 +206,29 @@ pub fn initialize(app: &App) -> Result<(), String> {
         save(app, &r).map_err(|e| e.1)?;
     }
     Ok(())
+}
+/// Called once the listener serves requests. Records this release as the rollback
+/// target, then tells systemd the start succeeded.
+pub fn ready(app: &App) {
+    if !app.restart.supported() {
+        return;
+    }
+    let stable = app.restart.release(None).and_then(|exe| {
+        crate::service_unit::point(
+            app.restart.releases.as_ref().unwrap(),
+            crate::service_unit::STABLE,
+            &exe,
+        )
+        .map_err(|e| e.to_string())
+    });
+    match crate::service_unit::notify("READY=1") {
+        Ok(true) if stable.is_ok() => app.restart.ready.store(true, Ordering::SeqCst),
+        Ok(_) => eprintln!(
+            "Agentworks: could not record the stable release: {}",
+            stable.err().unwrap_or_default()
+        ),
+        Err(e) => eprintln!("Agentworks: systemd readiness notification failed: {e}"),
+    }
 }
 fn activity(app: &App) -> Value {
     let sessions: Vec<_> = app.sessions.lock().unwrap().values().cloned().collect();
@@ -209,14 +249,8 @@ fn activity(app: &App) -> Value {
 }
 pub async fn status(State(app): State<App>) -> ApiResult {
     let rs = records(&app)?;
-    let external = app
-        .restart
-        .control
-        .as_ref()
-        .and_then(|p| std::fs::read(p.join("outcome.json")).ok())
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
     Ok(Json(
-        json!({"instanceId":app.restart.instance,"pid":std::process::id(),"executable":std::env::current_exe().ok(),"restartSupported":app.restart.supported(),"draining":app.restart.blocked.load(Ordering::SeqCst),"activity":activity(&app),"requests":rs.into_iter().take(20).collect::<Vec<_>>(),"supervisorOutcome":external,"managerError":*app.restart.fault.lock().unwrap()}),
+        json!({"instanceId":app.restart.instance,"pid":std::process::id(),"executable":std::env::current_exe().ok(),"restartSupported":app.restart.supported(),"ready":app.restart.ready.load(Ordering::SeqCst),"draining":app.restart.blocked.load(Ordering::SeqCst),"activity":activity(&app),"requests":rs.into_iter().take(20).collect::<Vec<_>>(),"managerError":*app.restart.fault.lock().unwrap()}),
     ))
 }
 pub async fn post(State(app): State<App>, Json(req): Json<Request>) -> ApiResult {
@@ -272,7 +306,7 @@ pub async fn request(app: &App, actor: &str, req: Request) -> Result<Value, (Sta
     if !app.restart.supported() {
         return Err(fail(
             StatusCode::CONFLICT,
-            "Restart requires the external Agentworks supervisor",
+            "Restart requires the Agentworks systemd user service (agentworks service --install)",
         ));
     }
     let executable = app
@@ -318,6 +352,7 @@ pub async fn request(app: &App, actor: &str, req: Request) -> Result<Value, (Sta
         detail: "Blocking new work; waiting for existing work".into(),
         executable,
         handoff_phase: String::new(),
+        ready_instance: String::new(),
     };
     save(app, &r)?;
     app.restart.blocked.store(true, Ordering::SeqCst);
@@ -376,7 +411,7 @@ fn backup(app: &App, r: &Record) -> Result<(), String> {
         .restart
         .control
         .as_ref()
-        .ok_or("Missing supervisor")?
+        .ok_or("Missing service directory")?
         .join("backups");
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     std::fs::DirBuilder::new()
@@ -446,7 +481,7 @@ async fn tick(app: &App) -> Result<(), (StatusCode, String)> {
                     .is_some_and(|s| communication::require(app, &s, "restart_service").is_ok());
             if !authorized || now() >= r.expires_at || !app.restart.supported() {
                 r.phase = "cancelled".into();
-                r.detail = "Expired, revoked or supervisor unavailable".into();
+                r.detail = "Expired, revoked or systemd service unavailable".into();
                 save(app, &r)?;
                 app.restart.blocked.store(false, Ordering::SeqCst);
                 continue;
@@ -502,9 +537,9 @@ async fn tick(app: &App) -> Result<(), (StatusCode, String)> {
                 }
                 backup(app, &r)?;
                 r.phase = "dispatching".into();
-                r.detail = "Backup verified; external supervisor owns restart".into();
+                r.detail = "Backup verified; systemd owns restart".into();
                 save(app, &r).map_err(|e| e.1)?;
-                let ticket = json!({"identity":format!("{}:{}",r.actor,r.request.request_id),"executable":r.executable,"instance":r.instance});
+                let ticket = json!({"identity":format!("{}:{}",r.actor,r.request.request_id),"executable":r.executable,"instance":r.instance,"at":now()});
                 let dir = app.restart.control.as_ref().unwrap();
                 let temp = dir.join("dispatch.tmp");
                 std::fs::write(&temp, serde_json::to_vec(&ticket).unwrap())
@@ -516,6 +551,13 @@ async fn tick(app: &App) -> Result<(), (StatusCode, String)> {
                 std::fs::File::open(dir)
                     .and_then(|f| f.sync_all())
                     .map_err(|e| e.to_string())?;
+                // systemd launches whatever `current` names once this process exits 75.
+                crate::service_unit::point(
+                    r.executable.parent().unwrap(),
+                    crate::service_unit::CURRENT,
+                    &r.executable,
+                )
+                .map_err(|e| e.to_string())?;
                 Ok(())
             })();
             if let Err(e) = result {
@@ -546,23 +588,10 @@ async fn tick(app: &App) -> Result<(), (StatusCode, String)> {
                 save(app, &r)?;
                 continue;
             }
-            // A model continuation requires the external readiness acknowledgment, including
-            // successful selector persistence. Backend boot alone does not prove supervision ready.
-            let receipt = app
-                .restart
-                .control
-                .as_ref()
-                .and_then(|p| std::fs::read(p.join("outcome.json")).ok())
-                .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
-            let identity = format!("{}:{}", r.actor, r.request.request_id);
-            let acknowledged = receipt.is_some_and(|v| {
-                v["phase"] == "ready"
-                    && v["identity"] == identity
-                    && v["instanceId"] == app.restart.instance
-                    && v["pid"] == std::process::id()
-                    && v["executable"] == json!(r.executable)
-            });
-            if !acknowledged {
+            // A model continuation waits until systemd has the readiness notification and
+            // this release is recorded as stable. Backend boot alone does not prove that.
+            if !app.restart.ready.load(Ordering::SeqCst) || r.ready_instance != app.restart.instance
+            {
                 continue;
             }
             let s = s.unwrap();
@@ -652,9 +681,11 @@ mod tests {
         let m = Manager {
             instance: "fixture".into(),
             blocked: AtomicBool::new(false),
+            ready: AtomicBool::new(false),
             fault: Mutex::new(None),
             control: None,
             releases: None,
+            supervised: false,
         };
         assert!(!m.supported());
         assert!(m.release(Some("/bin/sh")).is_err());
@@ -715,7 +746,7 @@ async fn validate_protocol(path: &std::path::Path) -> Result<(), String> {
             .map_err(|_| "Release metadata process failed")?;
         let v: Value = serde_json::from_slice(&bytes)
             .map_err(|_| "Release does not support supervised restart protocol")?;
-        if !status.success() || v["serviceProtocol"] != 1 {
+        if !status.success() || v["serviceProtocol"] != 2 {
             return Err("Incompatible supervised restart protocol");
         }
         Ok(())

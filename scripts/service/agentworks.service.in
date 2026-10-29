@@ -1,14 +1,24 @@
 [Unit]
-Description=Agentworks supervised local service
-StartLimitIntervalSec=300
-StartLimitBurst=3
+Description=Agentworks local service
+# Bounds crash loops. Deliberate restarts (exit 75) also count, so keep headroom.
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 WorkingDirectory=@WORKING_DIRECTORY@
+Environment=AGENTWORKS_RELEASE_DIR=@RELEASE_DIRECTORY@
+Environment=AGENTWORKS_SERVICE_DIR=@SERVICE_DIRECTORY@
 EnvironmentFile=%h/.config/agentworks/service.env
-ExecStart=/usr/bin/python3 @SUPERVISOR@ --release-dir @RELEASE_DIRECTORY@ --release @RELEASE@ --control-dir @CONTROL_DIRECTORY@
-Restart=no
+# `current` names the release to launch; a restart request repoints it, then exits 75.
+ExecStart=@RELEASE_DIRECTORY@/current
+# A release that fails before READY=1 is replaced by `stable`, the last release that was ready.
+ExecStopPost=-@RELEASE_DIRECTORY@/stable service --rollback
+RestartForceExitStatus=75
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=60
 KillMode=control-group
 KillSignal=SIGINT
 TimeoutStopSec=15

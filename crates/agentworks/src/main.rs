@@ -33,6 +33,7 @@ mod recovery;
 mod review_queue;
 mod roles;
 mod service_restart;
+mod service_unit;
 mod session_config;
 mod session_runtime;
 mod store;
@@ -575,8 +576,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(i32::from(result.is_err()));
     }
     if args.get(1).is_some_and(|a| a == "--service-protocol") {
-        println!("{}", json!({"serviceProtocol":1}));
+        // 2: restarts are launched by systemd through the release directory's `current` link.
+        println!("{}", json!({"serviceProtocol":2}));
         return Ok(());
+    }
+    if args.get(1).is_some_and(|a| a == "service") {
+        return service_unit::run(&args[2..]).map_err(|e| e.to_string().into());
     }
     if args.get(1).is_some_and(|a| a == "mcp") {
         return mcp::stdio().await.map_err(|e| e.to_string().into());
@@ -1338,6 +1343,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Persistent sessions: {}. Ctrl-C to stop.",
         db_path.display()
     );
+    // The listener is bound, so connections queue until serve() accepts them.
+    service_restart::ready(&app);
     axum::serve(listener, router)
         .with_graceful_shutdown(async move {
             #[cfg(unix)]

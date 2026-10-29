@@ -36,13 +36,13 @@ The readiness receipt means the supported database and catalog checks passed. It
 
 ## Deliberate operator promotion
 
-1. Inspect the failed supervisor receipt/journal and choose a compatible executable. Stage and validate the desired snapshot using the CLI above; inspect its catalog and saved session history.
-2. Before promotion, stop the user service/supervisor and verify no direct instance remains. Preserve the current catalog, database **and any WAL/SHM companions** separately for investigation. Do not overwrite or mix SQLite files from different generations.
-3. Deliberately set `AGENTWORKS_CATALOG_PATH` and `AGENTWORKS_DB_PATH` to the staged pair, or perform a separately reviewed offline replacement of both. Review the release selector and supervisor control receipts/tickets as described in [service recovery](SERVICE-RESTART.md). The CLI does not alter them.
+1. Inspect the service journal and choose a compatible executable. Stage and validate the desired snapshot using the CLI above; inspect its catalog and saved session history.
+2. Before promotion, stop the user service and verify no direct instance remains. Preserve the current catalog, database **and any WAL/SHM companions** separately for investigation. Do not overwrite or mix SQLite files from different generations.
+3. Deliberately set `AGENTWORKS_CATALOG_PATH` and `AGENTWORKS_DB_PATH` to the staged pair, or perform a separately reviewed offline replacement of both. Review the release directory's `current`/`stable` links and any dispatch ticket as described in [service recovery](SERVICE-RESTART.md). The CLI does not alter them.
 4. Before starting, review recovered grants and saved continuation/automation policies: a historical restore revives historical authorization and request/deduplication ledgers. Normal startup can act on still-authorized policies. Reconcile external effects and disable/revoke stale policies deliberately. The restore CLI itself runs no scheduler and never replays a prompt/tool.
 5. Start the selected compatible service manually and inspect readiness/history. Keep both the original live files and source snapshot until operator acceptance.
 
-Snapshots cover the catalog and SQLite application state, including transcript events, grants and durable ledgers. They do **not** include attachments, provider-native context files, credentials, Git repositories/worktrees, remote-host state, release executables or supervisor control state. Preserve those independently; provider resume depends on its native context still existing. There is no portable all-data export/import or automatic live rollback in this slice.
+Snapshots cover the catalog and SQLite application state, including transcript events, grants and durable ledgers. They do **not** include attachments, provider-native context files, credentials, Git repositories/worktrees, remote-host state, release executables or service directory state. Preserve those independently; provider resume depends on its native context still existing. There is no portable all-data export/import or automatic live rollback in this slice.
 
 Remaining product decisions: default/age/space retention policy and scheduling; attachment/transcript deletion semantics; portable archive coverage and encryption/off-host transport; promotion tooling and authorization reconciliation. These remain explicit follow-ups, outside automation-trigger work.
 

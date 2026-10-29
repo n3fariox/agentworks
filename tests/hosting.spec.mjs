@@ -31,7 +31,7 @@ async function start(enabled) {
   // Exercise the actual default, regardless of the parent process setting.
   if (enabled) delete env.AGENTWORKS_PWA;
   else env.AGENTWORKS_PWA = '0';
-  for (const key of ['AGENTWORKS_SUPERVISOR_DIR','AGENTWORKS_SUPERVISOR_TOKEN','AGENTWORKS_RELEASE_DIR','AGENTWORKS_RELEASE']) delete env[key];
+  for (const key of ['AGENTWORKS_SERVICE_DIR','NOTIFY_SOCKET','AGENTWORKS_RELEASE_DIR','INVOCATION_ID']) delete env[key];
   server = spawn(resolve('target/debug/agentworks'), [], {env, stdio: ['ignore', 'pipe', 'pipe']});
   let exited = false;
   server.on('exit', () => exited = true);
