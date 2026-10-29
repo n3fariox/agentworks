@@ -39,5 +39,7 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 
 rig-core = { version = "=0.45.0", default-features = false }
 rig-reqwest = { version = "=0.45.0", default-features = false }
+octocrab = { version = "0.54.6", default-features = false, features = ["default-client", "rustls", "rustls-aws-lc-rs", "timeout", "reqwest"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Environment", "Win32_System_Threading"] }

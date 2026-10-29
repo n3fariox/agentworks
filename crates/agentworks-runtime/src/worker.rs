@@ -62,6 +62,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         "mcpRelay": {"endpoint":mcp.address,"command":std::env::current_exe().map_err(|e| e.to_string())?},
         "workspace": true,
         "gitSettings": true,
+        "gitContext": true,
         "modelProviders": true,
         "sharedModelProviders": true,
         "worktreeCleanup": true,
@@ -628,6 +629,13 @@ async fn workspace_request(request: &Value) -> Result<Value, String> {
         git: serde_json::from_value(request["gitSettings"].clone()).unwrap_or_default(),
     };
     match request["operation"].as_str() {
+        Some("gitContext") => {
+            let cwd = context
+                .checked(request["cwd"].as_str().unwrap_or_default())
+                .map_err(|e| e.1)?;
+            let root = crate::worktrees::allowed(&context, &cwd).map_err(|e| e.1)?;
+            Ok(agentworks_workspace::git::inspect(&cwd, &root).await)
+        }
         Some("gitConfig") => {
             let cwd = context
                 .checked(request["cwd"].as_str().unwrap_or_default())
@@ -894,6 +902,48 @@ mod tests {
         let providers = available_providers(&env);
         assert!(providers.contains(&"claude-rust"));
         assert!(providers.contains(&"claude"));
+    }
+    #[tokio::test]
+    async fn git_context_is_bounded_and_reads_only_repository_metadata() {
+        let dir = std::env::temp_dir().join(format!("worker-git-context-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("repo")).unwrap();
+        std::fs::create_dir_all(dir.join("outside")).unwrap();
+        let dir = std::fs::canonicalize(dir).unwrap();
+        let repo = dir.join("repo");
+        let run = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .current_dir(&repo)
+                    .args(args)
+                    .env_remove("GIT_DIR")
+                    .env_remove("GIT_WORK_TREE")
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        };
+        run(&["init", "-b", "topic"]);
+        run(&[
+            "remote",
+            "add",
+            "origin",
+            "git@ghe.example.com:team/repo.git",
+        ]);
+        let result =
+            workspace_request(&json!({"operation":"gitContext","cwd":repo,"roots":[repo]}))
+                .await
+                .unwrap();
+        assert_eq!(result["branch"], "topic");
+        assert_eq!(result["origin"], "ghe.example.com:team/repo.git");
+        assert!(
+            workspace_request(
+                &json!({"operation":"gitContext","cwd":dir.join("outside"),"roots":[repo]})
+            )
+            .await
+            .is_err()
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[tokio::test]
     async fn directory_operations_stay_inside_host_roots() {

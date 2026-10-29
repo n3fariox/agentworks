@@ -59,6 +59,12 @@ async fn inspect_inner(cwd: &FsPath, root: &FsPath) -> Result<Value, &'static st
             return Err("Git commit is unavailable");
         }
     }
+    let origin = git(cwd, root, &["config", "--get", "remote.origin.url"]).await?;
+    let origin = if origin.0 {
+        safe_origin(&origin.1)
+    } else {
+        None
+    };
     let common_path = PathBuf::from(&common);
     let repository = if common_path.file_name().is_some_and(|n| n == ".git") {
         common_path.parent().unwrap_or(&common_path)
@@ -67,7 +73,7 @@ async fn inspect_inner(cwd: &FsPath, root: &FsPath) -> Result<Value, &'static st
     };
     Ok(
         json!({"cwd":cwd,"status":"git","repositoryRoot":repository,"worktreeRoot":worktree,
-        "gitDir":git_dir,"gitCommonDir":common,"branch":if branch.0 {Some(branch.1)} else {None},
+        "gitDir":git_dir,"gitCommonDir":common,"origin":origin,"branch":if branch.0 {Some(branch.1)} else {None},
         "head":if branch.0 {"branch"} else {"detached"},
         "commit":if commit.0 {Some(commit.1)} else {None},"linkedWorktree":git_dir != common,
         "message":if commit.0 {None} else {Some("No commits yet")}}),
@@ -174,4 +180,45 @@ pub async fn git_bounded_raw(
         child.wait().await.map_err(|_| "Git inspection failed")
     })?;
     Ok((status.success(), out, err, status.code()))
+}
+
+/// Only return credential-free network origins. Local paths and SSH aliases are
+/// not useful for host matching. Never expose HTTP userinfo, queries or fragments.
+fn safe_origin(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.contains(['\n', '\r']) {
+        return None;
+    }
+    if let Some((scheme, rest)) = raw.split_once("://") {
+        if !matches!(scheme, "https" | "http" | "ssh") {
+            return None;
+        }
+        let (authority, path) = rest.split_once('/')?;
+        let host = authority.rsplit('@').next()?;
+        let path = path.split(['?', '#']).next()?;
+        return Some(format!("{scheme}://{host}/{path}"));
+    }
+    let (authority, path) = raw.split_once(':')?;
+    let host = authority.rsplit('@').next()?;
+    if host.contains('/') || host.is_empty() {
+        return None;
+    }
+    Some(format!("{host}:{path}"))
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+    #[test]
+    fn origin_never_returns_http_credentials_or_queries() {
+        assert_eq!(
+            safe_origin("https://alice:secret@ghe.example.com/team/repo.git?token=secret#x"),
+            Some("https://ghe.example.com/team/repo.git".into())
+        );
+        assert_eq!(
+            safe_origin("ssh://git@ghe.example.com/team/repo.git"),
+            Some("ssh://ghe.example.com/team/repo.git".into())
+        );
+        assert_eq!(safe_origin("/local/path"), None);
+    }
 }

@@ -509,3 +509,12 @@ body[data-code-theme=github-light] .diff-remove{background:#ffebe9;color:#82071e
 body[data-code-theme=github-light] .diff-hunk{background:#ddf4ff;color:#0550ae}
 body[data-code-theme=github-light] .diff-meta{color:#57606a}
 body[data-code-theme=github-light] .source-line::before{color:#6e7781}
+
+/* GitHub context uses the same snapshots for all sessions on a repository. */
+.github-summary{align-self:flex-start;margin:0 18px 8px;max-width:calc(100% - 36px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#github-dialog{width:min(680px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overflow:auto}
+#github-dialog p,#github-dialog a,.github-connection{overflow-wrap:anywhere}
+.github-resource,.github-connection{padding:12px 0;border-top:1px solid var(--border,#333)}
+.github-resource p{margin:6px 0}.github-resource ul{padding-left:20px}
+.github-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}
+.github-toolbar input{min-width:80px;width:110px}.github-toolbar select{width:auto;max-width:100%}
