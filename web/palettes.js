@@ -170,6 +170,8 @@ export function actionItems(state={},handlers={}){
     if(handlers.archive)add('session-archive',active.archived?'Unarchive session':'Archive session','Current session','Stop the terminal and save its scrollback; harness work continues',handlers.archive);
     if(handlers.suspend)add('session-suspend','Suspend harness','Current session','Release the harness; history and workspace remain',handlers.suspend,
       !connected?{disabled:true,reason:'Not connected to this session yet'}:['suspended','closed'].includes(status)?{disabled:true,reason:'Already suspended'}:{});
+    if(handlers.restart)add('session-restart','Restart harness','Current session','Fresh harness process with the current shell environment; the conversation continues',handlers.restart,
+      !connected?{disabled:true,reason:'Not connected to this session yet'}:!['idle','suspended','error'].includes(status)?{disabled:true,reason:'Wait for the turn to finish'}:{});
     if(handlers.editProject&&active.projectId)add('project-edit','Edit project','Current session','Name, default location and communication role of this session’s project',handlers.editProject);
     add('session-agents','Agents and inbox','Current session','Access, messages and control activity',()=>handlers.agents?.());
     add('session-workspace','Workspace info','Current session','Directory, branch and commit',()=>handlers.workspaceInfo?.());

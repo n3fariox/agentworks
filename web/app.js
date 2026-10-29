@@ -970,6 +970,7 @@ function updateControls(){
   backgroundJobs.render();questions.refresh();
   $('archive-session').textContent=active?.archived?'Unarchive session':'Archive session';
   $('suspend-session').disabled=!connected||status==='suspended'||status==='closed';
+  $('restart-session').disabled=!connected||!['idle','suspended','error'].includes(status)||!!active?.providerHistoryDeletion;
   $('resume-session').hidden=!['suspended','error'].includes(status);
   $('resume-session').disabled=!connected||!!active?.providerHistoryDeletion;
   $('show-commands').disabled=!connected||status!=='idle';
@@ -1521,6 +1522,7 @@ setupPalettes({
     sessionSettings:()=>{if(active)$('session-settings').click();},
     archive:()=>{if(active)archiveSession(active);},
     suspend:()=>{if(active&&!$('suspend-session').disabled)$('suspend-session').click();},
+    restart:()=>{if(active&&!$('restart-session').disabled)$('restart-session').click();},
     editProject:()=>{const project=projects.find(p=>p.id===active?.projectId);if(project)openProjectDialog(project);},
     deleteEverywhere:()=>{if(active)deleteSession(active,true);},
     resume:()=>{if(active&&connected&&['suspended','error'].includes(status))resumeSession(active.id);},
@@ -1628,6 +1630,11 @@ setupContextMenu({onError:message=>toast(message),resolve(target){
 $('suspend-session').onclick=async()=>{
   const id=active?.id;if(!id)return;
   try{const updated=await api(`/api/sessions/${id}/suspend`,{method:'POST',body:'{}'});if(active?.id===id){Object.assign(active,updated);status=updated.status;updateControls();}await refreshSessions();}catch(e){toast(e.message);}
+};
+
+$('restart-session').onclick=async()=>{
+  const id=active?.id;if(!id)return;
+  try{await api(`/api/sessions/${id}/restart`,{method:'POST',body:'{}'});$('lifecycle-menu').open=false;toast('Restarting harness…','success');}catch(e){toast(e.message);}
 };
 
 $('dismiss-lifecycle').onclick=()=>{$('lifecycle-menu').open=false;$('lifecycle-menu').querySelector('summary').focus();};

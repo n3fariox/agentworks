@@ -92,6 +92,10 @@ Traefik example](HOSTING.md).
 - File previews follow live paths rather than keeping artifact snapshots. Concurrent filesystem replacement is outside the trusted-project boundary.
 - Image output, chat attachments, and supported question forms are available. Application login and native Windows delivery remain future work.
 
+## Harness environment
+
+Every harness process, local or remote, gets `AGENTWORKS_SESSION_ID` and `AGENTWORKS_SESSION_URI` (`agentworks://sessions/<id>`), so scripts, hooks and tools it runs can tell which session they serve. Remote workers older than this release omit them. The service's own configuration and process-manager state are withheld: listen address and port, roots, catalog and database paths, auth mode, model-provider directory, PWA switch, supervisor and release settings, and systemd variables such as `NOTIFY_SOCKET` and `INVOCATION_ID` (the full list is `SERVICE_ENVIRONMENT` in `crates/agentworks-runtime/src/provider.rs`). An Agentworks server or test started from inside a harness therefore does not inherit the live service's store, port or supervisor. Its defaults still apply: the default store is `.agentworks/` in the checkout the binary was built from, so a build in the checkout that also holds the live store opens that store unless the paths are set. Local harnesses also read your current login environment on each start; see [lifecycle](LIFECYCLE.md).
+
 ## Persistent sessions
 
 Session options show the adapter’s advertised settings, including reasoning effort, collaboration/plan mode, and fast mode where available. Settings can be changed while the session is idle. Select choices (including grouped choices) and boolean toggles are supported; unknown setting types are retained without an editable control. Model and permission selectors stay synchronized with provider changes. ACP v1 adapters that expose only session modes use `session/set_mode`. Additional settings are saved and reapplied on reconnect when still advertised.

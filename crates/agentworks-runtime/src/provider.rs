@@ -71,6 +71,54 @@ pub fn installed(provider: &str) -> bool {
     }
 }
 
+/// The service's own configuration and process-manager state. A harness never
+/// needs these, and inheriting them would let a server started by an agent open
+/// the live store, or let a child impersonate the service to systemd.
+pub const SERVICE_ENVIRONMENT: &[&str] = &[
+    "AGENTWORKS_BIND",
+    "AGENTWORKS_PORT",
+    "AGENTWORKS_ROOTS",
+    "AGENTWORKS_CATALOG_PATH",
+    "AGENTWORKS_DB_PATH",
+    "AGENTWORKS_AUTH_MODE",
+    "AGENTWORKS_PWA",
+    "AGENTWORKS_MODEL_PROVIDERS_DIR",
+    "AGENTWORKS_SUPERVISOR_DIR",
+    "AGENTWORKS_SUPERVISOR_TOKEN",
+    "AGENTWORKS_RELEASE_DIR",
+    "AGENTWORKS_RESTART_REQUEST",
+    "AGENTWORKS_OPENCODE_PATH",
+    "AGENTWORKS_MCP_ENDPOINT",
+    "AGENTWORKS_MCP_ENDPOINT_FILE",
+    "AGENTWORKS_MCP_TOKEN",
+    "AGENTWORKS_MCP_TOKEN_FILE",
+    "AGENTWORKS_LOGIN_ENV",
+    "NOTIFY_SOCKET",
+    "LISTEN_PID",
+    "LISTEN_FDS",
+    "LISTEN_FDNAMES",
+    "WATCHDOG_PID",
+    "WATCHDOG_USEC",
+    "INVOCATION_ID",
+    "JOURNAL_STREAM",
+    "SYSTEMD_EXEC_PID",
+    "MANAGERPID",
+    "MANAGERPIDFDID",
+    "MEMORY_PRESSURE_WATCH",
+    "MEMORY_PRESSURE_WRITE",
+];
+
+/// Tells a harness, and everything it runs, which Agentworks session it serves.
+pub fn session_environment(id: &str) -> [(&'static str, String); 2] {
+    [
+        ("AGENTWORKS_SESSION_ID", id.to_owned()),
+        (
+            "AGENTWORKS_SESSION_URI",
+            format!("agentworks://sessions/{id}"),
+        ),
+    ]
+}
+
 pub fn agent_config(provider: &str, api_key_mode: bool, host_profile: bool) -> AcpAgentConfig {
     let config = if provider == "demo" {
         AcpAgentConfig::new(std::env::current_exe().expect("executable path")).arg("demo-acp")
@@ -147,7 +195,9 @@ pub fn agent_config(provider: &str, api_key_mode: bool, host_profile: bool) -> A
         }
         config
     };
-    config
+    SERVICE_ENVIRONMENT
+        .iter()
+        .fold(config, |config, name| config.env_remove(*name))
 }
 
 pub fn prepare(provider: &str) -> std::io::Result<()> {
@@ -214,6 +264,30 @@ pub fn safe_error(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn every_harness_withholds_service_configuration() {
+        for provider in ["demo", "goose", "opencode", "claude", "codex-rust"] {
+            let config = agent_config(provider, false, false);
+            for name in [
+                "AGENTWORKS_DB_PATH",
+                "AGENTWORKS_SUPERVISOR_TOKEN",
+                "AGENTWORKS_MCP_TOKEN",
+                "AGENTWORKS_MCP_TOKEN_FILE",
+                "AGENTWORKS_MCP_ENDPOINT",
+                "AGENTWORKS_MCP_ENDPOINT_FILE",
+                "NOTIFY_SOCKET",
+            ] {
+                assert!(
+                    config.removed_environment().contains(name),
+                    "{provider} {name}"
+                );
+                assert!(
+                    !config.environment().contains_key(name),
+                    "{provider} {name}"
+                );
+            }
+        }
+    }
     #[test]
     fn existing_signin_inherits_credential_locations_and_does_not_force_api_keys() {
         for provider in ["claude", "claude-rust", "codex", "codex-rust"] {

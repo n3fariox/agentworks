@@ -1138,6 +1138,7 @@ mod tests {
                     mcp_endpoint: app.mcp_endpoint,
                     mcp_token: Mutex::new("fixture-only".into()),
                     mcp_refresh_pending: Default::default(),
+                    fresh_environment: Default::default(),
                     notifications: app.notifications.clone(),
                     progress: app.progress.clone(),
                 });

@@ -818,14 +818,17 @@ impl Live {
         cwd: &str,
         host_profile: bool,
     ) -> Result<(RemoteLines, Spawned), String> {
-        self.spawn_profile(provider, cwd, host_profile, None)
+        self.spawn_profile(provider, cwd, host_profile, None, None)
     }
+    /// `session` names the Agentworks session in the harness environment.
+    /// Older workers ignore it.
     pub fn spawn_profile(
         self: &Arc<Self>,
         provider: &str,
         cwd: &str,
         host_profile: bool,
         model_provider: Option<&crate::model_providers::Connection>,
+        session: Option<&str>,
     ) -> Result<(RemoteLines, Spawned), String> {
         if model_provider.is_some_and(|p| p.profile.kind == "chatgpt_codex")
             && self.worker["managedCodexAuth"] != true
@@ -844,7 +847,7 @@ impl Live {
             }
             channels.insert(channel, incoming_tx);
         }
-        let spawn = json!({"type":"spawn","channel":channel,"provider":provider,"cwd":cwd,"hostProfile":host_profile,"modelConnection":model_provider});
+        let spawn = json!({"type":"spawn","channel":channel,"provider":provider,"cwd":cwd,"hostProfile":host_profile,"modelConnection":model_provider,"session":session});
         if self.out.try_send(Message::text(spawn.to_string())).is_err() {
             self.channels.lock().unwrap().remove(&channel);
             return Err("The host disconnected.".into());

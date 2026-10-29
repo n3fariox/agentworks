@@ -23,6 +23,7 @@ mod inbox_delivery;
 mod input_queue;
 mod lifecycle;
 mod limit_resume;
+mod login_env;
 mod mcp;
 mod model_providers;
 mod native_rename;
@@ -121,6 +122,8 @@ struct Session {
     mcp_endpoint: std::net::SocketAddr,
     mcp_token: Mutex<String>,
     mcp_refresh_pending: std::sync::atomic::AtomicBool,
+    /// Restart harness: the next local start re-reads the login environment.
+    fresh_environment: std::sync::atomic::AtomicBool,
     /// U-02; cloned from the app hub so `emit` needs no global state.
     notifications: notifications::Hub,
     /// U-05; derived tool progress, fed from `emit`.
@@ -723,6 +726,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             mcp_endpoint: app.mcp_endpoint,
             mcp_token: Mutex::new(Uuid::new_v4().to_string()),
             mcp_refresh_pending: std::sync::atomic::AtomicBool::new(false),
+            fresh_environment: Default::default(),
             notifications: app.notifications.clone(),
             progress: app.progress.clone(),
         });
@@ -1263,6 +1267,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/{id}/stop", post(cancel))
         .route("/api/sessions/{id}/suspend", post(lifecycle::suspend))
         .route("/api/sessions/{id}/resume", post(resume))
+        .route("/api/sessions/{id}/restart", post(restart))
         .route("/api/sessions/{id}/model", post(set_model))
         .route(
             "/api/sessions/{id}/configuration",
@@ -2800,6 +2805,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
         mcp_endpoint: app.mcp_endpoint,
         mcp_token: Mutex::new(Uuid::new_v4().to_string()),
         mcp_refresh_pending: std::sync::atomic::AtomicBool::new(false),
+        fresh_environment: Default::default(),
         notifications: app.notifications.clone(),
         progress: app.progress.clone(),
     });
@@ -2937,6 +2943,38 @@ async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     let _run = app.run_lock.lock().await;
     service_restart::allow_start(&app)?;
     let s = session(&app, &id)?;
+    resume_locked(&app, &s).await
+}
+/// A fresh harness process for an idle session, which re-reads the login
+/// environment and harness configuration. Between turns only: a running turn
+/// would be cut short. A stopped session is simply resumed.
+async fn restart(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
+    let _run = app.run_lock.lock().await;
+    service_restart::allow_start(&app)?;
+    let s = session(&app, &id)?;
+    let running = {
+        let data = s.data.lock().unwrap();
+        match data.status.as_str() {
+            "idle" if !data.turn_active => true,
+            "suspended" | "error" => false,
+            _ => {
+                return Err(fail(
+                    StatusCode::CONFLICT,
+                    "Restart the harness between turns: wait for this turn to finish, or stop it",
+                ));
+            }
+        }
+    };
+    if running {
+        lifecycle::stop_worker(&s).await;
+        s.clear_approvals();
+        s.status("suspended");
+    }
+    s.fresh_environment
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    resume_locked(&app, &s).await
+}
+async fn resume_locked(app: &App, s: &Arc<Session>) -> ApiResult {
     if let Some(profile) = s.data.lock().unwrap().model_provider.as_deref() {
         agentworks_runtime::model_providers::authorize(profile, &s.host_id)
             .map_err(|e| fail(StatusCode::FORBIDDEN, e))?;
@@ -2981,7 +3019,7 @@ async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
             "This session's host is not connected, or no longer offers this harness",
         ));
     }
-    let limit = active_limit(&app);
+    let limit = active_limit(app);
     {
         let sessions = app.sessions.lock().unwrap();
         let mut data = s.data.lock().unwrap();
@@ -3015,9 +3053,9 @@ async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
         data.lifecycle.suspended = false;
         data.status = "resuming".into();
     }
-    lifecycle::stop_worker(&s).await;
+    lifecycle::stop_worker(s).await;
     s.status("resuming");
-    start_worker(&app, &s);
+    start_worker(app, s);
     Ok(Json(json!({"accepted":true})))
 }
 #[derive(Deserialize)]

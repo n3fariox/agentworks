@@ -468,7 +468,14 @@ async fn run_process(
             config.command().display()
         )
     })?;
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    for name in config.removed_environment() {
+        command.env_remove(name);
+    }
+    if let Some(id) = request["session"].as_str() {
+        command.envs(crate::provider::session_environment(id));
+    }
+    let mut child = command
         .args(config.arguments())
         .current_dir(&cwd)
         .envs(&env)

@@ -1,4 +1,6 @@
 use crate::{Approval, Session, use_api_key};
+#[cfg(test)]
+use agent_client_protocol::schema::v1::SessionNotification;
 use agent_client_protocol::schema::v1::{
     CancelNotification, ContentBlock, CreateElicitationRequest, CreateElicitationResponse,
     ElicitationAction, EmbeddedResource, EmbeddedResourceResource, ForkSessionRequest,
@@ -7,15 +9,13 @@ use agent_client_protocol::schema::v1::{
     SelectedPermissionOutcome, SessionConfigOptionValue, SetSessionConfigOptionRequest,
     SystemPrompt, TextContent, TextResourceContents,
 };
-use agent_client_protocol::{AcpAgent, Agent, Client, ConnectionTo, DynConnectTo};
-#[cfg(test)]
-use agent_client_protocol::{AcpAgentConfig, schema::v1::SessionNotification};
+use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo, DynConnectTo};
 use agentworks_runtime::acp::initialize_on;
 #[cfg(test)]
 use agentworks_runtime::acp::initialize_request;
 use agentworks_runtime::provider::parse_model_config;
 use agentworks_runtime::provider::{
-    agent_config, cli_provider, is_free_model, prepare, safe_error,
+    agent_config, cli_provider, is_free_model, prepare, safe_error, session_environment,
 };
 use agentworks_runtime::subagents::{Notification, Sessions};
 use serde_json::{Value, json};
@@ -76,8 +76,24 @@ fn profile_agent(
     provider: &str,
     host_profile: bool,
     profile: Option<&str>,
+    session: Option<&str>,
+    login: std::collections::BTreeMap<String, String>,
 ) -> Result<AcpAgent, String> {
-    let config = agent_config(provider, use_api_key(), host_profile);
+    let base = agent_config(provider, use_api_key(), host_profile);
+    // The login environment is the base layer: harness settings always win,
+    // and it cannot reintroduce service-only variables.
+    let removed = base.removed_environment();
+    let login = login
+        .into_iter()
+        .filter(|(name, _)| !removed.contains(name));
+    let config = removed.iter().fold(
+        AcpAgentConfig::new(base.command()).args(base.arguments().iter().cloned()),
+        |config, name| config.env_remove(name),
+    );
+    let config = config
+        .envs(login)
+        .envs(session.map(session_environment).into_iter().flatten())
+        .envs(base.environment().clone());
     let config = if let Some(id) = profile {
         if provider != "goose" {
             return Err("Model profiles require Goose".into());
@@ -345,13 +361,24 @@ pub async fn discover_on(
         let connection = profile
             .map(|id| agentworks_runtime::model_providers::connection(id, host_id))
             .transpose()?;
-        let (lines, guard) =
-            host.spawn_profile(provider, &cwd.to_string_lossy(), false, connection.as_ref())?;
+        let (lines, guard) = host.spawn_profile(
+            provider,
+            &cwd.to_string_lossy(),
+            false,
+            connection.as_ref(),
+            None,
+        )?;
         (DynConnectTo::new(lines), Some(guard))
     } else {
         prepare(provider)?;
         (
-            DynConnectTo::new(profile_agent(provider, false, profile)?),
+            DynConnectTo::new(profile_agent(
+                provider,
+                false,
+                profile,
+                None,
+                Default::default(),
+            )?),
             None,
         )
     };
@@ -421,11 +448,19 @@ pub async fn run(
     let import_pending = s.data.lock().unwrap().import_pending;
     let host_profile = s.data.lock().unwrap().opencode_host;
     let (transport, _spawn_guard): (DynConnectTo<Client>, _) = if s.host_id == "local" {
+        let login = if s.provider == "demo" {
+            Default::default()
+        } else {
+            let fresh = s.fresh_environment.swap(false, Ordering::SeqCst);
+            crate::login_env::changes(&s.cwd, fresh).await
+        };
         (
             DynConnectTo::new(profile_agent(
                 &s.provider,
                 host_profile,
                 s.data.lock().unwrap().model_provider.as_deref(),
+                Some(&s.id),
+                login,
             )?),
             None,
         )
@@ -443,6 +478,7 @@ pub async fn run(
             &s.cwd.to_string_lossy(),
             host_profile,
             connection.as_ref(),
+            Some(&s.id),
         )?;
         guard.bind_mcp(s.mcp_endpoint, s.mcp_token.lock().unwrap().clone());
         // Keep the worker process alive until this runtime returns or is cancelled.
@@ -921,6 +957,7 @@ mod fork_tests {
                 mcp_endpoint: "127.0.0.1:1".parse().unwrap(),
                 mcp_token: Mutex::new("child-token".into()),
                 mcp_refresh_pending: AtomicBool::new(false),
+                fresh_environment: Default::default(),
                 notifications: crate::notifications::Hub::new(catalog),
                 progress: crate::tool_progress::Hub::empty(),
             });
@@ -1049,6 +1086,7 @@ for line in sys.stdin:
                 mcp_endpoint: "127.0.0.1:1".parse().unwrap(),
                 mcp_token: Mutex::new("token".into()),
                 mcp_refresh_pending: AtomicBool::new(false),
+                fresh_environment: Default::default(),
                 notifications: crate::notifications::Hub::new(catalog),
                 progress: crate::tool_progress::Hub::empty(),
             });
@@ -1132,6 +1170,8 @@ pub async fn delete_provider_history(
                 &s.provider,
                 host_profile,
                 s.data.lock().unwrap().model_provider.as_deref(),
+                Some(&s.id),
+                Default::default(),
             )?),
             None,
         )
@@ -1149,6 +1189,7 @@ pub async fn delete_provider_history(
             &s.cwd.to_string_lossy(),
             host_profile,
             connection.as_ref(),
+            Some(&s.id),
         )?;
         (DynConnectTo::new(lines), Some(guard))
     };
