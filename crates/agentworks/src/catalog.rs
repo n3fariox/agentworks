@@ -67,6 +67,8 @@ pub const DEFAULT_ACTIVE_SESSIONS: u32 = 32;
 pub const MAX_ACTIVE_SESSIONS: u32 = 256;
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct CatalogData {
+    #[serde(default)]
+    pub github: crate::github::Config,
     pub projects: Vec<Project>,
     pub locations: Vec<Location>,
     #[serde(default)]
@@ -110,6 +112,11 @@ impl Catalog {
     ) -> io::Result<()> {
         let mut data = self.data.clone();
         data.settings.notifications = notifications;
+        self.save(data)
+    }
+    pub fn github(&mut self, github: crate::github::Config) -> io::Result<()> {
+        let mut data = self.data.clone();
+        data.github = github;
         self.save(data)
     }
     pub fn contains(&self, id: &str) -> bool {

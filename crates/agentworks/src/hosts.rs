@@ -451,3 +451,25 @@ pub async fn reconnect(State(app): State<App>, Path(id): Path<String>) -> ApiRes
     app.hosts.start(host.clone());
     Ok(Json(view(&app.hosts, &host)))
 }
+
+/// Read Git metadata remotely; GitHub authentication always stays on the server.
+pub(crate) async fn git_context(
+    app: &App,
+    host: &str,
+    cwd: &str,
+) -> Result<Value, (StatusCode, String)> {
+    let roots = host_roots(app, host)?;
+    let live = app
+        .hosts
+        .live(host)
+        .ok_or_else(|| fail(StatusCode::CONFLICT, "Host is not connected"))?;
+    if live.worker()["gitContext"] != true {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "Update this host's worker to enable Git context",
+        ));
+    }
+    live.workspace(json!({"operation":"gitContext","cwd":cwd,"roots":roots}))
+        .await
+        .map_err(|_| fail(StatusCode::CONFLICT, "Remote Git context is unavailable"))
+}

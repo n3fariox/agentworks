@@ -9,7 +9,11 @@ use axum::{
 
 pub async fn workspace(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     let s = session(&app, &id)?;
-    crate::local_only(&s)?;
+    if s.host_id != "local" {
+        return crate::hosts::git_context(&app, &s.host_id, &s.cwd.to_string_lossy())
+            .await
+            .map(Json);
+    }
     let roots = effective_roots(&app);
     // Recheck current roots and symlinks without rejecting a removed saved directory.
     let cwd = tokio::fs::canonicalize(&s.cwd).await.ok();

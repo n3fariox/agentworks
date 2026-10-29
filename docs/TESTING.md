@@ -39,6 +39,8 @@ The smoke test uses the demo agent to exercise ACP streaming, multiple turns, di
 
 Compact tool snapshots, tool bodies on demand, reconnect resume and tool headers: `npm run test:tool-bodies` (smoke against `AGENTWORKS_URL`, then an isolated browser check on port 4458).
 
+`npm run test:github` owns port 4541 and disposable repositories, a fake main-host `gh`, and an isolated catalog/database. It covers account/host selection, worktrees, persistence and desktop/mobile GitHub context without live GitHub access.
+
 For browser checks:
 
 ```bash
