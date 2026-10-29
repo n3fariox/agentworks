@@ -50,8 +50,49 @@ fn register<'v>(
     Ok(NoneType)
 }
 
+fn badge_effect<'v>(eval: &mut Evaluator<'v, '_, '_>, effect: serde_json::Value) -> anyhow::Result<NoneType> {
+    let extra = eval
+        .module()
+        .extra_value()
+        .and_then(TupleRef::from_value)
+        .ok_or_else(|| anyhow::anyhow!("badge setters are only available inside a running hook"))?;
+    anyhow::ensure!(
+        extra.content()[0].unpack_str() == Some("badge_effects"),
+        "missing badge effect buffer"
+    );
+    let values = ListRef::from_value(extra.content()[1]).unwrap();
+    anyhow::ensure!(values.len() < 16, "at most 16 badge changes per hook call");
+    let heap = eval.heap();
+    let mut next: Vec<_> = values.iter().collect();
+    next.push(heap.alloc(effect));
+    eval.module()
+        .set_extra_value(heap.alloc(AllocTuple([heap.alloc("badge_effects"), heap.alloc(AllocList(next))])));
+    Ok(NoneType)
+}
+
 #[starlark_module]
 pub(super) fn registration_helpers(builder: &mut GlobalsBuilder) {
+    /// Set/update this script's named badge on the current hook's session.
+    fn set_badge<'v>(
+        #[starlark(require = pos)] id: &str,
+        #[starlark(require = pos)] label: &str,
+        #[starlark(require = named, default = "neutral")] tone: &str,
+        #[starlark(require = named, default = "")] tooltip: &str,
+        #[starlark(require = named, default = NoneOr::None)] url: NoneOr<&str>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        badge_effect(
+            eval,
+            serde_json::json!({"op":"set","id":id,"label":label,"tone":tone,"tooltip":tooltip,"url":url.into_option()}),
+        )
+    }
+    fn clear_badge<'v>(
+        #[starlark(require = pos)] id: &str,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        badge_effect(eval, serde_json::json!({"op":"clear","id":id}))
+    }
+
     fn register_progress<'v>(
         #[starlark(require = pos)] function: Value<'v>,
         #[starlark(require = named)] command_pattern: &str,

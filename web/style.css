@@ -511,10 +511,24 @@ body[data-code-theme=github-light] .diff-meta{color:#57606a}
 body[data-code-theme=github-light] .source-line::before{color:#6e7781}
 
 /* GitHub context uses the same snapshots for all sessions on a repository. */
-.github-summary{align-self:flex-start;margin:0 18px 8px;max-width:calc(100% - 36px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.github-summary{max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #github-dialog{width:min(680px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overflow:auto}
 #github-dialog p,#github-dialog a,.github-connection{overflow-wrap:anywhere}
 .github-resource,.github-connection{padding:12px 0;border-top:1px solid var(--border,#333)}
 .github-resource p{margin:6px 0}.github-resource ul{padding-left:20px}
 .github-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}
 .github-toolbar input{min-width:80px;width:110px}.github-toolbar select{width:auto;max-width:100%}
+
+/* A shared third line for all session badge providers; absent means no space. */
+.session-badges{display:flex;align-items:center;flex-wrap:wrap;gap:4px;margin-top:6px}
+.session-badges:empty{display:none}
+.session-badge{display:inline-block;padding:1px 4px;border-radius:4px;border:1px solid #555b65;background:#272b31;color:#bfc5cf;font-size:9px;line-height:15px;white-space:nowrap}
+.session-badge.success{background:#173b2c;border-color:#31654b;color:#a1e4b7}
+.session-badge.warning{background:#403319;border-color:#79602d;color:#f0d38a}
+.session-badge.danger{background:#44252b;border-color:#854650;color:#ffb6bf}
+.session-badge.info{background:#1c3448;border-color:#3b6585;color:#aed7fa}
+
+.session-select{display:block;width:100%;padding:0;border:0;border-radius:3px;background:transparent;color:inherit;text-align:left;min-width:0}
+.session-badge[href]{cursor:pointer;text-decoration:none}
+.session-badge[href]:hover{text-decoration:underline;filter:brightness(1.15)}
+.session-badge[href]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}

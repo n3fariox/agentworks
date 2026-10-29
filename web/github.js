@@ -1,8 +1,10 @@
+import {setupSessionBadges} from './session-badges.js';
 // All GitHub credentials stay on the main host. This module receives only
 // connection identities, Git metadata and normalized resource snapshots.
 export function setupGithub({api,getActive}) {
   const $=id=>document.getElementById(id),button=$('session-github'),dialog=$('github-dialog');
   let generation=0,view=null,busy=false,settingsGeneration=0;
+  const browser=setupSessionBadges({api});
   const node=(tag,text,className)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(className)n.className=className;return n;};
   function link(text,url){
     const a=node('a',text);try{const parsed=new URL(url);if(parsed.protocol==='https:'&&!parsed.username&&!parsed.password){a.href=parsed.href;a.target='_blank';a.rel='noopener noreferrer';}}catch{}return a;
@@ -22,7 +24,7 @@ export function setupGithub({api,getActive}) {
     const gen=++generation;busy=true;button.disabled=true;
     if(dialog.open)$('github-status').textContent='Loading GitHub context…';
     try{
-      const data=await api(`${endpoint()}${refresh?'?refresh=true':''}`);
+      const data=await browser.read(active.id,refresh);
       if(gen!==generation||getActive()?.id!==active.id)return;
       view=data;button.textContent=statusText(data);button.title=data.message||'GitHub repository, pull requests, issues and checks';
       button.dataset.status=data.status;button.hidden=data.status==='no_origin';
@@ -58,7 +60,8 @@ export function setupGithub({api,getActive}) {
       if(resource.kind==='pullRequest')state.push(resource.headMatches?'Matches checkout commit':'PR head differs from checkout');
       card.append(node('p',state.filter(Boolean).join(' · '),'field-note'));
       if(resource.kind==='pullRequest'){
-        card.append(node('p',`PR head ${resource.headSha?.slice(0,10)||'unknown'} → ${resource.baseBranch||'unknown'} · Reviews: ${resource.reviewDecision||'unknown'}`,'field-note'));
+        const reviewState=resource.reviewSummary?.state||resource.reviewDecision||'UNKNOWN',reviewLabel={APPROVED:'Approved',CHANGES_REQUESTED:'Changes requested',REVIEW_REQUIRED:'Awaiting review',NONE:'Not requested',UNKNOWN:'Unknown'}[reviewState]||'Unknown';
+        card.append(node('p',`PR head ${resource.headSha?.slice(0,10)||'unknown'} → ${resource.baseBranch||'unknown'} · Reviews: ${reviewLabel}`,'field-note'));
         const checks=resource.checks;
         card.append(node('p',`Checks for PR head: ${checks.state||'unknown'}${checks.complete?'':' · Details incomplete or unavailable'}`,'field-note'));
         const list=node('ul');
@@ -71,7 +74,7 @@ export function setupGithub({api,getActive}) {
   }
   async function saveLinks(links){
     const active=getActive();if(!active)return;const id=active.id;
-    try{await api(endpoint(),{method:'POST',body:JSON.stringify({links})});if(getActive()?.id===id)await load();}
+    try{await api(endpoint(),{method:'POST',body:JSON.stringify({links})});browser.invalidate();if(getActive()?.id===id)await load();}
     catch(error){if(getActive()?.id===id)$('github-status').textContent=error.message;}
   }
   button.onclick=()=>{dialog.showModal();if(view)render();else load();};
@@ -79,7 +82,7 @@ export function setupGithub({api,getActive}) {
   $('github-refresh').onclick=()=>load(true);
   $('github-account-save').onclick=async()=>{
     const active=getActive();if(!active)return;const id=active.id;
-    try{await api(endpoint(),{method:'POST',body:JSON.stringify({login:$('github-account-select').value})});if(getActive()?.id===id)await load();}
+    try{await api(endpoint(),{method:'POST',body:JSON.stringify({login:$('github-account-select').value})});browser.invalidate();if(getActive()?.id===id)await load();}
     catch(error){if(getActive()?.id===id)$('github-status').textContent=error.message;}
   };
   $('github-link-add').onclick=()=>{
@@ -99,7 +102,7 @@ export function setupGithub({api,getActive}) {
         const input=node('input');input.type='checkbox';input.checked=connection.enabled;
         label.append(input,document.createTextNode(`${connection.host} · ${connection.login}`));
         const state=node('p',`${connection.state} · ${connection.apiBase}`,'field-note');
-        input.onchange=async()=>{input.disabled=true;try{await api('/api/github/connections',{method:'POST',body:JSON.stringify({host:connection.host,login:connection.login,enabled:input.checked})});state.textContent=input.checked?'Enabled':'Disabled';sessionChanged();}catch(error){input.checked=!input.checked;state.textContent=error.message;}finally{input.disabled=false;}};
+        input.onchange=async()=>{input.disabled=true;try{await api('/api/github/connections',{method:'POST',body:JSON.stringify({host:connection.host,login:connection.login,enabled:input.checked})});state.textContent=input.checked?'Enabled':'Disabled';browser.invalidate();sessionChanged();}catch(error){input.checked=!input.checked;state.textContent=error.message;}finally{input.disabled=false;}};
         const verify=node('button','Verify identity','text-button');verify.type='button';verify.onclick=async()=>{verify.disabled=true;try{const result=await api('/api/github/verify',{method:'POST',body:JSON.stringify({host:connection.host,login:connection.login,enabled:true})});state.textContent=result.ok?`Verified ${result.login} on ${result.host}`:result.message;}catch(error){state.textContent=error.message;}finally{verify.disabled=false;}};
         row.append(label,state,verify);rows.append(row);
       }
@@ -109,5 +112,5 @@ export function setupGithub({api,getActive}) {
   $('settings-tab-github').addEventListener('click',()=>loadSettings());
   function sessionChanged(){generation++;view=null;busy=false;button.disabled=false;button.hidden=!getActive();button.textContent='GitHub';if(dialog.open)dialog.close();if(getActive())load();}
   setInterval(()=>{if(getActive()&&!document.hidden&&!busy)load();},60000);
-  return {sessionChanged};
+  return {sessionChanged,refreshBadges:browser.sync,updateBadges:browser.update};
 }

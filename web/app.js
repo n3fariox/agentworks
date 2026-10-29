@@ -462,11 +462,14 @@ function treeGroup(key,label,items,{host=null,projectId=null,level=0,archived=fa
   return {group,children};
 }
 function sessionButton(s){
-  const button=el('button','session-item'+(active?.id===s.id&&document.body.dataset.workspaceView!=='host-terminal'?' selected':''));button.type='button';button.dataset.sessionId=s.id;button.title=s.cwd;
-  button.append(el('span','session-icon',icons[s.provider]));
-  const copy=el('span','session-copy');copy.append(el('strong','',s.title),el('small','',`${s.archived?'Archived · ':''}${s.automation?'Automation · ':''}${labels[s.provider]}${s.model?' · '+s.model:''}`));
-  button.append(copy,el('span','status-dot '+s.status));button.onclick=()=>selectSession(s);
-  if(active?.id===s.id)button.setAttribute('aria-current','true');return button;
+  const row=el('div','session-item'+(active?.id===s.id&&document.body.dataset.workspaceView!=='host-terminal'?' selected':''));row.dataset.sessionId=s.id;row.title=s.cwd;
+  row.append(el('span','session-icon',icons[s.provider]));
+  const copy=el('span','session-copy'),select=el('button','session-select'),sessionBadges=el('span','session-badges');select.type='button';
+  select.append(el('strong','',s.title),el('small','',`${s.archived?'Archived · ':''}${s.automation?'Automation · ':''}${labels[s.provider]}${s.model?' · '+s.model:''}`));
+  copy.append(select,sessionBadges);row.append(copy,el('span','status-dot '+s.status));
+  select.onclick=()=>selectSession(s);
+  row.onclick=event=>{if(!event.target.closest('a,button'))selectSession(s);};
+  if(active?.id===s.id){row.setAttribute('aria-current','true');select.setAttribute('aria-current','true');}return row;
 }
 // Keep the session browser's model label in step with live model changes.
 function syncModelLabel(){
@@ -520,7 +523,7 @@ function sidebar(){
       area.append(top.group);
     }
   }
-  area.scrollTop=scroll;updateProjectControls();
+  area.scrollTop=scroll;updateProjectControls();github.refreshBadges();
 }
 async function refreshSessions(){
   const [list,catalog]=await Promise.all([api('/api/sessions?archived=all'),api('/api/catalog')]);
@@ -579,6 +582,7 @@ function connect(gen){
   ws.onmessage=event=>{
     if(gen!==generation)return;
     const e=JSON.parse(event.data);
+    if(e.kind==='session_badges'){github.updateBadges(active.id,e.data);return;}
     if(e.kind==='input_queue'){inputQueue.set(e.data);updateControls();return;}
     if(e.kind==='tool_progress'){if(applyToolProgress(tools.get(e.data.toolCallId),e.data,e.seq))scheduleDraw();return;}
     if(e.kind==='tool_header'){
@@ -1599,10 +1603,11 @@ async function archiveSession(session){
 $('archive-session').onclick=()=>archiveSession(active);
 $('fork-session').onclick=()=>openFork();
 setupContextMenu({onError:message=>toast(message),resolve(target){
+  if(target.closest('a[href]'))return null;
   const row=target.closest('.session-item');
   if(row){
     const session=sessions.find(s=>s.id===row.dataset.sessionId);if(!session)return null;
-    return {origin:row,label:`Actions for ${session.title}`,actions:[
+    return {origin:row,focus:row.querySelector('.session-select')||row,label:`Actions for ${session.title}`,actions:[
       {label:'Fork session…',run:()=>openFork(session)},
       {label:session.archived?'Unarchive session':'Archive session',run:()=>archiveSession(session)},
       {label:'Delete history…',danger:true,run:()=>deleteSession(session)},

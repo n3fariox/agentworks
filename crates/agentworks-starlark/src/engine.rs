@@ -14,6 +14,7 @@
 mod registration;
 pub use registration::{HookInfo, RegisteredScript};
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
@@ -29,6 +30,16 @@ use starlark::typing::{AstModuleTypecheck, Interface, Ty};
 use starlark::values::FrozenHeapName;
 use starlark::values::OwnedFrozenValue;
 use starlark::values::none::NoneOr;
+
+// Host-bound session context. Scripts never receive a target-session argument.
+thread_local! { static BADGE_SESSION: RefCell<Option<String>> = const { RefCell::new(None) }; }
+pub struct BadgeScope(Option<String>, std::marker::PhantomData<std::rc::Rc<()>>);
+impl Drop for BadgeScope {
+    fn drop(&mut self) {
+        BADGE_SESSION.with(|value| *value.borrow_mut() = self.0.take());
+    }
+}
+pub type BadgeSink = Arc<dyn Fn(&str, &str, &str, &[Json]) + Send + Sync>;
 
 pub const HOST_API_VERSION: u32 = 1;
 const PROGRESS_PRELUDE: &str = "@agentworks//progress.star";
@@ -412,6 +423,7 @@ pub struct CallStats {
 }
 
 pub struct Engine {
+    badge_sink: Mutex<Option<BadgeSink>>,
     parser_globals: Globals,
     workflow_globals: Globals,
     message_globals: Globals,
@@ -440,6 +452,7 @@ impl Engine {
         let parser_prelude = prelude(Capability::Parser, &parser_globals)?;
         let workflow_prelude = prelude(Capability::Workflow, &workflow_globals)?;
         Ok(Engine {
+            badge_sink: Mutex::new(None),
             parser_globals,
             workflow_globals,
             message_globals,
@@ -454,6 +467,32 @@ impl Engine {
             hook_globals: globals(Capability::Parser),
             hook_cache: Mutex::default(),
         })
+    }
+
+    pub fn set_badge_sink(&self, sink: BadgeSink) {
+        *self.badge_sink.lock().unwrap() = Some(sink);
+    }
+    pub fn badge_scope(&self, session: Option<&str>) -> BadgeScope {
+        BadgeScope(
+            BADGE_SESSION.with(|value| value.replace(session.map(str::to_owned))),
+            std::marker::PhantomData,
+        )
+    }
+    /// Call only after the host has accepted the hook's return value.
+    pub fn publish_badge_effects(&self, script: &Compiled, effects: &[Json]) {
+        if effects.is_empty() {
+            return;
+        }
+        let target = BADGE_SESSION.with(|value| value.borrow().clone());
+        let sink = self.badge_sink.lock().unwrap().clone();
+        if let (Some(session), Some(sink)) = (target, sink) {
+            sink(&session, &script.name, &script.hash, effects);
+        }
+    }
+    pub fn publish_badges(&self, script: &Compiled, value: &Json) {
+        if let Some(effects) = value["badgeEffects"].as_array() {
+            self.publish_badge_effects(script, effects);
+        }
     }
 
     fn parts(&self, capability: Capability) -> (&Globals, &Prelude) {
@@ -659,6 +698,12 @@ impl Engine {
         let started = Instant::now();
         let deadline = started + limits.max_wall;
         Module::with_temp_heap(|module| {
+            use starlark::values::{list::AllocList, tuple::AllocTuple};
+            let heap = module.heap();
+            module.set_extra_value(heap.alloc(AllocTuple([
+                heap.alloc("badge_effects"),
+                heap.alloc(AllocList(Vec::<starlark::values::Value>::new())),
+            ])));
             let mut eval = Evaluator::new(&module);
             let setup = |e: anyhow::Error| script.diagnostic(DiagnosticKind::Runtime, e);
             eval.set_max_tick_count(limits.max_ticks).map_err(setup)?;
@@ -745,7 +790,23 @@ impl Engine {
                 }
                 committed
             };
-            let json = serde_json::json!({"result": result, "state": committed});
+            let mut json = serde_json::json!({"result": result, "state": committed});
+            if first["provisional"] != true {
+                use starlark::values::tuple::TupleRef;
+                let extra = module
+                    .extra_value()
+                    .and_then(TupleRef::from_value)
+                    .expect("host effect buffer");
+                let effects = extra.content()[1]
+                    .to_json_value()
+                    .map_err(|error| script.diagnostic(DiagnosticKind::InvalidResult, error))?;
+                if effects.as_array().is_some_and(|values| !values.is_empty()) {
+                    if effects.to_string().len() + json["result"].to_string().len() > limits.max_output_bytes {
+                        return Err(script.diagnostic(DiagnosticKind::Limit, "badge effects exceed output limit"));
+                    }
+                    json["badgeEffects"] = effects;
+                }
+            }
             Ok((
                 json,
                 CallStats {

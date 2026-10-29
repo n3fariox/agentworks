@@ -220,11 +220,14 @@ impl HeaderTracker {
                 return None;
             }
             match self.engine.call(script, &context, &summary) {
-                Ok((value, _)) => value["result"]
-                    .as_str()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(|s| bounded(s, MAX_HEADER_CHARS)),
+                Ok((value, _)) => {
+                    self.engine.publish_badges(script, &value);
+                    value["result"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(|s| bounded(s, MAX_HEADER_CHARS))
+                }
                 Err(error) => {
                     if self
                         .failed

@@ -114,6 +114,11 @@ pub fn seed(db: &Connection) -> rusqlite::Result<()> {
         )?;
     }
     tx.commit()?;
+    db.execute("DELETE FROM script_order WHERE name IN (SELECT name FROM scripts WHERE name='github_badges.star' AND builtin=1)",[])?;
+    db.execute(
+        "DELETE FROM scripts WHERE name='github_badges.star' AND builtin=1",
+        [],
+    )?;
     for (name, source) in BUILTIN {
         let hash = content_hash(source);
         let existing: Option<(bool, String)> = db
@@ -324,6 +329,7 @@ impl Tracker {
 
 enum Message {
     Update {
+        commit_badges: bool,
         session: String,
         provider: String,
         cwd: String,
@@ -333,10 +339,12 @@ enum Message {
     },
     Reload(Hooks),
     FormatInbox {
+        session: Option<String>,
         messages: Vec<Value>,
         reply: mpsc::SyncSender<Vec<Option<String>>>,
     },
     FormatChat {
+        session: Option<String>,
         /// `chat.agent` or `chat.user`.
         kind: String,
         context: Value,
@@ -382,6 +390,7 @@ impl Hub {
                 for message in rx {
                     match message {
                         Message::Update {
+                            commit_badges,
                             session,
                             provider,
                             cwd,
@@ -389,6 +398,8 @@ impl Hub {
                             data,
                             tx,
                         } => {
+                            let _scope =
+                                interpreter.badge_scope(commit_badges.then_some(session.as_str()));
                             if let Some(event) = tracker.update(&session, seq, &data) {
                                 let _ = tx.send(event);
                             }
@@ -410,7 +421,12 @@ impl Hub {
                             chat_cache.clear();
                             header_tracker.reload(hooks.headers);
                         }
-                        Message::FormatInbox { messages, reply } => {
+                        Message::FormatInbox {
+                            session,
+                            messages,
+                            reply,
+                        } => {
+                            let _scope = interpreter.badge_scope(session.as_deref());
                             let formatted = messages
                                 .iter()
                                 .map(|message| {
@@ -427,10 +443,13 @@ impl Hub {
                                         &json!({"channel":"inbox", "state":{}}),
                                         message,
                                     ) {
-                                        Ok((value, _)) => value["result"]
-                                            .as_str()
-                                            .filter(|s| !s.trim().is_empty())
-                                            .map(str::to_owned),
+                                        Ok((value, _)) => {
+                                            interpreter.publish_badges(script, &value);
+                                            value["result"]
+                                                .as_str()
+                                                .filter(|s| !s.trim().is_empty())
+                                                .map(str::to_owned)
+                                        }
                                         Err(error) => {
                                             eprintln!(
                                                 "Inbox formatter failed; using quoted JSON: {error}"
@@ -443,12 +462,14 @@ impl Hub {
                             let _ = reply.send(formatted);
                         }
                         Message::FormatChat {
+                            session,
                             kind,
                             context,
                             lines,
                             reply,
                         } => {
-                            let key = format!("{kind}\u{1f}{context}");
+                            let _scope = interpreter.badge_scope(session.as_deref());
+                            let key = format!("{session:?}\u{1f}{kind}\u{1f}{context}");
                             let active: Vec<_> = chat_formatters
                                 .iter()
                                 .filter(|f| f.message_type.as_deref() == Some(kind.as_str()))
@@ -469,7 +490,7 @@ impl Hub {
                                         states = next.clone();
                                         return result.clone();
                                     }
-                                    let result = format_line(
+                                    let (result, cacheable) = format_line(
                                         &interpreter,
                                         &active,
                                         &context,
@@ -479,7 +500,10 @@ impl Hub {
                                     if chat_cache.len() >= CHAT_CACHE_LINES {
                                         chat_cache.clear();
                                     }
-                                    chat_cache.insert(cache_key, (result.clone(), states.clone()));
+                                    if cacheable {
+                                        chat_cache
+                                            .insert(cache_key, (result.clone(), states.clone()));
+                                    }
                                     result
                                 })
                                 .collect();
@@ -502,26 +526,69 @@ impl Hub {
         }
     }
 
+    pub fn bind_badge_sessions(&self, sessions: &Arc<Mutex<HashMap<String, Arc<crate::Session>>>>) {
+        let registry = Arc::downgrade(sessions);
+        let failed = Mutex::new(HashSet::new());
+        self.engine
+            .set_badge_sink(Arc::new(move |id, source, hash, effects| {
+                let Some(registry) = registry.upgrade() else {
+                    return;
+                };
+                let target = registry.lock().unwrap().get(id).cloned();
+                if let Some(session) = target {
+                    if let Err(error) =
+                        crate::session_badges::apply(&session, source, hash, effects)
+                    {
+                        if failed.lock().unwrap().insert(format!("{source}@{hash}")) {
+                            eprintln!("Badge update from {source} failed: {error}");
+                        }
+                    }
+                }
+            }));
+    }
+
     /// A hub with no parsers, for tests and fixtures.
     #[cfg(test)]
     pub fn empty() -> Self {
         Hub::new(Arc::new(Engine::new().expect("host preludes")), Vec::new())
     }
 
-    /// `provider` and `cwd` describe the session for tool header hooks.
     pub fn update(
+        &self,
+        session: &str,
+        context: (&str, &std::path::Path),
+        tx: &broadcast::Sender<Value>,
+        seq: u64,
+        data: &Value,
+    ) {
+        self.send_update(session, context, tx, seq, data, true);
+    }
+    pub fn replay(
+        &self,
+        session: &str,
+        context: (&str, &std::path::Path),
+        tx: &broadcast::Sender<Value>,
+        seq: u64,
+        data: &Value,
+    ) {
+        self.send_update(session, context, tx, seq, data, false);
+    }
+    /// `provider` and `cwd` describe the session for tool header hooks.
+    fn send_update(
         &self,
         session: &str,
         (provider, cwd): (&str, &std::path::Path),
         tx: &broadcast::Sender<Value>,
         seq: u64,
         data: &Value,
+        commit_badges: bool,
     ) {
         if matches!(
             data["sessionUpdate"].as_str(),
             Some("tool_call" | "tool_call_update")
         ) {
             let _ = self.tx.send(Message::Update {
+                commit_badges,
                 session: session.to_owned(),
                 provider: provider.to_owned(),
                 cwd: cwd.to_string_lossy().into_owned(),
@@ -572,11 +639,20 @@ impl Hub {
 
     /// Run message formatting on the interpreter thread, away from request threads.
     /// Timeout, disabled script or evaluation failure falls back to host-quoted JSON.
+    #[cfg(test)]
     pub fn format_inbox(&self, messages: &[Value]) -> Vec<Option<String>> {
+        self.format_inbox_in_session(None, messages)
+    }
+    pub fn format_inbox_in_session(
+        &self,
+        session: Option<&str>,
+        messages: &[Value],
+    ) -> Vec<Option<String>> {
         let (reply, rx) = mpsc::sync_channel(1);
         if self
             .tx
             .send(Message::FormatInbox {
+                session: session.map(str::to_owned),
                 messages: messages.to_vec(),
                 reply,
             })
@@ -591,8 +667,19 @@ impl Hub {
     /// `kind` (`chat.agent` or `chat.user`) formatting for the lines of one
     /// message, on the interpreter thread. None when no formatter of that kind is
     /// enabled; otherwise None keeps a line, and a timeout keeps them all.
+    #[cfg(test)]
     pub fn format_chat(
         &self,
+        kind: &str,
+        provider: &str,
+        cwd: &str,
+        lines: Vec<String>,
+    ) -> Option<Vec<Option<String>>> {
+        self.format_chat_in_session(None, kind, provider, cwd, lines)
+    }
+    pub fn format_chat_in_session(
+        &self,
+        session: Option<&str>,
         kind: &str,
         provider: &str,
         cwd: &str,
@@ -607,6 +694,7 @@ impl Hub {
         if self
             .tx
             .send(Message::FormatChat {
+                session: session.map(str::to_owned),
                 kind: kind.to_owned(),
                 context,
                 lines,
@@ -658,7 +746,8 @@ fn format_line(
     context: &Value,
     states: &mut [Value],
     line: &str,
-) -> Option<String> {
+) -> (Option<String>, bool) {
+    let mut cacheable = true;
     let mut current = line.to_owned();
     for (script, state) in formatters.iter().zip(states) {
         if !script
@@ -682,6 +771,13 @@ fn format_line(
                 );
             }
             Ok((value, _)) => {
+                if value["badgeEffects"]
+                    .as_array()
+                    .is_some_and(|effects| !effects.is_empty())
+                {
+                    cacheable = false;
+                }
+                engine.publish_badges(script, &value);
                 *state = value["state"].clone();
                 if let Some(next) = value["result"].as_str() {
                     current = next.to_owned();
@@ -690,7 +786,7 @@ fn format_line(
             Err(error) => eprintln!("Chat formatter failed; keeping its input: {error}"),
         }
     }
-    (current != line).then_some(current)
+    ((current != line).then_some(current), cacheable)
 }
 
 /// Compile enabled modules in `list` order (priority, then filename), then route

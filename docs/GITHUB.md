@@ -6,7 +6,7 @@ Agentworks reads GitHub context using **GitHub CLI accounts on the main server**
 
 1. Install a recent GitHub CLI on the main server and run `gh auth login` as the OS user running Agentworks. Sign in to each public/Enterprise host and account you need. The CLI must support `gh auth status --json hosts`, `gh auth status --active`, and `gh auth token --hostname HOST --user LOGIN`.
 2. Open **Settings → GitHub**, rediscover accounts, and enable the accounts Agentworks should use. Connections save immediately. **Verify identity** checks the selected credential against that host's API.
-3. Open a session in a Git repository with an HTTPS or SSH `origin`. The GitHub button opens repository context, associated PRs, checks and review summaries.
+3. Open a session in a Git repository with an HTTPS or SSH `origin`. The GitHub/PR status button beside Workspace in the existing session toolbar opens repository context, associated PRs, checks and review summaries. On phones, it is in the session options (⋯) menu.
 
 An absent CLI, no accounts, authentication failures and inaccessible GitHub hosts have setup/error messages. You can finish configuring authentication later without recreating sessions. Account discovery does not enable accounts automatically.
 
@@ -27,6 +27,10 @@ If one account matches, Agentworks saves that repository's selection. If multipl
 Remote Git context requires a worker advertising `gitContext`; update/reconnect older workers. The worker still enforces its configured directory roots. Main-host Git inspection uses the same root and subprocess bounds as the workspace dialog. Network origins are returned without URL credentials, queries or fragments.
 
 ## Display and attachment
+
+The sessions browser shows `PR#1234` badges on a shared third line below each session's title and provider/model. Empty badge rows collapse completely. Clicking a PR badge opens that PR in a new tab without switching sessions. Normal GitHub context collection updates these badges in the shared session badge store. Existing Starlark hooks can call `agent.set_badge` and `agent.clear_badge` to contribute to the same row. See [Session badges](SESSION-BADGES.md) for setters, persistence, bounds and composition rules.
+
+Green means approved; red means not approved and CI is failing; yellow means awaiting review or changes requested. Approval has priority over failed CI. Drafts, closed/merged PRs and unknown/stale states are neutral. Repositories without review rules use latest opinionated reviews, and fallback approvals must refer to the current PR head. Incomplete review data stays unknown.
 
 The session GitHub panel lists PRs whose head branch and head repository match the origin repository, ordered by recent update, up to 20 candidates. It displays all candidates rather than silently choosing among several. A PR from a fork with the same branch name is not inferred as this checkout's PR. Fork PRs into another repository need broader repository association support in a later release.
 

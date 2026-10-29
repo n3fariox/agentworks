@@ -565,6 +565,8 @@ impl Store {
                 .and_then(|e| e["data"]["providerSessionId"].as_str())
                 .map(str::to_owned);
             let state = SessionData {
+                script_badges: Default::default(),
+                badge_revision: 0,
                 lifecycle: Default::default(),
                 inbox_turn: None,
                 status: "suspended".into(),
@@ -897,6 +899,8 @@ mod tests {
             location_id: "location".into(),
         };
         let mut state = SessionData {
+            script_badges: Default::default(),
+            badge_revision: 0,
             lifecycle: Default::default(),
             inbox_turn: None,
             status: "starting".into(),

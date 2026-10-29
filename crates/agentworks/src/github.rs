@@ -698,6 +698,7 @@ pub async fn context(
 const PR_FIELDS: &str = r#"
  id number title url state isDraft headRefName headRefOid headRepository { nameWithOwner }
  baseRefName reviewDecision
+ latestOpinionatedReviews(first:50) { pageInfo { hasNextPage } nodes { state commit { oid } } }
  commits(last:1) { nodes { commit { oid statusCheckRollup { state contexts(first:50) {
  pageInfo { hasNextPage } nodes {
  ... on CheckRun { name status conclusion detailsUrl }
@@ -811,10 +812,42 @@ async fn fetch_snapshot(
         json!({"fetchedAt":now(),"repository":repository,"resources":resources,"complete":complete,"headSha":sha}),
     )
 }
+fn review_summary(resource: &Value) -> Value {
+    if let Some(decision) = resource["reviewDecision"]
+        .as_str()
+        .filter(|state| matches!(*state, "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED"))
+    {
+        return json!({"state":decision,"complete":true,"source":"reviewDecision"});
+    }
+    let reviews = &resource["latestOpinionatedReviews"];
+    if reviews["pageInfo"]["hasNextPage"] != false || !reviews["nodes"].is_array() {
+        return json!({"state":"UNKNOWN","complete":false,"source":"reviews"});
+    }
+    let nodes = reviews["nodes"].as_array().unwrap();
+    let changes = nodes
+        .iter()
+        .any(|review| review["state"] == "CHANGES_REQUESTED");
+    let approved = nodes.iter().any(|review| {
+        review["state"] == "APPROVED"
+            && resource["headRefOid"]
+                .as_str()
+                .is_some_and(|sha| review["commit"]["oid"] == sha)
+    });
+    let state = if changes {
+        "CHANGES_REQUESTED"
+    } else if approved {
+        "APPROVED"
+    } else if resource["isDraft"] == true {
+        "NONE"
+    } else {
+        "REVIEW_REQUIRED"
+    };
+    json!({"state":state,"complete":true,"source":"reviews"})
+}
 fn normalize(resource: &Value, kind: &str, explicit: bool, sha: Option<&str>) -> Value {
     let rollup = &resource["commits"]["nodes"][0]["commit"]["statusCheckRollup"];
     json!({"id":resource["id"],"kind":kind,"number":resource["number"],"title":resource["title"],"url":resource["url"],"state":resource["state"],"draft":resource["isDraft"],"headSha":resource["headRefOid"],"baseBranch":resource["baseRefName"],"explicit":explicit,
-        "headMatches":sha.is_some_and(|sha| resource["headRefOid"] == sha),"reviewDecision":resource["reviewDecision"],
+        "headMatches":sha.is_some_and(|sha| resource["headRefOid"] == sha),"reviewDecision":resource["reviewDecision"],"reviewSummary":review_summary(resource),
         "checks":if rollup.is_null() { json!({"state":"UNKNOWN","items":[],"complete":false}) } else { json!({"state":rollup["state"],"items":rollup["contexts"]["nodes"],"complete":rollup["contexts"]["pageInfo"]["hasNextPage"] == false}) }})
 }
 
@@ -918,6 +951,23 @@ mod tests {
             &json!({"hosts":{"ghe.example.com":[{"login":"pinned","active":true,"state":"success"},{"login":"other","active":true,"state":"success"}]}}),
             &connection
         ));
+    }
+    #[test]
+    fn approval_without_repository_review_rules_is_commit_scoped() {
+        let mut pr = json!({"headRefOid":"new","isDraft":false,"reviewDecision":null,"latestOpinionatedReviews":{"pageInfo":{"hasNextPage":false},"nodes":[{"state":"APPROVED","commit":{"oid":"new"}}]}});
+        assert_eq!(review_summary(&pr)["state"], "APPROVED");
+        pr["latestOpinionatedReviews"]["nodes"][0]["commit"]["oid"] = json!("old");
+        assert_eq!(review_summary(&pr)["state"], "REVIEW_REQUIRED");
+        pr["latestOpinionatedReviews"]["nodes"][0]["state"] = json!("CHANGES_REQUESTED");
+        assert_eq!(review_summary(&pr)["state"], "CHANGES_REQUESTED");
+        pr["latestOpinionatedReviews"]["pageInfo"]["hasNextPage"] = json!(true);
+        assert_eq!(review_summary(&pr)["state"], "UNKNOWN");
+        pr["reviewDecision"] = json!("APPROVED");
+        assert_eq!(review_summary(&pr)["state"], "APPROVED");
+        pr["reviewDecision"] = Value::Null;
+        pr["isDraft"] = json!(true);
+        pr["latestOpinionatedReviews"] = json!({"pageInfo":{"hasNextPage":false},"nodes":[]});
+        assert_eq!(review_summary(&pr)["state"], "NONE");
     }
     #[test]
     fn checks_are_commit_scoped_and_absent_is_unknown() {

@@ -13,6 +13,11 @@ use serde_json::Value;
 use std::collections::{HashSet, VecDeque};
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SessionData {
+    /// Script-owned badge state: source -> {hash, badges}. Not transcript events.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub script_badges: std::collections::HashMap<String, Value>,
+    #[serde(default)]
+    pub badge_revision: u64,
     pub status: String,
     #[serde(default)]
     pub inbox_turn: Option<InboxTurn>,

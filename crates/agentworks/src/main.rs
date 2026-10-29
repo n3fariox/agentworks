@@ -35,6 +35,7 @@ mod review_queue;
 mod roles;
 mod service_restart;
 mod service_unit;
+mod session_badges;
 mod session_config;
 mod session_runtime;
 mod store;
@@ -689,6 +690,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         progress,
     };
+    app.progress.bind_badge_sessions(&app.sessions);
     if let Some(policy) = app
         .catalog
         .lock()
@@ -750,7 +752,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         for (seq, data) in &replay {
             app.progress
-                .update(&s.id, (&s.provider, &s.cwd), &s.tx, *seq, data);
+                .replay(&s.id, (&s.provider, &s.cwd), &s.tx, *seq, data);
         }
         if interrupted {
             s.emit("interrupted",json!({"message":"The server stopped during this turn. It was not automatically retried. Check the last tool result before continuing."}));
@@ -999,6 +1001,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (
                     [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
                     include_str!("../../../web/diff.js"),
+                )
+            }),
+        )
+        .route(
+            "/session-badges.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/session-badges.js"),
                 )
             }),
         )
@@ -1349,9 +1360,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(github::connections).post(github::save_connection),
         )
         .route("/api/github/verify", post(github::verify))
+        .route("/api/sessions/{id}/badges", get(session_badges::list))
         .route(
             "/api/sessions/{id}/github",
-            get(github::context).post(github::save_binding),
+            get(session_badges::context).post(github::save_binding),
         )
         .route(
             "/api/sessions/{id}/worktree/hooks/retry",
@@ -2786,6 +2798,8 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
             .unwrap()
             .as_millis() as u64,
         data: Mutex::new(SessionData {
+            script_badges: Default::default(),
+            badge_revision: 0,
             model_provider: req.model_provider,
             lifecycle: Default::default(),
             inbox_turn: None,
@@ -3550,7 +3564,7 @@ async fn event_socket(socket: WebSocket, s: Arc<Session>, after: Option<u64>) {
                 let n=event["seq"].as_u64().unwrap_or(0);
                 // L-05 hook: queue state is broadcast unsequenced (not stored in event history).
                 // U-05: derived tool progress and headers reuse their source event's seq and are never stored.
-                if !matches!(event["kind"].as_str(),Some("input_queue"|"tool_progress"|"tool_header")) {if n<=seq {continue;} seq=n;}
+                if !matches!(event["kind"].as_str(),Some("input_queue"|"tool_progress"|"tool_header"|"session_badges")) {if n<=seq {continue;} seq=n;}
                 let closed=event["kind"]=="status" && (event["data"]["status"]=="closed" || event["data"]["status"]=="suspended");
                 if sink.send(Message::Text(event.to_string().into())).await.is_err(){break;}
                 if closed {let _=sink.send(Message::Close(None)).await;break;}
@@ -3617,7 +3631,13 @@ async fn markdown(State(app): State<App>, Json(req): Json<Markdown>) -> Json<Val
         Some(s) => {
             let (hub, text) = (app.progress.clone(), req.text.clone());
             tokio::task::spawn_blocking(move || {
-                chat_format::apply(&hub, &s.provider, &s.cwd.to_string_lossy(), &text)
+                chat_format::apply_in_session(
+                    &hub,
+                    &s.id,
+                    &s.provider,
+                    &s.cwd.to_string_lossy(),
+                    &text,
+                )
             })
             .await
             .unwrap_or(req.text)
@@ -3649,7 +3669,7 @@ async fn format_user(
     let hub = app.progress.clone();
     let (provider, cwd) = (s.provider.clone(), s.cwd.to_string_lossy().into_owned());
     let lines = tokio::task::spawn_blocking(move || {
-        chat_format::format(&hub, "chat.user", &provider, &cwd, &req.text)
+        chat_format::format_in_session(&hub, Some(&s.id), "chat.user", &provider, &cwd, &req.text)
     })
     .await
     .unwrap_or(None)

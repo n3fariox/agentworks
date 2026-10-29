@@ -1,12 +1,12 @@
 // One delegated menu supports rows that are replaced while sessions stream.
 export function setupContextMenu({resolve,onError}){
   const menu=document.createElement('div');menu.className='context-menu';menu.role='menu';menu.hidden=true;document.body.append(menu);
-  let origin=null,hold=null,suppressed=null;
+  let origin=null,focusTarget=null,hold=null,suppressed=null;
   const cancelHold=()=>{if(hold)clearTimeout(hold.timer);hold=null;};
-  function close(restore=false){menu.hidden=true;menu.replaceChildren();if(restore&&origin?.isConnected)origin.focus();origin=null;}
+  function close(restore=false){menu.hidden=true;menu.replaceChildren();if(restore&&focusTarget?.isConnected)focusTarget.focus();origin=null;focusTarget=null;}
   function open(target,x,y){
     const context=resolve(target);if(!context)return false;
-    close();origin=context.origin;menu.setAttribute('aria-label',context.label);
+    close();origin=context.origin;focusTarget=context.focus||origin;menu.setAttribute('aria-label',context.label);
     for(const action of context.actions){
       const button=document.createElement('button');button.type='button';button.role='menuitem';button.textContent=action.label;button.classList.toggle('danger',!!action.danger);
       button.onclick=async()=>{close(true);try{await action.run();}catch(error){onError(error.message);}};menu.append(button);

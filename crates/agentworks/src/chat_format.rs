@@ -38,8 +38,9 @@ pub fn prose_lines(text: &str) -> Vec<bool> {
 /// Each `\n`-separated line's replacement from enabled `kind` formatters, or
 /// None to keep it; None overall when no formatter of that kind is enabled.
 /// Lines are passed in order, without a CRLF carriage return.
-pub fn format(
+pub fn format_in_session(
     hub: &Hub,
+    session: Option<&str>,
     kind: &str,
     provider: &str,
     cwd: &str,
@@ -57,7 +58,7 @@ pub fn format(
         .iter()
         .map(|&i| lines[i].trim_end_matches('\r').to_owned())
         .collect();
-    let formatted = hub.format_chat(kind, provider, cwd, input)?;
+    let formatted = hub.format_chat_in_session(session, kind, provider, cwd, input)?;
     let mut result = vec![None; lines.len()];
     for (i, line) in selected.into_iter().zip(formatted) {
         result[i] = line;
@@ -66,8 +67,15 @@ pub fn format(
 }
 
 /// An agent message's Markdown with each formatted line replaced.
+#[cfg(test)]
 pub fn apply(hub: &Hub, provider: &str, cwd: &str, text: &str) -> String {
-    let Some(formatted) = format(hub, "chat.agent", provider, cwd, text) else {
+    apply_impl(hub, None, provider, cwd, text)
+}
+pub fn apply_in_session(hub: &Hub, session: &str, provider: &str, cwd: &str, text: &str) -> String {
+    apply_impl(hub, Some(session), provider, cwd, text)
+}
+fn apply_impl(hub: &Hub, session: Option<&str>, provider: &str, cwd: &str, text: &str) -> String {
+    let Some(formatted) = format_in_session(hub, session, "chat.agent", provider, cwd, text) else {
         return text.to_owned();
     };
     text.split('\n')

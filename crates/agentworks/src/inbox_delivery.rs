@@ -819,7 +819,7 @@ fn dispatch_inner(app: &App, s: &Session, human_pending: bool) -> Result<()> {
         }
     }
     let request = format!("inbox:{}:{}:{}", s.id, p.generation, p.attempts + 1);
-    let formatted = app.progress.format_inbox(&messages);
+    let formatted = app.progress.format_inbox_in_session(Some(&s.id), &messages);
     let text = instruction(&request, &messages, &formatted);
     p.attempts += 1;
     p.last_dispatch = now();

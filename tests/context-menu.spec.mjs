@@ -70,9 +70,9 @@ test('session menu archives and deletes the pressed session without switching ch
   await expect(page.locator('#header-title')).toHaveText('Current session');
 });
 test('keyboard navigation forks the pressed session',async({page})=>{
-  await fixture(page);await row(page).focus();await page.keyboard.press('Shift+F10');
+  await fixture(page);await row(page).locator('.session-select').focus();await page.keyboard.press('Shift+F10');
   await expect(menu(page)).toBeVisible();await page.keyboard.press('End');await expect(menu(page).getByRole('menuitem',{name:'Delete history…'})).toBeFocused();
-  await page.keyboard.press('Escape');await expect(row(page)).toBeFocused();
+  await page.keyboard.press('Escape');await expect(row(page).locator('.session-select')).toBeFocused();
   await page.keyboard.press('Shift+F10');await page.keyboard.press('Enter');
   await expect(page.locator('#session-title')).toHaveValue('Other session (fork)');
   await expect(page.locator('#header-title')).toHaveText('Current session');

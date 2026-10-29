@@ -62,7 +62,7 @@
     "readme:media": "node scripts/readme-media/capture.mjs",
     "test:attachments": "playwright test tests/attachments.spec.mjs",
     "test:codex-oauth": "playwright test tests/codex-oauth.spec.mjs",
-    "test:github": "playwright test tests/github.spec.mjs"
+    "test:github": "node --test tests/session-badges.test.mjs && playwright test tests/github.spec.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1"

@@ -112,6 +112,8 @@ pub struct StarlarkParser {
 struct CallResult {
     result: Option<Progress>,
     state: Option<State>,
+    #[serde(default, rename = "badgeEffects")]
+    badge_effects: Vec<Json>,
 }
 
 impl StarlarkParser {
@@ -132,6 +134,7 @@ impl StarlarkParser {
         if let Some(next) = result.state {
             *state = next;
         }
+        self.engine.publish_badge_effects(&self.script, &result.badge_effects);
         Ok((result.result, stats))
     }
 }

@@ -96,10 +96,11 @@ for(const mobile of [false,true])test(`GitHub display, safe text and detached li
     if(route.request().method()==='POST'){const body=route.request().postDataJSON();expect(body.links[0]).toMatchObject({kind:'issue',number:7,host:'ghe-a.example.com'});data.links=body.links;await route.fulfill({json:{ok:true}});}
     else await route.fulfill({json:data});
   });
-  await page.goto(base);await expect(page.locator('#session-github')).toBeVisible();
-  await page.locator('#prompt').fill('Keep my draft');await page.locator('#session-github').click();
+  async function openGithub(){if(mobile)await page.locator('#session-more').click();await page.locator('#session-github').click();}
+  await page.goto(base);
+  await page.locator('#prompt').fill('Keep my draft');await openGithub();
   await expect(page.locator('#github-resources')).toContainText('PR head differs from checkout');
-  await expect(page.locator('#github-resources')).toContainText('CHANGES_REQUESTED');
+  await expect(page.locator('#github-resources')).toContainText('Changes requested');
   await expect(page.locator('#github-resources img')).toHaveCount(0);
   await expect(page.locator('#github-resources a').first()).not.toHaveAttribute('href',/javascript/);
   await page.locator('#github-link-kind').selectOption('issue');await page.locator('#github-link-number').fill('7');await page.locator('#github-link-add').click();
@@ -107,9 +108,112 @@ for(const mobile of [false,true])test(`GitHub display, safe text and detached li
   expect(await page.locator('#github-dialog').evaluate(n=>{const r=n.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.height<=innerHeight;})).toBe(true);
   await page.screenshot({path:join('.cache',`github-${mobile?'mobile':'desktop'}.png`)});
   await page.locator('#dismiss-github').click();await expect(page.locator('#prompt')).toHaveValue('Keep my draft');
-  await page.locator('#session-github').click();await page.locator('#github-settings').click();
+  await openGithub();await page.locator('#github-settings').click();
   await expect(page.locator('#settings-panel-github')).toBeVisible();
   await expect(page.locator('#github-connections')).toContainText('ghe-b.example.com');
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
   expect(errors).toEqual([]);
+});
+
+for(const mobile of [false,true])test(`session browser PR badges ${mobile?'mobile':'desktop'}`,async({page})=>{
+  const cases=[
+    {title:'Fix account selection',number:1234,reviewDecision:'APPROVED',ci:'SUCCESS',tone:'success'},
+    {title:'Simplify worker startup',number:5678,reviewDecision:'REVIEW_REQUIRED',ci:'PENDING',tone:'warning'},
+    {title:'Handle expired credentials',number:9012,reviewDecision:'CHANGES_REQUESTED',ci:'FAILURE',tone:'danger'},
+  ];
+  const examples=new Map(),calls=new Map();
+  for(const example of cases){const session=await api('/api/sessions',{provider:'demo',cwd:linked,title:example.title});examples.set(session.id,{...example,session});}
+  const first=[...examples.values()][0].session;
+  if(mobile)await page.setViewportSize({width:390,height:844});
+  await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),first.id);
+  await page.route('**/api/sessions/*/github*',route=>{
+    const id=new URL(route.request().url()).pathname.split('/')[3],example=examples.get(id);
+    calls.set(id,(calls.get(id)||0)+1);
+    if(!example)return route.fulfill({json:{status:'no_origin'}});
+    return route.fulfill({json:{status:'ready',repository:{host:'ghe-a.example.com',owner:'team',name:'repo'},connection:{host:'ghe-a.example.com',login:'work-a'},links:[],badgesAt:Date.now(),badges:[{id:`github.pr.${example.number}`,label:`PR#${example.number}`,tone:example.tone,tooltip:example.title,url:`https://ghe-a.example.com/team/repo/pull/${example.number}`,source:'@github'}],snapshot:{fetchedAt:Date.now(),complete:true,resources:[{kind:'pullRequest',number:example.number,title:example.title,state:'OPEN',draft:false,headMatches:true,headSha:'1234',reviewDecision:example.reviewDecision,checks:{state:example.ci,complete:true,items:[]}}]}}});
+  });
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  await page.goto(base);await expect(page.locator('#session-state')).toHaveText('Ready');
+  if(mobile){await page.locator('#session-home').click();await expect(page.locator('#sidebar')).toHaveCSS('transform','none');}
+  for(const [id,example] of examples){
+    const row=page.locator(`.session-item[data-session-id="${id}"]`),badge=row.locator('.session-badge');
+    await expect(badge).toHaveText(`PR#${example.number}`);await expect(badge).toHaveClass(`session-badge ${example.tone}`);
+    expect(calls.get(id)).toBe(1); // selected session and browser share one request
+    await expect(badge).toHaveAttribute('href',`https://ghe-a.example.com/team/repo/pull/${example.number}`);
+    await expect(badge).toHaveAttribute('target','_blank');await expect(badge).toHaveAttribute('rel','noopener noreferrer');
+    expect(await badge.evaluate(n=>n.closest('button'))).toBeNull(); // native link and selection button are siblings
+    expect(await badge.evaluate(n=>n.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true})))).toBe(true);
+    const metaBox=await row.locator('small').boundingBox(),badgeBox=await badge.boundingBox();
+    expect(badgeBox.y).toBeGreaterThanOrEqual(metaBox.y+metaBox.height);
+  }
+  await page.screenshot({path:join('.cache',`session-badges-third-line-${mobile?'mobile':'desktop'}-20261029.png`),animations:'disabled'});
+  if(!mobile)await page.locator('#sessions').screenshot({path:join('.cache','session-badges-third-line-preview-20261029.png'),animations:'disabled'});
+  await page.context().route('https://ghe-a.example.com/**',route=>route.fulfill({contentType:'text/html',body:'<title>PR link test</title>'}));
+  const second=[...examples.values()][1],secondBadge=page.locator(`.session-item[data-session-id="${second.session.id}"] .session-badge`);
+  const opened=page.waitForEvent('popup');await secondBadge.click();const popup=await opened;await popup.waitForLoadState();
+  expect(popup.url()).toBe(`https://ghe-a.example.com/team/repo/pull/${second.number}`);await popup.close();
+  expect(await page.evaluate(()=>localStorage.getItem('agentworks-session'))).toBe(first.id);
+  const third=[...examples.values()][2],thirdBadge=page.locator(`.session-item[data-session-id="${third.session.id}"] .session-badge`);
+  await thirdBadge.focus();const keyed=page.waitForEvent('popup');await page.keyboard.press('Enter');const keyboardPopup=await keyed;await keyboardPopup.waitForLoadState();
+  expect(keyboardPopup.url()).toBe(`https://ghe-a.example.com/team/repo/pull/${third.number}`);await keyboardPopup.close();
+  expect(await page.evaluate(()=>localStorage.getItem('agentworks-session'))).toBe(first.id);
+  await page.locator(`.session-item[data-session-id="${second.session.id}"] .session-select`).click();
+  expect(await page.evaluate(()=>localStorage.getItem('agentworks-session'))).toBe(second.session.id);
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);expect(errors).toEqual([]);
+});
+
+test('existing hooks set/update/clear stored badges, isolate sessions, survive restart and push live updates',async({page})=>{
+  const plain=join(fixture,'badge-plain');await mkdir(plain,{recursive:true});
+  const source=`load("@agentworks//chat.star", "ChatContext")
+def format_line(ctx: ChatContext, line: str) -> str | None:
+    if line == "BADGE_SET":
+        agent.set_badge("context", "Local", tone = "info", tooltip = "Set by an existing hook")
+        agent.set_badge("ready", "Ready", tone = "success", url = "https://github.com/org/repo/pull/1")
+    elif line == "BADGE_UPDATE":
+        agent.set_badge("ready", "Updated", tone = "warning")
+    elif line == "BADGE_FAIL":
+        agent.set_badge("ready", "Must not persist")
+        return str(1 // 0)
+    elif line == "BADGE_INVALID":
+        agent.set_badge("ready", "Invalid", url = "javascript:alert(1)")
+    elif line == "BADGE_CLEAR":
+        agent.clear_badge("context")
+        agent.clear_badge("ready")
+    return None
+agent.register_formatter(format_line, message_type = "chat.user", text_pattern = "^BADGE_")
+`;
+  const installed=await api('/api/scripts/local_badges.star',{source},'PUT');
+  expect(installed.scripts.find(s=>s.name==='local_badges.star').hooks[0].message_type).toBe('chat.user');
+  const session=await api('/api/sessions',{provider:'demo',cwd:plain,title:'Stored badges from an existing hook'});
+  const other=await api('/api/sessions',{provider:'demo',cwd:plain,title:'Independent badge target'});
+  const run=(s,text)=>api(`/api/sessions/${s.id}/user-format`,{text});
+  const stored=s=>api(`/api/sessions/${s.id}/badges`);
+  expect((await stored(session)).badges).toEqual([]);
+  await run(session,'BADGE_SET');
+  const response=await stored(session);expect(response.badges.map(b=>b.label)).toEqual(['Local','Ready']);
+  expect(response.badges[0].source).toBe('local_badges.star');expect(response.badgesAt).toEqual(expect.any(Number));
+  expect((await stored(session)).badgeRevision).toBe(response.badgeRevision); // reading does not invoke hooks
+  expect((await stored(other)).badges).toEqual([]);
+  await run(session,'BADGE_FAIL');await run(session,'BADGE_INVALID');
+  expect((await stored(session)).badges.map(b=>b.label)).toEqual(['Local','Ready']);
+  await run(other,'BADGE_SET'); // identical formatter input must not share another session's side effects
+  expect((await stored(other)).badges.map(b=>b.label)).toEqual(['Local','Ready']);
+  await run(other,'BADGE_CLEAR');expect((await stored(other)).badges).toEqual([]);
+  expect((await stored(session)).badges.map(b=>b.label)).toEqual(['Local','Ready']);
+  await stop();await start();
+  expect((await stored(session)).badges.map(b=>b.label)).toEqual(['Local','Ready']);
+  await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),session.id);await page.goto(base);
+  await expect(page.locator('#session-state')).toHaveText('Ready');
+  const row=page.locator(`.session-item[data-session-id="${session.id}"]`);
+  await expect(row.locator('.session-badge')).toHaveText(['Local','Ready']);await expect(row).toBeVisible();await row.scrollIntoViewIfNeeded();
+  await expect(page.locator('#connection')).toHaveText('Connected');
+  const withBadges=(await row.boundingBox()).height;
+  await run(session,'BADGE_UPDATE');await expect(row.locator('.session-badge')).toHaveText(['Local','Updated']); // pushed, no read/refresh
+  expect((await stored(session)).badges).toHaveLength(2);
+  await run(session,'BADGE_CLEAR');await expect(row.locator('.session-badge')).toHaveCount(0);
+  await expect(row.locator('.session-badges')).toHaveCSS('display','none');expect((await row.boundingBox()).height).toBeLessThan(withBadges);
+  await run(session,'BADGE_SET');await expect(row.locator('.session-badge')).toHaveText(['Local','Ready']); // setter calls must not be memoized away
+  await api('/api/scripts/local_badges.star/enabled',{enabled:false},'PUT');
+  await page.evaluate(()=>document.dispatchEvent(new Event('session-badges-changed')));await expect(row.locator('.session-badge')).toHaveCount(0);
+  await api('/api/scripts/local_badges.star',undefined,'DELETE');
 });
