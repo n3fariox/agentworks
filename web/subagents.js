@@ -9,24 +9,46 @@ export function activityLabel(state,rootBusy){
   return 'Activity unconfirmed';
 }
 
-export function createSubagents({jobResult,append,uuid,applyToolUpdate,renderToolActivity,renderMessage,el,tabs,panel,messages,onSelect}){
+export function createSubagents({jobResult,append,uuid,applyToolUpdate,renderToolActivity,renderMessage,el,tabs,panel,messages,onSelect,getSessionId=()=>'',storage}){
   const children=new Map();
+  // Keep visual dismissals through reloads and transcript rebuilds, scoped to the owning conversation.
+  const dismissed=new Map();
+  const storageKey='agentworks-dismissed-subagents';
+  try{
+    const saved=JSON.parse(storage?.getItem(storageKey)||'[]');
+    if(Array.isArray(saved))for(const entry of saved){
+      if(Array.isArray(entry)&&entry.length===2&&typeof entry[0]==='string'&&Number.isSafeInteger(entry[1])&&entry[1]>=0)dismissed.set(entry[0],entry[1]);
+    }
+  }catch{}
+  function saveDismissals(){try{storage?.setItem(storageKey,JSON.stringify([...dismissed]));}catch{}}
   let lastSeq=0,selected=null;
-  function ensure(id,parent){
+  const dismissalKey=id=>JSON.stringify([getSessionId(),id]);
+  function ensure(id,parent,seq,live){
     let child=children.get(id);
     if(!child){
       child={id:uuid(),sessionId:id,parentSessionId:parent,type:'subagent',title:null,description:null,state:null,items:[],tools:new Map(),sessionMessages:new Map(),nodes:new Map(),message:null};
       children.set(id,child);
       append(child);
     }
+    child.lastSeq=Math.max(child.lastSeq||0,Number.isSafeInteger(seq)?seq:0);
+    const key=dismissalKey(id);
+    if(dismissed.has(key)&&(child.lastSeq>dismissed.get(key)||live&&!Number.isSafeInteger(seq))){dismissed.delete(key);saveDismissals();}
     return child;
+  }
+  function close(child){
+    dismissed.set(dismissalKey(child.sessionId),child.lastSeq||0);
+    saveDismissals();
+    const focused=child.tabGroup.contains(document.activeElement);
+    child.tabGroup.remove();
+    if(selected===child.sessionId){onSelect('chat');document.getElementById('session-tab-chat')?.focus();}
+    else if(focused)tabs.querySelector('[role="tab"][aria-selected="true"]')?.focus();
   }
   function consume(e,{live=false}={}){
     const d=e.data,kind=d?.sessionUpdate;
     // A child's background-job outcome belongs to the child transcript that launched it.
     if(e.kind==='async_task_finished'&&typeof d?.parentSessionId==='string'){
       if(Number.isSafeInteger(e.seq)){if(e.seq<=lastSeq)return true;lastSeq=e.seq;}
-      const child=ensure(d.acpSessionId,d.parentSessionId);child.message=null;
+      const child=ensure(d.acpSessionId,d.parentSessionId,e.seq,live);child.message=null;
       child.items.push({id:uuid(),type:'text',role:'Background job',text:jobResult?jobResult(d):d.name||'Background job'});
       return true;
     }
@@ -37,7 +59,7 @@ export function createSubagents({jobResult,append,uuid,applyToolUpdate,renderToo
     if(['subagent_spawned','subagent_state_update','subagent_update'].includes(kind)){
       const id=kind==='subagent_update'?d.sessionId:d.subagentSessionId;
       if(typeof id!=='string')return true;
-      const child=ensure(id,d.acpSessionId);
+      const child=ensure(id,d.acpSessionId,e.seq,live);
       if(kind==='subagent_spawned'){
         child.title=d.name;child.description=d.task;child.state='running';
       }else if(kind==='subagent_state_update')child.state=d.state;
@@ -45,7 +67,7 @@ export function createSubagents({jobResult,append,uuid,applyToolUpdate,renderToo
       return true;
     }
     if(typeof d?.parentSessionId!=='string')return false;
-    const child=ensure(d.acpSessionId,d.parentSessionId);
+    const child=ensure(d.acpSessionId,d.parentSessionId,e.seq,live);
     if(['agent_message_chunk','agent_thought_chunk','user_message_chunk'].includes(kind)){
       const role=kind==='user_message_chunk'?'Instruction':kind==='agent_thought_chunk'?'Thinking':'Agent';
       if(d.content?.type==='text'){
@@ -84,15 +106,22 @@ export function createSubagents({jobResult,append,uuid,applyToolUpdate,renderToo
   function sync(rootBusy){
     if(!tabs||!panel)return;
     for(const child of children.values()){
+      if(dismissed.has(dismissalKey(child.sessionId)))continue;
       if(!child.tab){
+        child.tabGroup=el('div','subagent-tab-group');
         child.tab=el('button','subagent-tab');child.tab.type='button';child.tab.id=`session-tab-subagent-${child.id}`;
         child.tab.setAttribute('role','tab');child.tab.setAttribute('aria-controls','session-chat');
         child.tab.dataset.sessionView=`sub:${child.sessionId}`;child.tab.dataset.subagentSession=child.sessionId;
         child.tab.append(el('span','subagent-tab-label'),el('span','subagent-dot'));
         child.tab.querySelector('.subagent-dot').setAttribute('aria-hidden','true');
-        child.tab.onclick=()=>onSelect(`sub:${child.sessionId}`);tabs.append(child.tab);
+        child.tab.onclick=()=>onSelect(`sub:${child.sessionId}`);
+        child.close=el('button','subagent-tab-close','×');child.close.type='button';
+        child.close.onclick=()=>close(child);
+        child.tabGroup.append(child.tab,child.close);
       }
+      if(child.tabGroup.parentNode!==tabs)tabs.append(child.tabGroup);
       const name=child.title||'Subagent',state=activityLabel(child.state,rootBusy),active=selected===child.sessionId;
+      child.close.setAttribute('aria-label',`Close subagent tab: ${name}`);child.close.title='Hide tab until new activity';
       child.tab.querySelector('.subagent-tab-label').textContent=`Sub: ${name}`;
       child.tab.setAttribute('aria-label',`Sub: ${name}`);child.tab.title=`${name} · ${state}`;
       child.tab.setAttribute('aria-selected',String(active));child.tab.tabIndex=active?0:-1;
@@ -136,7 +165,7 @@ export function createSubagents({jobResult,append,uuid,applyToolUpdate,renderToo
   }
   function reset(){
     children.clear();lastSeq=0;
-    for(const button of tabs?.querySelectorAll('.subagent-tab')||[])button.remove();
+    for(const group of tabs?.querySelectorAll('.subagent-tab-group')||[])group.remove();
     if(panel){panel.replaceChildren();delete panel.dataset.subagentSession;}
   }
   function setHeaders(headers){

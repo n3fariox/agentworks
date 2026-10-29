@@ -442,6 +442,10 @@ dialog.image-viewer{width:96vw;max-width:96vw;height:92dvh;max-height:92dvh;padd
 /* Native subagents share the session tab strip and keep independent transcripts. */
 .session-tabs{overflow-x:auto;scrollbar-width:thin;min-width:0}
 .session-tabs button{flex:none;white-space:nowrap}
+.subagent-tab-group{display:inline-flex;flex:none;align-items:stretch}
+.session-tabs .subagent-tab{padding-right:6px}
+.session-tabs .subagent-tab-close{padding:0 8px;font-size:16px}
+.session-tabs .subagent-tab-close:hover{color:var(--text)}
 .subagent-tab{display:inline-flex;align-items:center;gap:8px;max-width:240px}
 .subagent-tab-label{overflow:hidden;text-overflow:ellipsis}
 .subagent-dot{width:6px;height:6px;border-radius:50%;background:var(--muted);flex:none}
