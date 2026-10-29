@@ -1,7 +1,6 @@
 import {localState as localStorage} from './hosting.js';
-// Right-hand panel beside the chat with Files and Diff tabs. Desktop shows it
-// as a third, resizable column; narrow layouts show it full screen in place of
-// the chat, and on phones it is a history entry so Back returns to the chat.
+// Files and Diff fill the conversation area while keeping the chat mounted.
+// On phones the panel is a history entry so Back returns to the chat.
 // Each tab is a {show(session),hide()} renderer; the panel only follows the
 // active session and decides which tab is visible.
 const KEY='agentworks-side-panel';

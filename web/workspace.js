@@ -47,11 +47,15 @@ export function createWorkspace(hooks){
     for(const name of ['sessions','files','automations'])$('nav-'+name).setAttribute('aria-pressed',String(state.view===name||(name==='sessions'&&state.view==='host-terminal')));
     if(state.view==='files')loadFiles();if(state.view==='automations')loadAutomations();hooks.viewChanged?.(state.view);save();
   }
-  // Directory listing shared by the Files view and the side panel's Files tab.
-  function renderListing({crumbs,list,result,go,open,selected}){
+  function renderCrumbs(crumbs,path,go,filename){
     crumbs.replaceChildren();
     const root=el('button','text-button','Root');root.onclick=()=>go('');crumbs.append(root);
-    const segments=result.path.split('/').filter(Boolean);for(let i=0;i<segments.length;i++){const button=el('button','text-button',segments[i]);button.onclick=()=>go(segments.slice(0,i+1).join('/'));crumbs.append(el('span','','/'),button);}
+    const segments=path.split('/').filter(Boolean);for(let i=0;i<segments.length;i++){const button=el('button','text-button',segments[i]);button.onclick=()=>go(segments.slice(0,i+1).join('/'));crumbs.append(el('span','','/'),button);}
+    if(filename){const current=el('strong','',filename);current.setAttribute('aria-current','page');crumbs.append(el('span','','/'),current);}
+  }
+  // Directory listing shared by the Files view and the side panel's Files tab.
+  function renderListing({crumbs,list,result,go,open,selected}){
+    renderCrumbs(crumbs,result.path,go);
     list.replaceChildren();
     if(result.path){const parent=el('button','file-entry','↰ Parent directory');parent.onclick=()=>go(result.path.split('/').slice(0,-1).join('/'));list.append(parent);}
     for(const entry of result.entries){
@@ -75,6 +79,7 @@ export function createWorkspace(hooks){
   // Side panel Files tab: browses the active session's directory, and shows a
   // file preview in place of the listing until "← Files".
   const side={location:null,path:'',generation:0};
+  function goSideDirectory(path){state.sideFile=null;side.path=path;loadSideFiles();}
   function sideListing(){$('side-file-browser').hidden=false;$('workspace-preview').hidden=true;}
   async function loadSideFiles(){
     const gen=++side.generation,location=side.location;sideListing();
@@ -115,7 +120,16 @@ export function createWorkspace(hooks){
   }
   function renderPreview(file,side){
     const area=side?$('workspace-preview'):$('workspace-file-detail');area.replaceChildren();
-    const header=el('div','workspace-preview-header');header.append(el('strong','',file.path));
+    const header=el('div','workspace-preview-header'),crumbs=el('nav','workspace-preview-path');crumbs.setAttribute('aria-label','File path');crumbs.title=file.path;
+    const root=file.location.path.replaceAll('\\','/').replace(/\/$/,''),normalized=file.path.replaceAll('\\','/');
+    const relative=normalized.startsWith(root+'/')?normalized.slice(root.length+1):normalized;
+    // Session references can point outside the selected directory. Keep those
+    // labels intact without offering folder links outside the browser's root.
+    const outside=/^(\/|[a-z]:\/)/i.test(relative),segments=outside?[]:relative.split('/').filter(Boolean),filename=outside?file.path:segments.pop();
+    renderCrumbs(crumbs,segments.join('/'),path=>{
+      if(side)goSideDirectory(path);
+      else{state.file=null;state.path=path;$('workspace-file-detail').replaceChildren(el('div','workspace-empty','Choose a file to preview.'));loadFiles();}
+    },filename);header.append(crumbs);
     const actions=el('div','workspace-preview-actions');const download=el('a','text-button','Download ↓');download.href=fileUrl(file,true);download.download=file.path.split('/').at(-1);actions.append(download);
     if(side){const back=el('button','text-button','← Files');back.onclick=()=>{state.sideFile=null;loadSideFiles();};actions.prepend(back);}header.append(actions);area.append(header);
     if(file.type?.startsWith('text/')){
