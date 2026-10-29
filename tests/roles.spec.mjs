@@ -47,7 +47,7 @@ test('new session applies a chosen role; unsupported agents disable the picker',
   await page.locator('#fork-session').click();
   await expect(page.locator('#create-role')).toBeDisabled();
   await expect(page.locator('#create-role-note')).toContainText("Forks keep the parent's role · Release captain");
-  await page.locator('#provider').selectOption('codex');
+  await page.locator('#provider').selectOption('opencode');
   await expect(page.locator('#create-submit')).toBeDisabled();
   await expect(page.locator('#create-role-note')).toContainText('must keep the “Release captain” role');
   await page.locator('#provider').selectOption('demo');
@@ -57,10 +57,10 @@ test('new session applies a chosen role; unsupported agents disable the picker',
   // Unsupported agents disable the picker instead of sending a role they would drop.
   await page.locator('#new-session').click();
   await page.locator('#create-role').selectOption({label:'Reviewer'});
-  await page.locator('#provider').selectOption('codex');
+  await page.locator('#provider').selectOption('opencode');
   await expect(page.locator('#create-role')).toBeDisabled();
   await expect(page.locator('#create-role')).toHaveValue('');
-  await expect(page.locator('#create-role-note')).toContainText('Codex does not accept role instructions');
+  await expect(page.locator('#create-role-note')).toContainText('OpenCode does not accept role instructions');
   await page.locator('#provider').selectOption('demo');
   await expect(page.locator('#create-role')).toBeEnabled();
   await page.locator('#dismiss-create').click();

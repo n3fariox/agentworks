@@ -169,9 +169,12 @@ export function createWorkspace(hooks){
     if(active?.cwd===file.location.path){hooks.selectSession(active);hooks.appendDraft(text);state.sideFile=file;if(!narrow())hooks.openPanel('files');}
     else{pendingFile={cwd:file.location.path,text,file};hooks.openCreate({projectId:state.projectId,cwd:file.location.path});}
   }
-  function automationOptions(){
+  // A saved definition keeps its harness, even a hidden or retired one.
+  function automationOptions(keep){
     const config=hooks.getConfig();if(!config)return;
-    const items=config.providers.map(p=>[p.id,p.name]);options($('automation-provider'),items,$('automation-provider').value||hooks.getActive()?.provider||'claude');
+    const items=config.providers.filter(p=>!p.hidden||p.id===keep).map(p=>[p.id,p.name]);
+    if(keep&&!items.some(([id])=>id===keep))items.push([keep,hooks.labels[keep]||keep]);
+    const previous=$('automation-provider').value;options($('automation-provider'),items,keep||(items.some(([id])=>id===previous)?previous:items[0]?.[0]));
     projectOptions($('automation-project'),$('automation-project').value);
   }
   function automationHosts(selected='local'){
@@ -252,8 +255,8 @@ export function createWorkspace(hooks){
     box.append(when,then,list);return box;
   }
   function automationEditor(def=null){
-    editorGeneration++;editing=def?.id||null;automationOptions();automationHosts(def?.hostId||hooks.getActive()?.hostId||'local');$('automation-dialog-title').textContent=def?'Edit automation':'New automation';
-    $('automation-name').value=def?.name||'';$('automation-provider').value=def?.provider||hooks.getActive()?.provider||'claude';$('automation-model').value=def?.model||'';
+    editorGeneration++;editing=def?.id||null;automationOptions(def?.provider);automationHosts(def?.hostId||hooks.getActive()?.hostId||'local');$('automation-dialog-title').textContent=def?'Edit automation':'New automation';
+    $('automation-name').value=def?.name||'';$('automation-model').value=def?.model||'';
     $('automation-project').value=def?.projectId||state.projectId||'';$('automation-directory').value=def?.cwd||(hooks.getActive()?.hostId===$('automation-host').value?hooks.getActive().cwd:$('automation-host').value==='local'?directory():catalog.hosts.find(h=>h.id===$('automation-host').value)?.roots?.[0]||'');steps=stepsOf(def);renderSteps();scheduleFields(triggerOf(def));$('automation-enabled').checked=def?.enabled??true;automationProfiles(def?.modelProvider||'');
     $('delete-automation').hidden=!def;$('automation-error').textContent='';$('automation-models').replaceChildren();$('automation-load-models').disabled=false;$('automation-dialog').showModal();
   }

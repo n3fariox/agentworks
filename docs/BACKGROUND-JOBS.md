@@ -1,9 +1,8 @@
 # Background jobs
 
 Agentworks negotiates the optional, versioned AIR `asyncTasks` ACP extension with
-compatible adapters. The installed JavaScript Claude adapter, the bundled Codex
-adapter, the [Rust Codex adapter](RUST-CODEX-ACP.md), and the Rust Claude adapter
-(`claude-rust`, see [RUST-CLAUDE-ACP.md](RUST-CLAUDE-ACP.md)) implement it.
+compatible adapters. The [Rust Codex adapter](RUST-CODEX-ACP.md) and the Rust Claude
+adapter (`claude-rust`, see [RUST-CLAUDE-ACP.md](RUST-CLAUDE-ACP.md)) implement it.
 Ordinary tool activity remains available for other harnesses.
 
 **Background jobs** appears above the composer when the session has reported jobs.
@@ -69,7 +68,6 @@ No provider inference is required:
 
 ```sh
 cargo test --locked --offline -p agentworks-session -p agentworks-runtime -p agentworks
-node tests/async-tasks-adapters.test.mjs
 cargo build --locked --offline -p agentworks
 npx playwright test tests/async-tasks.spec.mjs tests/subagents.spec.mjs
 python3 tests/claude-acp.test.py -v
@@ -79,6 +77,5 @@ npx playwright test tests/claude-rust-subagents.spec.mjs
 The fixture covers background shell launches, child jobs, turn completion, failed
 jobs, duplicate spawns, progress, individual stopping during/after a turn, adapter
 stop errors, reload, service restart, foreign-session rejection, and mobile width.
-Adapter checks exercise the installed JavaScript Claude and bundled Codex
-capability parsers. The Rust Claude adapter's wire test and browser test drive it with
+The Rust Claude adapter's wire test and browser test drive it with
 a fake stream-json CLI. Live provider lifecycle behavior has not been exercised.

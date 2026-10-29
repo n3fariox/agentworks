@@ -13,9 +13,8 @@ These capabilities are negotiated with the adapter, including on remote workers;
 older adapters retain their existing initialization behavior. See
 [the Rust bridge protocol](RUST-CODEX-ACP.md).
 
-Verified against the pinned `@agentclientprotocol/codex-acp`
-`2.2.2-agentworks.1` in `vendor/codex-acp/dist/index.js` (`AgentMode`,
-`toConfigOption`, `applyModeChange`, and `sendPrompt`):
+The mode IDs match those of the former npm `codex-acp` 2.2.2 adapter, so sessions
+saved under it keep their mode on the Rust bridge:
 
 | ACP mode ID | Adapter label | Sandbox | Approval policy |
 | --- | --- | --- | --- |

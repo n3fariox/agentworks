@@ -26,7 +26,7 @@ class HarnessTests(unittest.TestCase):
             sock.bind(("127.0.0.1",0))
             port=sock.getsockname()[1]
         self.base=f"http://127.0.0.1:{port}"
-        self.env=dict(os.environ, AGENTWORKS_PORT=str(port),AGENTWORKS_BIND="127.0.0.1",AGENTWORKS_ROOTS=str(self.cwd),AGENTWORKS_CATALOG_PATH=str(self.cwd/"catalog.json"),AGENTWORKS_DB_PATH=str(self.cwd/"sessions.sqlite3"),AGENTWORKS_AUTH_MODE="existing",ACP_FIXTURE_ASYNC="1",AGENTWORKS_NODE="/nonexistent/node",CODEX_PATH=str(self.root/"tests/codex-acp.test.py"))
+        self.env=dict(os.environ, AGENTWORKS_PORT=str(port),AGENTWORKS_BIND="127.0.0.1",AGENTWORKS_ROOTS=str(self.cwd),AGENTWORKS_CATALOG_PATH=str(self.cwd/"catalog.json"),AGENTWORKS_DB_PATH=str(self.cwd/"sessions.sqlite3"),AGENTWORKS_AUTH_MODE="existing",ACP_FIXTURE_ASYNC="1",CODEX_PATH=str(self.root/"tests/codex-acp.test.py"))
         self.env["ACP_FIXTURE_CWD"]=str(self.cwd)
         self.env["ACP_FIXTURE_NATIVE_LOG"]=str(self.cwd/"native.jsonl")
         self.log=tempfile.TemporaryFile(mode="w+")
@@ -76,8 +76,8 @@ class HarnessTests(unittest.TestCase):
     def test_selected_harness_discovers_models_and_handles_commands(self):
         status=self.request("/api/status")
         providers={p["id"]:p for p in status["providers"]}
-        self.assertIn("codex",providers)
-        self.assertIn("Rust ACP",providers["codex-rust"]["name"])
+        self.assertNotIn("codex",providers)
+        self.assertEqual(providers["codex-rust"]["name"],"Codex")
         self.assertTrue(providers["codex-rust"]["installed"])
         models=self.request("/api/models","POST",dict(provider="codex-rust",cwd=str(self.cwd)))
         self.assertEqual(models["options"][0]["value"],"test-model")
@@ -123,6 +123,13 @@ class HarnessTests(unittest.TestCase):
         self.request(path+"/prompt","POST",dict(text="/rename",requestId=str(uuid4())))
         self.until(lambda:self.request(path)["session"]["status"] in ("idle","error"))
         self.assertEqual(self.request(path)["session"]["title"],"New conversation name")
+
+    def test_legacy_codex_sessions_run_the_rust_bridge(self):
+        created=self.request("/api/sessions","POST",dict(provider="codex",cwd=str(self.cwd),title="Saved under the npm adapter ID"))
+        path="/api/sessions/"+created["id"]
+        self.until(lambda:self.request(path)["session"]["status"]=="idle")
+        self.assertEqual(self.request(path)["session"]["provider"],"codex")
+        self.assertTrue(any(v.get("method")=="thread/start" for v in self.native_lifecycle()))
 
     def native_lifecycle(self):
         return [v for line in (self.cwd/"native.jsonl").read_text().splitlines() if (v:=json.loads(line)).get("method") in ("thread/start","thread/resume","thread/fork")]
@@ -183,7 +190,6 @@ class HarnessTests(unittest.TestCase):
     def test_role_and_shared_context_survive_resume_restart_and_native_fork(self):
         providers={p["id"]:p for p in self.request("/api/status")["providers"]}
         self.assertTrue(providers["codex-rust"]["roles"])
-        self.assertFalse(providers["codex"]["roles"])
         role=self.request("/api/roles","POST",dict(name="Test role",instructions="Keep the original role."))
         created=self.request("/api/sessions","POST",dict(provider="codex-rust",cwd=str(self.cwd),role=role["id"]))
         path="/api/sessions/"+created["id"]

@@ -62,6 +62,9 @@ pub struct Settings {
     /// Harnesses allowed to run at once; absent keeps the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_active_sessions: Option<u32>,
+    /// Harnesses left out of the new-session picker; their sessions still run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_providers: Option<Vec<String>>,
 }
 pub const DEFAULT_ACTIVE_SESSIONS: u32 = 32;
 pub const MAX_ACTIVE_SESSIONS: u32 = 256;
@@ -80,12 +83,19 @@ pub struct Catalog {
 }
 impl Catalog {
     pub fn open(path: PathBuf) -> io::Result<Self> {
-        let data = match std::fs::read(&path) {
+        let mut data: CatalogData = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
             Err(e) if e.kind() == io::ErrorKind::NotFound => CatalogData::default(),
             Err(e) => return Err(e),
         };
+        // The retired npm harnesses' default models carry over to their Rust bridges.
+        let models = &mut data.settings.default_models;
+        for (legacy, native) in [("claude", "claude-rust"), ("codex", "codex-rust")] {
+            if let Some(model) = models.get(legacy).cloned() {
+                models.entry(native.into()).or_insert(model);
+            }
+        }
         Ok(Self { path, data })
     }
     fn save(&mut self, data: CatalogData) -> io::Result<()> {
@@ -545,6 +555,7 @@ mod tests {
             let saved = Catalog::open(path.clone()).unwrap().data.settings;
             assert_eq!(saved.codex_default_permission_mode, Some(mode));
             assert_eq!(saved.default_models["claude"], "unchanged");
+            assert_eq!(saved.default_models["claude-rust"], "unchanged");
             assert_eq!(
                 serde_json::to_value(saved).unwrap()["codexDefaultPermissionMode"],
                 mode.id()
@@ -629,6 +640,7 @@ mod tests {
                 notifications: Default::default(),
                 max_active_sessions: Some(48),
                 git: None,
+                hidden_providers: None,
             })
             .unwrap();
         let mut reopened = Catalog::open(path.clone()).unwrap();

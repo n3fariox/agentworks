@@ -1,11 +1,10 @@
-# Experimental Rust Claude ACP bridge
+# Rust Claude ACP bridge
 
-Choose **Claude · Rust ACP** (provider ID `claude-rust`) in the harness picker. The
-**Claude** option keeps using the npm `claude-agent-acp` adapter. Both share the host
-Claude sign-in, API-key store, default permission mode and limit-resume handling;
-sessions keep the adapter they were created with. Unlike the npm Claude harness,
-`claude-rust` forks natively at the recorded message boundary instead of carrying a
-transcript into a fresh session.
+Choose **Claude** (provider ID `claude-rust`) in the harness picker. It replaced the
+npm `claude-agent-acp` adapter; sessions saved under that adapter's ID, `claude`, now
+run on this bridge too, resuming from the same Claude transcripts. It forks natively
+at the recorded message boundary instead of carrying a transcript into a fresh
+session.
 
 The `agentworks-claude-acp` crate implements it; the Agentworks executable runs it
 as `agentworks claude-acp`. Each ACP session starts one native `claude` process in
@@ -26,12 +25,12 @@ slash commands, cancellation, and model, effort and permission-mode options
 Usage updates carry context occupancy, cost, `_claude/model` and the raw
 `_claude/rateLimit` information; failed turns report `errorKind` (for example
 `rate_limit`) for limit-resume handling. Auto mode falls back to Accept edits for
-models without it, as in the npm adapter.
+models without it, as the former npm adapter did.
 
 Agentworks [roles](ROLES.md) and its shared session context arrive as an ACP
 `systemPrompt` on every new, resume, load and fork request; Claude Code does not store
 them. `append` becomes `--append-system-prompt` and `override` becomes
-`--system-prompt`, so `claude-rust` accepts roles like the npm Claude harness.
+`--system-prompt`, so `claude-rust` accepts roles.
 
 Turns end when Claude Code reports idle (`CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS`),
 not at its first `result`. Claude Code runs subagents in the background: the Agent
@@ -86,7 +85,7 @@ it copies the conversation up to the boundary message into the child cwd's proje
 with fresh message ids. Unknown boundaries fail rather than inheriting newer history.
 Deletion removes the transcript and its sidecar directory.
 
-This is intentionally smaller than the npm adapter. Not implemented: the AIR/JetBrains
+This is intentionally smaller than the former npm adapter. Not implemented: the AIR/JetBrains
 extensions other than async tasks (steering, goals, file-change
 reports), fast mode, custom agents, provider routing/gateways, terminal login
 methods, MCP OAuth, plan clear-context, prompt suggestions, and session titles beyond
@@ -100,8 +99,7 @@ a CLI that fails while a session is opening are ordinary errors and leave the br
 running.
 
 A remote worker offers `claude-rust` when it finds a native `claude` (or
-`CLAUDE_CODE_EXECUTABLE`), even without Node. Remote enrollment still installs the
-existing npm dependencies.
+`CLAUDE_CODE_EXECUTABLE`), even without Node.
 
 Validation (no Node or inference needed):
 

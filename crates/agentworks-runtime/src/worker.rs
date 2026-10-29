@@ -737,15 +737,11 @@ async fn workspace_request(request: &Value) -> Result<Value, String> {
 
 /// Which providers can actually start here, using the mise environment.
 fn available_providers(env: &HashMap<String, String>) -> Vec<&'static str> {
-    let interpreter = std::env::var_os("AGENTWORKS_NODE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| "node".into());
-    let node = resolve(&interpreter, env).is_some();
     PROVIDERS
         .into_iter()
-        .filter(|provider| match *provider {
-            "goose" => true,
-            "codex-rust" => {
+        .filter(|provider| match crate::provider::cli_provider(provider) {
+            "goose" | "demo" => true,
+            "codex" => {
                 let executable = env
                     .get("CODEX_PATH")
                     .cloned()
@@ -753,7 +749,7 @@ fn available_providers(env: &HashMap<String, String>) -> Vec<&'static str> {
                     .unwrap_or_else(|| "codex".into());
                 resolve(Path::new(&executable), env).is_some()
             }
-            "claude-rust" => {
+            "claude" => {
                 let executable = env
                     .get("CLAUDE_CODE_EXECUTABLE")
                     .cloned()
@@ -761,12 +757,10 @@ fn available_providers(env: &HashMap<String, String>) -> Vec<&'static str> {
                     .unwrap_or_else(|| "claude".into());
                 resolve(Path::new(&executable), env).is_some()
             }
-            "opencode" => {
+            _ => {
                 let config = crate::provider::agent_config(provider, false, false);
                 resolve(config.command(), env).is_some()
             }
-            "demo" => true,
-            _ => node && crate::provider::adapter_path(provider).is_file(),
         })
         .collect()
 }
@@ -862,7 +856,7 @@ fn hostname() -> Option<String> {
 mod tests {
     use super::*;
     #[test]
-    fn native_codex_is_available_without_a_node_interpreter() {
+    fn native_codex_serves_both_codex_ids() {
         let env = HashMap::from([
             ("PATH".into(), "/nonexistent".into()),
             (
@@ -875,12 +869,11 @@ mod tests {
         ]);
         let providers = available_providers(&env);
         assert!(providers.contains(&"codex-rust"));
+        assert!(providers.contains(&"codex"));
         assert!(providers.contains(&"goose"));
-        assert!(!providers.contains(&"codex"));
-        assert!(!providers.contains(&"claude"));
     }
     #[test]
-    fn native_claude_is_available_without_a_node_interpreter() {
+    fn native_claude_serves_both_claude_ids() {
         let env = HashMap::from([
             ("PATH".into(), "/nonexistent".into()),
             (
@@ -893,7 +886,7 @@ mod tests {
         ]);
         let providers = available_providers(&env);
         assert!(providers.contains(&"claude-rust"));
-        assert!(!providers.contains(&"claude"));
+        assert!(providers.contains(&"claude"));
     }
     #[tokio::test]
     async fn directory_operations_stay_inside_host_roots() {

@@ -35,7 +35,9 @@ import {setupDirectoryPicker,setupProjectDirectory} from './directory-picker.js'
 const $ = id => document.getElementById(id);
 // randomUUID is unavailable on plain HTTP remote origins; getRandomValues is supported.
 const uuid = () => globalThis.crypto.randomUUID?.() ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
-const labels = {goose:'Goose · embedded',demo:'Demo agent',claude:'Claude','claude-rust':'Claude · Rust ACP',codex:'Codex','codex-rust':'Codex · Rust ACP',opencode:'OpenCode'};
+const labels = {goose:'Goose · embedded',demo:'Demo agent',claude:'Claude','claude-rust':'Claude',codex:'Codex','codex-rust':'Codex',opencode:'OpenCode'};
+// Sessions saved under the retired npm adapter IDs now run the Rust bridges.
+const currentProvider=id=>({claude:'claude-rust',codex:'codex-rust'})[id]||id;
 const icons = {goose:'◉',demo:'◈',claude:'✳','claude-rust':'✳',codex:'⌘','codex-rust':'⌘',opencode:'▣'};
 function readStorage(storage,key,fallback){try{return JSON.parse(storage.getItem(key))??fallback;}catch{return fallback;}}
 let workspace;
@@ -116,7 +118,7 @@ function providerNote() {
     $('create-submit').disabled=!available||!remote.roots?.length||(p.id==='goose'&&$('create-model-provider').disabled)||creating||worktrees.blocked()||!!(forkSource?.role&&!p.roles);
     return;
   }
-  $('provider-note').textContent=p.id==='demo'?'Local test agent. No model calls, API key, or file changes.':p.id==='goose'?'Uses the model provider configured for Goose on this host.':p.id==='opencode'?(p.installed?'Native ACP. Choose an advertised free model. Availability and limits may change.':'Install OpenCode on this host or set AGENTWORKS_OPENCODE_PATH.'):!p.installed?(p.id==='codex-rust'?'Install native Codex on this host or set CODEX_PATH.':p.id==='claude-rust'?'Install native Claude Code on this host or set CLAUDE_CODE_EXECUTABLE.':'Adapter not installed. Run npm ci --ignore-scripts.'):p.authMode==='existing'?'Uses the existing agent sign-in on this host. If it has expired, sign in with the CLI and try again.':!p.keyPresent?`Set ${['claude','claude-rust'].includes(p.id)?'ANTHROPIC_API_KEY':'OPENAI_API_KEY or CODEX_API_KEY'} before starting the server.`:'API key available on the host. Messages use your provider account.';
+  $('provider-note').textContent=p.id==='demo'?'Local test agent. No model calls, API key, or file changes.':p.id==='goose'?'Uses the model provider configured for Goose on this host.':p.id==='opencode'?(p.installed?'Native ACP. Choose an advertised free model. Availability and limits may change.':'Install OpenCode on this host or set AGENTWORKS_OPENCODE_PATH.'):!p.installed?(p.id==='codex-rust'?'Install native Codex on this host or set CODEX_PATH.':'Install native Claude Code on this host or set CLAUDE_CODE_EXECUTABLE.'):p.authMode==='existing'?'Uses the existing agent sign-in on this host. If it has expired, sign in with the CLI and try again.':!p.keyPresent?`Set ${['claude','claude-rust'].includes(p.id)?'ANTHROPIC_API_KEY':'OPENAI_API_KEY or CODEX_API_KEY'} before starting the server.`:'API key available on the host. Messages use your provider account.';
   $('create-submit').disabled=!p.installed||(p.authMode==='api_key'&&!p.keyPresent)||(p.id==='goose'&&$('create-model-provider').disabled)||creating||worktrees.blocked()||!!(forkSource?.role&&!p.roles);
 }
 // Roles add instructions to the agent's system prompt; they never change Agentworks access.
@@ -143,8 +145,17 @@ function updateCommunicationDefault(){
   $('create-agent-access').querySelector('option[value=""]').textContent=`Use ${project?.defaultCommunicationRole?'project':'global'} default · ${communicationLabels[role]}`;
   $('create-communication-note').textContent='Participant exchanges project messages. Coordinator can also start sessions and turns, cancel turns, and run project automations. Change session access later in Agents & inbox.';
 }
+// Most recently used harness first; hidden harnesses stay out unless a fork keeps one.
+function renderProviderPicker(keep){
+  const used=readStorage(localStorage,'agentworks-provider-used',{});
+  const shown=config.providers.filter(p=>!p.hidden||p.id===keep);
+  const items=(shown.length?shown:config.providers).map((p,i)=>({p,i})).sort((a,b)=>(used[b.p.id]||0)-(used[a.p.id]||0)||a.i-b.i);
+  $('provider').replaceChildren(...items.map(({p})=>{const option=el('option','',p.name+(p.authMode==='api_key'&&!p.keyPresent?' · API key needed':''));option.value=p.id;return option;}));
+}
 function openCreate(context={}) {
   if(!config)return;
+  if(context.provider)context.provider=currentProvider(context.provider);
+  renderProviderPicker(context.provider);
   updateProjectControls();
   forkSource=context.fork||null;const generation=++forkGeneration;modelPicked=false;
   const workspaceContext=workspace?.context();
@@ -285,7 +296,7 @@ function renderCommands(){
 }
 function importHost(){return hosts.find(h=>h.id===$('import-host').value&&h.kind==='remote')||null;}
 function importProviders(){
-  const host=importHost(),selected=$('import-provider').value||active?.provider||'claude';
+  const host=importHost(),selected=$('import-provider').value||currentProvider(active?.provider||'claude');
   $('import-provider').replaceChildren();
   for(const provider of config.providers){const option=el('option','',provider.name);option.value=provider.id;option.disabled=host?!host.worker?.providers?.includes(provider.id):!provider.installed;$('import-provider').append(option);}
   const available=[...$('import-provider').options].filter(o=>!o.disabled);
@@ -1242,6 +1253,7 @@ $('create-form').onsubmit=async event=>{
     pendingCreate=null;sessionStorage.removeItem('agentworks-pending-create');
     // Remember the chosen source directory, never a worktree created from it.
     const remembered=readStorage(localStorage,'agentworks-project-locations',{});remembered[created.hostId&&created.hostId!=='local'?created.hostId+':'+(created.projectId||'ungrouped'):created.projectId||'ungrouped']=source;try{localStorage.setItem('agentworks-project-locations',JSON.stringify(remembered));}catch{}
+    const used=readStorage(localStorage,'agentworks-provider-used',{});used[created.provider]=Date.now();try{localStorage.setItem('agentworks-provider-used',JSON.stringify(used));}catch{}
     sessions.unshift(created);$('create-dialog').close();selectSession(created);
     if(fork)toast(`Forked from “${fork.title}”. Its recorded history and lineage are preserved; the selected context handoff is applied.`,'success');
   }catch(e){$('create-error').textContent=e.message;}finally{creating=false;providerNote();}
@@ -1366,44 +1378,54 @@ async function openSettings(){
     $('default-communication-role').value=settings.defaultCommunicationRole||'participant';
     $('max-active-sessions').value=settings.maxActiveSessions;
     const fields=$('default-model-fields');fields.replaceChildren();
-    // Node and Rust harnesses for one CLI share its permission default; show the picker once per CLI.
-    const modeFamilies=new Set();
-    for(const provider of config.providers.filter(p=>p.id!=='demo')){
-      const family=provider.id.replace(/-rust$/,''),firstOfFamily=!modeFamilies.has(family);modeFamilies.add(family);
-      const id='default-model-'+provider.id,label=el('label','',provider.name+' default model');label.htmlFor=id;
-      const input=el('input');input.id=id;input.dataset.provider=provider.id;input.value=settings.defaultModels[provider.id]||'';input.placeholder='Harness default';input.maxLength=256;
-      const list=el('datalist');list.id=id+'-options';input.setAttribute('list',list.id);
-      const load=el('button','text-button','Load models');load.type='button';
-      load.onclick=async()=>{
-        load.disabled=true;load.textContent='Loading…';$('settings-error').textContent='';
-        try{
-          const cwd=rootValues().find(Boolean)||config.roots[0];
-          const result=await api('/api/models',{method:'POST',body:JSON.stringify({provider:provider.id,cwd})});
-          list.replaceChildren();for(const model of result.options||[]){const option=el('option');option.value=model.value;option.label=model.name||model.value;list.append(option);}
-          if(!result.options?.length)$('settings-error').textContent='This harness did not advertise selectable models.';
-        }catch(e){$('settings-error').textContent=e.message;}finally{load.disabled=false;load.textContent='Load models';}
-      };
-      const row=el('div','model-field');row.append(input,load);fields.append(label,row,list);
-      if(family==='codex'&&firstOfFamily){
-        const modeLabel=el('label','','Codex default sandbox / permission mode');modeLabel.htmlFor='codex-default-permission-mode';
+    const hidden=new Set(settings.hiddenProviders||[]);
+    for(const provider of config.providers){
+      // The power switch hides a harness from new sessions and collapses its defaults.
+      const section=el('section','settings-section harness-settings'),heading=el('div','harness-heading'),title=el('h3','',provider.name),state=el('span','harness-state');
+      title.id='harness-title-'+provider.id;section.setAttribute('aria-labelledby',title.id);
+      const power=el('button','harness-power');power.type='button';power.setAttribute('role','switch');power.dataset.visible=provider.id;
+      power.setAttribute('aria-label',`Show ${provider.name} in the new session picker`);power.append(el('span','harness-power-knob','⏻'));
+      const body=el('div','harness-body');
+      const setShown=on=>{power.setAttribute('aria-checked',String(on));section.classList.toggle('is-off',!on);body.hidden=!on;state.textContent=on?'':'Hidden from new sessions';};
+      power.onclick=()=>setShown(power.getAttribute('aria-checked')!=='true');
+      heading.append(title,state,power);section.append(heading,body);setShown(!hidden.has(provider.id));
+      if(provider.id!=='demo'){
+        const id='default-model-'+provider.id,label=el('label','','Default model');label.htmlFor=id;
+        const input=el('input');input.id=id;input.dataset.provider=provider.id;input.value=settings.defaultModels[provider.id]||'';input.placeholder='Harness default';input.maxLength=256;
+        const list=el('datalist');list.id=id+'-options';input.setAttribute('list',list.id);
+        const load=el('button','text-button','Load models');load.type='button';
+        load.onclick=async()=>{
+          load.disabled=true;load.textContent='Loading…';$('settings-error').textContent='';
+          try{
+            const cwd=rootValues().find(Boolean)||config.roots[0];
+            const result=await api('/api/models',{method:'POST',body:JSON.stringify({provider:provider.id,cwd})});
+            list.replaceChildren();for(const model of result.options||[]){const option=el('option');option.value=model.value;option.label=model.name||model.value;list.append(option);}
+            if(!result.options?.length)$('settings-error').textContent='This harness did not advertise selectable models.';
+          }catch(e){$('settings-error').textContent=e.message;}finally{load.disabled=false;load.textContent='Load models';}
+        };
+        const row=el('div','model-field');row.append(input,load);body.append(label,row,list);
+      }
+      if(provider.id==='codex-rust'){
+        const modeLabel=el('label','','Default sandbox / permission mode');modeLabel.htmlFor='codex-default-permission-mode';
         const mode=el('select');mode.id='codex-default-permission-mode';
         for(const [value,name] of [['agent-full-access','Full access'],['read-only','Read-only'],['workspace-write','Workspace access'],['agent','Auto review']]){
           const option=el('option','',name);option.value=value;mode.append(option);
         }
         mode.value=settings.codexDefaultPermissionMode||'agent-full-access';
-        const note=el('div','field-note',"Applies only to new Codex sessions, in both the Node and Rust harnesses. Full access allows unrestricted file and network access in the Codex harness. Existing sessions keep their saved mode. If the adapter does not advertise your choice, its current mode is kept and a note appears in Session options. This does not change Agentworks MCP/controller grants or host controls.");
-        fields.append(modeLabel,mode,note);
+        const note=el('div','field-note',"Applies only to new Codex sessions. Full access allows unrestricted file and network access in the Codex harness. Existing sessions keep their saved mode. If the adapter does not advertise your choice, its current mode is kept and a note appears in Session options. This does not change Agentworks MCP/controller grants or host controls.");
+        body.append(modeLabel,mode,note);
       }
-      if(family==='claude'&&firstOfFamily){
-        const modeLabel=el('label','','Claude default permission mode');modeLabel.htmlFor='claude-default-permission-mode';
+      if(provider.id==='claude-rust'){
+        const modeLabel=el('label','','Default permission mode');modeLabel.htmlFor='claude-default-permission-mode';
         const mode=el('select');mode.id='claude-default-permission-mode';
         for(const [value,name] of [['auto','Auto'],['default','Default'],['acceptEdits','Accept edits'],['plan','Plan']]){
           const option=el('option','',name);option.value=value;mode.append(option);
         }
         mode.value=settings.claudeDefaultPermissionMode||'auto';
-        const note=el('div','field-note',"Applies only to new Claude sessions, in both the Node and Rust harnesses. Auto uses Claude’s normal Auto mode. If the adapter does not advertise your choice, its current permission mode is kept and a note appears in Session options. Reconnected sessions keep their saved mode.");
-        fields.append(modeLabel,mode,note);
+        const note=el('div','field-note',"Applies only to new Claude sessions. Auto uses Claude’s normal Auto mode. If the adapter does not advertise your choice, its current permission mode is kept and a note appears in Session options. Reconnected sessions keep their saved mode.");
+        body.append(modeLabel,mode,note);
       }
+      fields.append(section);
     }
     await timeoutsReady;
     $('settings-dialog').showModal();
@@ -1415,11 +1437,12 @@ $('dismiss-settings').onclick=()=>$('settings-dialog').close();
 $('settings-form').onsubmit=async event=>{
   event.preventDefault();$('save-settings').disabled=true;$('settings-error').textContent='';
   try{
-    const defaultModels={};for(const input of $('default-model-fields').querySelectorAll('input')){if(input.value.trim())defaultModels[input.dataset.provider]=input.value.trim();}
+    const defaultModels={};for(const input of $('default-model-fields').querySelectorAll('input[data-provider]')){if(input.value.trim())defaultModels[input.dataset.provider]=input.value.trim();}
+    const hiddenProviders=[...$('default-model-fields').querySelectorAll('[data-visible]')].filter(power=>power.getAttribute('aria-checked')!=='true').map(power=>power.dataset.visible);
     const timeouts=timeoutControls.pendingDefault();
-    const settings=await api('/api/settings',{method:'PUT',body:JSON.stringify({git:gitSettings.value(),roots:rootValues().filter(Boolean),defaultModels,claudeDefaultPermissionMode:$('claude-default-permission-mode')?.value,codexDefaultPermissionMode:$('codex-default-permission-mode')?.value,defaultCommunicationRole:$('default-communication-role').value,maxActiveSessions:Number.isInteger($('max-active-sessions').valueAsNumber)?$('max-active-sessions').valueAsNumber:undefined,...(timeouts?{timeouts}:{})})});
+    const settings=await api('/api/settings',{method:'PUT',body:JSON.stringify({git:gitSettings.value(),roots:rootValues().filter(Boolean),defaultModels,claudeDefaultPermissionMode:$('claude-default-permission-mode')?.value,codexDefaultPermissionMode:$('codex-default-permission-mode')?.value,hiddenProviders,defaultCommunicationRole:$('default-communication-role').value,maxActiveSessions:Number.isInteger($('max-active-sessions').valueAsNumber)?$('max-active-sessions').valueAsNumber:undefined,...(timeouts?{timeouts}:{})})});
     if(timeouts)timeoutControls.acceptDefault(timeouts);
-    config.roots=settings.roots;config.defaultModels=settings.defaultModels;config.defaultCommunicationRole=settings.defaultCommunicationRole||'participant';applyRoots();
+    config.roots=settings.roots;config.defaultModels=settings.defaultModels;for(const p of config.providers)p.hidden=settings.hiddenProviders.includes(p.id);config.defaultCommunicationRole=settings.defaultCommunicationRole||'participant';applyRoots();
     $('settings-dialog').close();toast('Settings saved. They apply to new sessions.','success');
   }catch(e){$('settings-error').textContent='Host settings were not saved: '+e.message+' Display preferences are stored separately in this browser.';}finally{$('save-settings').disabled=false;}
 };
@@ -1448,7 +1471,7 @@ sidePanel=setupSidePanel({panel:$('side-panel'),tabs:{files:$('side-tab-files'),
 async function init(){
   config=await api('/api/status');
   $('host-address').textContent=location.host+' · Linux prototype';
-  for(const p of config.providers){const option=el('option','',p.name+(p.authMode==='api_key'&&!p.keyPresent?' · API key needed':''));option.value=p.id;$('provider').append(option);}
+  renderProviderPicker();
   applyRoots();
   await refreshSessions();
   const saved=sessions.find(s=>s.id===localStorage.getItem('agentworks-session'));if(saved)selectSession(saved);workspace.restoreView();

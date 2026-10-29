@@ -2,7 +2,7 @@
 // No Agentworks server, provider process, account query or session is started.
 import {test,expect} from '@playwright/test';
 import {readFileSync} from 'node:fs';
-import {observeSubscriptionLimits,subscriptionLimitsMeta} from '../vendor/codex-acp/dist/subscription-limits.js';
+import {observeSubscriptionLimits,subscriptionLimitsMeta} from './fixtures/subscription-limits.mjs';
 const script=readFileSync(new URL('../web/usage-status.js',import.meta.url),'utf8');
 const fixture=JSON.parse(readFileSync(new URL('./fixtures/codex-subscription.json',import.meta.url)));
 test.use({viewport:{width:390,height:844}});

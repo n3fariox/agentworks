@@ -48,7 +48,7 @@
     "test:service-restart": "node scripts/service-restart-smoke.mjs",
     "test:supervisor": "python3 scripts/service/supervisor-test.py",
     "prepare:coordinator": "node scripts/prepare-self-improvement.mjs",
-    "test:codex-quota": "node tests/codex-subscription.test.mjs",
+    "test:codex-quota": "playwright test tests/codex-subscription.spec.mjs",
     "test:review-queue": "node scripts/review-queue-smoke.mjs",
     "test:questions": "node tests/questions.test.mjs && playwright test tests/questions.spec.mjs",
     "test:host-enrollment": "node scripts/host-enrollment-smoke.mjs",
@@ -57,15 +57,13 @@
     "test:starlark": "cargo test --locked -p agentworks-starlark",
     "test:progress": "node --test tests/bazel-progress.test.mjs && node scripts/progress-smoke.mjs",
     "test:tool-bodies": "node scripts/tool-bodies-smoke.mjs && playwright test tests/tool-bodies.spec.mjs",
-    "test:async-tasks": "node tests/async-tasks-adapters.test.mjs && playwright test tests/async-tasks.spec.mjs",
-    "test:subagents": "node tests/subagents.test.mjs && node tests/subagents-adapters.test.mjs && playwright test tests/subagents.spec.mjs",
+    "test:async-tasks": "playwright test tests/async-tasks.spec.mjs",
+    "test:subagents": "node tests/subagents.test.mjs && playwright test tests/subagents.spec.mjs",
     "readme:media": "node scripts/readme-media/capture.mjs",
-    "test:attachments": "node tests/attachments-adapters.test.mjs && playwright test tests/attachments.spec.mjs",
+    "test:attachments": "playwright test tests/attachments.spec.mjs",
     "test:codex-oauth": "playwright test tests/codex-oauth.spec.mjs"
   },
   "dependencies": {
-    "@agentclientprotocol/claude-agent-acp": "0.93.0",
-    "@agentclientprotocol/codex-acp": "file:vendor/codex-acp",
     "@modelcontextprotocol/sdk": "1.32.1"
   },
   "devDependencies": {
