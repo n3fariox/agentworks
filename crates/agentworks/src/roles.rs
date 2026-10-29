@@ -97,7 +97,7 @@ pub struct Input {
 pub fn supported(provider: &str) -> bool {
     matches!(
         provider,
-        "claude" | "claude-rust" | "codex-rust" | "goose" | "demo"
+        "claude" | "claude-rust" | "codex" | "codex-rust" | "goose" | "demo"
     )
 }
 
@@ -349,7 +349,7 @@ mod tests {
             StatusCode::BAD_REQUEST
         );
         assert!(
-            resolve(&db, Some("reviewer"), "codex")
+            resolve(&db, Some("reviewer"), "opencode")
                 .unwrap_err()
                 .1
                 .contains("does not accept")

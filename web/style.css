@@ -248,6 +248,18 @@ body[data-code-wrap=scroll] .tool-card pre,body[data-code-wrap=scroll] .approval
 #settings-dialog .display-field label{margin:0 0 7px}
 #settings-dialog .workspace-check{display:flex;align-items:center;gap:10px;margin:14px 0;font-size:13px}
 #settings-dialog input[type=checkbox]{width:18px;height:18px;min-height:18px;flex:none;margin:0;accent-color:var(--accent)}
+#default-model-fields{display:grid;gap:12px;margin-bottom:24px}
+#settings-dialog .harness-heading{display:flex;align-items:center;gap:12px}
+#settings-dialog .harness-heading h3{margin:0;font-size:15px;font-weight:600;flex:1;min-width:0}
+#settings-dialog .harness-state{font-size:12px;color:var(--muted)}
+#settings-dialog .harness-body{margin-top:2px}
+#settings-dialog .harness-settings.is-off{background:transparent;border-style:dashed}
+#settings-dialog .harness-settings.is-off h3{color:var(--muted)}
+.harness-power{position:relative;flex:none;width:52px;height:30px;padding:0;border-radius:15px;border:1px solid #3a3d45;background:#111417;cursor:pointer;transition:background .15s,border-color .15s}
+.harness-power-knob{position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;line-height:1;background:#2a2d34;color:var(--muted);transition:transform .15s,background .15s,color .15s}
+.harness-power[aria-checked=true]{background:#302b42;border-color:#6d5f8c}
+.harness-power[aria-checked=true] .harness-power-knob{transform:translateX(22px);background:var(--accent);color:#211b36}
+.harness-power:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 #settings-dialog #timeout-controls{display:block}
 #settings-dialog [data-timeout-scope]{min-width:0}
 #settings-dialog [data-timeout-scope] h3{font-size:14px;font-weight:500;margin:0 0 12px}

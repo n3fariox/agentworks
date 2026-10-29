@@ -1,11 +1,12 @@
 import {test,expect} from '@playwright/test';
 import {spawn} from 'node:child_process';
-import {mkdtemp,mkdir,copyFile,readFile} from 'node:fs/promises';
+import {mkdtemp,mkdir,readFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
+import {acpAgent} from './support/acp-agent.mjs';
 import {serverReady,stopChild,removeFixture} from './support/cleanup.mjs';
 const base='http://127.0.0.1:4496';
-let dir,server,output='';
+let dir,server,agent,output='';
 async function api(path,body){
   const response=await fetch(base+path,{method:body===undefined?'GET':'POST',headers:{Origin:base,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
   expect(response.ok,await response.clone().text()).toBeTruthy();return response.json();
@@ -24,13 +25,13 @@ async function screenshots(page,name){
 }
 test.beforeAll(async()=>{
   dir=await mkdtemp(join(tmpdir(),'agentworks-subagents-'));
-  await mkdir(join(dir,'node_modules/.bin'),{recursive:true});
-  await copyFile('tests/fixtures/subagent-agent.mjs',join(dir,'node_modules/.bin/codex-acp'));
+  
+  agent=await acpAgent(dir,'tests/fixtures/subagent-agent.mjs');
   await startServer();
 });
 async function startServer(){
   output='';
-  server=spawn(resolve(process.env.AGENTWORKS_TEST_BINARY||'target/debug/agentworks'),[],{env:{...process.env,AGENTWORKS_NODE:process.execPath,AGENTWORKS_RUNTIME_DIR:dir,AGENTWORKS_SUBAGENT_LOG:join(dir,'wire.jsonl'),AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:'4496',AGENTWORKS_ROOTS:dir,AGENTWORKS_CATALOG_PATH:join(dir,'catalog.json'),AGENTWORKS_DB_PATH:join(dir,'sessions.sqlite3')},stdio:['ignore','pipe','pipe']});
+  server=spawn(resolve(process.env.AGENTWORKS_TEST_BINARY||'target/debug/agentworks'),[],{env:{...process.env,AGENTWORKS_ACP_COMMAND:agent,AGENTWORKS_RUNTIME_DIR:dir,AGENTWORKS_SUBAGENT_LOG:join(dir,'wire.jsonl'),AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:'4496',AGENTWORKS_ROOTS:dir,AGENTWORKS_CATALOG_PATH:join(dir,'catalog.json'),AGENTWORKS_DB_PATH:join(dir,'sessions.sqlite3')},stdio:['ignore','pipe','pipe']});
   server.stdout.on('data',b=>output+=b);server.stderr.on('data',b=>output+=b);
   let error;server.on('error',e=>error=e);
   await expect.poll(async()=>{if(error)throw error;if(server.exitCode!==null)throw Error(output);return serverReady(server,base);},{timeout:10000}).toBe(true);
@@ -40,7 +41,7 @@ test.afterAll(async()=>{await stopChild(server);await removeFixture(dir);});
 test('subagent tabs separate transcripts, retain approvals, and survive replay',async({page})=>{
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.setViewportSize({width:1440,height:1000});
-  const s=await api('/api/sessions',{provider:'codex',cwd:dir});await state(s.id,'idle');
+  const s=await api('/api/sessions',{provider:'codex-rust',cwd:dir});await state(s.id,'idle');
   await open(page,s.id);
   await api('/api/sessions/'+s.id+'/prompt',{text:'inspect',requestId:'subagents'});await state(s.id,'waiting');
   const researcher=page.getByRole('tab',{name:'Sub: Researcher',exact:true}),reviewer=page.getByRole('tab',{name:'Sub: Reviewer',exact:true});
@@ -94,7 +95,7 @@ test('subagent tabs separate transcripts, retain approvals, and survive replay',
 
 test('mobile strip scrolls, child Stop targets the root, and tabs stay within the viewport',async({page})=>{
   await page.setViewportSize({width:390,height:844});
-  const s=await api('/api/sessions',{provider:'codex',cwd:dir});await state(s.id,'idle');await open(page,s.id);
+  const s=await api('/api/sessions',{provider:'codex-rust',cwd:dir});await state(s.id,'idle');await open(page,s.id);
   await api('/api/sessions/'+s.id+'/prompt',{text:'slow',requestId:'stop-subagents'});await state(s.id,'running');
   const reviewer=page.getByRole('tab',{name:'Sub: Reviewer',exact:true});
   await reviewer.click();await expect(page.locator('#subagent-view')).toContainText('Modern working');

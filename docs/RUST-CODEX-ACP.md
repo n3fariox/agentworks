@@ -1,11 +1,8 @@
-# Experimental Rust Codex ACP bridge
+# Rust Codex ACP bridge
 
-Select **Codex · Rust ACP** in the harness picker (`provider: "codex-rust"` in the
-API). It is a separate harness alongside **Codex**, which continues to use the
-JavaScript adapter. The former `AGENTWORKS_CODEX_ADAPTER` switch has been removed.
-Each saved session retains its adapter identity across restart/resume. Both harnesses
-share Codex authentication, API-key storage, and account quota reporting, while model
-defaults are independent. Import registration treats native thread IDs as belonging
+Select **Codex** in the harness picker (`provider: "codex-rust"` in the API). It
+replaced the JavaScript `codex-acp` adapter; sessions saved under that adapter's ID,
+`codex`, now run on this bridge too, resuming the same native threads. Import registration treats native thread IDs as belonging
 to the same Codex provider to avoid opening duplicate writers through both adapters.
 
 The same Agentworks executable runs `agentworks codex-acp`, which starts the native
@@ -132,8 +129,6 @@ newer history. Fingerprint-only boundary recovery is not implemented.
 
 Workers advertise `codex-rust` independently when native Codex is available, even
 without Node. Older workers that do not advertise it cannot start this harness.
-Remote enrollment still installs the existing npm dependencies; this experiment
-does not yet make enrollment or Claude execution independent of Node.
 
 Validation (no Node or inference needed):
 

@@ -18,25 +18,24 @@ AGENTWORKS_AUTH_MODE=api_key mise exec -- cargo run --locked
 
 Only this explicit API-key mode isolates provider configuration/authentication under `.agentworks/claude` and `.agentworks/codex`, keeping it separate from the host CLI login store.
 
-The JavaScript **Claude** and **Codex** options use pinned local ACP adapters installed by `npm ci`, without downloading an adapter at session creation. Claude wraps its SDK; Codex wraps app-server. Project-local agent instructions may be loaded by the harness. Run `npm ci --ignore-scripts` on each execution machine that should offer them. The binary itself includes the demo agent and the Rust adapters, which need no Node.
+**Claude** and **Codex** run the [Rust Claude](RUST-CLAUDE-ACP.md) and
+[Rust Codex](RUST-CODEX-ACP.md) ACP bridges built into the binary (provider IDs
+`claude-rust` and `codex-rust`). They need a native `claude` or `codex` executable on
+PATH (or `CLAUDE_CODE_EXECUTABLE` / `CODEX_PATH`) and no Node or npm adapter. Each
+shares the host CLI sign-in.
 
-Choose **Codex · Rust ACP** in the harness picker to use the experimental
-[Rust Codex adapter](RUST-CODEX-ACP.md) included in the binary. Its provider ID is
-`codex-rust`; it requires a native `codex` executable on PATH (or `CODEX_PATH`).
-The existing **Codex** option uses the JavaScript adapter. Both share the host
-Codex sign-in; model defaults and session adapter identity stay separate.
-The Rust Codex execution path requires no Node or npm adapter. No adapter-selection
-environment variable is needed.
+The npm adapters (`claude-agent-acp` and the vendored `codex-acp`) have been removed.
+Sessions, automations and settings saved under their old provider IDs, `claude` and
+`codex`, keep those IDs and run on the Rust bridges, which read the same native
+history. Default models saved for the old IDs carry over to the Rust harnesses.
+Forking an old session into a Rust harness hands over its transcript.
 
-Choose **Claude · Rust ACP** in the harness picker to use the experimental
-[Rust Claude adapter](RUST-CLAUDE-ACP.md) included in the binary. Its provider ID is
-`claude-rust`; it requires a native `claude` executable on PATH (or
-`CLAUDE_CODE_EXECUTABLE`) and no Node or npm adapter. The existing **Claude** option
-uses the JavaScript adapter. Both share the host Claude sign-in; model defaults and
-session adapter identity stay separate. Guided host enrollment installs no Node or npm
-packages, so enrolled hosts offer only the Rust adapters.
+Settings → Harnesses groups each harness's defaults (model, permission mode) and a
+**Show in the new session picker** switch. A hidden harness keeps its ID and its
+existing sessions; it is only left out of the new-session and automation pickers. The
+picker lists harnesses you used most recently first (remembered in this browser).
 
-Codex uses the tracked local `2.2.2-agentworks.1` fork in `vendor/codex-acp` to attach cached subscription windows to genuine context usage events. The usage display preserves each window's source observation time separately from context. No extra account queries or polling are performed; quotas appear after native push notifications and a genuine usage event. See the [implemented metadata contract and limitations](CODEX-SUBSCRIPTION-QUOTA.md).
+The Rust Codex bridge attaches cached subscription windows to genuine context usage events. The usage display preserves each window's source observation time separately from context. No extra account queries or polling are performed; quotas appear after native push notifications and a genuine usage event. See the [metadata contract](CODEX-SUBSCRIPTION-QUOTA.md).
 
 To check the ACP handshake without making an inference request:
 

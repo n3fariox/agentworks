@@ -148,7 +148,7 @@ test('OpenCode: native session and advertised free model picker', async ({page})
 test('Claude and Codex use existing sign-in without an API-key gate', async ({page}) => {
   await page.goto('/');
   await page.locator('#new-session').click();
-  for (const provider of ['claude','codex']) {
+  for (const provider of ['claude-rust','codex-rust']) {
     await page.locator('#provider').selectOption(provider);
     await expect(page.locator('#provider-note')).toContainText('existing agent sign-in');
     await expect(page.locator('#create-submit')).toBeEnabled();
@@ -250,11 +250,11 @@ test('models at creation, command and skill discovery, host settings',async({pag
     await page.getByRole('button',{name:'Remove root directory'}).last().click();
     await expect(page.locator('#settings-roots input')).toHaveCount(original.roots.length);
     await page.locator('#settings-tab-models').click();
-    await page.locator('#default-model-codex').fill('test-default-model');
+    await page.locator('#default-model-codex-rust').fill('test-default-model');
     await page.locator('#save-settings').click();
     await expect(page.locator('#settings-dialog')).not.toBeVisible();
     await page.locator('#new-session').click();
-    await page.locator('#provider').selectOption('codex');
+    await page.locator('#provider').selectOption('codex-rust');
     await expect(page.locator('#create-model')).toHaveValue('test-default-model');
     await page.locator('#dismiss-create').click();
     await page.evaluate(settings=>fetch('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(settings)}),original);
@@ -302,7 +302,7 @@ test('resume picker loads on open and agent changes, clears old filters, and ign
   let delayCodex=false;
   await page.route('**/api/external-sessions',async route=>{
     const {provider,hostProfile}=route.request().postDataJSON();
-    if(provider==='codex'&&delayCodex){startedSlow();await slowRelease;}
+    if(provider==='codex-rust'&&delayCodex){startedSlow();await slowRelease;}
     const title=provider==='opencode'?`opencode ${hostProfile?'host':'agentworks'}`:provider;
     await route.fulfill({json:{sessions:[{sessionId:title,cwd:'/project',title}],nextCursor:null}});
   });
@@ -310,15 +310,15 @@ test('resume picker loads on open and agent changes, clears old filters, and ign
     await page.goto('/');await page.locator('#new-session').click();await page.locator('#create-import').click();
     await expect(page.locator('.external-session')).toContainText('claude');
     await page.locator('#import-search').fill('claude');
-    await page.locator('#import-provider').selectOption('codex');
+    await page.locator('#import-provider').selectOption('codex-rust');
     await expect(page.locator('#import-search')).toHaveValue('');
     await expect(page.locator('.external-session')).toContainText('codex');
-    await page.locator('#import-provider').selectOption('claude');
+    await page.locator('#import-provider').selectOption('claude-rust');
     await expect(page.locator('.external-session')).toContainText('claude');
-    delayCodex=true;await page.locator('#import-provider').selectOption('codex');await slowStarted;
-    await page.locator('#import-provider').selectOption('claude');
+    delayCodex=true;await page.locator('#import-provider').selectOption('codex-rust');await slowStarted;
+    await page.locator('#import-provider').selectOption('claude-rust');
     await expect(page.locator('#external-sessions')).toContainText('Loading sessions');
-    const stale=page.waitForResponse(response=>response.url().endsWith('/api/external-sessions')&&response.request().postDataJSON().provider==='codex');
+    const stale=page.waitForResponse(response=>response.url().endsWith('/api/external-sessions')&&response.request().postDataJSON().provider==='codex-rust');
     releaseSlow();await stale;
     await expect(page.locator('.external-session')).toContainText('claude');
     await page.locator('#import-provider').selectOption('opencode');

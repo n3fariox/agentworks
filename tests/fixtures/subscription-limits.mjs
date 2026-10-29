@@ -1,4 +1,4 @@
-// Agentworks extension to codex-acp 2.2.2. Observes push notifications only.
+// Builds the _codex/subscriptionLimits metadata the Rust Codex bridge attaches to usage updates.
 // Each field carries its own source observation time: sparse notifications and
 // repeated token updates must not turn an older percentage into a fresh one.
 const WINDOWS = ['primary', 'secondary'];

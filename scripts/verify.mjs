@@ -28,7 +28,6 @@ try{
   await run('cargo',['test','--locked','-p','agentworks-starlark']);
   await run('node',['--test','tests/bazel-progress.test.mjs']);
   await run('node',['--test','tests/fixture-cleanup.test.mjs']);
-  await run('node',['tests/codex-subscription.test.mjs']);
   await run('node',['scripts/mcp-wire-smoke.mjs']);
   await run('node',['scripts/remote-host-smoke.mjs']);
   await run('node',['scripts/remote-plumbing-smoke.mjs']);

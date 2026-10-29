@@ -11,6 +11,11 @@ pub fn cli_provider(provider: &str) -> &str {
         _ => provider,
     }
 }
+/// `claude` and `codex` once named the npm adapters. Sessions saved with them keep
+/// their ID but now run the Rust bridge, which shares the same native history.
+pub fn is_legacy(provider: &str) -> bool {
+    matches!(provider, "claude" | "codex")
+}
 
 pub fn key_present(provider: &str) -> bool {
     let keys: &[&str] = match cli_provider(provider) {
@@ -29,14 +34,9 @@ pub fn runtime_root() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")))
 }
-pub fn adapter_path(provider: &str) -> PathBuf {
-    runtime_root()
-        .join("node_modules/.bin")
-        .join(if provider == "claude" {
-            "claude-agent-acp"
-        } else {
-            "codex-acp"
-        })
+/// Test hook: an ACP agent executable that stands in for the Claude/Codex bridges.
+fn acp_override() -> Option<PathBuf> {
+    std::env::var_os("AGENTWORKS_ACP_COMMAND").map(PathBuf::from)
 }
 pub fn opencode_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("AGENTWORKS_OPENCODE_PATH") {
@@ -49,8 +49,11 @@ pub fn opencode_path() -> Option<PathBuf> {
     })
 }
 pub fn installed(provider: &str) -> bool {
-    if matches!(provider, "codex-rust" | "claude-rust") {
-        let (var, name) = if provider == "claude-rust" {
+    if matches!(cli_provider(provider), "codex" | "claude") {
+        if acp_override().is_some() {
+            return true;
+        }
+        let (var, name) = if cli_provider(provider) == "claude" {
             ("CLAUDE_CODE_EXECUTABLE", "claude")
         } else {
             ("CODEX_PATH", "codex")
@@ -64,7 +67,7 @@ pub fn installed(provider: &str) -> bool {
     match provider {
         "demo" | "goose" => true,
         "opencode" => opencode_path().is_some(),
-        _ => adapter_path(provider).exists(),
+        _ => false,
     }
 }
 
@@ -108,14 +111,15 @@ pub fn agent_config(provider: &str, api_key_mode: bool, host_profile: bool) -> A
             .env("CODEX_API_KEY", "")
             .env("ANTHROPIC_API_KEY", "")
     } else {
-        let mut config = if provider == "codex-rust" {
-            AcpAgentConfig::new(std::env::current_exe().expect("executable path")).arg("codex-acp")
-        } else if provider == "claude-rust" {
-            AcpAgentConfig::new(std::env::current_exe().expect("executable path")).arg("claude-acp")
-        } else if let Some(node) = std::env::var_os("AGENTWORKS_NODE") {
-            AcpAgentConfig::new(node).arg(adapter_path(provider).to_string_lossy())
+        let mut config = if let Some(command) = acp_override() {
+            AcpAgentConfig::new(command)
         } else {
-            AcpAgentConfig::new(adapter_path(provider))
+            let bridge = if cli_provider(provider) == "codex" {
+                "codex-acp"
+            } else {
+                "claude-acp"
+            };
+            AcpAgentConfig::new(std::env::current_exe().expect("executable path")).arg(bridge)
         }
         .env("NO_BROWSER", "1");
         if api_key_mode {
@@ -305,10 +309,20 @@ mod tests {
                 .get("CODEX_HOME")
         );
         assert!(!native.environment().contains_key("CLAUDE_CONFIG_DIR"));
-        assert_ne!(
-            native.command(),
-            agent_config("codex", true, false).command()
-        );
+    }
+
+    #[test]
+    fn legacy_ids_run_the_rust_bridges() {
+        assert!(is_legacy("claude") && is_legacy("codex") && !is_legacy("claude-rust"));
+        for (legacy, native) in [("claude", "claude-rust"), ("codex", "codex-rust")] {
+            let (old, new) = (
+                agent_config(legacy, false, false),
+                agent_config(native, false, false),
+            );
+            assert_eq!(old.command(), new.command());
+            assert_eq!(old.arguments(), new.arguments());
+            assert_eq!(installed(legacy), installed(native));
+        }
     }
 
     #[test]

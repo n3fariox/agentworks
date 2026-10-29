@@ -59,7 +59,7 @@
       <div class="settings-categories" role="tablist" aria-label="Settings categories" aria-orientation="vertical">
         <button id="settings-tab-directories" type="button" role="tab" aria-selected="true" aria-controls="settings-panel-directories" data-settings-category="directories">Directories</button>
         <button id="settings-tab-git" type="button" role="tab" aria-selected="false" aria-controls="settings-panel-git" data-settings-category="git" tabindex="-1">Git</button>
-        <button id="settings-tab-models" type="button" role="tab" aria-selected="false" aria-controls="settings-panel-models" data-settings-category="models" tabindex="-1">Models &amp; permissions</button>
+        <button id="settings-tab-models" type="button" role="tab" aria-selected="false" aria-controls="settings-panel-models" data-settings-category="models" tabindex="-1">Harnesses</button>
         <button id="settings-tab-providers" type="button" role="tab" aria-selected="false" aria-controls="settings-panel-providers" data-settings-category="providers" tabindex="-1">Model providers</button>
         <button id="settings-tab-communication" type="button" role="tab" aria-selected="false" aria-controls="settings-panel-communication" data-settings-category="communication" tabindex="-1">Communication</button>
         <button id="settings-tab-display" type="button" role="tab" aria-selected="false" aria-controls="settings-panel-display" data-settings-category="display" tabindex="-1">Display</button>
@@ -95,11 +95,8 @@
         </fieldset>
       </div>
       <div id="settings-panel-models" role="tabpanel" aria-labelledby="settings-tab-models" tabindex="0" hidden>
-      <fieldset class="settings-section"><legend>Models &amp; permissions</legend>
-        <p class="field-note">Defaults for new sessions. Existing sessions keep their directory, model, and permission mode.</p>
-        <div id="default-model-fields"></div>
-        <div class="field-note">Leave a model blank to use the harness default. Load models to discover available IDs. Save new roots before using them for discovery.</div>
-      </fieldset>
+      <p class="field-note">Defaults for new sessions, per harness. Existing sessions keep their directory, model, and permission mode. Leave a model blank to use the harness default; Load models discovers available IDs (save new roots first). A hidden harness still runs its existing sessions.</p>
+      <div id="default-model-fields"></div>
       <fieldset class="settings-section"><legend>Active sessions</legend>
         <label for="max-active-sessions">Maximum running harnesses</label>
         <input id="max-active-sessions" type="number" min="1" max="256" step="1">

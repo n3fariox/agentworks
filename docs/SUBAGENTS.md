@@ -22,17 +22,15 @@ idle child is reusable and is not treated as a permanently closed session.
 
 The Rust SDK's current draft uses `subagent_update` with patch semantics:
 omitted fields retain their previous values, `null` clears them, and concrete
-state/capability objects replace the previous object. The bundled Codex adapter
-uses the earlier `subagent_spawned` and `subagent_state_update` draft. The receive
-boundary accepts both, while ordinary updates still pass through the SDK's
+state/capability objects replace the previous object. Some adapters use the earlier
+`subagent_spawned` and `subagent_state_update` draft. The receive boundary accepts
+both, while ordinary updates still pass through the SDK's
 schema. The optional feature does not require an adapter to support subagents;
 older adapters retain their ordinary tool-call presentation.
 
-The bundled Codex SDK parser needs one local correction to preserve
-`clientCapabilities.subagents`; see its [modification notice](../vendor/codex-acp/AGENTWORKS.md).
 Canonical subagent negotiation is retained. Declaring the separate AIR `asyncTasks`
 capability selects Claude’s older subagent event format, which is also supported;
-the client identity remains Agentworks. Claude's installed SDK already preserves the capability. The Rust Claude
+the client identity remains Agentworks. The Rust Claude
 harness (`claude-rust`) announces each Claude task as a current-draft child session;
 see [its notes](RUST-CLAUDE-ACP.md).
 
@@ -60,8 +58,6 @@ No paid inference is needed:
 mise exec -- cargo test --locked --offline --workspace
 mise exec -- cargo build --locked --offline
 node tests/subagents.test.mjs
-node tests/subagents-adapters.test.mjs
-node tests/codex-subscription.test.mjs
 node tests/usage-status.test.mjs
 node node_modules/@playwright/test/cli.js test tests/subagents.spec.mjs tests/codex-permission-default.spec.mjs
 ```
