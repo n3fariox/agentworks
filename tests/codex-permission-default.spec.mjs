@@ -25,7 +25,7 @@ async function open(page,id){
 }
 test.beforeAll(async()=>{
   dir=await mkdtemp(join(tmpdir(),'agentworks-codex-default-'));
-  
+
   agent=await acpAgent(dir,'tests/fixtures/permission-mode-agent.mjs');
   await controls({});
   server=spawn(resolve(process.env.AGENTWORKS_TEST_BINARY||'target/debug/agentworks'),[],{env:{...process.env,AGENTWORKS_ACP_COMMAND:agent,AGENTWORKS_RUNTIME_DIR:dir,AGENTWORKS_PERMISSION_FIXTURE:dir,AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:'4486',AGENTWORKS_ROOTS:dir,AGENTWORKS_CATALOG_PATH:join(dir,'catalog.json'),AGENTWORKS_DB_PATH:join(dir,'sessions.sqlite3')},stdio:['ignore','pipe','pipe']});
