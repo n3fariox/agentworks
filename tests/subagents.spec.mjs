@@ -25,7 +25,7 @@ async function screenshots(page,name){
 }
 test.beforeAll(async()=>{
   dir=await mkdtemp(join(tmpdir(),'agentworks-subagents-'));
-  
+
   agent=await acpAgent(dir,'tests/fixtures/subagent-agent.mjs');
   await startServer();
 });
