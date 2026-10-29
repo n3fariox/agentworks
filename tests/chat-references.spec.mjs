@@ -19,6 +19,8 @@ test.beforeAll(async()=>{
   await mkdir('.cache',{recursive:true});fixture=await mkdtemp(resolve('.cache/chat-references-'));
   await writeFile(join(fixture,'sample.rs'),'pub fn sample() -> u8 {\n    42 // answer\n}\n');
   await writeFile(join(fixture,'notes.md'),'# Notes\n\n```python\ndef f():\n    return "x"\n```\n');
+  await mkdir(join(fixture,'docs/deep'),{recursive:true});
+  await writeFile(join(fixture,'docs/deep/file with spaces.md'),'# Nested preview\n');
   await writeFile(join(fixture,'file with spaces.rs'),Array.from({length:90},(_,i)=>`// line ${i+1}`).join('\n'));
   await symlink('/etc/passwd',join(fixture,'escape.txt'));
   server=spawn(resolve('target/debug/agentworks'),[],{env:{...process.env,
@@ -40,13 +42,38 @@ test.afterAll(async()=>{
   if(fixture)await rm(fixture,{recursive:true,force:true});
 });
 
+for(const mobile of [false,true])test(`Files fills the conversation area and preview breadcrumbs navigate folders (${mobile?'phone':'desktop'})`,async({page})=>{
+ await page.setViewportSize(mobile?{width:390,height:844}:{width:1440,height:1000});
+ await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),session.id);await page.goto('/');
+ await expect(page.locator('#session-state')).toHaveText('Ready');await page.locator('#prompt').fill('Keep my draft');
+ if(mobile)await page.locator('#session-more').click();await page.locator('#session-files').click();
+ const panel=page.locator('#side-panel'),preview=page.locator('#workspace-preview');
+ await expect(panel).toBeVisible();await expect(page.locator('#workspace-chat-column')).toBeHidden();
+ expect(await panel.evaluate(n=>n.clientWidth/n.parentElement.clientWidth)).toBeGreaterThan(.95);
+ await expect(page.locator('#side-panel-resize')).toBeHidden();
+ const entry=name=>page.locator('#side-file-entries .file-entry').filter({hasText:name});
+ await entry('docs').click();await entry('deep').click();await entry('file with spaces.md').click();
+ await expect(preview).toContainText('Nested preview');
+ const crumbs=preview.getByRole('navigation',{name:'File path'});
+ await expect(crumbs.locator('[aria-current="page"]')).toHaveText('file with spaces.md');
+ await expect(crumbs.getByRole('button')).toHaveText(['Root','docs','deep']);
+ await page.locator('#side-tab-diff').click();await page.locator('#side-tab-files').click();
+ await crumbs.getByRole('button',{name:'deep',exact:true}).click();await expect(preview).toBeHidden();await expect(entry('file with spaces.md')).toBeVisible();
+ await entry('file with spaces.md').click();await crumbs.getByRole('button',{name:'docs',exact:true}).click();
+ await expect(preview).toBeHidden();await expect(entry('deep')).toBeVisible();
+ await entry('deep').click();await entry('file with spaces.md').click();await crumbs.getByRole('button',{name:'Root',exact:true}).click();
+ await expect(preview).toBeHidden();await expect(entry('docs')).toBeVisible();
+ expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+ await page.locator('#side-close').click();await expect(page.locator('#prompt')).toBeVisible();await expect(page.locator('#prompt')).toHaveValue('Keep my draft');
+});
+
 test('file references: absolute, encoded and spaced paths, line navigation, external links and root enforcement',async({page,context})=>{
  const spaced=join(fixture,'file with spaces.rs');
  await send(page,`[absolute](<${spaced}:42>) [encoded](${encodeURI(spaced)}:70) [relative](sample.rs:2) [file](file://${encodeURI(spaced)}:12) [outside](/etc/passwd:2) [escape](escape.txt:1) [external](https://example.com/a:42?q=x#part)`);
  const chat=page.locator('.message.assistant');
  for(const [label,line,path] of [['absolute',42,spaced],['encoded',70,spaced],['relative',2,'sample.rs'],['file',12,spaced]]){
   await chat.getByRole('link',{name:label,exact:true}).click();
-  await expect(page.locator('#workspace-preview .workspace-preview-header strong')).toHaveText(path);
+  await expect(page.locator('#workspace-preview .workspace-preview-header strong')).toHaveText(path.split('/').at(-1));
   const target=page.locator('#workspace-preview .referenced-line');
   await expect(target).toHaveAttribute('data-line',String(line));await expect(target).toBeInViewport();
   await expect(target).toContainText(line===2?'42 // answer':`// line ${line}`);
@@ -55,11 +82,13 @@ test('file references: absolute, encoded and spaced paths, line navigation, exte
    expect(await page.locator('#workspace-preview pre code').textContent()).toBe('pub fn sample() -> u8 {\n    42 // answer\n}\n');
    expect(await page.locator('#workspace-preview .code-block').evaluate(n=>n.codeState.raw)).toBe('pub fn sample() -> u8 {\n    42 // answer\n}\n');
   }
+  await page.locator('#side-close').click();
  }
  for(const label of ['outside','escape']){
   await chat.getByRole('link',{name:label,exact:true}).click();
   await expect(page.locator('#workspace-preview')).toContainText('outside allowed workspace roots');
   await expect(page.locator('#workspace-preview')).not.toContainText('root:x:');
+  await page.locator('#side-close').click();
  }
  const external=chat.getByRole('link',{name:'external',exact:true});
  await expect(external).toHaveAttribute('href','https://example.com/a:42?q=x#part');await expect(external).toHaveAttribute('target','_blank');

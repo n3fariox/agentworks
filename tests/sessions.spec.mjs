@@ -370,7 +370,7 @@ test('resume picker imports external history, paginates, and opens existing entr
   }
 });
 
-test('side panel: files and diff beside the chat, resizable on desktop, full screen with Back on phones',async({page})=>{
+test('side panel: files and diff fill the conversation area, with Back on phones',async({page})=>{
   const {mkdir,writeFile,rm}=await import('node:fs/promises'),{resolve,join}=await import('node:path'),{randomUUID}=await import('node:crypto');
   const cwd=resolve('.cache/browser-side-panel-'+randomUUID());await mkdir(join(cwd,'src'),{recursive:true});
   try{
@@ -381,9 +381,11 @@ test('side panel: files and diff beside the chat, resizable on desktop, full scr
   await page.goto('/');await page.evaluate(()=>{localStorage.removeItem('agentworks-side-panel');localStorage.removeItem('agentworks-side-panel-width');});
   await create(page,'Browser test side panel',cwd);await page.locator('#prompt').fill('Keep the side panel draft');
   const panel=page.locator('#side-panel');await expect(panel).toBeHidden();
-  // Files from the session bar opens a third column; the chat stays visible beside it.
+  // Files fills the conversation area and keeps the chat mounted.
   await page.locator('#session-files').click();await expect(panel).toBeVisible();await expect(page.locator('#session-files')).toHaveAttribute('aria-expanded','true');
-  await expect(page.locator('#conversation')).toBeVisible();
+  await expect(page.locator('#workspace-chat-column')).toBeHidden();
+  expect(await panel.evaluate(n=>n.clientWidth/n.parentElement.clientWidth)).toBeGreaterThan(.95);
+  await expect(page.locator('#side-panel-resize')).toBeHidden();
   // Hidden files stay invisible until the side panel's own toggle reveals them; both toggles share the flag.
   await expect(page.locator('#side-file-entries')).not.toContainText('.hidden-note.md');
   await page.locator('#side-files-hidden').check();await expect(page.locator('#side-file-entries')).toContainText('.hidden-note.md');await expect(page.locator('#files-hidden')).toBeChecked();
@@ -406,14 +408,11 @@ test('side panel: files and diff beside the chat, resizable on desktop, full scr
   await expect(viewer).toBeVisible();await expect(panel).toBeHidden();
   await page.keyboard.press('Escape');await expect(viewer).toBeHidden();
   await page.locator('#session-files').click();await expect(panel).toBeVisible();
-  // Dragging the left edge widens the panel; the width and open state persist across reload.
-  const before=(await panel.boundingBox()).width,edge=await page.locator('#side-panel-resize').boundingBox();
-  await page.mouse.move(edge.x+edge.width/2,edge.y+300);await page.mouse.down();await page.mouse.move(edge.x+edge.width/2-160,edge.y+300,{steps:5});await page.mouse.up();
-  const wider=(await panel.boundingBox()).width;expect(wider).toBeGreaterThan(before+140);
+  // The full-size panel and its open state survive reload.
   await page.reload();await expect(page.locator('#session-state')).toHaveText('Ready');await expect(panel).toBeVisible();
-  expect(Math.abs((await panel.boundingBox()).width-wider)).toBeLessThan(2);
-  // Clicking the active trigger again closes the panel.
-  await page.locator('#session-files').click();await expect(panel).toBeHidden();
+  expect(await panel.evaluate(n=>n.clientWidth/n.parentElement.clientWidth)).toBeGreaterThan(.95);
+  // Closing the panel restores the chat.
+  await page.locator('#side-close').click();await expect(panel).toBeHidden();
   await expect(page.locator('#prompt')).toHaveValue('Keep the side panel draft');
   // Phone: the panel replaces the chat, and Back returns to the chat.
   await page.setViewportSize({width:390,height:844});
@@ -440,7 +439,10 @@ test('workspace: file browsing, side preview, drafts, and manual automation runs
     await expect(page.locator('#workspace-file-detail h1')).toHaveText('Workspace files');
     await page.locator('#workspace-file-detail a').filter({hasText:'the notes'}).click();await expect(page.locator('#workspace-file-detail h1')).toHaveText('A project note');
     await page.locator('#workspace-file-detail button').filter({hasText:'Source',exact:true}).click();await expect(page.locator('.workspace-source')).toContainText('# A project note');
-    await page.getByRole('button',{name:'Open beside chat',exact:true}).click();await expect(page.locator('#conversation')).toBeVisible();await expect(page.locator('#workspace-preview')).toContainText('A project note');
+    await page.locator('#workspace-file-detail').getByRole('navigation',{name:'File path'}).getByRole('button',{name:'docs',exact:true}).click();
+    await expect(page.locator('#file-breadcrumbs')).toContainText('docs');await page.locator('#file-entries .file-entry').filter({hasText:'note.md'}).click();
+    await expect(page.locator('#workspace-file-detail h1')).toHaveText('A project note');
+    await page.getByRole('button',{name:'Open beside chat',exact:true}).click();await expect(page.locator('#workspace-chat-column')).toBeHidden();await expect(page.locator('#workspace-preview')).toContainText('A project note');
     await expect(page.locator('#prompt')).toHaveValue('Keep my existing draft.');
     await page.locator('#workspace-preview').getByRole('button',{name:'Ask about this file'}).click();
     expect(await page.locator('#prompt').inputValue()).toContain('docs/note.md');expect(await page.locator('#prompt').inputValue()).toContain('Keep my existing draft.');

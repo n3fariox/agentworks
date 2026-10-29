@@ -10,6 +10,12 @@ The strip scrolls horizontally on narrow screens, and arrow keys, Home and End
 navigate its tabs. Child views keep the parent approval controls and composer;
 composer messages are sent to the main agent.
 
+Each child tab has a close button that hides it without stopping work or deleting
+its transcript. Closing the selected tab returns to Chat. New updates for that
+child bring its tab back without selecting it. Dismissals are saved in this
+browser across page reloads and browser restarts; switching conversations or
+replaying existing history does not bring a dismissed tab back.
+
 Background work reported through the optional [async-task extension](BACKGROUND-JOBS.md) appears in the Background jobs dropdown, including jobs owned by a child. Its individual Stop control targets only that reported job.
 
 Children are created by the harness. Agentworks does not start, prompt, resume,

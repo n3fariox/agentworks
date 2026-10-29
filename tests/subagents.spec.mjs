@@ -93,6 +93,41 @@ test('subagent tabs separate transcripts, retain approvals, and survive replay',
   expect(errors).toEqual([]);
 });
 
+test('closing tabs preserves work, survives replay, and new child activity restores them',async({page})=>{
+  const s=await api('/api/sessions',{provider:'codex',cwd:dir});await state(s.id,'idle');await open(page,s.id);
+  await api('/api/sessions/'+s.id+'/prompt',{text:'inspect',requestId:'close-subagents'});await state(s.id,'waiting');
+  const researcher=page.getByRole('tab',{name:'Sub: Researcher',exact:true}),reviewer=page.getByRole('tab',{name:'Sub: Reviewer',exact:true});
+  const chat=page.getByRole('tab',{name:'Chat',exact:true}),panel=page.locator('#subagent-view');
+  await reviewer.click();
+  // Closing an inactive tab leaves the current child selected.
+  await page.getByRole('button',{name:'Close subagent tab: Researcher',exact:true}).click();
+  await expect(researcher).toHaveCount(0);await expect(reviewer).toHaveAttribute('aria-selected','true');
+  await page.getByRole('button',{name:'Close subagent tab: Reviewer',exact:true}).focus();
+  await page.keyboard.press('Enter');
+  await expect(reviewer).toHaveCount(0);await expect(chat).toHaveAttribute('aria-selected','true');
+  await expect(chat).toBeFocused();await expect(panel).toBeHidden();
+  await expect(page.locator('#approval-area')).toContainText('Reviewer');
+  await page.reload();await expect(page.locator('#approval-area')).toContainText('Reviewer');
+  await expect(reviewer).toHaveCount(0);await expect(researcher).toHaveCount(0);
+  // Switching conversations rebuilds the transcript without new activity.
+  const other=await api('/api/sessions',{provider:'codex',cwd:dir});await state(other.id,'idle');
+  await page.locator(`.session-item[data-session-id="${other.id}"]`).click();
+  // The fixture reuses child IDs; dismissing one conversation must not hide another's children.
+  await api('/api/sessions/'+other.id+'/prompt',{text:'inspect',requestId:'other-subagents'});await state(other.id,'waiting');
+  await expect(reviewer).toBeVisible();await expect(researcher).toBeVisible();
+  await page.locator(`.session-item[data-session-id="${s.id}"]`).click();
+  await expect(page.locator('#approval-area')).toContainText('Reviewer');
+  await expect(reviewer).toHaveCount(0);await expect(researcher).toHaveCount(0);
+  await page.getByRole('button',{name:'Allow once',exact:true}).click();await state(s.id,'idle');
+  await expect(reviewer).toBeVisible();await expect(researcher).toBeVisible();
+  await expect(chat).toHaveAttribute('aria-selected','true');
+  await page.reload();await expect(reviewer).toBeVisible();await expect(researcher).toBeVisible();
+  await reviewer.click();await expect(panel).toContainText('Modern working');await expect(panel).toContainText('Modern result');
+  await expect(panel.locator('.tool-card')).toHaveCount(1);
+  const wire=(await readFile(join(dir,'wire.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+  expect(wire.filter(m=>m.method==='session/cancel')).toHaveLength(0);
+});
+
 test('mobile strip scrolls, child Stop targets the root, and tabs stay within the viewport',async({page})=>{
   await page.setViewportSize({width:390,height:844});
   const s=await api('/api/sessions',{provider:'codex-rust',cwd:dir});await state(s.id,'idle');await open(page,s.id);
