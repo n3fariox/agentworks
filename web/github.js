@@ -27,7 +27,7 @@ export function setupGithub({api,getActive}) {
       const data=await browser.read(active.id,refresh);
       if(gen!==generation||getActive()?.id!==active.id)return;
       view=data;button.textContent=statusText(data);button.title=data.message||'GitHub repository, pull requests, issues and checks';
-      button.dataset.status=data.status;button.hidden=data.status==='no_origin';
+      button.dataset.status=data.status;button.hidden=data.status==='no_origin';button.title=data.message||'GitHub repository, pull requests, issues and checks';
       if(dialog.open)render();
     }catch(error){
       if(gen!==generation)return;
@@ -112,5 +112,12 @@ export function setupGithub({api,getActive}) {
   $('settings-tab-github').addEventListener('click',()=>loadSettings());
   function sessionChanged(){generation++;view=null;busy=false;button.disabled=false;button.hidden=!getActive();button.textContent='GitHub';if(dialog.open)dialog.close();if(getActive())load();}
   setInterval(()=>{if(getActive()&&!document.hidden&&!busy)load();},60000);
-  return {sessionChanged,refreshBadges:browser.sync,updateBadges:browser.update};
+  function updateContext(id,data){
+    browser.update(id,data);
+    if(getActive()?.id!==id)return;
+    if((view?.tracking?.observedAt??-1)>(data.tracking?.observedAt??-1))return;
+    generation++;view=data;busy=false;button.disabled=false;button.textContent=statusText(data);button.dataset.status=data.status;button.hidden=data.status==='no_origin';button.title=data.message||'GitHub repository, pull requests, issues and checks';
+    if(dialog.open)render();
+  }
+  return {sessionChanged,refreshBadges:browser.sync,updateBadges:browser.update,updateContext};
 }

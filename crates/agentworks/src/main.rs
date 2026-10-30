@@ -16,6 +16,7 @@ mod fork;
 mod git_context;
 mod git_settings;
 mod github;
+mod github_tracking;
 mod goose_acp;
 mod host_usage;
 mod hosting;
@@ -771,6 +772,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let inbox_scheduler = tokio::spawn(inbox_delivery::scheduler(app.clone()));
     let input_scheduler = tokio::spawn(input_queue::scheduler(app.clone()));
     tokio::spawn(automations::scheduler(app.clone()));
+    tokio::spawn(github_tracking::scheduler(app.clone()));
     tokio::spawn(mcp::serve_bridge(app.clone(), mcp_listener));
     let router = Router::new()
         .route(
@@ -1360,6 +1362,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(github::connections).post(github::save_connection),
         )
         .route("/api/github/verify", post(github::verify))
+        .route(
+            "/api/sessions/{id}/github/events",
+            get(github_tracking::events),
+        )
         .route("/api/sessions/{id}/badges", get(session_badges::list))
         .route(
             "/api/sessions/{id}/github",
@@ -3564,7 +3570,7 @@ async fn event_socket(socket: WebSocket, s: Arc<Session>, after: Option<u64>) {
                 let n=event["seq"].as_u64().unwrap_or(0);
                 // L-05 hook: queue state is broadcast unsequenced (not stored in event history).
                 // U-05: derived tool progress and headers reuse their source event's seq and are never stored.
-                if !matches!(event["kind"].as_str(),Some("input_queue"|"tool_progress"|"tool_header"|"session_badges")) {if n<=seq {continue;} seq=n;}
+                if !matches!(event["kind"].as_str(),Some("input_queue"|"tool_progress"|"tool_header"|"session_badges"|"github_event"|"github_context")) {if n<=seq {continue;} seq=n;}
                 let closed=event["kind"]=="status" && (event["data"]["status"]=="closed" || event["data"]["status"]=="suspended");
                 if sink.send(Message::Text(event.to_string().into())).await.is_err(){break;}
                 if closed {let _=sink.send(Message::Close(None)).await;break;}

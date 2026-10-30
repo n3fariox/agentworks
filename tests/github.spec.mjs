@@ -23,6 +23,16 @@ async function start(){
   throw new Error('Server did not start: '+log);
 }
 async function stop(){if(server&&!exited){const done=new Promise(r=>server.once('exit',r));server.kill('SIGTERM');await done;}}
+// Presentation fixtures control GitHub data; forward the live session stream
+// while keeping real background refreshes from overwriting those fixtures.
+async function trackingSocket(page){
+  let socket;
+  await page.routeWebSocket('**/api/sessions/*/events',ws=>{
+    socket=ws;const server=ws.connectToServer();
+    server.onMessage(message=>{const event=JSON.parse(String(message));if(!['github_context','github_event'].includes(event.kind))ws.send(message);});
+  });
+  return ()=>socket;
+}
 const create=cwd=>api('/api/sessions',{provider:'demo',cwd,title:'GitHub context test'});
 const connection=(host,login,enabled=true)=>api('/api/github/connections',{host,login,enabled});
 const context=s=>api(`/api/sessions/${s.id}/github`);
@@ -87,6 +97,7 @@ test('same-host ambiguity requires selection and link inputs stay repository-sco
 });
 
 for(const mobile of [false,true])test(`GitHub display, safe text and detached links ${mobile?'mobile':'desktop'}`,async({page})=>{
+  await trackingSocket(page);
   const session=await create(linked);
   if(mobile)await page.setViewportSize({width:390,height:844});
   await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),session.id);
@@ -116,6 +127,7 @@ for(const mobile of [false,true])test(`GitHub display, safe text and detached li
 });
 
 for(const mobile of [false,true])test(`session browser PR badges ${mobile?'mobile':'desktop'}`,async({page})=>{
+  await trackingSocket(page);
   const cases=[
     {title:'Fix account selection',number:1234,reviewDecision:'APPROVED',ci:'SUCCESS',tone:'success'},
     {title:'Simplify worker startup',number:5678,reviewDecision:'REVIEW_REQUIRED',ci:'PENDING',tone:'warning'},
@@ -216,4 +228,31 @@ agent.register_formatter(format_line, message_type = "chat.user", text_pattern =
   await api('/api/scripts/local_badges.star/enabled',{enabled:false},'PUT');
   await page.evaluate(()=>document.dispatchEvent(new Event('session-badges-changed')));await expect(row.locator('.session-badge')).toHaveCount(0);
   await api('/api/scripts/local_badges.star',undefined,'DELETE');
+});
+
+test('pushed PR status refreshes the open panel and badge and emits a change event without reload',async({page})=>{
+  const socket=await trackingSocket(page),session=await create(linked);
+  await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),session.id);
+  const data={status:'ready',repository:{host:'ghe-a.example.com',owner:'team',name:'repo'},connection:{host:'ghe-a.example.com',login:'work-a'},branch:'feature/topic',commit:'abc',accounts:[],links:[],tracking:{observedAt:1},badgeRevision:1,badgesAt:Date.now(),badges:[{id:'github.pr.12',source:'@github',label:'PR#12',tone:'warning',tooltip:'Awaiting review',url:'https://ghe-a.example.com/team/repo/pull/12'}],snapshot:{fetchedAt:Date.now(),complete:true,resources:[{kind:'pullRequest',number:12,title:'Tracked PR',url:'https://ghe-a.example.com/team/repo/pull/12',state:'OPEN',draft:false,headSha:'abc',headMatches:true,reviewSummary:{state:'REVIEW_REQUIRED',complete:true},checks:{state:'PENDING',complete:true,items:[]}}]}};
+  await page.route(`**/api/sessions/${session.id}/github`,route=>route.fulfill({json:data}));
+  await page.goto(base);await expect(page.locator('#connection')).toHaveText('Connected');await page.locator('#session-github').click();await expect(page.locator('#github-resources')).toContainText('Awaiting review');
+  await page.evaluate(()=>document.addEventListener('github-event',event=>window.__prEvent=event.detail));
+  const next=structuredClone(data);next.tracking.observedAt=2;next.badgeRevision=2;next.badges[0].tone='success';next.badges[0].tooltip='Approved';next.snapshot.resources[0].reviewSummary.state='APPROVED';next.snapshot.resources[0].checks.state='SUCCESS';
+  socket().send(JSON.stringify({kind:'github_context',data:next}));
+  await expect(page.locator('#github-resources')).toContainText('Approved');await expect(page.locator('#github-resources')).toContainText('SUCCESS');
+  const row=page.locator(`.session-item[data-session-id="${session.id}"]`);await expect(row.locator('.session-badge.success')).toHaveText('PR#12');
+  socket().send(JSON.stringify({kind:'github_event',data:{id:99,kind:'pr.status_changed',initial:false,before:{review:'REVIEW_REQUIRED'},after:{review:'APPROVED'},changed:['review']}}));
+  await expect.poll(()=>page.evaluate(()=>window.__prEvent?.id)).toBe(99);expect(await page.evaluate(()=>window.__prEvent.sessionId)).toBe(session.id);
+  const unavailable=structuredClone(next);unavailable.status='unavailable';unavailable.message='GitHub access is unavailable';unavailable.tracking.observedAt=3;unavailable.badgeRevision=3;unavailable.badges[0].tone='neutral';delete unavailable.snapshot;
+  socket().send(JSON.stringify({kind:'github_context',data:unavailable}));await expect(page.locator('#github-status')).toHaveText('GitHub access is unavailable');await expect(row.locator('.session-badge.success')).toHaveCount(0);
+  socket().send(JSON.stringify({kind:'github_context',data}));await expect(page.locator('#github-status')).toHaveText('GitHub access is unavailable');await expect(row.locator('.session-badge.success')).toHaveCount(0);
+});
+
+test('GitHub PR hook starter installs and its registration is displayed',async({page})=>{
+  await page.goto(base);await page.locator('#nav-settings').evaluate(node=>node.click());await page.locator('#settings-tab-parsers').click();
+  const panel=page.locator('#parser-script-controls');await panel.locator('[data-new]').click();await panel.locator('[data-starter]').selectOption('github');
+  await panel.locator('[data-name]').fill('pr_status.star');await panel.locator('[data-save]').click();
+  await expect(panel.locator('[data-script-entry="pr_status.star"]')).toContainText('GitHub · pr.tracked, pr.snapshot, pr.status_changed, pr.untracked, pr.unavailable');
+  const scripts=await api('/api/scripts');expect(scripts.scripts.find(s=>s.name==='pr_status.star').hooks).toContainEqual({hook:'github',events:['pr.tracked','pr.snapshot','pr.status_changed','pr.untracked','pr.unavailable']});
+  await api('/api/scripts/pr_status.star',undefined,'DELETE');
 });

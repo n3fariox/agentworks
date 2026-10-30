@@ -38,6 +38,7 @@ export function setupSessionBadges({api,area=document.getElementById('sessions')
         if(version===epoch){
           const previous=cache.get(id)?.data;
           let display=!Array.isArray(data.badges)&&['unavailable','workspace_unavailable'].includes(data.status)&&previous?{...data,snapshot:previous.snapshot,badges:previous.badges,badgesAt:previous.badgesAt,badgesUnavailable:true}:data;
+          if((previous?.tracking?.observedAt??-1)>(display.tracking?.observedAt??-1))display={...display,...previous};
           if((previous?.badgeRevision??-1)>(display.badgeRevision??-1))display={...display,badges:previous.badges,badgesAt:previous.badgesAt,badgeRevision:previous.badgeRevision,badgesUnavailable:false};
           if(cache.size>=250&&!cache.has(id))cache.delete(cache.keys().next().value);
           cache.set(id,{at:Date.now(),data:display});paint(id);
@@ -72,8 +73,9 @@ export function setupSessionBadges({api,area=document.getElementById('sessions')
   document.addEventListener('session-badges-changed',invalidate);
   document.addEventListener('visibilitychange',()=>{if(!document.hidden)sync();});
   function update(id,payload){
-    const previous=cache.get(id);if((previous?.data.badgeRevision??-1)>(payload.badgeRevision??-1))return;
-    cache.set(id,{at:previous?.at??0,data:{...previous?.data,...payload,badgesUnavailable:false}});
+    const previous=cache.get(id);if((previous?.data.tracking?.observedAt??-1)>(payload.tracking?.observedAt??Infinity))return;
+    if((previous?.data.badgeRevision??-1)>(payload.badgeRevision??-1))return;
+    cache.set(id,{at:payload.status?Date.now():previous?.at??0,data:{...previous?.data,...payload,badgesUnavailable:false}});
     paint(id);
   }
   return {read,sync,invalidate,update};

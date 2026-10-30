@@ -4,7 +4,7 @@ The session browser reserves a third line below the title and provider/model for
 
 ## Setters from existing hooks
 
-Existing progress, tool-header, inbox and chat hooks can update their session's badges:
+Existing progress, tool-header, inbox, chat and [GitHub PR observation hooks](GITHUB-PR-TRACKING.md) can update their session's badges:
 
 ```python
 load("@agentworks//progress.star", "LineContext", "Progress")
@@ -23,7 +23,7 @@ agent.register_progress(on_line, command_pattern = "^make\\b")
 
 Use **Settings → Starlark scripts → New script → Session badges** for this starter. Existing script editing, validation, enable/disable and priority controls apply. Repository scripts are never loaded implicitly.
 
-The host supplies the target session from the running hook; scripts cannot choose another session. Effects are staged until the callback succeeds and its return value is accepted. Errors, invalid badge values and provisional progress results leave stored badges unchanged. Setters are unavailable during module registration. Startup replay of retained tool output does not change badges.
+The host binds the target session before evaluating the running hook. The `agent` namespace is not a GitHub identity or browser selection; scripts cannot choose another session. Effects are staged until the callback succeeds and its return value is accepted. Errors, invalid badge values and provisional progress results leave stored badges unchanged. Setters are unavailable during module registration. Startup replay of retained tool output does not change badges.
 
 State is persisted per session and script and survives restart. A script can clear only its own badges. Disabled, deleted or changed script versions do not contribute their old badges. Among enabled scripts, priority descending then filename determines which duplicate ID is displayed; the native GitHub producer follows scripts. Up to 16 changes per invocation, 16 badges per source and 32 stored badges per session are allowed.
 
@@ -43,6 +43,6 @@ The host adds `source` using the installed script filename. Badges contain plain
 
 ## GitHub producer
 
-Normal GitHub context collection writes native PR badges into the same store under the reserved source `@github`. These use IDs such as `github.pr.1234`, labels such as `PR#1234`, and the PR's HTTPS URL. Approval is green; no approval plus failed CI is red; awaiting review or changes requested is yellow. Draft, closed, unknown and stale states are neutral. Approval takes priority over CI failure.
+Main-host background tracking and normal GitHub context collection write native PR badges into the same store under the reserved source `@github`. These use IDs such as `github.pr.1234`, labels such as `PR#1234`, and the PR's HTTPS URL. Approval is green; no approval plus failed CI is red; awaiting review or changes requested is yellow. Draft, closed, unknown and stale states are neutral. Approval takes priority over CI failure.
 
 GitHub collection, permissions, cache freshness and review-state calculation remain host responsibilities. Custom scripts can use the same ID at higher priority to override a native badge, or add unrelated badges without GitHub access.
