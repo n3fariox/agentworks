@@ -91,7 +91,8 @@ test('composer usage statusline: live, replay, partial, attributed, session swit
   await expect(toggle(page)).toHaveText('⚠ 60k/200k · 30%');
   // Reported unified 5h/7d windows (verified live shape; fractions 0..1, resets in seconds).
   await open(page,b.id);
-  const rateLimit={status:'allowed',rateLimitType:'five_hour',resetsAt:1792366200,unifiedWindows:{five_hour:{utilization:0.23,resetsAt:1792366200},seven_day:{utilization:0.1,resetsAt:1792803600}}};
+  const fiveHourReset=Math.floor(Date.now()/1000)+3600,sevenDayReset=fiveHourReset+6*24*3600;
+  const rateLimit={status:'allowed',rateLimitType:'five_hour',resetsAt:fiveHourReset,unifiedWindows:{five_hour:{utilization:0.23,resetsAt:fiveHourReset},seven_day:{utilization:0.1,resetsAt:sevenDayReset}}};
   await inject(page,{used:68468,size:1000000,_meta:{'_claude/model':'demo-model','_claude/rateLimit':rateLimit}});
   await expect(toggle(page)).toHaveText(quota('68k/1.0M · 7%'));
   await expect(chip(page)).toHaveText('ctx 7% · 5h 77% left');

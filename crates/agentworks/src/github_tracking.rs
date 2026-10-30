@@ -522,6 +522,7 @@ mod tests {
                 notifications: crate::notifications::Hub::new(catalog),
                 hosts: crate::hosts::Hosts::new(),
                 host_usage: Arc::new(crate::host_usage::Hub::default()),
+                account_quota: Arc::default(),
                 github: Arc::new(crate::github::Hub::default()),
                 progress,
             };
