@@ -27,11 +27,15 @@ test('Codex subscription display preserves window identity, sparse freshness, re
   const consume=(data,live=true)=>page.evaluate(({data,live})=>window.consume(data,live),{data,live});
   const label=page.locator('.usage-status-toggle');
   await consume(first);
-  await expect(label).toContainText('codex primary (5h) 85% left');
-  await expect(label).toContainText('codex secondary (7d) 33% left');
-  await expect(label).toContainText('Research (research) primary (90m) 100% left');
-  await expect(label).toContainText('Research (research) secondary (2d) 0% left');
+  await expect(label).toContainText('5h 85% left');
+  await expect(label).toContainText('7d 33% left');
+  await expect(label).toContainText('Research 90m 100% left');
+  await expect(label).toContainText('Research 2d 0% left');
+  // The pill names windows by length; full names stay in the details.
+  await expect(label).not.toContainText('codex primary');
+  await expect(page.locator('#chip')).toHaveText('ctx 1% · 5h 85% left');
   await label.click();
+  await expect(page.locator('#usage-status-details')).toContainText('codex primary (5h):');
   await expect(page.locator('#usage-status-details')).toContainText('15% used / 85% remaining');
   await expect(page.locator('#usage-status-details')).toContainText('reset unknown');
   const reset=await page.evaluate(()=>Object.values(ui.state.codexQuota)[0].resetsAt.value);
@@ -62,6 +66,6 @@ test('Codex subscription display preserves window identity, sparse freshness, re
   observeSubscriptionLimits(cache,fixture.notifications[4],time+600001);
   observeSubscriptionLimits(cache,fixture.notifications[5],time+600001);
   await consume({sessionUpdate:'usage_update',used:2000,size:200000,...subscriptionLimitsMeta(cache)});
-  await expect(label).toContainText('codex primary (5h) usage unknown');
-  await expect(label).not.toContainText('Research (research) secondary');
+  await expect(label).toContainText('5h usage unknown');
+  await expect(label).not.toContainText('Research 2d');
 });

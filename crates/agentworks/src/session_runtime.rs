@@ -960,6 +960,7 @@ mod fork_tests {
                 fresh_environment: Default::default(),
                 notifications: crate::notifications::Hub::new(catalog),
                 progress: crate::tool_progress::Hub::empty(),
+                account_quota: Default::default(),
             });
             store
                 .lock()
@@ -1089,6 +1090,7 @@ for line in sys.stdin:
                 fresh_environment: Default::default(),
                 notifications: crate::notifications::Hub::new(catalog),
                 progress: crate::tool_progress::Hub::empty(),
+                account_quota: Default::default(),
             });
             let script = r#"
 import sys,json
