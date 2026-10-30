@@ -46,6 +46,15 @@ const PROGRESS_PRELUDE: &str = "@agentworks//progress.star";
 const MESSAGE_PRELUDE: &str = "@agentworks//message.star";
 const WORKFLOW_PRELUDE: &str = "@agentworks//workflow.star";
 const TOOL_PRELUDE: &str = "@agentworks//tool.star";
+pub const GITHUB_EVENT_KINDS: [&str; 6] = [
+    "pr.tracked",
+    "pr.snapshot",
+    "pr.status_changed",
+    "pr.unavailable",
+    "pr.untracked",
+    "github.availability_changed",
+];
+const GITHUB_PRELUDE: &str = "@agentworks//github.star";
 const CHAT_PRELUDE: &str = "@agentworks//chat.star";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -62,6 +71,8 @@ pub enum Capability {
     /// Rewrites one line of an agent (`chat.agent`) or user (`chat.user`)
     /// chat message as Markdown. Display only.
     ChatFormatter,
+    /// Observes GitHub PR state changes; badge setters only, no actions or I/O.
+    Github,
 }
 
 impl Capability {
@@ -71,6 +82,7 @@ impl Capability {
             Capability::MessageFormatter => (MESSAGE_PRELUDE, include_str!("../host/message.star")),
             Capability::Workflow => (WORKFLOW_PRELUDE, include_str!("../host/workflow.star")),
             Capability::ToolHeader => (TOOL_PRELUDE, include_str!("../host/tool.star")),
+            Capability::Github => (GITHUB_PRELUDE, include_str!("../host/github.star")),
             Capability::ChatFormatter => (CHAT_PRELUDE, include_str!("../host/chat.star")),
         }
     }
@@ -81,6 +93,7 @@ impl Capability {
             Capability::MessageFormatter => "format_message",
             Capability::ToolHeader => "tool_header",
             Capability::ChatFormatter => "format_line",
+            Capability::Github => "on_github",
         }
     }
     /// Host API v1 entry signature, as rendered by the starlark typechecker.
@@ -91,6 +104,7 @@ impl Capability {
             Capability::MessageFormatter => "def(ctx: MessageContext, message: PeerMessage) -> str",
             Capability::ToolHeader => "def(ctx: ToolContext, tool: ToolCall) -> None | str",
             Capability::ChatFormatter => "def(ctx: ChatContext, line: str) -> None | str",
+            Capability::Github => "def(ctx: GithubContext, event: dict[str, typing.Any]) -> None",
         }
     }
     /// Prelude record type for the hook's `ctx` argument.
@@ -101,6 +115,7 @@ impl Capability {
             Capability::MessageFormatter => "MessageContext",
             Capability::ToolHeader => "ToolContext",
             Capability::ChatFormatter => "ChatContext",
+            Capability::Github => "GithubContext",
         }
     }
 }
@@ -148,7 +163,9 @@ impl Limits {
         match capability {
             Capability::Parser => Self::parser(),
             Capability::Workflow => Self::workflow(),
-            Capability::MessageFormatter | Capability::ToolHeader | Capability::ChatFormatter => Self::parser(),
+            Capability::MessageFormatter | Capability::ToolHeader | Capability::ChatFormatter | Capability::Github => {
+                Self::parser()
+            }
         }
     }
 }
@@ -369,9 +386,11 @@ fn globals(capability: Capability) -> Globals {
             .with(parser_helpers)
             .with_namespace("agent", registration::registration_helpers)
             .build(),
-        Capability::MessageFormatter | Capability::ToolHeader | Capability::ChatFormatter => builder
-            .with_namespace("agent", registration::registration_helpers)
-            .build(),
+        Capability::MessageFormatter | Capability::ToolHeader | Capability::ChatFormatter | Capability::Github => {
+            builder
+                .with_namespace("agent", registration::registration_helpers)
+                .build()
+        }
         Capability::Workflow => builder.build(),
     }
 }
@@ -401,10 +420,19 @@ pub struct Compiled {
     /// Formatters and tool headers: only matching text reaches the hook; None matches everything.
     pub text_pattern: Option<Arc<regex::Regex>>,
     pub message_type: Option<String>,
+    /// Exact event names routed before evaluation; None means all GitHub events.
+    pub github_events: Option<Vec<String>>,
     pub compile_time: Duration,
 }
 
 impl Compiled {
+    pub fn accepts_github_event(&self, kind: &str) -> bool {
+        self.capability == Capability::Github
+            && self
+                .github_events
+                .as_ref()
+                .is_none_or(|events| events.iter().any(|event| event == kind))
+    }
     fn diagnostic(&self, kind: DiagnosticKind, message: impl std::fmt::Display) -> Diagnostic {
         Diagnostic {
             script: self.name.clone(),
@@ -434,6 +462,7 @@ pub struct Engine {
     tool_prelude: Prelude,
     chat_globals: Globals,
     chat_prelude: Prelude,
+    github_prelude: Prelude,
     cache: Mutex<HashMap<String, Arc<Compiled>>>,
     hook_globals: Globals,
     hook_cache: Mutex<HashMap<(String, String), Arc<RegisteredScript>>>,
@@ -447,6 +476,7 @@ impl Engine {
         let message_prelude = prelude(Capability::MessageFormatter, &message_globals)?;
         let tool_globals = globals(Capability::ToolHeader);
         let tool_prelude = prelude(Capability::ToolHeader, &tool_globals)?;
+        let github_prelude = prelude(Capability::Github, &message_globals)?;
         let chat_globals = globals(Capability::ChatFormatter);
         let chat_prelude = prelude(Capability::ChatFormatter, &chat_globals)?;
         let parser_prelude = prelude(Capability::Parser, &parser_globals)?;
@@ -461,6 +491,7 @@ impl Engine {
             tool_prelude,
             chat_globals,
             chat_prelude,
+            github_prelude,
             parser_prelude,
             workflow_prelude,
             cache: Mutex::default(),
@@ -502,6 +533,7 @@ impl Engine {
             Capability::MessageFormatter => (&self.message_globals, &self.message_prelude),
             Capability::ToolHeader => (&self.tool_globals, &self.tool_prelude),
             Capability::ChatFormatter => (&self.chat_globals, &self.chat_prelude),
+            Capability::Github => (&self.message_globals, &self.github_prelude),
         }
     }
 
@@ -638,7 +670,8 @@ impl Engine {
             Capability::Workflow
             | Capability::MessageFormatter
             | Capability::ToolHeader
-            | Capability::ChatFormatter => (install.name.clone(), None),
+            | Capability::ChatFormatter
+            | Capability::Github => (install.name.clone(), None),
         };
         let compiled = Arc::new(Compiled {
             name: install.name.clone(),
@@ -651,6 +684,7 @@ impl Engine {
             command_pattern,
             text_pattern: None,
             message_type: None,
+            github_events: None,
             compile_time: started.elapsed(),
         });
         self.cache
@@ -830,6 +864,7 @@ fn cap_name(c: Capability) -> &'static str {
         Capability::MessageFormatter => "message_formatter",
         Capability::ToolHeader => "tool_header",
         Capability::ChatFormatter => "chat_formatter",
+        Capability::Github => "github",
     }
 }
 
@@ -852,7 +887,7 @@ fn prelude(capability: Capability, globals: &Globals) -> Result<Prelude, String>
     })?;
     let context = module.get(capability.context_type()).map_err(|e| e.to_string())?;
     let event = match capability {
-        Capability::Parser | Capability::ChatFormatter => None,
+        Capability::Parser | Capability::ChatFormatter | Capability::Github => None,
         Capability::MessageFormatter => Some(module.get("message_from_json").map_err(|e| e.to_string())?),
         Capability::ToolHeader => Some(module.get("tool_from_json").map_err(|e| e.to_string())?),
         Capability::Workflow => Some(module.get("event_from_json").map_err(|e| e.to_string())?),

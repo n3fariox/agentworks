@@ -1,7 +1,7 @@
 //! Installation-time hook declarations. Runtime calls never have a registry.
 use super::*;
 use starlark::values::Value;
-use starlark::values::list::{AllocList, ListRef};
+use starlark::values::list::{AllocList, ListRef, UnpackList};
 use starlark::values::none::NoneType;
 use starlark::values::tuple::{AllocTuple, TupleRef};
 
@@ -15,6 +15,8 @@ pub struct HookInfo {
     pub message_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub events: Option<Vec<String>>,
 }
 
 pub struct RegisteredScript {
@@ -29,6 +31,7 @@ fn register<'v>(
     pattern: Option<&str>,
     label: &str,
     message_type: &str,
+    events: Option<Vec<String>>,
 ) -> anyhow::Result<NoneType> {
     let registry = eval
         .module()
@@ -43,6 +46,7 @@ fn register<'v>(
         pattern.map_or(Value::new_none(), |p| heap.alloc(p)),
         heap.alloc(label),
         heap.alloc(message_type),
+        events.map_or(Value::new_none(), |events| heap.alloc(AllocList(events))),
     ]));
     let mut entries: Vec<_> = registry.iter().collect();
     entries.push(row);
@@ -99,7 +103,15 @@ pub(super) fn registration_helpers(builder: &mut GlobalsBuilder) {
         #[starlark(require = named, default = "Progress")] display_name: &str,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        register(eval, function, "progress", Some(command_pattern), display_name, "")
+        register(
+            eval,
+            function,
+            "progress",
+            Some(command_pattern),
+            display_name,
+            "",
+            None,
+        )
     }
 
     fn register_formatter<'v>(
@@ -116,7 +128,28 @@ pub(super) fn registration_helpers(builder: &mut GlobalsBuilder) {
             text_pattern.into_option(),
             "",
             message_type,
+            None,
         )
+    }
+
+    fn register_github<'v>(
+        #[starlark(require = pos)] function: Value<'v>,
+        #[starlark(require = named, default = NoneOr::None)] events: NoneOr<UnpackList<String>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let events = events.into_option().map(|events| events.items);
+        if let Some(events) = &events {
+            anyhow::ensure!(
+                !events.is_empty() && events.len() <= GITHUB_EVENT_KINDS.len(),
+                "events must contain 1 to 6 GitHub event names; omit it to receive all events"
+            );
+            anyhow::ensure!(
+                events.iter().all(|kind| GITHUB_EVENT_KINDS.contains(&kind.as_str())),
+                "unknown GitHub event name; supported: {}",
+                GITHUB_EVENT_KINDS.join(", ")
+            );
+        }
+        register(eval, function, "github", None, "", "", events)
     }
 
     fn register_tool_header<'v>(
@@ -124,7 +157,7 @@ pub(super) fn registration_helpers(builder: &mut GlobalsBuilder) {
         #[starlark(require = named, default = ".*")] title_pattern: &str,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        register(eval, function, "tool_header", Some(title_pattern), "", "")
+        register(eval, function, "tool_header", Some(title_pattern), "", "", None)
     }
 }
 
@@ -185,13 +218,14 @@ impl Engine {
             &self.message_prelude,
             &self.tool_prelude,
             &self.chat_prelude,
+            &self.github_prelude,
         ];
         for load in ast.loads() {
             if !preludes.iter().any(|p| load.module_id == p.id) {
                 return Err(fail(
                     DiagnosticKind::Capability,
                     format!(
-                        "hook scripts may only load progress.star, message.star, tool.star and chat.star, not {:?}",
+                        "hook scripts may only load progress.star, message.star, tool.star chat.star and github.star, not {:?}",
                         load.module_id
                     ),
                 ));
@@ -257,9 +291,12 @@ impl Engine {
                     format!("unknown message_type {message_type:?}; supported: inbox.peer, chat.agent, chat.user"),
                 ));
             }
+            let events: Option<Vec<String>> = ListRef::from_value(row[5])
+                .map(|values| values.iter().map(|v| v.unpack_str().unwrap().to_owned()).collect());
             let capability = match kind {
                 "progress" => Capability::Parser,
                 "tool_header" => Capability::ToolHeader,
+                "github" => Capability::Github,
                 _ if message_type.starts_with("chat.") => Capability::ChatFormatter,
                 _ => Capability::MessageFormatter,
             };
@@ -315,17 +352,20 @@ impl Engine {
                 // Formatters route on message text, tool headers on the tool title.
                 text_pattern: regex.filter(|_| kind != "progress"),
                 message_type: (kind == "formatter").then(|| message_type.to_owned()),
+                github_events: events.clone(),
                 compile_time: started.elapsed(),
             }));
             hooks.push(HookInfo {
                 hook: match kind {
                     "progress" => "progress",
                     "tool_header" => "tool_header",
+                    "github" => "github",
                     _ => "formatter",
                 },
                 pattern: pattern.map(str::to_owned),
                 message_type: (kind == "formatter").then(|| message_type.to_owned()),
                 display_name: (kind == "progress").then(|| label.to_owned()),
+                events,
             });
         }
         Ok(RegisteredScript { handlers, hooks })

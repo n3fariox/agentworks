@@ -11,7 +11,8 @@ use std::{
 // v10 introduced A-01 schedules; v11 is the combined A-01/R-02 release marker;
 // v12 adds the manageAutomations grant and agent automation request ledger.
 // Recovery adds no tables and preserves every v10 schedule/slot ledger row.
-pub const SCHEMA_VERSION: i64 = 12;
+// v13 adds browser-independent PR tracking and its durable event journal.
+pub const SCHEMA_VERSION: i64 = 13;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 #[derive(Serialize, Deserialize)]
@@ -84,13 +85,14 @@ impl Store {
           COMMIT;")?;
         // C-01 controllers, C-05 review records, U-05 parser scripts, roles and A-01 schedules are additive schema migrations.
         connection.execute_batch(&format!(
-            "BEGIN; {} {} {} {} {} {} PRAGMA user_version={SCHEMA_VERSION}; COMMIT;",
+            "BEGIN; {} {} {} {} {} {} {} PRAGMA user_version={SCHEMA_VERSION}; COMMIT;",
             crate::inbox_delivery::SCHEMA,
             crate::review_queue::SCHEMA,
             crate::controllers::SCHEMA,
             crate::tool_progress::SCHEMA,
             crate::roles::SCHEMA,
-            crate::automations::SCHEMA
+            crate::automations::SCHEMA,
+            crate::github_tracking::SCHEMA
         ))?;
         Ok(Self {
             connection,

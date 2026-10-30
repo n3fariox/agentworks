@@ -582,6 +582,8 @@ function connect(gen){
   ws.onmessage=event=>{
     if(gen!==generation)return;
     const e=JSON.parse(event.data);
+    if(e.kind==='github_context'){github.updateContext(active.id,e.data);return;}
+    if(e.kind==='github_event'){document.dispatchEvent(new CustomEvent('github-event',{detail:{sessionId:active.id,...e.data}}));return;}
     if(e.kind==='session_badges'){github.updateBadges(active.id,e.data);return;}
     if(e.kind==='input_queue'){inputQueue.set(e.data);updateControls();return;}
     if(e.kind==='tool_progress'){if(applyToolProgress(tools.get(e.data.toolCallId),e.data,e.seq))scheduleDraw();return;}

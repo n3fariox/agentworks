@@ -1,10 +1,9 @@
 //! Stored session badges. Existing hooks stage set/clear operations; the host
 //! commits them for the session bound to that invocation after it succeeds.
-use crate::{ApiResult, App, Session, SessionData, fail, session};
+use crate::{ApiResult, App, Session, SessionData, session};
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
 };
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -215,7 +214,7 @@ pub fn apply(s: &Session, source: &str, hash: &str, effects: &[Value]) -> Result
 }
 /// GitHub is a host producer using the same stored badge state, not a script
 /// callback invoked by a badge read. A successful sync replaces its own badges.
-fn sync_github(s: &Session, context: &Value) -> Result<(), String> {
+pub(crate) fn sync_github(s: &Session, context: &Value) -> Result<(), String> {
     let mut data = s.data.lock().unwrap();
     let previous = data.script_badges.clone();
     if context["status"] == "ready" {
@@ -309,17 +308,12 @@ pub async fn context(
     Path(id): Path<String>,
     Query(query): Query<crate::github::Refresh>,
 ) -> ApiResult {
-    let s = session(&app, &id)?;
-    let Json(mut value) =
-        crate::github::context(State(app.clone()), Path(id), Query(query)).await?;
-    sync_github(&s, &value).map_err(|e| fail(StatusCode::INSUFFICIENT_STORAGE, e))?;
+    crate::github_tracking::refresh(&app, &id, query).await
+}
+pub(crate) fn stored_payload(s: &Session) -> Value {
     let data = s.data.lock().unwrap();
     let store = s.store.lock().unwrap();
-    let result = payload(&data, &store.connection);
-    value["badges"] = result["badges"].clone();
-    value["badgesAt"] = result["badgesAt"].clone();
-    value["badgeRevision"] = result["badgeRevision"].clone();
-    Ok(Json(value))
+    payload(&data, &store.connection)
 }
 /// Reads stored state only: never fetches GitHub or runs a script.
 pub async fn list(State(app): State<App>, Path(id): Path<String>) -> ApiResult {

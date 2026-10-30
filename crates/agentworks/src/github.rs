@@ -62,6 +62,7 @@ struct Account {
 }
 #[derive(Default)]
 pub struct Hub {
+    tracking_locks: Mutex<HashMap<String, std::sync::Weak<Mutex<()>>>>,
     state: Mutex<HubState>,
 }
 #[derive(Default)]
@@ -71,6 +72,18 @@ struct HubState {
     failures: HashMap<String, (u64, String)>,
     // Serialize main-host requests and share work between sessions. Capped cache;
     // neither credentials nor Octocrab clients are persisted in this state.
+}
+impl Hub {
+    pub(crate) async fn tracking_lock(&self, id: &str) -> std::sync::Arc<Mutex<()>> {
+        let mut locks = self.tracking_locks.lock().await;
+        locks.retain(|_, weak| weak.strong_count() > 0);
+        if let Some(lock) = locks.get(id).and_then(std::sync::Weak::upgrade) {
+            return lock;
+        }
+        let lock = std::sync::Arc::new(Mutex::new(()));
+        locks.insert(id.into(), std::sync::Arc::downgrade(&lock));
+        lock
+    }
 }
 fn valid_host(host: &str) -> bool {
     host.len() <= 253
@@ -635,13 +648,14 @@ pub async fn context(
         repo.key(),
         connection.login.to_ascii_lowercase(),
         context["branch"],
-        context["commit"],
         links
     ]))
     .unwrap();
     if let Some((at, cached)) = hub.snapshots.get(&key) {
         if at.elapsed() < Duration::from_secs(if query.refresh { 10 } else { 60 }) {
-            view["snapshot"] = cached.clone();
+            let mut snapshot = cached.clone();
+            checkout_snapshot(&mut snapshot, context["commit"].as_str());
+            view["snapshot"] = snapshot;
             view["status"] = json!("ready");
             return Ok(Json(view));
         }
@@ -694,6 +708,14 @@ pub async fn context(
         }
     }
     Ok(Json(view))
+}
+fn checkout_snapshot(snapshot: &mut Value, sha: Option<&str>) {
+    snapshot["headSha"] = json!(sha);
+    if let Some(resources) = snapshot["resources"].as_array_mut() {
+        for pr in resources.iter_mut().filter(|p| p["kind"] == "pullRequest") {
+            pr["headMatches"] = json!(sha.is_some_and(|sha| pr["headSha"] == sha));
+        }
+    }
 }
 const PR_FIELDS: &str = r#"
  id number title url state isDraft headRefName headRefOid headRepository { nameWithOwner }
@@ -780,6 +802,13 @@ async fn fetch_snapshot(
         repository = json!({"id":data["repository"]["id"],"name":data["repository"]["nameWithOwner"],"url":data["repository"]["url"]});
     }
     for link in links {
+        if let Some(existing) = resources
+            .iter_mut()
+            .find(|r| r["number"] == link.number && r["kind"] == link.kind)
+        {
+            existing["explicit"] = json!(true);
+            continue;
+        }
         let query = format!(
             r#"query($owner:String!,$name:String!,$number:Int!) {{ repository(owner:$owner,name:$name) {{ id nameWithOwner url issueOrPullRequest(number:$number) {{ ... on Issue {{ id number title url state }} ... on PullRequest {{ {PR_FIELDS} }} }} }} }}"#
         );
@@ -1103,5 +1132,17 @@ mod tests {
         assert!(failure.retry_at >= now() + 119_000);
         assert!(!failure.message.contains("do not expose"));
         server.abort();
+    }
+}
+
+#[cfg(test)]
+impl Hub {
+    pub(crate) async fn seed_pr_snapshot(&self, branch: &str, snapshot: Value) {
+        let key = json!(["github.com/team/repo", "fixture", branch, []]).to_string();
+        self.state
+            .lock()
+            .await
+            .snapshots
+            .insert(key, (Instant::now(), snapshot));
     }
 }
