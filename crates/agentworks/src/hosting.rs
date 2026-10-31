@@ -32,6 +32,16 @@ pub async fn asset(axum::extract::Path(name): axum::extract::Path<String>) -> Re
             let page = include_str!("../../../web/dashboard.html");
             return Html(page.replace("<!-- PWA_METADATA -->", metadata())).into_response();
         }
+        #[cfg(feature = "model-viewer")]
+        "model-viewer-frame.html" => (
+            "text/html; charset=utf-8",
+            include_bytes!("../../../web/model-viewer-frame.html"),
+        ),
+        #[cfg(feature = "model-viewer")]
+        "model-viewer-frame.bundle.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("../../../web/model-viewer-frame.bundle.js"),
+        ),
         "dashboard.js" => (
             "text/javascript; charset=utf-8",
             include_bytes!("../../../web/dashboard.js"),

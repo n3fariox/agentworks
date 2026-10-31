@@ -29,6 +29,8 @@ mod limit_resume;
 mod login_env;
 mod mcp;
 mod model_providers;
+#[cfg(feature = "model-viewer")]
+mod model_viewer;
 mod native_rename;
 mod notifications;
 mod permission_modes;
@@ -1421,7 +1423,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/{id}/diff", get(diff::view))
         .route("/api/markdown", post(markdown))
         .route("/api/sessions/{id}/user-format", post(format_user))
-        .route("/{name}", get(hosting::asset))
+        .route("/{name}", get(hosting::asset));
+    #[cfg(feature = "model-viewer")]
+    let router = router.route("/model-viewer-assets/{*name}", get(model_viewer::asset));
+    let router = router
         .layer(DefaultBodyLimit::max(128 * 1024))
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app.clone());
@@ -1517,6 +1522,8 @@ async fn guard(
         eprintln!("WebSocket guard passed path={:?}", req.uri().path());
     }
     let mermaid_frame = req.uri().path() == "/mermaid-frame.html";
+    let model_frame =
+        cfg!(feature = "model-viewer") && req.uri().path() == "/model-viewer-frame.html";
     let mut response = next.run(req).await;
     let h = response.headers_mut();
     h.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
@@ -1524,7 +1531,11 @@ async fn guard(
     h.insert(header::REFERRER_POLICY, "no-referrer".parse().unwrap());
     // xterm emits scoped style sheets and per-cell true-color style attributes.
     // Script execution remains restricted to bundled same-origin modules.
-    let csp = if mermaid_frame {
+    // CAD importers use Emscripten bindings that generate JavaScript functions.
+    // Allow evaluation only in the dedicated model frame, not in the app.
+    let csp = if model_frame {
+        "default-src 'none'; script-src 'self' 'unsafe-eval'; style-src 'unsafe-inline'; connect-src 'self' blob:; img-src 'self' blob: data:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'none'"
+    } else if mermaid_frame {
         "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; font-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'none'"
     } else {
         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
@@ -1580,6 +1591,7 @@ async fn status(State(app): State<App>) -> Json<Value> {
         {"id":"goose","name":"Goose · embedded","installed":true,"keyPresent":true,"authMode":"configured"},
         {"id":"opencode","name":"OpenCode · free models","installed":installed("opencode"),"keyPresent":true}
     ]});
+    status["features"] = json!({"modelViewer": cfg!(feature = "model-viewer")});
     let hidden = defaults.hidden_providers.unwrap_or_default();
     for p in status["providers"].as_array_mut().unwrap() {
         let id = p["id"].as_str().unwrap_or_default().to_string();

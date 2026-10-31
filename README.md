@@ -6,7 +6,7 @@ A small, local Rust prototype for running independent Claude, Codex, Goose, Open
 
 ## Run
 
-Requires [mise](https://mise.jdx.dev/); Node is only needed for the test tooling. The repository pins Rust 1.98.1 (installed through rustup, with the `x86_64-pc-windows-gnu` target) and Zig 0.15.2 in `mise.toml`; the build and start commands install/select them through mise so neither has to be added to your shell `PATH` manually. The crates' minimum supported Rust is 1.97.1. To check the Windows build from Linux: `mise exec -- cargo check --target x86_64-pc-windows-gnu -p agentworks-terminal` (other crates do not build for Windows yet). The first Rust build fetches Ghostty’s pinned native sources and Zig dependencies.
+Requires [mise](https://mise.jdx.dev/); Node is needed for the test tooling and to prepare optional 3D viewer assets. The repository pins Rust 1.98.1 (installed through rustup, with the `x86_64-pc-windows-gnu` target) and Zig 0.15.2 in `mise.toml`; the build and start commands install/select them through mise so neither has to be added to your shell `PATH` manually. The crates' minimum supported Rust is 1.97.1. To check the Windows build from Linux: `mise exec -- cargo check --target x86_64-pc-windows-gnu -p agentworks-terminal` (other crates do not build for Windows yet). The first Rust build fetches Ghostty’s pinned native sources and Zig dependencies.
 
 ```bash
 mise trust mise.toml # once per checkout, if mise asks
@@ -26,7 +26,18 @@ Or pass Cargo build options through the project wrapper, for example `npm run bu
 
 Open **http://127.0.0.1:4317** and create a **Demo agent** session. Try `hello`, `approval`, `slow`, or `image`. The demo is a real local ACP subprocess, not a simulated browser response, and never calls a model or edits project files. Its own session state is saved locally for restart tests.
 
-The prototype uses plain HTML/CSS/JavaScript so there is no frontend build step. UI assets are embedded in the Rust executable; rebuild/restart after changing them.
+Default builds use plain HTML/CSS/JavaScript and need no frontend build step. UI assets are embedded in the Rust executable; rebuild/restart after changing them.
+
+Optional 3D model previews use [Online 3D Viewer](https://github.com/kovacsv/Online3DViewer). To include them:
+
+```sh
+npm ci --prefix web --ignore-scripts
+npm run build:model-viewer
+npm run build -- --features model-viewer
+npm start -- --features model-viewer
+```
+
+Default builds exclude the viewer and its CAD/WebAssembly assets. Enabled builds embed all assets locally and load the viewer only when a model is opened in Files or the chat sidebar. Controls include rotate, pan, zoom, fit, an edges toggle, and an Albedo toggle for base colors/textures without lighting or metallic reflections. The Albedo preference is remembered for subsequent previews. Supported previews: FCStd, STEP/STP, IGES/IGS, BREP/BRP, GLB/glTF, STL, OBJ, FBX, DAE, 3MF, AMF, PLY, OFF, 3DM, 3DS, IFC, BIM, and WRL. Export Blender projects as GLB; `.blend` is unsupported. glTF buffers/textures and OBJ materials/textures resolve relative to the model through the existing file API. The existing 10 MB per-file limit applies; previews allow up to 64 files and 64 MB combined. Third-party notices are served at `model-viewer-assets/LICENSES.txt`; OpenCascade and other importer notices are included with their assets. Regenerate the assets after updating viewer dependencies.
 
 ## Connect an agent
 

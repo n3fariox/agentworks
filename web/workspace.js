@@ -1,6 +1,7 @@
 import {setupGithubBrowser} from './github-browser.js';
 import {enhanceMermaid} from './mermaid.js';
 import {appUrl, localState as localStorage, sessionState as sessionStorage} from './hosting.js';
+const isModelPath=path=>/\.(3dm|3ds|3mf|amf|bim|brp|brep|dae|fbx|fcstd|gltf|glb|ifc|igs|iges|stp|step|stl|obj|off|ply|wrl)$/i.test(path);
 export function createWorkspace(hooks){
   const $=id=>document.getElementById(id),el=(tag,cls,text)=>{const node=document.createElement(tag);if(cls)node.className=cls;if(text!==undefined)node.textContent=text;return node;};
   const read=(storage,key,fallback)=>{try{return JSON.parse(storage.getItem(key))??fallback;}catch{return fallback;}};
@@ -134,7 +135,8 @@ export function createWorkspace(hooks){
     },filename);header.append(crumbs);
     const actions=el('div','workspace-preview-actions');const download=el('a','text-button','Download ↓');download.href=fileUrl(file,true);download.download=file.path.split('/').at(-1);actions.append(download);
     if(side){const back=el('button','text-button','← Files');back.onclick=()=>{state.sideFile=null;loadSideFiles();};actions.prepend(back);}header.append(actions);area.append(header);
-    if(file.type?.startsWith('text/')){
+    const model=hooks.getConfig()?.features?.modelViewer&&isModelPath(file.path);
+    if(!model&&file.type?.startsWith('text/')){
       const tabs=el('div','workspace-preview-tabs');for(const [source,label]of [[false,'Preview'],[true,'Source']]){
         const button=el('button','text-button',label);button.setAttribute('aria-pressed',String(file.source===source));button.onclick=()=>{file.source=source;renderPreview(file,side);};tabs.append(button);
       }area.append(tabs);
@@ -142,6 +144,10 @@ export function createWorkspace(hooks){
     const body=el('div','workspace-preview-body markdown');area.append(body);
     if(file.error)body.textContent=file.error;
     else if(file.loading)body.textContent='Loading file…';
+    else if(model){
+      const frame=el('iframe','model-viewer');frame.title='3D model: '+filename;frame.setAttribute('referrerpolicy','no-referrer');
+      frame.src=appUrl('model-viewer-frame.html')+'#'+encodeURIComponent(JSON.stringify({url:fileUrl(file),path:file.path}));body.append(frame);
+    }
     else if(file.type?.startsWith('image/')){const image=el('img','file-image');image.src=fileUrl(file);image.alt=file.path;body.append(image);}
     else if(file.type?.startsWith('text/')){
       if(!file.source&&file.html){body.innerHTML=file.html;decorate(body,file,side);enhanceMermaid(body,file.mermaidClass);}else body.append(el('pre','workspace-source',file.text.slice(0,100000)));
@@ -172,6 +178,7 @@ export function createWorkspace(hooks){
   async function openFile(location,path,side=false,line=null){
     const file={location,path,line,source:!!line,text:'',type:'',loading:true};if(side){state.sideFile=file;$('side-file-browser').hidden=true;$('workspace-preview').hidden=false;}else{state.file=file;for(const node of $('file-entries').querySelectorAll('button'))node.classList.toggle('selected',node.dataset.path===path);save();}renderPreview(file,side);
     try{
+      if(hooks.getConfig()?.features?.modelViewer&&isModelPath(path))return;
       const response=await fetch(fileUrl(file));if(!response.ok)throw new Error(await response.text());
       file.type=response.headers.get('content-type')||'';
       if(file.type.startsWith('text/')){
