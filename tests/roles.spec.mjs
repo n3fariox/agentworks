@@ -1,9 +1,11 @@
 import {serverReady} from './support/cleanup.mjs';
 import {test,expect} from '@playwright/test';
+import {openCreateSections} from './support/create-sections.mjs';
 import {spawn} from 'node:child_process';
 import {mkdtemp,mkdir,rm} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 
+openCreateSections(test);
 // Own server and data: never touch the user's sessions or settings.
 const base='http://127.0.0.1:4493';
 test.use({baseURL:base});

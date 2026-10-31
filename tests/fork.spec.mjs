@@ -1,8 +1,10 @@
 import {test,expect} from '@playwright/test';
+import {openCreateSections} from './support/create-sections.mjs';
 import {createServer} from 'node:http';
 import {readFile} from 'node:fs/promises';
 import {resolve,extname} from 'node:path';
 
+openCreateSections(test);
 // Static UI only: all API traffic is intercepted, no provider or live data access.
 const port=Number(process.env.AGENTWORKS_FORK_UI_PORT||4363),base=`http://127.0.0.1:${port}`;let server;
 test.beforeAll(async()=>{

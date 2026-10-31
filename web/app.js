@@ -33,6 +33,7 @@ import {setupMentions} from './mentions.js';
 import {setupAttachments} from './attachments.js';
 import {setupModelProviders} from './model-providers.js';
 import {setupDirectoryPicker,setupProjectDirectory} from './directory-picker.js';
+import {setupCreateSections} from './create-sections.js';
 const $ = id => document.getElementById(id);
 // randomUUID is unavailable on plain HTTP remote origins; getRandomValues is supported.
 const uuid = () => globalThis.crypto.randomUUID?.() ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -92,6 +93,7 @@ let pendingCreate=readStorage(sessionStorage,'agentworks-pending-create',null);
 // L-08: set only while the new-session dialog is pre-filled from an existing session.
 let forkSource=null,forkGeneration=0,modelPicked=false,roleLibrary=[];
 const worktrees=setupWorktreeControls({$,api,onChange:()=>{if(config)providerNote();}});
+const createSections=setupCreateSections({$,storage:localStorage});
 const policyEditor=setupPolicyEditor({$,api});
 const directoryPicker=setupDirectoryPicker({$,api});
 const projectDirectory=setupProjectDirectory({$,picker:directoryPicker,hosts:()=>hosts});
@@ -120,10 +122,11 @@ function providerNote() {
     const available=remote.status==='connected'&&remote.worker?.providers?.includes(p.id);
     $('provider-note').textContent=available?`Uses ${labels[p.id]} and its provider configuration on ${remote.name}.`:`${labels[p.id]} is unavailable on ${remote.name}.`;
     $('create-submit').disabled=!available||!remote.roots?.length||(p.id==='goose'&&$('create-model-provider').disabled)||creating||worktrees.blocked()||!!(forkSource?.role&&!p.roles);
-    return;
+    createSections.summarize();return;
   }
   $('provider-note').textContent=p.id==='demo'?'Local test agent. No model calls, API key, or file changes.':p.id==='goose'?'Uses the model provider configured for Goose on this host.':p.id==='opencode'?(p.installed?'Native ACP. Choose an advertised free model. Availability and limits may change.':'Install OpenCode on this host or set AGENTWORKS_OPENCODE_PATH.'):!p.installed?(p.id==='codex-rust'?'Install native Codex on this host or set CODEX_PATH.':'Install native Claude Code on this host or set CLAUDE_CODE_EXECUTABLE.'):p.authMode==='existing'?'Uses the existing agent sign-in on this host. If it has expired, sign in with the CLI and try again.':!p.keyPresent?`Set ${['claude','claude-rust'].includes(p.id)?'ANTHROPIC_API_KEY':'OPENAI_API_KEY or CODEX_API_KEY'} before starting the server.`:'API key available on the host. Messages use your provider account.';
   $('create-submit').disabled=!p.installed||(p.authMode==='api_key'&&!p.keyPresent)||(p.id==='goose'&&$('create-model-provider').disabled)||creating||worktrees.blocked()||!!(forkSource?.role&&!p.roles);
+  createSections.summarize();
 }
 // Roles add instructions to the agent's system prompt; they never change Agentworks access.
 function renderRoles(){
@@ -141,6 +144,7 @@ function updateRoleNote(){
   select.disabled=!p?.roles;if(!p?.roles)select.value='';
   const role=roleLibrary.find(r=>r.id===select.value);
   $('create-role-note').textContent=!p?.roles?`${labels[p?.id]||'This agent'} does not accept role instructions yet.`:role?(role.description||'Custom role.')+' Added to the agent\'s system prompt.':'Adds instructions to the agent\'s system prompt. Roles do not change Agentworks access.';
+  createSections.summarize();
 }
 const communicationLabels={off:'Off',participant:'Participant',coordinator:'Coordinator'};
 function updateCommunicationDefault(){
@@ -148,6 +152,7 @@ function updateCommunicationDefault(){
   const role=project?.defaultCommunicationRole||config.defaultCommunicationRole||'participant';
   $('create-agent-access').querySelector('option[value=""]').textContent=`Use ${project?.defaultCommunicationRole?'project':'global'} default · ${communicationLabels[role]}`;
   $('create-communication-note').textContent='Participant exchanges project messages. Coordinator can also start sessions and turns, cancel turns, and run project automations. Change session access later in Agents & inbox.';
+  createSections.summarize();
 }
 // Most recently used harness first; hidden harnesses stay out unless a fork keeps one.
 function renderProviderPicker(keep){
@@ -171,7 +176,7 @@ function openCreate(context={}) {
   const remembered=readStorage(localStorage,'agentworks-project-locations',{});
   $('create-resume-policy').checked=false;
   $('create-role').value='';api('/api/roles').then(list=>{roleLibrary=Array.isArray(list)?list:[];renderRoles();}).catch(()=>{});
-  $('create-agent-access').value='';updateCommunicationDefault();$('create-error').textContent='';$('directory').value=context.cwd||projectDirectoryOn('local',projectId)||workspaceContext?.cwd||remembered[projectId||'ungrouped']||(active?.hostId==='local'?active.cwd:null)||config.roots[0];$('session-title').value=context.title||'';
+  $('create-agent-access').value='';updateCommunicationDefault();$('create-error').textContent='';$('directory').value=context.cwd||(projectId?projectRoot('local',projectId):workspaceContext?.cwd||remembered.ungrouped||(active?.hostId==='local'?active.cwd:null))||config.roots[0];$('session-title').value=context.title||'';
   if(context.provider&&$('provider').querySelector(`option[value="${context.provider}"]`))$('provider').value=context.provider;
   $('fork-boundary').replaceChildren(new Option('Latest completed turn at submission',''));$('fork-context').value='auto';$('fork-summary').value='';
   renderForkHeader();fillCreateHosts(context.hostId||'local',context.cwd);providerNote();updateRoleNote();
@@ -204,13 +209,19 @@ function projectDirectoryOn(hostId,projectId){
   return location&&location.hostId===hostId?location.path:null;
 }
 // The last source directory chosen in this browser for a project on a host.
-function rememberedDirectory(){
-  const host=$('create-host').value||'local',project=$('create-project').value||'ungrouped';
+function rememberedDirectory(host=$('create-host').value||'local',projectId=$('create-project').value||null){
+  const project=projectId||'ungrouped';
   return readStorage(localStorage,'agentworks-project-locations',{})[host==='local'?project:host+':'+project];
+}
+// Where a project's sessions start on a host: its saved directory, the last
+// source chosen here, else its newest session's source checkout (never a worktree).
+function projectRoot(hostId,projectId){
+  const newest=projectId&&sessions.find(s=>s.projectId===projectId&&(s.hostId||'local')===hostId);
+  return projectDirectoryOn(hostId,projectId)||rememberedDirectory(hostId,projectId)||newest?.worktree?.mainTop||newest?.cwd||null;
 }
 function createHostChanged(cwd){
   const host=createHost(),roots=host?host.roots||[]:config.roots;
-  $('directory').value=cwd||projectDirectoryOn($('create-host').value||'local',$('create-project').value||null)||rememberedDirectory()||roots[0]||'';
+  $('directory').value=cwd||projectRoot($('create-host').value||'local',$('create-project').value||null)||roots[0]||'';
   $('create-resume-policy').disabled=false;
   worktrees.setHost(host?.id);
   $('project-roots').replaceChildren(...roots.map(root=>{const option=el('option');option.value=root;return option;}));
@@ -273,6 +284,7 @@ function resetCreateModels(){
   const option=el('option','',carried?`From “${forkSource.title}” · ${carried}`:defaultId?`Saved default · ${defaultId}`:'Harness default');option.value=defaultId||'';select.append(option);
   const remote=createHost();$('load-models').disabled=false;
   $('model-note').textContent=remote?`Load available models from ${remote.name} without sending a prompt.`:'Load available models from the agent without sending a prompt.';
+  createSections.summarize();
 }
 async function loadCreateModels(){
   const gen=++discoveryGeneration,provider=$('provider').value,cwd=$('directory').value,hostId=$('create-host').value;
@@ -287,7 +299,7 @@ async function loadCreateModels(){
     select.value=[...select.options].some(o=>o.value===previous)?previous:'';
     $('model-note').textContent=result.options?.length?'Model is applied before the first turn.':'This harness did not advertise selectable models.';
   }catch(e){if(gen===discoveryGeneration)$('model-note').textContent=e.message;}
-  finally{if(gen===discoveryGeneration)$('load-models').disabled=false;}
+  finally{if(gen===discoveryGeneration){$('load-models').disabled=false;createSections.summarize();}}
 }
 function commandText(command){return command.name.startsWith('$')?command.name:'/'+command.name.replace(/^\//,'');}
 function renderCommands(){
@@ -1171,7 +1183,8 @@ const enrollment=hostEnrollment({$,api,refresh:refreshSessions,directories:host=
 function openHostDialog(){enrollment.open();}
 $('dismiss-project').onclick=()=>{if(!savingProject)$('project-dialog').close();};
 $('project-dialog').addEventListener('cancel',event=>{if(savingProject)event.preventDefault();});
-$('create-project').onchange=()=>{const remembered=projectDirectoryOn($('create-host').value||'local',$('create-project').value||null)||rememberedDirectory();if(remembered)$('directory').value=remembered;worktrees.projectChanged();updateCommunicationDefault();};
+// Switching projects always moves the directory to the new project's root.
+$('create-project').onchange=()=>{const host=createHost(),projectId=$('create-project').value||null;$('directory').value=projectRoot(host?.id||'local',projectId)||(host?host.roots||[]:config.roots)[0]||'';$('directory').dispatchEvent(new Event('input'));worktrees.projectChanged();updateCommunicationDefault();};
 $('project-form').onsubmit=async event=>{
   event.preventDefault();if(savingProject)return;savingProject=true;
   for(const id of ['save-project','project-name','project-directory','project-directory-host','project-directory-browse','project-directory-clear','project-default-mode','project-require-worktree','project-communication-role','archive-project','delete-project','dismiss-project'])$(id).disabled=true;

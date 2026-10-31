@@ -520,7 +520,7 @@ fn role_summary(data: &SessionData) -> Value {
 fn worktree_summary(data: &SessionData) -> Value {
     data.worktree.as_ref().map_or(
         Value::Null,
-        |o| json!({"owned":true,"path":o.path,"branch":o.branch,"removed":o.removed.is_some()}),
+        |o| json!({"owned":true,"path":o.path,"branch":o.branch,"mainTop":o.main_top,"removed":o.removed.is_some()}),
     )
 }
 fn fail(code: StatusCode, msg: impl Into<String>) -> (StatusCode, String) {
@@ -939,6 +939,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (
                     [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
                     include_str!("../../../web/directory-picker.js"),
+                )
+            }),
+        )
+        .route(
+            "/create-sections.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/create-sections.js"),
                 )
             }),
         )

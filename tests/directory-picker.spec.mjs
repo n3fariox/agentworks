@@ -1,8 +1,10 @@
 import {test,expect} from '@playwright/test';
+import {openCreateSections,override} from './support/create-sections.mjs';
 import {createServer} from 'node:http';
 import {readFile} from 'node:fs/promises';
 import {resolve,extname} from 'node:path';
 
+openCreateSections(test);
 // Static UI only: all API traffic is intercepted, including the folder tree.
 const port=Number(process.env.AGENTWORKS_DIRECTORY_UI_PORT||4364),base=`http://127.0.0.1:${port}`;let server;
 test.beforeAll(async()=>{
@@ -15,7 +17,7 @@ test.beforeAll(async()=>{
   await new Promise((ok,fail)=>{server.once('error',fail);server.listen(port,'127.0.0.1',ok);});
 });
 test.afterAll(async()=>{await new Promise(ok=>server.close(ok));});
-async function fixture(page,{remembered}={}){
+async function fixture(page,{remembered,sessions=[]}={}){
   const state={
     tree:{'/repo':['existing','other'],'/repo/existing':[],'/repo/other':[]},
     projects:[{id:'a',name:'Alpha',locationIds:['loc-a'],defaultLocationId:'loc-a'},{id:'b',name:'Beta',locationIds:[]}],
@@ -31,7 +33,7 @@ async function fixture(page,{remembered}={}){
     const json=data=>route.fulfill({json:data});
     if(path==='/api/status')return json({roots:['/repo'],defaultModels:{},providers:[{id:'demo',name:'Demo agent',installed:true}]});
     if(path==='/api/catalog')return json({projects:state.projects,hosts:state.hosts,locations:state.locations});
-    if(path==='/api/sessions'&&method==='GET')return json([]);
+    if(path==='/api/sessions'&&method==='GET')return json(sessions);
     if(path==='/api/automations')return json([]);
     if(path.endsWith('/workspace-policy'))return json({defaultMode:'directory',requireWorktree:false});
     if(path==='/api/directories'&&method==='GET'){
@@ -113,6 +115,34 @@ test('project directory beats the browser-remembered path; remembered path is th
   expect(s.creates[0]).toMatchObject({cwd:'/repo/existing',projectId:'b',workspace:{mode:'newWorktree'}});
   const stored=await page.evaluate(()=>JSON.parse(localStorage.getItem('agentworks-project-locations')));
   expect(stored.b).toBe('/repo/existing');
+});
+test('switching projects moves the directory to each project root, never a worktree',async({page})=>{
+  // Beta has no saved directory or remembered path; its newest session ran in a worktree.
+  const worktree='/repo/existing/.worktrees/old';
+  await fixture(page,{sessions:[{id:'s1',provider:'demo',title:'Old',status:'idle',created:1,cwd:worktree,projectId:'b',hostId:'local',worktree:{owned:true,path:worktree,branch:'old',mainTop:'/repo/existing',removed:false}}]});
+  await page.locator('#welcome-new').click();
+  await page.locator('#create-project').selectOption('a');await expect(page.locator('#directory')).toHaveValue('/repo/other');
+  await page.locator('#directory').fill('/repo/other/deep/subfolder');
+  await page.locator('#create-project').selectOption('b');await expect(page.locator('#directory')).toHaveValue('/repo/existing');
+  await page.locator('#create-project').selectOption('');await expect(page.locator('#directory')).toHaveValue('/repo');
+  await page.locator('#create-project').selectOption('a');await expect(page.locator('#directory')).toHaveValue('/repo/other');
+});
+test('secondary new-session fields start collapsed with their current choice and remember being opened',async({page})=>{
+  // Start this tab with nothing remembered instead of the shared all-open state.
+  await fixture(page);await page.evaluate(key=>sessionStorage.setItem(key,'{}'),override);await page.reload();
+  await page.locator('#welcome-new').click();
+  for(const id of ['workspace','model','access'])await expect(page.locator(`#create-section-${id}`)).not.toHaveAttribute('open','');
+  await expect(page.locator('#workspace-mode')).toBeHidden();
+  await expect(page.locator('#create-section-workspace-value')).toHaveText('Use project directory');
+  await expect(page.locator('#create-section-model-value')).toHaveText('Harness default');
+  await expect(page.locator('#create-section-access-value')).toContainText('default');
+  await page.locator('#create-section-workspace summary').click();
+  await page.locator('#workspace-mode').selectOption('newWorktree');await page.locator('#worktree-branch').fill('feat/x');
+  await expect(page.locator('#create-section-workspace-value')).toHaveText('Create new worktree · feat/x');
+  await page.evaluate(key=>sessionStorage.setItem(key,localStorage.getItem('agentworks-create-sections')),override);
+  await page.reload();await page.locator('#welcome-new').click();
+  await expect(page.locator('#create-section-workspace')).toHaveAttribute('open','');
+  await expect(page.locator('#create-section-model')).not.toHaveAttribute('open','');
 });
 test('editing a project leaves its directory alone unless changed, and Clear sends null',async({page})=>{
   const s=await fixture(page);

@@ -1,5 +1,7 @@
 import {test,expect} from '@playwright/test';
+import {openCreateSections} from './support/create-sections.mjs';
 
+openCreateSections(test);
 async function create(page,name,directory){
   await page.locator('#new-session').click();
   await page.locator('#session-title').fill(name);
