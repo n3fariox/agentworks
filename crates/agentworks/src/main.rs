@@ -943,6 +943,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route(
+            "/create-place.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/create-place.js"),
+                )
+            }),
+        )
+        .route(
             "/create-sections.js",
             get(|| async {
                 (

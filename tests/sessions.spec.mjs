@@ -1,5 +1,5 @@
 import {test,expect} from '@playwright/test';
-import {openCreateSections} from './support/create-sections.mjs';
+import {openCreateSections,choosePlace} from './support/create-sections.mjs';
 
 openCreateSections(test);
 async function create(page,name,directory){
@@ -167,7 +167,7 @@ test('project hierarchies preserve draft, stream, selection and independent expa
   await page.locator('#save-project').click();
   await expect(page.locator('#project-dialog')).not.toBeVisible();
   await page.locator('#new-session').click();
-  await page.locator('#create-project').selectOption({label:'Browser test Alpha'});
+  await choosePlace(page,{project:{label:'Browser test Alpha'}});
   await page.locator('#session-title').fill('Browser test grouped');
   await page.locator('#create-submit').click();
   await expect(page.locator('#session-state')).toHaveText('Ready');

@@ -34,6 +34,7 @@ import {setupAttachments} from './attachments.js';
 import {setupModelProviders} from './model-providers.js';
 import {setupDirectoryPicker,setupProjectDirectory} from './directory-picker.js';
 import {setupCreateSections} from './create-sections.js';
+import {setupCreatePlace} from './create-place.js';
 const $ = id => document.getElementById(id);
 // randomUUID is unavailable on plain HTTP remote origins; getRandomValues is supported.
 const uuid = () => globalThis.crypto.randomUUID?.() ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -94,6 +95,8 @@ let pendingCreate=readStorage(sessionStorage,'agentworks-pending-create',null);
 let forkSource=null,forkGeneration=0,modelPicked=false,roleLibrary=[];
 const worktrees=setupWorktreeControls({$,api,onChange:()=>{if(config)providerNote();}});
 const createSections=setupCreateSections({$,storage:localStorage});
+// A place counts as used when it has a saved or remembered directory or a session.
+const createPlace=setupCreatePlace({$,el,used:(hostId,projectId)=>!!(projectDirectoryOn(hostId,projectId)||rememberedDirectory(hostId,projectId)||sessions.some(s=>(s.projectId||null)===projectId&&(s.hostId||'local')===hostId))});
 const policyEditor=setupPolicyEditor({$,api});
 const directoryPicker=setupDirectoryPicker({$,api});
 const projectDirectory=setupProjectDirectory({$,picker:directoryPicker,hosts:()=>hosts});
@@ -122,12 +125,14 @@ function providerNote() {
     const available=remote.status==='connected'&&remote.worker?.providers?.includes(p.id);
     $('provider-note').textContent=available?`Uses ${labels[p.id]} and its provider configuration on ${remote.name}.`:`${labels[p.id]} is unavailable on ${remote.name}.`;
     $('create-submit').disabled=!available||!remote.roots?.length||(p.id==='goose'&&$('create-model-provider').disabled)||creating||worktrees.blocked()||!!(forkSource?.role&&!p.roles);
-    createSections.summarize();return;
+    createChanged();return;
   }
   $('provider-note').textContent=p.id==='demo'?'Local test agent. No model calls, API key, or file changes.':p.id==='goose'?'Uses the model provider configured for Goose on this host.':p.id==='opencode'?(p.installed?'Native ACP. Choose an advertised free model. Availability and limits may change.':'Install OpenCode on this host or set AGENTWORKS_OPENCODE_PATH.'):!p.installed?(p.id==='codex-rust'?'Install native Codex on this host or set CODEX_PATH.':'Install native Claude Code on this host or set CLAUDE_CODE_EXECUTABLE.'):p.authMode==='existing'?'Uses the existing agent sign-in on this host. If it has expired, sign in with the CLI and try again.':!p.keyPresent?`Set ${['claude','claude-rust'].includes(p.id)?'ANTHROPIC_API_KEY':'OPENAI_API_KEY or CODEX_API_KEY'} before starting the server.`:'API key available on the host. Messages use your provider account.';
   $('create-submit').disabled=!p.installed||(p.authMode==='api_key'&&!p.keyPresent)||(p.id==='goose'&&$('create-model-provider').disabled)||creating||worktrees.blocked()||!!(forkSource?.role&&!p.roles);
-  createSections.summarize();
+  createChanged();
 }
+// Keeps the folded section summaries and the place field in step with the form.
+function createChanged(){createSections.summarize();createPlace.sync();}
 // Roles add instructions to the agent's system prompt; they never change Agentworks access.
 function renderRoles(){
   const select=$('create-role'),previous=select.value;select.replaceChildren(new Option('No role',''));
@@ -144,7 +149,7 @@ function updateRoleNote(){
   select.disabled=!p?.roles;if(!p?.roles)select.value='';
   const role=roleLibrary.find(r=>r.id===select.value);
   $('create-role-note').textContent=!p?.roles?`${labels[p?.id]||'This agent'} does not accept role instructions yet.`:role?(role.description||'Custom role.')+' Added to the agent\'s system prompt.':'Adds instructions to the agent\'s system prompt. Roles do not change Agentworks access.';
-  createSections.summarize();
+  createChanged();
 }
 const communicationLabels={off:'Off',participant:'Participant',coordinator:'Coordinator'};
 function updateCommunicationDefault(){
@@ -152,7 +157,7 @@ function updateCommunicationDefault(){
   const role=project?.defaultCommunicationRole||config.defaultCommunicationRole||'participant';
   $('create-agent-access').querySelector('option[value=""]').textContent=`Use ${project?.defaultCommunicationRole?'project':'global'} default · ${communicationLabels[role]}`;
   $('create-communication-note').textContent='Participant exchanges project messages. Coordinator can also start sessions and turns, cancel turns, and run project automations. Change session access later in Agents & inbox.';
-  createSections.summarize();
+  createChanged();
 }
 // Most recently used harness first; hidden harnesses stay out unless a fork keeps one.
 function renderProviderPicker(keep){
@@ -284,7 +289,7 @@ function resetCreateModels(){
   const option=el('option','',carried?`From “${forkSource.title}” · ${carried}`:defaultId?`Saved default · ${defaultId}`:'Harness default');option.value=defaultId||'';select.append(option);
   const remote=createHost();$('load-models').disabled=false;
   $('model-note').textContent=remote?`Load available models from ${remote.name} without sending a prompt.`:'Load available models from the agent without sending a prompt.';
-  createSections.summarize();
+  createChanged();
 }
 async function loadCreateModels(){
   const gen=++discoveryGeneration,provider=$('provider').value,cwd=$('directory').value,hostId=$('create-host').value;
@@ -299,7 +304,7 @@ async function loadCreateModels(){
     select.value=[...select.options].some(o=>o.value===previous)?previous:'';
     $('model-note').textContent=result.options?.length?'Model is applied before the first turn.':'This harness did not advertise selectable models.';
   }catch(e){if(gen===discoveryGeneration)$('model-note').textContent=e.message;}
-  finally{if(gen===discoveryGeneration){$('load-models').disabled=false;createSections.summarize();}}
+  finally{if(gen===discoveryGeneration){$('load-models').disabled=false;createChanged();}}
 }
 function commandText(command){return command.name.startsWith('$')?command.name:'/'+command.name.replace(/^\//,'');}
 function renderCommands(){

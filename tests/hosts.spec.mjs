@@ -1,5 +1,5 @@
 import {test,expect} from '@playwright/test';
-import {openCreateSections} from './support/create-sections.mjs';
+import {openCreateSections,choosePlace} from './support/create-sections.mjs';
 import {createServer} from 'node:http';
 import {readFile} from 'node:fs/promises';
 import {resolve,extname} from 'node:path';
@@ -121,7 +121,7 @@ test('host working directories enable remote sessions in the new-session dialog'
   await expect(page.locator('#create-error')).toContainText('stop here');
   expect(s.created).toMatchObject({hostId:'r1',cwd:'~/projects',workspace:{mode:'directory'}});
   // Switching back to Local restores local roots and model discovery.
-  await page.locator('#create-host').selectOption('local');
+  await choosePlace(page,{host:'local'});
   await expect(page.locator('#load-models')).toBeEnabled();
   await expect(page.locator('#roots-note')).toContainText('Allowed roots: /repo');
   expect(errors).toEqual([]);
@@ -138,7 +138,7 @@ test('remote availability and directories are independent of local provider conf
   await expect(page.locator('#create-submit')).toBeEnabled();
   await expect(page.locator('#workspace-mode')).toBeEnabled();
   await expect(page.locator('#create-resume-policy')).toBeEnabled();
-  await page.locator('#create-host').selectOption('local');
+  await choosePlace(page,{host:'local'});
   await expect(page.locator('#directory')).toHaveValue('/repo');
   await expect(page.locator('#create-submit')).toBeDisabled();
   await expect(page.locator('#workspace-mode')).toBeEnabled();
@@ -150,11 +150,11 @@ test('remote selection respects required worktrees and restores local policy on 
   await page.route('**/api/projects/a/workspace-policy',route=>route.fulfill({json:{defaultMode:'newWorktree',requireWorktree:true}}));
   await page.locator('#view-hosts').click();
   await page.locator('[data-group="host:r1"]').getByRole('button',{name:'New session in build-box'}).click();
-  await page.locator('#create-project').selectOption('a');
+  await choosePlace(page,{project:'a'});
   await expect(page.locator('#workspace-policy-note')).toContainText('Isolated worktree required');
   await expect(page.locator('#workspace-mode')).toHaveValue('newWorktree');
   await expect(page.locator('#create-submit')).toBeEnabled();
-  await page.locator('#create-host').selectOption('local');
+  await choosePlace(page,{host:'local'});
   await expect(page.locator('#workspace-mode')).toHaveValue('newWorktree');
   await expect(page.locator('#workspace-policy-note')).toContainText('Isolated worktree required');
   await expect(page.locator('#create-submit')).toBeEnabled();

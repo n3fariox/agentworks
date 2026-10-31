@@ -1,5 +1,5 @@
 import {test,expect} from '@playwright/test';
-import {openCreateSections,override} from './support/create-sections.mjs';
+import {openCreateSections,override,choosePlace} from './support/create-sections.mjs';
 import {createServer} from 'node:http';
 import {readFile} from 'node:fs/promises';
 import {resolve,extname} from 'node:path';
@@ -108,8 +108,8 @@ for(const mobile of [false,true]){
 test('project directory beats the browser-remembered path; remembered path is the source, not the worktree',async({page})=>{
   const s=await fixture(page,{remembered:{a:'/repo/remembered',b:'/repo/existing'}});
   await page.locator('#welcome-new').click();
-  await page.locator('#create-project').selectOption('a');await expect(page.locator('#directory')).toHaveValue('/repo/other');
-  await page.locator('#create-project').selectOption('b');await expect(page.locator('#directory')).toHaveValue('/repo/existing');
+  await choosePlace(page,{project:'a'});await expect(page.locator('#directory')).toHaveValue('/repo/other');
+  await choosePlace(page,{project:'b'});await expect(page.locator('#directory')).toHaveValue('/repo/existing');
   await page.locator('#workspace-mode').selectOption('newWorktree');await page.locator('#create-submit').click();
   await expect(page.locator('#create-dialog')).toBeHidden();
   expect(s.creates[0]).toMatchObject({cwd:'/repo/existing',projectId:'b',workspace:{mode:'newWorktree'}});
@@ -121,11 +121,48 @@ test('switching projects moves the directory to each project root, never a workt
   const worktree='/repo/existing/.worktrees/old';
   await fixture(page,{sessions:[{id:'s1',provider:'demo',title:'Old',status:'idle',created:1,cwd:worktree,projectId:'b',hostId:'local',worktree:{owned:true,path:worktree,branch:'old',mainTop:'/repo/existing',removed:false}}]});
   await page.locator('#welcome-new').click();
-  await page.locator('#create-project').selectOption('a');await expect(page.locator('#directory')).toHaveValue('/repo/other');
+  await choosePlace(page,{project:'a'});await expect(page.locator('#directory')).toHaveValue('/repo/other');
   await page.locator('#directory').fill('/repo/other/deep/subfolder');
-  await page.locator('#create-project').selectOption('b');await expect(page.locator('#directory')).toHaveValue('/repo/existing');
-  await page.locator('#create-project').selectOption('');await expect(page.locator('#directory')).toHaveValue('/repo');
-  await page.locator('#create-project').selectOption('a');await expect(page.locator('#directory')).toHaveValue('/repo/other');
+  await choosePlace(page,{project:'b'});await expect(page.locator('#directory')).toHaveValue('/repo/existing');
+  await choosePlace(page,{project:''});await expect(page.locator('#directory')).toHaveValue('/repo');
+  await choosePlace(page,{project:'a'});await expect(page.locator('#directory')).toHaveValue('/repo/other');
+});
+test('one field picks project and host: used places first, letters-in-order search, Escape keeps the dialog',async({page})=>{
+  const s=await fixture(page);
+  await page.locator('#welcome-new').click();
+  await page.locator('#create-place').click();
+  const options=page.locator('#create-place-list .create-place-option');
+  // Alpha has a saved directory on Local, so it leads; every other pair is still offered.
+  await expect(page.locator('#create-place-list .create-place-group').first()).toHaveText('Used before');
+  await expect(options.first()).toHaveText('Alpha · Local');
+  await expect(options).toHaveCount(6);
+  await page.locator('#create-place').fill('bet bx');
+  await expect(options).toHaveText(['Beta · Box']);
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#create-place')).toHaveValue('Beta · Box');
+  await expect(page.locator('#create-project')).toHaveValue('b');await expect(page.locator('#create-host')).toHaveValue('box');
+  await expect(page.locator('#directory')).toHaveValue('~/work');
+  await page.locator('#create-place').click();await page.keyboard.press('Escape');
+  await expect(page.locator('#create-place-list')).toBeHidden();await expect(page.locator('#create-dialog')).toBeVisible();
+  await expect(page.locator('#create-place')).toHaveValue('Beta · Box');
+});
+test('sidebar + prefills the place field from the project, or the project and host',async({page})=>{
+  await fixture(page,{sessions:[{id:'s1',provider:'demo',title:'Remote',status:'idle',created:1,cwd:'~/work/beta',projectId:'b',hostId:'box'}]});
+  const add=page.locator('button[aria-label^="New session in"]');
+  // A project's own + keeps the default host.
+  await page.getByRole('button',{name:'New session in Alpha',exact:true}).click();
+  await expect(page.locator('#create-place')).toHaveValue('Alpha · Local');await expect(page.locator('#directory')).toHaveValue('/repo/other');
+  await page.locator('#dismiss-create').click();
+  // A host row under a project carries both; the directory is that project's root there.
+  await add.nth(4).click();
+  await expect(page.locator('#create-place')).toHaveValue('Beta · Box');
+  await expect(page.locator('#create-project')).toHaveValue('b');await expect(page.locator('#create-host')).toHaveValue('box');
+  await expect(page.locator('#directory')).toHaveValue('~/work/beta');
+  await page.locator('#dismiss-create').click();
+  // Typing in the field and leaving the dialog does not leak into the next prefill.
+  await add.nth(2).click();await page.locator('#create-place').fill('zzz');await page.locator('#dismiss-create').click();
+  await page.getByRole('button',{name:'New session in Alpha',exact:true}).click();
+  await expect(page.locator('#create-place')).toHaveValue('Alpha · Local');
 });
 test('secondary new-session fields start collapsed with their current choice and remember being opened',async({page})=>{
   // Start this tab with nothing remembered instead of the shared all-open state.
@@ -165,7 +202,7 @@ test('editing a project leaves its directory alone unless changed, and Clear sen
 });
 test('session Browse uses the selected host and shows its limits',async({page})=>{
   const s=await fixture(page);
-  await page.locator('#welcome-new').click();await page.locator('#create-project').selectOption('b');
+  await page.locator('#welcome-new').click();await choosePlace(page,{project:'b'});
   await page.locator('#directory').fill('/repo/missing');
   await page.locator('#directory-browse').click();
   // A start path the server rejects falls back to the roots list.
@@ -174,7 +211,7 @@ test('session Browse uses the selected host and shows its limits',async({page})=
   await page.locator('#directory-picker-list button',{hasText:'other'}).click();
   await page.locator('#directory-picker-select').click();
   await expect(page.locator('#directory')).toHaveValue('/repo/other');
-  await page.locator('#create-host').selectOption('box');
+  await choosePlace(page,{host:'box'});
   await page.locator('#directory-browse').click();
   await expect(page.locator('#directory-picker-host')).toContainText('Box');
   await expect(page.locator('#directory-picker-error')).toContainText('Update the worker');
