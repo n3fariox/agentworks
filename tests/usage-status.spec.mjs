@@ -91,7 +91,8 @@ test('composer usage statusline: live, replay, partial, attributed, session swit
   await expect(toggle(page)).toHaveText('⚠ 60k/200k · 30%');
   // Reported unified 5h/7d windows (verified live shape; fractions 0..1, resets in seconds).
   await open(page,b.id);
-  const rateLimit={status:'allowed',rateLimitType:'five_hour',resetsAt:1792366200,unifiedWindows:{five_hour:{utilization:0.23,resetsAt:1792366200},seven_day:{utilization:0.1,resetsAt:1792803600}}};
+  const fiveHourReset=Math.floor(Date.now()/1000)+3600,sevenDayReset=fiveHourReset+6*24*3600;
+  const rateLimit={status:'allowed',rateLimitType:'five_hour',resetsAt:fiveHourReset,unifiedWindows:{five_hour:{utilization:0.23,resetsAt:fiveHourReset},seven_day:{utilization:0.1,resetsAt:sevenDayReset}}};
   await inject(page,{used:68468,size:1000000,_meta:{'_claude/model':'demo-model','_claude/rateLimit':rateLimit}});
   await expect(toggle(page)).toHaveText(quota('68k/1.0M · 7%'));
   await expect(chip(page)).toHaveText('ctx 7% · 5h 77% left');
@@ -104,11 +105,19 @@ test('composer usage statusline: live, replay, partial, attributed, session swit
   // Invalid fractions are rejected and do not overwrite reported windows.
   await inject(page,{used:70000,size:1000000,_meta:{'_claude/rateLimit':{unifiedWindows:{five_hour:{utilization:1.5},seven_day:{utilization:-0.2}}}}});
   await expect(toggle(page)).toHaveText(quota('70k/1.0M · 7%'));
-  // Replay: quota and context freshness unknown; a live context update leaves quota stale.
+  // Replay: context freshness unknown, but account quota stays fresh from the
+  // server's shared report, which carries its receipt time.
   await page.reload();await expect(page.locator('#session-state')).toHaveText('Ready');
-  await expect(toggle(page)).toHaveText(quota('⚠ 70k/1.0M · 7%',' ⚠'));
+  await expect(toggle(page)).toHaveText(quota('⚠ 70k/1.0M · 7%'));
   await inject(page,{used:80000,size:0});
-  await expect(toggle(page)).toHaveText(quota('80k ctx · size unknown',' ⚠'));
+  await expect(toggle(page)).toHaveText(quota('80k ctx · size unknown'));
   await openMenu(page);await toggle(page).click();
-  await expect(details(page).locator('div',{hasText:'5h quota'})).toContainText('freshness unknown (replayed');
+  await expect(details(page).locator('div',{hasText:'5h quota'})).toContainText('Agentworks-observed');
+  // Quota is per account: A (same host and provider family) shows B's report
+  // without one of its own, and a newer report from B arrives while A is open.
+  await open(page,a.id);
+  await expect(chip(page)).toHaveText('⚠ ctx 30% · 5h 77% left');
+  const later={...rateLimit,unifiedWindows:{...rateLimit.unifiedWindows,five_hour:{utilization:0.5,resetsAt:1792366200}}};
+  await api(`/api/sessions/${b.id}/prompt`,{text:'usage-status '+JSON.stringify({used:1,size:10,_meta:{'_claude/rateLimit':later}}),requestId:crypto.randomUUID()});
+  await expect(chip(page)).toHaveText('⚠ ctx 30% · 5h 50% left');
 });

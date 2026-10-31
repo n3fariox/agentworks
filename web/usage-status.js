@@ -112,11 +112,52 @@ export function applyUsageEvent(state,e,observedAt=null){
   return next;
 }
 
+// Account quota shared by every session on one host and provider family
+// (`crates/agentworks/src/account_quota.rs`). Goose families are its provider profile.
+export function quotaFamily(provider,modelProvider){
+  if(provider==='claude'||provider==='claude-rust')return 'claude';
+  if(provider==='codex'||provider==='codex-rust')return 'codex';
+  return provider==='goose'?`goose/${modelProvider||'default'}`:provider;
+}
+export function quotaKey(hostId,family){return JSON.stringify([hostId||'local',family]);}
+
+// Converts a server entry to usage state. Claude windows carry Agentworks receipt
+// time; Codex cells keep their adapter observation times.
+export function sharedQuota(entry){
+  if(!entry)return null;
+  let state=emptyUsage();
+  for(const [key,w] of Object.entries(entry?.claude?.windows||{})){
+    const at=nonneg(w?.at)??null;
+    const rateLimit={status:w.status,rateLimitType:w.status==null?null:key,unifiedWindows:{[key]:w}};
+    state=applyUsageEvent(state,{kind:'acp',data:{sessionUpdate:'usage_update',_meta:{'_claude/rateLimit':rateLimit}}},at);
+  }
+  for(const label of Object.keys(state.quota))state.quota[label].source='server';
+  const limits=Object.values(entry?.codex?.limits||{});
+  state.codexQuota=applyCodexQuota({},{version:1,limits},{at:nonneg(entry?.codex?.at)??null,seq:null});
+  return state;
+}
+const newer=(mine,shared)=>!mine?shared:!shared?mine:(shared.at??-1)>(mine.at??-1)?shared:mine;
+// Each quota window independently shows whichever report is newest; the
+// session's own report wins ties.
+export function withSharedQuota(state,shared){
+  if(!shared)return state;
+  const quota={...state.quota},codexQuota={...state.codexQuota};
+  for(const [k,v] of Object.entries(shared.quota))quota[k]=newer(quota[k],v);
+  for(const [k,w] of Object.entries(shared.codexQuota)){
+    const mine=codexQuota[k];
+    if(!mine){codexQuota[k]=w;continue;}
+    const merged={...w,...mine};
+    for(const field of ['usedPercent','windowDurationMins','resetsAt'])merged[field]=newer(mine[field],w[field]);
+    codexQuota[k]=merged;
+  }
+  return {...state,quota,codexQuota};
+}
+
 function freshness(v,now){
   if(v.at==null&&v.source==='adapter')return {text:`freshness unknown (${v.replayed?'replayed, ':''}no source observation time)`,stale:true};
   if(v.at==null)return {text:`freshness unknown (replayed${v.seq!=null?' event #'+v.seq:''}, no stored timestamp)`,stale:true};
   const stale=now-v.at>STALE_MS;
-  return {text:`${v.source==='adapter'?'adapter':'browser'}-observed ${new Date(v.at).toLocaleString()}${v.replayed?' (replayed)':''}${stale?' — stale':''}`,stale};
+  return {text:`${v.source==='adapter'?'adapter':v.source==='server'?'Agentworks':'browser'}-observed ${new Date(v.at).toLocaleString()}${v.replayed?' (replayed)':''}${stale?' — stale':''}`,stale};
 }
 
 function codexWindows(state,now){
@@ -125,13 +166,16 @@ function codexWindows(state,now){
     const duration=mins===undefined?'duration unknown':mins%1440===0?`${mins/1440}d`:mins%60===0?`${mins/60}h`:`${mins}m`;
     const name=w.limitName&&w.limitName!==w.limitId?`${w.limitName} (${w.limitId})`:w.limitId;
     const label=`${name} ${w.role} (${duration})`;
+    // The pill names a window by its length, like Claude's 5h/7d; only extra
+    // limit families keep a name, and the role stands in for an unknown length.
+    const brief=[w.limitId==='codex'?'':w.limitName||w.limitId,mins===undefined?w.role:duration].filter(Boolean).join(' ');
     const used=w.usedPercent?.value;
     const f=w.usedPercent?freshness(w.usedPercent,now):{text:'freshness unknown',stale:true};
     const remaining=used===undefined?'usage unknown':`${Math.round(100-used)}% left`;
     const reset=w.resetsAt?.value;
     const rt=reset===undefined?'reset unknown':`${resetText(reset,now)} (${new Date(reset).toLocaleString()}) · ${freshness(w.resetsAt,now).text}`;
-    return {window:w,label,remaining,stale:f.stale,
-      compact:`${label} ${remaining}${f.stale?' ⚠':''}`,
+    return {window:w,label,brief,remaining,stale:f.stale,
+      compact:`${brief} ${remaining}${f.stale?' ⚠':''}`,
       detail:`${label}: ${used===undefined?'usage unknown':`${used}% used / ${100-used}% remaining`} · ${f.text} · ${rt}${w.windowDurationMins?` · duration ${freshness(w.windowDurationMins,now).text}`:''}`};
   });
 }
@@ -156,27 +200,50 @@ export function usageView(state,{now=Date.now(),provider}={}){
     state.model?`Reported model: ${state.model.name} · ${freshness(state.model,now).text}`:'',
     state.cost?`Provider-reported cost: ${state.cost.amount.toFixed(4)} ${state.cost.currency||'(currency unknown)'} · scope and account billing not verified · ${freshness(state.cost,now).text}`:'Cost: not reported',
     ...quotaDetails,
-    'Quota appears only when a provider event reports it; Agentworks does not query usage or infer quota from token counts.',
+    'Quota appears only when a provider event reports it, from this or another session on the same host and account; Agentworks does not query usage or infer quota from token counts.',
     `Source: ACP usage_update${provider?' · '+provider:''} · ${state.events} event(s)${state.ignored?` · ${state.ignored} subagent/parent-attributed ignored`:''}`,
   ].filter(Boolean);
   const stale=!c||cf.stale;
   // Glanceable form for the phone composer chip: context used and 5h quota left.
-  const primary=codex.find(w=>w.window.role==='primary')||codex[0];
-  const short=[c?.percent!==undefined?`ctx ${Math.round(Math.min(100,c.percent))}%`:'',state.quota['5h']?`5h ${pct(100-state.quota['5h'].usedPercent)}% left`:'',primary?`${primary.label} ${primary.remaining}${primary.stale?' ⚠':''}`:''].filter(Boolean).join(' · ');
+  const primary=codex.find(w=>w.window.role==='primary'&&w.window.limitId==='codex')||codex.find(w=>w.window.role==='primary')||codex[0];
+  const short=[c?.percent!==undefined?`ctx ${Math.round(Math.min(100,c.percent))}%`:'',state.quota['5h']?`5h ${pct(100-state.quota['5h'].usedPercent)}% left`:'',primary?primary.compact:''].filter(Boolean).join(' · ');
   const allQuota=[...compactQuota,...codex.map(w=>w.compact)];
   return {label:(c&&stale?'⚠ ':'')+label+(allQuota.length?' · '+allQuota.join(' · '):''),short:short&&(c&&stale?'⚠ ':'')+short,stale,known:!!c,details};
+}
+
+// Keeps every host/family's shared quota current from the server push, and
+// reconnects after a drop; each connection starts with a full snapshot.
+// `onChange(connected)` runs after every message and connection change.
+export function watchSharedQuota(url,onChange){
+  const entries=new Map();let delay=1000,connected=false;
+  const connect=()=>{
+    const ws=new WebSocket(url);
+    ws.onopen=()=>{delay=1000;connected=true;onChange(true);};
+    ws.onmessage=message=>{
+      let m;try{m=JSON.parse(message.data);}catch{return;}
+      if(m.kind==='snapshot')entries.clear();
+      for(const entry of m.kind==='snapshot'?m.entries||[]:m.kind==='quota'?[m.entry]:[])
+        if(typeof entry?.family==='string')entries.set(quotaKey(entry.hostId,entry.family),{hostId:entry.hostId||'local',family:entry.family,state:sharedQuota(entry)});
+      onChange(connected);
+    };
+    ws.onclose=()=>{connected=false;onChange(false);setTimeout(connect,delay);delay=Math.min(15000,delay*2);};
+    ws.onerror=()=>{try{ws.close();}catch{}};
+  };
+  connect();
+  return {get:(hostId,family)=>entries.get(quotaKey(hostId,family))?.state||null,entries:()=>[...entries.values()]};
 }
 
 // Wires the statusline into the composer. Hooks: reset() on session switch or
 // snapshot replay, consume(event,{live}) per event, render() after updates.
 // An optional `chip` mirrors the short label (hidden while nothing is reported).
-export function setupUsageStatus({root,getProvider,chip}){
+// `getShared` returns the account quota reported by any session sharing this one's account.
+export function setupUsageStatus({root,getProvider,getShared=()=>null,chip}){
   let state=emptyUsage();
   root.innerHTML='<button type="button" class="usage-status-toggle" aria-expanded="false" aria-controls="usage-status-details"></button><div id="usage-status-details" class="usage-status-details" role="region" aria-label="Usage details" hidden></div>';
   const button=root.firstChild,panel=root.lastChild;
   button.onclick=()=>{panel.hidden=!panel.hidden;button.setAttribute('aria-expanded',String(!panel.hidden));};
   const render=()=>{
-    const v=usageView(state,{provider:getProvider()});
+    const v=usageView(withSharedQuota(state,getShared()),{provider:getProvider()});
     button.textContent=v.label;button.classList.toggle('stale',v.stale);button.classList.toggle('unknown',!v.known);
     button.title='Context usage details';
     if(chip){chip.textContent=v.short;chip.hidden=!v.short;chip.classList.toggle('stale',v.stale);chip.setAttribute('aria-label',`Usage: ${v.label}. More options`);}

@@ -1,7 +1,7 @@
 // Deterministic U-07 checks: node tests/usage-status.test.mjs (no server, no model calls).
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {emptyUsage,applyUsageEvent,usageView,countdown,STALE_MS} from '../web/usage-status.js';
+import {emptyUsage,applyUsageEvent,usageView,countdown,STALE_MS,sharedQuota,withSharedQuota,quotaFamily} from '../web/usage-status.js';
 const events=JSON.parse(readFileSync(new URL('./fixtures/usage-events.json',import.meta.url)));
 const replay=(list,at=null)=>list.reduce((s,e)=>applyUsageEvent(s,e,at),emptyUsage());
 let s=emptyUsage();
@@ -65,7 +65,34 @@ assert.equal(applyUsageEvent(base,{kind:'user',data:{text:'x'}}),base);
 // Goose reports Codex subscription windows through the shared metadata format.
 const goose=applyUsageEvent(emptyUsage(),{kind:'acp',data:{sessionUpdate:'usage_update',used:7,size:200000,_meta:{'_codex/subscriptionLimits':{version:1,limits:[{limitId:'codex',primary:{usedPercent:{value:12.5,observedAtMs:now},windowDurationMins:{value:300,observedAtMs:now}}}]}}}},now);
 const gooseView=usageView(goose,{now,provider:'goose'});
-assert.match(gooseView.label,/codex primary \(5h\) 88% left/);
+assert.match(gooseView.label,/(^| · )5h 88% left/);
 assert.ok(gooseView.details.some(d=>d.includes('12.5% used / 87.5% remaining')));
 assert.ok(!gooseView.details.some(d=>d.includes('quota: not reported')));
+
+// Shared account quota: harnesses on one account share a family, Goose keys by profile.
+assert.equal(quotaFamily('claude-rust'),quotaFamily('claude'));
+assert.equal(quotaFamily('codex-rust','p'),'codex');
+assert.equal(quotaFamily('goose','work'),'goose/work');
+{
+  const t=Date.UTC(2026,0,1);
+  const rl=(u,status)=>({kind:'acp',data:{sessionUpdate:'usage_update',_meta:{'_claude/rateLimit':{status,rateLimitType:'five_hour',unifiedWindows:{five_hour:{utilization:u,resetsAt:t/1000+3600}}}}}});
+  const shared=sharedQuota({hostId:'local',family:'claude',claude:{windows:{five_hour:{utilization:0.6,resetsAt:t/1000+3600,status:'allowed_warning',at:t}}}});
+  assert.equal(shared.quota['5h'].usedPercent,60);assert.equal(shared.quota['5h'].status,'allowed_warning');
+  // Another session's newer report replaces this session's replayed one…
+  const replayed=applyUsageEvent(emptyUsage(),rl(0.2,'allowed'),null);
+  let merged=withSharedQuota(replayed,shared);
+  assert.equal(merged.quota['5h'].usedPercent,60);
+  assert.match(usageView(merged,{now:t}).details.join('\n'),/Agentworks-observed/);
+  // …but not a newer live report of its own; context stays this session's.
+  const live=applyUsageEvent(emptyUsage(),{kind:'acp',data:{...rl(0.7,'allowed').data,used:5,size:10}},t+1000);
+  merged=withSharedQuota(live,shared);
+  assert.equal(merged.quota['5h'].usedPercent,70);assert.equal(merged.context.used,5);
+  // Codex cells merge field by field on adapter observation time.
+  const cell=(value,at)=>({value,observedAtMs:at});
+  const mine=applyUsageEvent(emptyUsage(),{kind:'acp',data:{sessionUpdate:'usage_update',_meta:{'_codex/subscriptionLimits':{version:1,limits:[{limitId:'codex',primary:{usedPercent:cell(10,t),resetsAt:cell(t/1000+9000,t+5000)}}]}}}},t);
+  const theirs=sharedQuota({hostId:'local',family:'codex',codex:{at:t+2000,limits:{codex:{limitId:'codex',primary:{usedPercent:cell(30,t+2000),resetsAt:cell(t/1000+60,t)}}}}});
+  const w=withSharedQuota(mine,theirs).codexQuota[JSON.stringify(['codex','primary'])];
+  assert.equal(w.usedPercent.value,30);assert.equal(w.resetsAt.value,(t/1000+9000)*1000);
+  assert.equal(withSharedQuota(mine,null),mine);
+}
 console.log('usage-status: all checks passed');

@@ -1,3 +1,4 @@
+mod account_quota;
 mod async_tasks;
 mod attachments;
 mod automations;
@@ -103,6 +104,7 @@ struct App {
     notifications: notifications::Hub,
     hosts: Arc<hosts::Hosts>,
     host_usage: Arc<host_usage::Hub>,
+    account_quota: Arc<account_quota::Hub>,
     github: Arc<github::Hub>,
 
     /// U-05 progress parser thread and installed scripts.
@@ -133,6 +135,8 @@ struct Session {
     notifications: notifications::Hub,
     /// U-05; derived tool progress, fed from `emit`.
     progress: tool_progress::Hub,
+    /// Account quota shared with every session on the same host and family.
+    account_quota: Arc<account_quota::Hub>,
 }
 
 struct Approval {
@@ -227,6 +231,11 @@ impl Session {
         let event = json!({"seq":state.seq,"kind":kind,"time":time,"data":data});
         if kind == "user" {
             state.last_prompt = Some(event.clone());
+        }
+        if kind == "acp" {
+            let family = account_quota::family(&self.provider, state.model_provider.as_deref());
+            self.account_quota
+                .observe(&self.host_id, &family, &self.id, time, &event["data"]);
         }
         // U-02: fan out noteworthy events to connected browsers.
         if let Some(category) = notifications::classify(kind, &event["data"]) {
@@ -687,6 +696,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         notifications: notifications::Hub::new(catalog),
         hosts: hosts::Hosts::new(),
         host_usage: Arc::new(host_usage::Hub::default()),
+        account_quota: Arc::default(),
         github: Arc::new(github::Hub::default()),
 
         progress,
@@ -728,6 +738,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .filter(|e| e["kind"] == "acp")
             .filter_map(|e| Some((e["seq"].as_u64()?, e["data"].clone())))
             .collect();
+        // Retained reports seed shared account quota with their original receipt times.
+        let family = account_quota::family(&metadata.provider, data.model_provider.as_deref());
+        for event in data.events.iter().filter(|e| e["kind"] == "acp") {
+            if let Some(time) = event["time"].as_u64() {
+                app.account_quota.observe(
+                    &metadata.host_id,
+                    &family,
+                    &metadata.id,
+                    time,
+                    &event["data"],
+                );
+            }
+        }
         let (tx, _) = broadcast::channel(128);
         let s = Arc::new(Session {
             id: metadata.id,
@@ -750,6 +773,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             fresh_environment: Default::default(),
             notifications: app.notifications.clone(),
             progress: app.progress.clone(),
+            account_quota: app.account_quota.clone(),
         });
         for (seq, data) in &replay {
             app.progress
@@ -1179,6 +1203,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/external-sessions", post(list_external_sessions))
         .route("/api/sessions/import", post(import_session))
         .route("/api/dashboard/host-usage/events", get(host_usage::events))
+        .route("/api/account-quota/events", get(account_quota::events))
         .route("/api/catalog", get(get_catalog))
         .route("/api/hosts", post(hosts::add))
         .route("/api/hosts/enroll/events", get(enrollment::upgrade))
@@ -2880,6 +2905,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
         fresh_environment: Default::default(),
         notifications: app.notifications.clone(),
         progress: app.progress.clone(),
+        account_quota: app.account_quota.clone(),
     });
     // Event publication takes session state before the catalog. Release the
     // catalog before reading other sessions, so turn completion can run while

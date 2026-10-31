@@ -18,7 +18,7 @@ import {setupPalettes} from './palettes.js';
 import {enhanceMermaid} from './mermaid.js';
 import {setupDisplayPreferences} from './display-preferences.js';
 import {setupWorkLogs,observeTool} from './work-logs.js';
-import {setupUsageStatus} from './usage-status.js';
+import {setupUsageStatus, watchSharedQuota, quotaFamily} from './usage-status.js';
 import {setupFlyout} from './flyout.js';
 import {setupResize,setupPromptResize} from './resize-handle.js';
 import {setupSidebarPin} from './sidebar-pin.js';
@@ -49,8 +49,11 @@ let editingProject=null,savingProject=false;
 const drafts=readStorage(sessionStorage,'agentworks-drafts',{});
 const scrollPositions=new Map();let restoreScroll=null;
 let config, sessions=[], active=null, socket=null, generation=0, connected=false;
-// U-07: per-session composer usage statusline; only this session's own events feed it.
-const usageStatus=setupUsageStatus({root:$('usage-status'),getProvider:()=>active?.provider,chip:$('composer-info')});
+// U-07: per-session composer usage statusline. Context and cost come only from this
+// session's events; account quota also takes newer reports from sessions sharing its account.
+const sharedQuota=watchSharedQuota(socketUrl('/api/account-quota/events'),()=>usageStatus.render());
+const usageStatus=setupUsageStatus({root:$('usage-status'),getProvider:()=>active?.provider,chip:$('composer-info'),
+  getShared:()=>active?sharedQuota.get(active.hostId,quotaFamily(active.provider,active.modelProvider)):null});
 const composerMenu=setupFlyout({menu:$('composer-menu'),triggers:[$('composer-more'),$('composer-info')]});
 const sessionMenu=setupFlyout({menu:$('session-menu'),triggers:[$('session-more')]});
 setupResize({handle:$('sidebar-resize'),target:document.querySelector('.layout'),panel:$('sidebar'),variable:'--sidebar-width',key:'agentworks-sidebar-width',min:200,max:560,initial:228});
