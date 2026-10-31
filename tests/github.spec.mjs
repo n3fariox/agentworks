@@ -256,3 +256,48 @@ test('GitHub PR hook starter installs and its registration is displayed',async({
   const scripts=await api('/api/scripts');expect(scripts.scripts.find(s=>s.name==='pr_status.star').hooks).toContainEqual({hook:'github',events:['pr.tracked','pr.snapshot','pr.status_changed','pr.untracked','pr.unavailable']});
   await api('/api/scripts/pr_status.star',undefined,'DELETE');
 });
+
+function githubBrowserData(){
+  const sha=git(repo,'rev-parse','HEAD');
+  const hosts=['github.com','ghe-a.example.com','ghe-b.example.com'].map((host,i)=>({host,accounts:[i?'work':'personal'],intervalMs:300000,nextPollAt:Date.now()+300000,messages:[],rows:[{repository:{host,owner:'team',name:'repo'},pr:{number:100+i,title:i===1?'<img src=x onerror=alert(1)>':'A pull request',author:'me',headBranch:'feature/topic',headSha:sha,state:'OPEN',draft:false,reviewSummary:{state:i===0?'APPROVED':'REVIEW_REQUIRED'},checks:{state:i===1?'FAILURE':'PENDING'},url:`https://${host}/team/repo/pull/${100+i}`},authored:i===0,assigned:i===1,reviewRequested:i===2,stale:false,badge:{label:`PR#${100+i}`,tone:['success','danger','warning'][i],tooltip:'PR status',url:`https://${host}/team/repo/pull/${100+i}`}}]}));
+  return {hosts,defaultIntervalMs:300000};
+}
+for(const mobile of [false,true])test(`GitHub sidebar tables and PR-to-session prefill ${mobile?'mobile':'desktop'}`,async({page})=>{
+  if(mobile)await page.setViewportSize({width:390,height:844});
+  const dataset=githubBrowserData();let reads=0;
+  await page.route('**/api/github/pulls',route=>{reads++;return route.fulfill({json:dataset});});
+  await page.goto(base);expect(reads).toBe(0);await page.locator('#nav-github').click();
+  await expect(page.locator('.github-pr-table')).toHaveCount(3);await expect(page.locator('.github-browser-row')).toHaveCount(3);
+  await expect(page.locator('#github-browser .session-badge.success')).toHaveText('PR#100');await expect(page.locator('#github-browser .session-badge.danger')).toHaveText('PR#101');await expect(page.locator('#github-browser .session-badge.warning')).toHaveText('PR#102');
+  await expect(page.locator('#github-browser img')).toHaveCount(0);await expect(page.locator('#github-browser')).toContainText('Assigned to me');await expect(page.locator('#github-browser')).toContainText('Review requested');
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  const host=page.locator('#github-browser>.github-browser-group').first();await host.locator(':scope>summary').click();await expect(host).not.toHaveAttribute('open','');await host.locator(':scope>summary').click();
+  await page.screenshot({path:`.cache/github-browser-${mobile?'mobile':'desktop'}-20261030.png`});
+  const beforeIds=new Set((await api('/api/sessions')).map(s=>s.id));
+  const row=page.locator('.github-browser-row[data-number="101"]');
+  await row.scrollIntoViewIfNeeded();await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  if(mobile)await row.getByRole('button',{name:'Open in session…'}).click();else{await row.click({button:'right'});await page.getByRole('menuitem',{name:'Open in session…'}).click();}
+  await expect(page.locator('#create-dialog')).toBeVisible();await expect(page.locator('#workspace-mode')).toHaveValue('newWorktree');await expect(page.locator('#worktree-branch')).toHaveValue(/pr-101-feature\/topic-/);await expect(page.locator('#worktree-base')).toHaveValue(dataset.hosts[1].rows[0].pr.headSha);await expect(page.locator('#create-github-note')).toContainText('ghe-a.example.com/team/repo');
+  await expect(page.locator('#session-title')).toHaveValue('PR #101: <img src=x onerror=alert(1)>');expect((await api('/api/sessions')).every(s=>beforeIds.has(s.id))).toBe(true);
+  await page.locator('#provider').selectOption('demo');await page.locator('#directory').fill(repo);
+  const submitted=page.waitForRequest(request=>request.url()===base+'/api/sessions'&&request.method()==='POST');await page.locator('#create-submit').click();const payload=(await submitted).postDataJSON();expect(payload.workspace.pullRequest.number).toBe(101);expect(payload).not.toHaveProperty('prompt');
+  await expect(page.locator('#create-dialog')).toBeHidden();await expect(page.locator('#session-state')).toHaveText('Ready');const created=(await api('/api/sessions')).find(s=>!beforeIds.has(s.id));expect(created.cwd).toContain('.worktrees');expect(git(created.cwd,'rev-parse','HEAD')).toBe(dataset.hosts[1].rows[0].pr.headSha);
+  const snapshot=await api(`/api/sessions/${created.id}`);expect(snapshot.events.filter(e=>e.kind==='user')).toEqual([]);
+});
+
+test('GitHub listing runs only in the visible view and per-host intervals save through settings',async({page})=>{
+  await page.clock.install();let reads=0;await page.route('**/api/github/pulls',route=>{reads++;return route.fulfill({json:githubBrowserData()});});
+  await page.goto(base);await page.locator('#nav-github').click();await expect.poll(()=>reads).toBe(1);
+  await page.clock.fastForward(299000);expect(reads).toBe(1);await page.clock.fastForward(2000);await expect.poll(()=>reads).toBe(2);
+  await page.locator('#nav-files').click();await page.clock.fastForward(600000);expect(reads).toBe(2);
+  await page.locator('#nav-settings').evaluate(node=>node.click());await page.locator('#settings-tab-github').click();
+  const minutes=page.getByLabel('Polling minutes for github.com');await expect(minutes).toHaveValue('5');await minutes.fill('10');await minutes.locator('..').locator('..').getByRole('button',{name:'Save interval'}).click();await expect(minutes.locator('..').locator('..')).toContainText('Saved');
+  const config=await api('/api/github/connections');expect(config.polling.find(p=>p.host==='github.com').intervalSeconds).toBe(600);
+  await api('/api/github/polling',{host:'github.com',intervalSeconds:300},'PUT');
+});
+
+test('each host keeps one table while its repository groups collapse independently',async({page})=>{
+  const data=githubBrowserData();data.hosts=data.hosts.slice(0,1);const extra=structuredClone(data.hosts[0].rows[0]);extra.repository.name='other';extra.pr.number=104;extra.pr.url='https://github.com/team/other/pull/104';extra.badge.label='PR#104';extra.badge.url=extra.pr.url;data.hosts[0].rows.push(extra);
+  await page.route('**/api/github/pulls',route=>route.fulfill({json:data}));await page.goto(base+'/?view=github');await expect(page.locator('.github-pr-table')).toHaveCount(1);await expect(page.locator('.github-browser-row')).toHaveCount(2);
+  await page.getByRole('button',{name:'Toggle github.com/team/repo',exact:true}).click();await expect(page.locator('.github-browser-row[data-number="100"]')).toBeHidden();await expect(page.locator('.github-browser-row[data-number="104"]')).toBeVisible();
+});

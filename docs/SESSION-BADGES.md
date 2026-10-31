@@ -39,7 +39,7 @@ State is persisted per session and script and survives restart. A script can cle
 
 The host adds `source` using the installed script filename. Badges contain plain text and links, without executable actions or HTML.
 
-`GET /api/sessions/{id}/badges` reads stored state and returns `{badges:[...], badgesAt:<Unix ms>, badgeRevision:<number>}`. Successful hook changes push a `session_badges` update to the session's connected browser. Visible background rows refresh approximately once per minute with bounded concurrency; collapsed and offscreen rows are not polled. Script setting changes refresh visible rows. Setters do not add an independent timer or trigger.
+`GET /api/sessions/{id}/badges` reads stored state and returns `{badges:[...], badgesAt:<Unix ms>, badgeRevision:<number>}`. Successful hook changes push a `session_badges` update to the session's connected browser. Visible background rows refresh at the configured host interval (five minutes by default) with bounded concurrency; collapsed and offscreen rows are not polled. Script setting changes refresh visible rows. Setters do not add an independent timer or trigger.
 
 ## GitHub producer
 

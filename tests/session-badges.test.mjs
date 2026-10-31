@@ -13,7 +13,7 @@ test('missing and explicitly empty output collapse the badge row',()=>{
   assert.deepEqual(sessionBadges({...view,badges:[]},now),[]);
 });
 test('stale or unavailable data cannot retain an approval color',()=>{
-  assert.equal(sessionBadges(view,now+121000)[0].tone,'neutral');
+  assert.equal(sessionBadges(view,now+601000)[0].tone,'neutral');
   assert.equal(sessionBadges({...view,badgesUnavailable:true},now)[0].tone,'neutral');
 });
 test('only bounded text and known semantic tones reach the renderer',()=>{

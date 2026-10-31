@@ -29,6 +29,17 @@ pub struct Workspace {
     pub branch: Option<String>,
     pub base_ref: Option<String>,
     pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request: Option<PullRequest>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PullRequest {
+    pub host: String,
+    pub owner: String,
+    pub repo: String,
+    pub number: u64,
+    pub head_sha: String,
 }
 fn bad(message: impl Into<String>) -> Error {
     fail(StatusCode::BAD_REQUEST, message)
@@ -225,7 +236,8 @@ pub async fn prepare_in(
         workspace.map(|w| w.mode).unwrap_or(policy.default_mode)
     };
     if mode != Mode::NewWorktree
-        && workspace.is_some_and(|w| w.branch.is_some() || w.base_ref.is_some())
+        && workspace
+            .is_some_and(|w| w.branch.is_some() || w.base_ref.is_some() || w.pull_request.is_some())
     {
         return Err(bad("branch and baseRef only apply to newWorktree"));
     }
@@ -285,6 +297,76 @@ pub async fn prepare_in(
                 || base.chars().any(char::is_control)
             {
                 return Err(bad("Invalid worktree base ref"));
+            }
+            if let Some(pr) = workspace.and_then(|w| w.pull_request.as_ref()) {
+                if pr.number == 0
+                    || pr.number > i32::MAX as u64
+                    || !matches!(pr.head_sha.len(), 40 | 64)
+                    || !pr.head_sha.bytes().all(|b| b.is_ascii_hexdigit())
+                    || base != pr.head_sha
+                {
+                    return Err(bad(
+                        "Invalid PR checkout or base ref; refresh the GitHub view",
+                    ));
+                }
+                let info = crate::git::inspect(&repo.top, &allowed(app, &repo.top)?).await;
+                let origin = info["origin"].as_str().and_then(|origin| {
+                    let (host, path) = if let Some(rest) = origin
+                        .strip_prefix("https://")
+                        .or_else(|| origin.strip_prefix("ssh://"))
+                    {
+                        rest.split_once('/')
+                    } else {
+                        origin.split_once(':')
+                    }?;
+                    Some(
+                        format!(
+                            "{}/{}",
+                            host.rsplit('@').next()?,
+                            path.trim_end_matches('/')
+                                .strip_suffix(".git")
+                                .unwrap_or(path.trim_end_matches('/'))
+                        )
+                        .to_ascii_lowercase(),
+                    )
+                });
+                if origin.as_deref()
+                    != Some(
+                        format!("{}/{}/{}", pr.host, pr.owner, pr.repo)
+                            .to_ascii_lowercase()
+                            .as_str(),
+                    )
+                {
+                    return Err(bad(
+                        "Choose a project/source directory whose origin matches this PR repository",
+                    ));
+                }
+                if let Some(path) = workspace.and_then(|w| w.path.as_ref()) {
+                    destination(app, &PathBuf::from(path))?;
+                }
+                if git(
+                    app,
+                    &repo.top,
+                    &["cat-file", "-e", &format!("{}^{{commit}}", pr.head_sha)],
+                )
+                .await
+                .is_err()
+                {
+                    app.arm(creation_key)?;
+                    git(
+                        app,
+                        &repo.top,
+                        &[
+                            "fetch",
+                            "--no-tags",
+                            "--no-recurse-submodules",
+                            "--no-write-fetch-head",
+                            "origin",
+                            &format!("refs/pull/{}/head", pr.number),
+                        ],
+                    )
+                    .await?;
+                }
             }
             let commit = git(
                 app,

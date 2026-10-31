@@ -2,7 +2,7 @@
 export function setupWorktreeControls({$,api,onChange}) {
   const defaults={defaultMode:'directory',requireWorktree:false};
   const names={directory:'Use project directory',newWorktree:'Create new worktree',existingWorktree:'Use existing worktree'};
-  let hostId='local';
+  let hostId='local',prefill=null;
   let policy={...defaults},policyGeneration=0,listGeneration=0,ready=true,loading=false,policyLoad=Promise.resolve();
   function render(){
     const mode=$('workspace-mode').value;
@@ -21,9 +21,10 @@ export function setupWorktreeControls({$,api,onChange}) {
   // `preferred` lets a caller suggest a mode (forking suggests its own worktree).
   // Project policy still wins: a required worktree is never downgraded to a directory.
   async function loadPolicy(preferred){
+    preferred=preferred||(prefill?'newWorktree':null);
     const gen=++policyGeneration,id=$('create-project').value;
     ready=false;policy={...defaults};$('workspace-mode').value='directory';
-    $('worktree-branch').value='';$('worktree-base').value='';clearList();
+    $('worktree-branch').value=prefill?.branch||'';$('worktree-base').value=prefill?.baseRef||'';clearList();
     $('workspace-policy-note').textContent=id?'Loading project workspace policy…':'Default: Use project directory';render();
     try{
       const result=id?await api(`/api/projects/${encodeURIComponent(id)}/workspace-policy`):defaults;
@@ -54,6 +55,7 @@ export function setupWorktreeControls({$,api,onChange}) {
   };
   return {
     projectChanged,
+    setPrefill(value){prefill=value;},
     setHost(value){
       hostId=value||'local';
       clearList();render();
@@ -68,6 +70,7 @@ export function setupWorktreeControls({$,api,onChange}) {
       if(mode==='newWorktree'){
         if($('worktree-branch').value.trim())workspace.branch=$('worktree-branch').value.trim();
         if($('worktree-base').value.trim())workspace.baseRef=$('worktree-base').value.trim();
+        if(prefill?.pullRequest&&workspace.baseRef===prefill.pullRequest.headSha)workspace.pullRequest=prefill.pullRequest;
       }
       if(mode==='existingWorktree')cwd=$('existing-worktree').value;
       return {cwd,workspace};

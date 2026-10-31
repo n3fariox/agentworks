@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS github_pr_tracking(session_id TEXT PRIMARY KEY REFERE
 CREATE TABLE IF NOT EXISTS github_pr_events(id INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,payload TEXT NOT NULL,created INTEGER NOT NULL,delivered INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS github_pr_events_by_session ON github_pr_events(session_id,id);
 ";
-const POLL_MS: i64 = 60_000;
+const POLL_MS: i64 = crate::github::DEFAULT_POLL_MS as i64;
 fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -169,7 +169,12 @@ fn observe(
     let retry = context["retryAt"]
         .as_i64()
         .unwrap_or_default()
-        .max(at + POLL_MS);
+        .max(
+            context["nextPollAt"]
+                .as_i64()
+                .unwrap_or(at + context["pollIntervalMs"].as_i64().unwrap_or(POLL_MS)),
+        )
+        .max(at + 1000);
     // Preserve the previous hook fingerprint through an outage so newly enabled
     // handlers receive an initial snapshot when the source is readable again.
     let saved_hooks = if status == "ready" {
@@ -226,6 +231,40 @@ pub async fn refresh(app: &App, id: &str, query: crate::github::Refresh) -> ApiR
     let _guard = gate.lock().await;
     let Json(mut context) =
         crate::github::context(State(app.clone()), Path(id.into()), Query(query)).await?;
+    if context.get("pollIntervalMs").is_none() {
+        let old_scope: Option<String> = s
+            .store
+            .lock()
+            .unwrap()
+            .connection
+            .query_row(
+                "SELECT scope FROM github_pr_tracking WHERE session_id=?1",
+                [id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .flatten();
+        let old_host = old_scope
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .and_then(|s| s[0].as_str().map(str::to_owned));
+        context["pollIntervalMs"] =
+            json!(old_host.map_or(crate::github::DEFAULT_POLL_MS, |host| {
+                crate::github::poll_interval(app, &host)
+            }));
+    }
+    let interval = context["pollIntervalMs"]
+        .as_u64()
+        .unwrap_or(crate::github::DEFAULT_POLL_MS);
+    context["nextPollAt"] = json!(if context["status"] == "ready" {
+        crate::github::snapshot_deadline(&context["snapshot"], interval)
+    } else {
+        context["retryAt"]
+            .as_u64()
+            .unwrap_or_default()
+            .max(now() as u64 + interval)
+    });
     crate::session_badges::sync_github(&s, &context)
         .map_err(|m| fail(StatusCode::INSUFFICIENT_STORAGE, m))?;
     let events =
@@ -247,7 +286,7 @@ pub async fn refresh(app: &App, id: &str, query: crate::github::Refresh) -> ApiR
         .as_object_mut()
         .unwrap()
         .extend(badges.as_object().unwrap().clone());
-    context["tracking"] = json!({"transport":"graphql_polling","intervalMs":POLL_MS,"browserIndependent":true,"observedAt":now()});
+    context["tracking"] = json!({"transport":"graphql_polling","intervalMs":context["pollIntervalMs"].as_i64().unwrap_or(POLL_MS),"browserIndependent":true,"observedAt":now()});
     let _ = s.tx.send(json!({"kind":"github_context","data":context}));
     Ok(Json(context))
 }
@@ -361,7 +400,7 @@ async fn tick(app: &App) -> Result<(), String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     fn pr() -> Value {
         json!({"kind":"pullRequest","number":17,"url":"https://github.com/team/repo/pull/17","state":"OPEN","draft":false,"headSha":"abc","headMatches":true,"reviewSummary":{"state":"REVIEW_REQUIRED","complete":true},"checks":{"state":"PENDING","complete":true,"items":[]}})
@@ -455,13 +494,13 @@ mod tests {
         let events = observe(&mut db, "s", &moved, 8).unwrap();
         assert_eq!(events[0]["kind"], "pr.untracked");
     }
-    struct Fixture {
-        app: App,
-        s: Arc<Session>,
+    pub(crate) struct Fixture {
+        pub(crate) app: App,
+        pub(crate) s: Arc<Session>,
         root: std::path::PathBuf,
     }
     impl Fixture {
-        async fn new() -> Self {
+        pub(crate) async fn new() -> Self {
             use std::sync::Mutex;
             let root = std::env::temp_dir().join(format!("pr-tracking-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&root).unwrap();

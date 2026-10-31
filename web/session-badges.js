@@ -1,12 +1,12 @@
 // Shared rendering of stored badges from hook setters and native producers.
 // The browser only renders bounded plain data.
-const FRESH_MS=60000;
+const FRESH_MS=300000;
 function badgeUrl(value){
   if(typeof value!=='string'||value.length>2048||!value.startsWith('https://')||/[\s\x00-\x1f\x7f]/.test(value))return null;
   try{const url=new URL(value);return url.protocol==='https:'&&!url.username&&!url.password?url.href:null;}catch{return null;}
 }
 export function sessionBadges(context,now=Date.now()) {
-  const fresh=!context?.badgesUnavailable&&Number.isFinite(context?.badgesAt)&&now-context.badgesAt<=120000;
+  const fresh=!context?.badgesUnavailable&&Number.isFinite(context?.badgesAt)&&now-context.badgesAt<=2*(context?.pollIntervalMs||FRESH_MS);
   return (Array.isArray(context?.badges)?context.badges:[]).filter(b=>typeof b.label==='string'&&b.label.trim()&&b.label.length<=64).slice(0,32).map(b=>({
     ...b,url:badgeUrl(b.url),tone:fresh&&['neutral','success','warning','danger','info'].includes(b.tone)?b.tone:'neutral',
     title:fresh?(b.tooltip||b.label):`${b.tooltip||b.label} · Status unavailable or out of date`,
@@ -28,8 +28,8 @@ export function setupSessionBadges({api,area=document.getElementById('sessions')
     }
   }
   async function read(id,refresh=false){
-    const saved=cache.get(id),minAge=refresh?10000:FRESH_MS;
-    if(saved&&Date.now()-saved.at<minAge)return saved.data;
+    const saved=cache.get(id),minAge=refresh?10000:(saved?.data.pollIntervalMs||FRESH_MS);
+    if(saved&&Date.now()-saved.at<minAge&&(refresh||Date.now()<(saved.data.nextPollAt||Infinity)))return saved.data;
     if(requests.has(id))return requests.get(id);
     const version=epoch;
     let request;request=(async()=>{
@@ -69,7 +69,7 @@ export function setupSessionBadges({api,area=document.getElementById('sessions')
     for(const row of rows()){paint(rowId(row));observer.observe(row.closest('.session-item'));}
   }
   function invalidate(){epoch++;cache.clear();requests.clear();sync();}
-  setInterval(()=>{if(!document.hidden)for(const id of visible)enqueue(id);},FRESH_MS);
+  setInterval(()=>{if(!document.hidden)for(const id of visible)enqueue(id);},5000);
   document.addEventListener('session-badges-changed',invalidate);
   document.addEventListener('visibilitychange',()=>{if(!document.hidden)sync();});
   function update(id,payload){

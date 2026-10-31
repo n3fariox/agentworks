@@ -1016,6 +1016,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route(
+            "/github-browser.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/github-browser.js"),
+                )
+            }),
+        )
+        .route(
             "/github.js",
             get(|| async {
                 (
@@ -1362,6 +1371,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(github::connections).post(github::save_connection),
         )
         .route("/api/github/verify", post(github::verify))
+        .route("/api/github/pulls", get(github::pulls))
+        .route(
+            "/api/github/polling",
+            axum::routing::put(github::save_polling),
+        )
         .route(
             "/api/sessions/{id}/github/events",
             get(github_tracking::events),

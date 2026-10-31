@@ -28,6 +28,8 @@ Remote Git context requires a worker advertising `gitContext`; update/reconnect 
 
 ## Display and attachment
 
+The left navigation’s [GitHub PR browser](GITHUB-BROWSER.md) lists your authored/assigned open PRs across enabled hosts. Configure the shared per-host polling interval in **Settings → GitHub**; it defaults to five minutes.
+
 A main-host background monitor refreshes PR status for non-archived sessions even when no browser is open. See [PR tracking and events](GITHUB-PR-TRACKING.md).
 
 The sessions browser shows `PR#1234` badges on a shared third line below each session's title and provider/model. Empty badge rows collapse completely. Clicking a PR badge opens that PR in a new tab without switching sessions. Normal GitHub context collection updates these badges in the shared session badge store. Existing Starlark hooks can call `agent.set_badge` and `agent.clear_badge` to contribute to the same row. See [Session badges](SESSION-BADGES.md) for setters, persistence, bounds and composition rules.

@@ -153,8 +153,11 @@ function renderProviderPicker(keep){
   const items=(shown.length?shown:config.providers).map((p,i)=>({p,i})).sort((a,b)=>(used[b.p.id]||0)-(used[a.p.id]||0)||a.i-b.i);
   $('provider').replaceChildren(...items.map(({p})=>{const option=el('option','',p.name+(p.authMode==='api_key'&&!p.keyPresent?' · API key needed':''));option.value=p.id;return option;}));
 }
+let githubCreate=null;
 function openCreate(context={}) {
   if(!config)return;
+  githubCreate=context.githubPr||null;worktrees.setPrefill(context.worktreePrefill||null);
+  $('create-github-note').hidden=!githubCreate;$('create-github-note').textContent=githubCreate?`PR #${githubCreate.number} · ${githubCreate.host}/${githubCreate.owner}/${githubCreate.repo}. Choose a matching project/source directory. The worktree starts at this PR head; the session opens without a prompt.`:'';
   if(context.provider)context.provider=currentProvider(context.provider);
   renderProviderPicker(context.provider);
   updateProjectControls();
@@ -1249,7 +1252,7 @@ $('model-picker').onchange=async event=>{
 };
 $('create-form').onsubmit=async event=>{
   event.preventDefault();if(creating||worktrees.blocked())return;creating=true;providerNote();$('create-error').textContent='';
-  const fork=forkSource;
+  const fork=forkSource,githubPr=githubCreate;
   try{
     const source=$('directory').value.trim();
     const payload={resumePolicy:{enabled:$('create-resume-policy').checked},provider:$('provider').value,modelProvider:modelProviders.selection(),...worktrees.submission(),title:$('session-title').value,projectId:$('create-project').value||null,hostId:$('create-host').value,model:$('create-model').value,...(!fork&&$('create-role').value?{role:$('create-role').value}:{}),...($('create-agent-access').value?{agentAccess:{communicate:$('create-agent-access').value!=='off',...Object.fromEntries(['startSessions','promptSessions','cancelSessions','runAutomations'].map(key=>[key,$('create-agent-access').value==='coordinator']))}}:{})};
@@ -1263,6 +1266,7 @@ $('create-form').onsubmit=async event=>{
     // Remember the chosen source directory, never a worktree created from it.
     const remembered=readStorage(localStorage,'agentworks-project-locations',{});remembered[created.hostId&&created.hostId!=='local'?created.hostId+':'+(created.projectId||'ungrouped'):created.projectId||'ungrouped']=source;try{localStorage.setItem('agentworks-project-locations',JSON.stringify(remembered));}catch{}
     const used=readStorage(localStorage,'agentworks-provider-used',{});used[created.provider]=Date.now();try{localStorage.setItem('agentworks-provider-used',JSON.stringify(used));}catch{}
+    if(githubPr){try{await api(`/api/sessions/${created.id}/github`,{method:'POST',body:JSON.stringify({links:[{host:githubPr.host,owner:githubPr.owner,repo:githubPr.repo,kind:'pullRequest',number:githubPr.number}]})});}catch(error){toast('Session created; could not attach PR: '+error.message);}}
     sessions.unshift(created);$('create-dialog').close();selectSession(created);
     if(fork)toast(`Forked from “${fork.title}”. Its recorded history and lineage are preserved; the selected context handoff is applied.`,'success');
   }catch(e){$('create-error').textContent=e.message;}finally{creating=false;providerNote();}
@@ -1467,6 +1471,10 @@ workspace=createWorkspace({api,toast,labels,uuid,
       $('header-title').textContent=terminalHost.name+' · Terminal';$('host-terminal-title').textContent=terminalHost.name+' · Terminal';
       hostTerminal.open();document.body.classList.remove('menu-open');enterChat();
     }else if(active)setTitle(active.title);else $('header-title').textContent='Overview';
+  },openGithubSession(row){
+    const pr=row.pr,repo=row.repository,request={...repo,repo:repo.name,number:pr.number,headSha:pr.headSha};delete request.name;
+    const branch=`pr-${pr.number}-${(pr.headBranch||'work').replace(/[^a-zA-Z0-9_/-]/g,'-').slice(0,150)}-${uuid().slice(0,6)}`;
+    openCreate({title:`PR #${pr.number}: ${pr.title}`.slice(0,80),workspaceMode:'newWorktree',githubPr:request,worktreePrefill:{branch,baseRef:pr.headSha,pullRequest:request}});
   },getConfig:()=>config,getActive:()=>active,selectSession,openCreate,refreshSessions,enhanceBlocks:display.enhance,openSettings,
   overview(){ $('conversation').hidden=true;$('welcome').hidden=false;localStorage.removeItem('agentworks-session'); },
   openPanel:tab=>sidePanel?.open(tab),
@@ -1605,6 +1613,7 @@ async function archiveSession(session){
 $('archive-session').onclick=()=>archiveSession(active);
 $('fork-session').onclick=()=>openFork();
 setupContextMenu({onError:message=>toast(message),resolve(target){
+  const githubContext=workspace?.githubContext(target);if(githubContext)return githubContext;
   if(target.closest('a[href]'))return null;
   const row=target.closest('.session-item');
   if(row){

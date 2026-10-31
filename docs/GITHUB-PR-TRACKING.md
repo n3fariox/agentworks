@@ -1,8 +1,10 @@
 # PR tracking and observation hooks
 
-Agentworks tracks PR status on the main host independently of the browser. Once GitHub connections are configured, a scheduler checks non-archived sessions about once a minute using their origin, branch and explicitly attached PRs. Archived sessions are excluded from background reads. Remote workers provide Git metadata only; their GitHub credentials/configuration are never used.
+Agentworks tracks PR status on the main host independently of the browser. Once GitHub connections are configured, a scheduler checks non-archived sessions at the configured per-host interval (five minutes by default) using their origin, branch and explicitly attached PRs. Archived sessions are excluded from background reads. Remote workers provide Git metadata only; their GitHub credentials/configuration are never used.
 
-The scheduler wakes every five seconds to find due sessions. Actual GitHub reads share the existing serialized transport, one-minute cache and account backoff. Sessions with the same repository/account/branch/attachments share a snapshot even when their checkout SHAs differ; checkout matching is calculated separately. Slow hosts and rate-limit backoff can delay refreshes. Browser reads use the same path and a per-session refresh lock, so they cannot race the background baseline.
+The scheduler wakes every five seconds to find due sessions. Actual GitHub reads share the existing serialized transport, per-host cache and account backoff. Sessions with the same repository/account/branch/attachments share a snapshot even when their checkout SHAs differ; checkout matching is calculated separately. Slow hosts and rate-limit backoff can delay refreshes. Browser reads use the same path and a per-session refresh lock, so they cannot race the background baseline.
+
+The [GitHub PR browser](GITHUB-BROWSER.md) shares the status cache and polling preferences; its authored/assigned listing is opt-in while that view is visible.
 
 GraphQL remains the transport for the combined PR, review and CI snapshot. This release does not implement REST ETags. Approval and CI remain scoped to the PR head SHA, and ambiguous branch matches remain visible instead of silently choosing one PR. Existing discovery limits apply: up to 20 branch candidates and 10 explicit attachments. Incomplete candidate lists do not prove that an older PR disappeared. Explicitly attach a PR to keep its identity pinned when branch inference is ambiguous.
 

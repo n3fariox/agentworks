@@ -99,9 +99,13 @@ fn visible(data: &SessionData, db: &Connection) -> Vec<Badge> {
                 continue;
             }
             if source == GITHUB
-                && record["observedAt"]
-                    .as_u64()
-                    .is_none_or(|at| now().saturating_sub(at) > 120_000)
+                && record["observedAt"].as_u64().is_none_or(|at| {
+                    now().saturating_sub(at)
+                        > record["pollIntervalMs"]
+                            .as_u64()
+                            .unwrap_or(crate::github::DEFAULT_POLL_MS)
+                            .saturating_mul(2)
+                })
             {
                 badge.tone = "neutral".into();
                 badge.tooltip = format!(
@@ -212,6 +216,51 @@ pub fn apply(s: &Session, source: &str, hash: &str, effects: &[Value]) -> Result
     let _ = s.tx.send(json!({"kind":"session_badges","data":event}));
     Ok(())
 }
+pub(crate) fn pr_badge(pr: &Value, checkout: bool) -> Badge {
+    let review = pr["reviewSummary"]["state"]
+        .as_str()
+        .or(pr["reviewDecision"].as_str())
+        .unwrap_or("UNKNOWN");
+    let ci = pr["checks"]["state"].as_str().unwrap_or("UNKNOWN");
+    let (tone, meaning) = if pr["state"] == "MERGED" {
+        ("neutral", "Merged")
+    } else if pr["state"] == "CLOSED" {
+        ("neutral", "Closed")
+    } else if pr["draft"] == true {
+        ("neutral", "Draft")
+    } else if review == "APPROVED" {
+        ("success", "Approved")
+    } else if matches!(review, "REVIEW_REQUIRED" | "CHANGES_REQUESTED" | "NONE")
+        && matches!(ci, "FAILURE" | "ERROR")
+    {
+        ("danger", "Not approved; CI failing")
+    } else if review == "CHANGES_REQUESTED" {
+        ("warning", "Changes requested")
+    } else if review == "REVIEW_REQUIRED" {
+        ("warning", "Awaiting review")
+    } else {
+        ("neutral", "Review status unknown")
+    };
+    Badge {
+        id: format!("github.pr.{}", pr["number"]),
+        label: format!("PR#{}", pr["number"]),
+        tone: tone.into(),
+        tooltip: format!(
+            "PR#{} · {meaning} · CI: {ci}{}",
+            pr["number"],
+            if checkout && pr["headMatches"] == false {
+                " · PR head differs from checkout"
+            } else {
+                ""
+            }
+        ),
+        url: pr["url"]
+            .as_str()
+            .filter(|u| valid_url(u))
+            .map(str::to_owned),
+        source: GITHUB.into(),
+    }
+}
 /// GitHub is a host producer using the same stored badge state, not a script
 /// callback invoked by a badge read. A successful sync replaces its own badges.
 pub(crate) fn sync_github(s: &Session, context: &Value) -> Result<(), String> {
@@ -233,54 +282,12 @@ pub(crate) fn sync_github(s: &Session, context: &Value) -> Result<(), String> {
             .filter(|r| r["kind"] == "pullRequest")
             .take(16.min(available))
         {
-            let review = pr["reviewSummary"]["state"]
-                .as_str()
-                .or(pr["reviewDecision"].as_str())
-                .unwrap_or("UNKNOWN");
-            let ci = pr["checks"]["state"].as_str().unwrap_or("UNKNOWN");
-            let (tone, meaning) = if pr["state"] == "MERGED" {
-                ("neutral", "Merged")
-            } else if pr["state"] == "CLOSED" {
-                ("neutral", "Closed")
-            } else if pr["draft"] == true {
-                ("neutral", "Draft")
-            } else if review == "APPROVED" {
-                ("success", "Approved")
-            } else if matches!(review, "REVIEW_REQUIRED" | "CHANGES_REQUESTED" | "NONE")
-                && matches!(ci, "FAILURE" | "ERROR")
-            {
-                ("danger", "Not approved; CI failing")
-            } else if review == "CHANGES_REQUESTED" {
-                ("warning", "Changes requested")
-            } else if review == "REVIEW_REQUIRED" {
-                ("warning", "Awaiting review")
-            } else {
-                ("neutral", "Review status unknown")
-            };
-            badges.push(Badge {
-                id: format!("github.pr.{}", pr["number"]),
-                label: format!("PR#{}", pr["number"]),
-                tone: tone.into(),
-                tooltip: format!(
-                    "PR#{} · {meaning} · CI: {ci}{}",
-                    pr["number"],
-                    if pr["headMatches"] == false {
-                        " · PR head differs from checkout"
-                    } else {
-                        ""
-                    }
-                ),
-                url: pr["url"]
-                    .as_str()
-                    .filter(|u| valid_url(u))
-                    .map(str::to_owned),
-                source: GITHUB.into(),
-            });
+            badges.push(pr_badge(pr, true));
         }
         if badges.is_empty() {
             data.script_badges.remove(GITHUB);
         } else {
-            data.script_badges.insert(GITHUB.into(),json!({"hash":"host","observedAt":context["snapshot"]["fetchedAt"],"badges":badges}));
+            data.script_badges.insert(GITHUB.into(),json!({"hash":"host","observedAt":context["snapshot"]["fetchedAt"],"pollIntervalMs":context["pollIntervalMs"],"badges":badges}));
         }
     } else if matches!(
         context["status"].as_str(),

@@ -1,3 +1,4 @@
+import {setupGithubBrowser} from './github-browser.js';
 import {enhanceMermaid} from './mermaid.js';
 import {appUrl, localState as localStorage, sessionState as sessionStorage} from './hosting.js';
 export function createWorkspace(hooks){
@@ -5,11 +6,12 @@ export function createWorkspace(hooks){
   const read=(storage,key,fallback)=>{try{return JSON.parse(storage.getItem(key))??fallback;}catch{return fallback;}};
   const initial=read(localStorage,'agentworks-workspace',{});
   const requestedView=new URLSearchParams(location.search).get('view');
-  if(['sessions','files','automations'].includes(requestedView))initial.view=requestedView;
+  if(['sessions','files','automations','github'].includes(requestedView))initial.view=requestedView;
   const state={view:'sessions',projectId:initial.projectId||null,locationKey:initial.locationKey||'',path:'',hidden:false,file:null,sideFile:null,automationId:initial.automationId||null};
   let catalog={projects:[],locations:[],hosts:[]},sessions=[],definitions=[],runs=[],contextGeneration=0,filesGeneration=0,automationGeneration=0,editorGeneration=0,editing=null,runStarting=false,pendingFile=null;
   const pendingRuns=read(sessionStorage,'agentworks-pending-runs',{});
   const api=hooks.api;
+  const githubBrowser=setupGithubBrowser({api,root:$('github-browser'),openSession:row=>hooks.openGithubSession(row),openSettings:()=>{hooks.openSettings();$('settings-tab-github').click();}});
   const save=()=>localStorage.setItem('agentworks-workspace',JSON.stringify({view:state.view,projectId:state.projectId,locationKey:state.locationKey,path:state.path,filePath:state.file?.path||null,automationId:state.automationId}));
   function option(select,value,label){const node=el('option','',label);node.value=value;select.append(node);}
   function options(select,items,value){const signature=JSON.stringify(items);if(select.dataset.items!==signature){select.replaceChildren();for(const [id,label]of items)option(select,id,label);select.dataset.items=signature;}select.value=value;}
@@ -41,10 +43,10 @@ export function createWorkspace(hooks){
     state.locationKey=location.id;contextControls();save();return location;
   }
   function showView(view){
-    state.view=['sessions','files','automations','host-terminal'].includes(view)?view:'sessions';
+    state.view=['sessions','files','automations','github','host-terminal'].includes(view)?view:'sessions';
     document.body.dataset.workspaceView=state.view;document.body.classList.remove('menu-open');
-    $('host-terminal-view').hidden=state.view!=='host-terminal';$('workspace-session-area').hidden=state.view!=='sessions';$('workspace-files').hidden=state.view!=='files';$('workspace-automations').hidden=state.view!=='automations';
-    for(const name of ['sessions','files','automations'])$('nav-'+name).setAttribute('aria-pressed',String(state.view===name||(name==='sessions'&&state.view==='host-terminal')));
+    $('host-terminal-view').hidden=state.view!=='host-terminal';$('workspace-session-area').hidden=state.view!=='sessions';$('workspace-files').hidden=state.view!=='files';$('workspace-automations').hidden=state.view!=='automations';$('workspace-github').hidden=state.view!=='github';githubBrowser.setActive(state.view==='github');
+    for(const name of ['sessions','files','automations','github'])$('nav-'+name).setAttribute('aria-pressed',String(state.view===name||(name==='sessions'&&state.view==='host-terminal')));
     if(state.view==='files')loadFiles();if(state.view==='automations')loadAutomations();hooks.viewChanged?.(state.view);save();
   }
   function renderCrumbs(crumbs,path,go,filename){
@@ -324,7 +326,7 @@ export function createWorkspace(hooks){
   const narrow=()=>matchMedia('(max-width:800px)').matches;
   function openAutomation(id){state.automationId=id;showView('automations');}
   // On phones the Sessions tab is the full-screen session browser.
-  $('nav-sessions').onclick=()=>{showView('sessions');if(matchMedia('(max-width:650px)').matches)document.body.classList.add('menu-open');};$('nav-files').onclick=()=>showView('files');$('nav-automations').onclick=()=>showView('automations');$('nav-settings').onclick=()=>hooks.openSettings();
+  $('nav-sessions').onclick=()=>{showView('sessions');if(matchMedia('(max-width:650px)').matches)document.body.classList.add('menu-open');};$('nav-files').onclick=()=>showView('files');$('nav-automations').onclick=()=>showView('automations');$('nav-github').onclick=()=>showView('github');$('nav-settings').onclick=()=>hooks.openSettings();
   $('workspace-project').onchange=()=>{contextGeneration++;state.projectId=$('workspace-project').value||null;state.locationKey='';contextControls();resetFiles();save();
     if(state.view==='sessions'){const session=sessions.find(s=>(s.projectId||null)===state.projectId);if(session)hooks.selectSession(session);else hooks.overview();}
     else if(state.view==='files')loadFiles();else loadAutomations();
@@ -360,7 +362,7 @@ export function createWorkspace(hooks){
   $('delete-automation').onclick=async()=>{if(!editing||!confirm('Delete this automation definition? Its run sessions and history will remain.'))return;try{await api('/api/automations/'+editing,{method:'DELETE'});$('automation-dialog').close();loadAutomations();}catch(error){$('automation-error').textContent=error.message;}};
   return {
     sync(next,list){catalog=next;sessions=list;contextControls();if(state.view==='automations')loadAutomations();},
-    sessionSelected,showView,sideFiles,
+    sessionSelected,showView,sideFiles,githubContext:githubBrowser.context,
     // Chat file links open in the side panel's Files tab.
     openSideFile(session,path,line=null){openFile({id:session.locationId,path:session.cwd,sessionId:session.id},path,true,line);hooks.openPanel('files');},
     context(){return {projectId:state.projectId,cwd:directory()};},

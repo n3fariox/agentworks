@@ -78,6 +78,7 @@ impl Fixture {
             mode: Mode::NewWorktree,
             branch: Some("feature/test".into()),
             base_ref: None,
+            pull_request: None,
             path: Some(self.root.join("checkout").to_str().unwrap().into()),
         }
     }
@@ -507,5 +508,104 @@ async fn prefer_cow_falls_back_and_require_cow_refuses_unsupported_checkout_feat
     assert!(
         output.stdout.is_empty(),
         "Unsupported CoW must not register a branch"
+    );
+}
+
+#[tokio::test]
+async fn pr_worktree_fetches_missing_pinned_head_from_matching_origin_only() {
+    let fixture = Fixture::new();
+    let upstream = fixture.root.join("upstream");
+    let git_at = |cwd: &std::path::Path, args: &[&str]| {
+        let out = Command::new("git")
+            .current_dir(cwd)
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    git_at(
+        &fixture.root,
+        &[
+            "clone",
+            "--no-hardlinks",
+            fixture.repo.to_str().unwrap(),
+            upstream.to_str().unwrap(),
+        ],
+    );
+    git_at(
+        &upstream,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@localhost",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "PR head",
+        ],
+    );
+    let sha = git_at(&upstream, &["rev-parse", "HEAD"]);
+    git_at(&upstream, &["update-ref", "refs/pull/17/head", &sha]);
+    fixture.git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://ghe.example.com/team/repo.git",
+    ]);
+    fixture.git(&["config", "protocol.file.allow", "always"]);
+    fixture.git(&[
+        "config",
+        &format!("url.file://{}.insteadOf", upstream.display()),
+        "https://ghe.example.com/team/repo.git",
+    ]);
+    let mut workspace = fixture.workspace();
+    workspace.base_ref = Some(sha.clone());
+    workspace.pull_request = Some(worktrees::PullRequest {
+        host: "wrong.example.com".into(),
+        owner: "team".into(),
+        repo: "repo".into(),
+        number: 17,
+        head_sha: sha.clone(),
+    });
+    let error = worktrees::prepare_in(
+        &fixture,
+        Some(&workspace),
+        Policy::default(),
+        false,
+        fixture.repo.clone(),
+        Some("creation"),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(error.1.contains("origin matches"));
+    assert_eq!(fixture.reservations.load(Ordering::SeqCst), 0);
+    workspace.pull_request.as_mut().unwrap().host = "ghe.example.com".into();
+    let (path, _) = worktrees::prepare_in(
+        &fixture,
+        Some(&workspace),
+        Policy::default(),
+        false,
+        fixture.repo.clone(),
+        Some("creation"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(git_at(&path, &["rev-parse", "HEAD"]), sha);
+    assert_eq!(
+        git_at(&fixture.repo, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "main"
     );
 }
