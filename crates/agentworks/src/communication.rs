@@ -462,9 +462,13 @@ pub fn send_as(app: &App, s: &Actor, req: SendMessage) -> Result<Value> {
     let sender_title = s.title.clone();
     let mut store = app.store.lock().unwrap();
     let tx = store.connection.transaction().map_err(db_error)?;
-    let previous:Option<(i64,String,String,Option<i64>)>=tx.query_row("SELECT id,recipient,text,reply_to FROM agent_messages WHERE sender=?1 AND request_id=?2",params![s.id,req.request_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(db_error)?;
-    if let Some((id, recipient, text, reply)) = previous {
-        if recipient != target_id || text != req.text || reply != req.reply_to {
+    let previous:Option<(i64,String,String,Option<i64>,bool)>=tx.query_row("SELECT id,recipient,text,reply_to,EXISTS(SELECT 1 FROM reply_requests WHERE message_id=agent_messages.id) FROM agent_messages WHERE sender=?1 AND request_id=?2",params![s.id,req.request_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(db_error)?;
+    if let Some((id, recipient, text, reply, expect_reply)) = previous {
+        if recipient != target_id
+            || text != req.text
+            || reply != req.reply_to
+            || expect_reply != (req.expect_reply && s.session.is_some())
+        {
             return Err(fail(
                 StatusCode::CONFLICT,
                 "Request ID already used for a different message",

@@ -1703,6 +1703,35 @@ mod tests {
         assert_eq!(box_()["messages"][1]["expectReply"], false);
     }
     #[test]
+    fn send_message_retry_binds_expect_reply() {
+        let f = Fixture::new();
+        let send = |request_id: &str, expect_reply| {
+            mail::send(
+                &f.app,
+                &f.sender,
+                mail::SendMessage {
+                    recipient: f.recipient.id.clone(),
+                    text: "Review this branch".into(),
+                    request_id: request_id.into(),
+                    reply_to: None,
+                    expect_reply,
+                },
+            )
+        };
+        assert_eq!(send("without-reply", false).unwrap()["duplicate"], false);
+        assert_eq!(send("without-reply", false).unwrap()["duplicate"], true);
+        assert_eq!(
+            send("without-reply", true).unwrap_err().0,
+            StatusCode::CONFLICT
+        );
+
+        assert_eq!(send("with-reply", true).unwrap()["duplicate"], false);
+        assert_eq!(
+            send("with-reply", false).unwrap_err().0,
+            StatusCode::CONFLICT
+        );
+    }
+    #[test]
     fn started_turn_acknowledges_fully_quoted_messages_only() {
         let mut f = Fixture::new();
         mail::send(
