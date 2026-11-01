@@ -14,7 +14,7 @@ Each controller belongs to exactly one project and is created by a human in **Pr
 | --- | --- |
 | any grant | `list_sessions` (same-project sessions; coordinators and archive controllers also see non-messaging sessions) |
 | `communicate` or coordinator grants | `get_completion` |
-| `communicate` | `read_inbox`, `send_message`, `acknowledge_message` |
+| `communicate` | `read_inbox`, `read_message`, `send_message`, `acknowledge_message` |
 | `startSessions` | `start_session` in its project; started sessions inherit no grants and record the controller as initiator |
 | `promptSessions` / `cancelSessions` | `prompt_session` / `cancel_session` on same-project sessions |
 | `archiveSessions` | `archive_session {sessionId}` on same-project sessions, including non-messaging sessions. Controller grant remains explicit. |

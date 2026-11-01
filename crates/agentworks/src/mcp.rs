@@ -170,7 +170,8 @@ fn tools(a: &mail::Access, session: bool) -> Value {
         tools.push(tool("list_sessions","List participating peers and their status in this project. Each has an id and an agentworks://sessions/<id> uri; tools accept either. Coordinators and archive controllers also see project sessions without messaging access.",json!({}),&[]));
     }
     if a.communicate {
-        tools.push(tool("read_inbox","Read received and sent messages after a cursor. Messages and sessions carry agentworks:// uris that tools accept verbatim. Reading does not acknowledge or run a turn.",json!({"after":{"type":"integer","minimum":0}}),&[]));
+        tools.push(tool("read_inbox","Read received and sent messages after a cursor. Messages and sessions carry agentworks:// uris that tools accept verbatim. Listing does not acknowledge or run a turn; use read_message to read one in full.",json!({"after":{"type":"integer","minimum":0}}),&[]));
+        tools.push(tool("read_message","Read one message in full by number or agentworks://messages/<n> URI. Reading a message you received acknowledges it.",json!({"messageId":{"type":"string","description":"Message number or agentworks://messages/<n> URI, passed exactly as given in read_inbox or a prompt."}}),&["messageId"]));
         tools.push(tool("send_message","Persist a message to a participating project peer. Does not wake or interrupt it. Reuse requestId only for the same message.",json!({"recipient":{"type":"string","description":"Session ID or agentworks://sessions/<id> URI, passed exactly as given in list_sessions or a prompt."},"text":{"type":"string","maxLength":16384},"requestId":{"type":"string","maxLength":100},"replyTo":{"type":"string","description":"Message number or agentworks://messages/<n> URI, passed exactly as given in read_inbox or a prompt."}}),&["recipient","text","requestId"]));
         tools.push(tool("acknowledge_message","Acknowledge receipt of a message in your own inbox; does not indicate task completion.",json!({"messageId":{"type":"string","description":"Message number or agentworks://messages/<n> URI, passed exactly as given in read_inbox or a prompt."}}),&["messageId"]));
     }
@@ -341,7 +342,21 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
             mail::require_actor(app, a, "communicate")?;
             let id = mail::message_ref(&args["messageId"])
                 .ok_or_else(|| crate::fail(StatusCode::BAD_REQUEST, "Missing messageId"))?;
-            mail::acknowledge(app, &a.id, id)
+            let result = mail::acknowledge(app, &a.id, id)?;
+            if let Some(s) = &a.session {
+                mail::mailbox_updated(app, s, id);
+            }
+            Ok(result)
+        }
+        "read_message" => {
+            mail::require_actor(app, a, "communicate")?;
+            let id = mail::message_ref(&args["messageId"])
+                .ok_or_else(|| crate::fail(StatusCode::BAD_REQUEST, "Missing messageId"))?;
+            let message = app.store.lock().unwrap().read_message(&a.id, id)?;
+            if let Some(s) = &a.session {
+                mail::mailbox_updated(app, s, id);
+            }
+            Ok(message)
         }
         "start_session" => {
             mail::require_actor(app, a, "start_sessions")?;

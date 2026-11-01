@@ -90,7 +90,8 @@ pub async fn update(
 /// Commits title/archive metadata; callers hold the run lock.
 pub async fn apply(s: &Session, title: Option<String>, archived: Option<bool>) -> ApiResult {
     if archived == Some(true) {
-        crate::inbox_delivery::cancel(s, "Recipient archived")?;
+        // Archived sessions are inactive: drop pending wakes; the authorization stays for unarchive.
+        crate::inbox_delivery::stop(s, "Recipient archived")?;
     }
     commit(s, title, archived)?;
     if archived == Some(true) {
@@ -166,7 +167,8 @@ pub async fn stop_worker(s: &Session) {
     }
 }
 pub async fn suspend_locked(s: &Session) -> ApiResult {
-    let inbox_error = crate::inbox_delivery::cancel(s, "Explicit suspend").err();
+    // Queued wakes are held, not dropped, and resume with the session.
+    let inbox_error = crate::inbox_delivery::interrupt_inflight(s, "Explicit suspend").err();
     {
         let mut data = s.data.lock().unwrap();
         data.lifecycle.suspended = true;

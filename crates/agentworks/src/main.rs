@@ -365,11 +365,18 @@ impl Session {
         &self,
         events: impl FnOnce(&std::collections::VecDeque<Value>, u64) -> (Value, Option<u64>),
     ) -> Value {
+        // Taken before session guards: never hold the store while waiting on them.
+        let unacknowledged = self
+            .store
+            .lock()
+            .unwrap()
+            .unacknowledged(&self.id)
+            .unwrap_or(0);
         let approvals = self.approvals.lock().unwrap();
         let data = self.data.lock().unwrap();
         let (events, resumed) = events(&data.events, data.seq);
         json!({"kind":"snapshot","seq":data.seq,"resumed":resumed,"session":{"id":self.id,"provider":self.provider,
-            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"modelProvider":data.model_provider,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None},"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"])} ,"events":events,
+            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"modelProvider":data.model_provider,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None},"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"]),"unacknowledged":unacknowledged} ,"events":events,
             "truncated":data.events.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
             "asyncTasks":data.async_tasks.snapshot(),"providerCapabilities":data.agent_capabilities["sessionCapabilities"],"sessionConfig":data.session_config,"permissionModes":data.permission_modes,"models":data.models,"attachments":attachments::policy(&self.provider,&data.prompt_capabilities),"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|a.event(id)).collect::<Vec<_>>(),
@@ -1328,6 +1335,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(communication::ack_message),
         )
         .route(
+            "/api/sessions/{id}/mailbox/ack-all",
+            post(communication::ack_all),
+        )
+        .route(
             "/api/sessions/{id}/agent-audit",
             get(communication::audit_log),
         )
@@ -2205,7 +2216,7 @@ fn ungroup_sessions(
 ) -> Result<(), (StatusCode, String)> {
     for s in sessions {
         s.data.lock().unwrap().project_id = None;
-        inbox_delivery::revoke_related(app, s, reason)?;
+        inbox_delivery::drop_from_sender(app, s, reason)?;
         s.emit("session_updated", json!({"projectId":null}));
     }
     Ok(())
@@ -2236,7 +2247,7 @@ async fn delete_project(
     if req.sessions == ProjectSessions::Cascade {
         // Delete sessions before the project so a failure leaves a retryable project.
         for s in &affected {
-            inbox_delivery::revoke_related(&app, s, "Project deletion requested")?;
+            inbox_delivery::drop_from_sender(&app, s, "Project deletion requested")?;
             let _ = lifecycle::suspend_locked(s).await?;
             git_settings::exit_locked(&app, s, "delete").await?;
             delete_session_locked(&app, s).await?;
@@ -2333,7 +2344,7 @@ async fn assign_project(
             })?;
     }
     drop(catalog);
-    inbox_delivery::revoke_related(&app, &s, "Project assignment changed")?;
+    inbox_delivery::drop_from_sender(&app, &s, "Sender moved to another project")?;
     s.data.lock().unwrap().project_id = req.project_id.clone();
     s.emit("session_updated", json!({"projectId":req.project_id}));
     Ok(Json(s.meta()))
@@ -3042,9 +3053,9 @@ fn start_worker(app: &App, s: &Arc<Session>) {
                     .unwrap()
                     .input_queue
                     .block("Remote host disconnected; inspect, then resume the queue.");
-                let _ = inbox_delivery::cancel(
+                let _ = inbox_delivery::interrupt_inflight(
                     &worker_s,
-                    "Remote host disconnected; inspect before reauthorizing inbox turns",
+                    "Remote host disconnected; queued wakes are held until it reconnects",
                 );
                 worker_s.emit("interrupted",json!({"message":if was_active {"The connection to this session's host dropped during a turn. It was not retried. Resume once the host reconnects, and check the last tool result before continuing."} else {"The connection to this session's host dropped. Resume once the host reconnects."}}));
                 worker_s.status("suspended");
@@ -3333,7 +3344,7 @@ async fn cancel(
         user.cloned()
     };
     let restart_error = service_restart::stop_requester(&app, &id).err();
-    let inbox_error = inbox_delivery::cancel(&s, "Explicit Stop").err();
+    let inbox_error = inbox_delivery::stop(&s, "Explicit Stop").err();
     let status = {
         let mut data = s.data.lock().unwrap();
         data.continuation.stop("Explicit Stop");
@@ -3432,7 +3443,7 @@ async fn delete_session(
     let _gate = app.communication_lock.lock().await;
     let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
-    inbox_delivery::revoke_related(&app, &s, "Session deletion requested")?;
+    inbox_delivery::drop_from_sender(&app, &s, "Sender deleted")?;
     let _ = lifecycle::suspend_locked(&s).await?;
     git_settings::exit(&app, &s, "delete").await?;
     if options.provider_history {
@@ -3450,7 +3461,7 @@ async fn delete_session(
 }
 /// Callers hold the communication and run locks, have stopped the harness, and completed exit hooks.
 async fn delete_session_locked(app: &App, s: &Session) -> Result<(), (StatusCode, String)> {
-    inbox_delivery::revoke_related(app, s, "Session deleted")?;
+    inbox_delivery::drop_from_sender(app, s, "Sender deleted")?;
     app.store.lock().unwrap().delete(&s.id).map_err(|_| {
         fail(
             StatusCode::INTERNAL_SERVER_ERROR,

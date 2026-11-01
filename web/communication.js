@@ -50,6 +50,13 @@ export function setupCommunication({api,getActive,getSessions,selectSession,toas
       $('agent-audit').replaceChildren(...audit.events.slice(0,20).map(e=>node('div',`${new Date(e.created).toLocaleTimeString()} · ${e.actor==='human'?'You':e.actorTitle?'Controller '+e.actorTitle:getSessions().find(s=>s.id===e.actor)?.title||e.actor.slice(0,8)} · ${e.action} · ${e.outcome}`)));
     }catch(e){$('agent-error').textContent=e.message;}finally{loading=false;}
   }
+  // Unacknowledged count comes from the live session snapshot, not just the loaded page.
+  setInterval(()=>{const n=getActive()?.id===id?getActive().unacknowledged||0:0;$('agent-ack-all').hidden=!n;$('agent-ack-all').textContent=n?`Acknowledge all (${n})`:'Acknowledge all';},500);
+  $('agent-ack-all').addEventListener('click',async()=>{
+    const current=id;if(!current)return;$('agent-ack-all').disabled=true;
+    try{const r=await api(`/api/sessions/${current}/mailbox/ack-all`,{method:'POST'});if(current!==id)return;for(const m of messages)if(m.recipient===current)m.acknowledged=true;render();toast(`Acknowledged ${r.acknowledged} message${r.acknowledged===1?'':'s'}.`,'success');}
+    catch(e){toast(e.message);}finally{$('agent-ack-all').disabled=false;}
+  });
   $('agent-more-messages').addEventListener('click',()=>refresh());
   $('agent-refresh-messages').addEventListener('click',()=>refresh(true));
   $('session-agents').addEventListener('click',async()=>{

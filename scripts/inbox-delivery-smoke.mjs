@@ -58,7 +58,9 @@ try{
  await until(async()=>(await policy(id)).policy.attempts===1);const done=await idle(id);assert.equal(turns(done),humanBase+2);assert.equal(native(done),originalNative);
  const wake=done.events.filter(e=>e.kind==='user').at(-1).data;assert(wake.text.includes('UNTRUSTED PEER DATA'));assert(wake.text.includes('First bounded context'));assert(wake.text.includes('Second bounded context'));assert(wake.text.includes(sender));assert.equal(wake.initiatedBy,'human-authorized inbox delivery');assert(wake.text.startsWith('## Agentworks inbox delivery'));assert(wake.text.includes('> - **Review** the branch.'));
  await send(id,'No ping pong beyond one turn');await delay(6000);assert.equal(turns(await snap(id)),humanBase+2);assert.equal((await policy(id)).policy.enabled,false);
- assert.equal((await api(path(id)+'/mailbox')).messages.length,6);assert((await api(path(id)+'/mailbox')).messages.every(m=>!m.acknowledged));
+ assert.equal((await api(path(id)+'/mailbox')).messages.length,6);{const box=(await api(path(id)+'/mailbox')).messages;
+ // A started wake turn acknowledges what it quoted in full; undelivered mail stays unacknowledged.
+ assert(box.filter(m=>m.text.includes('bounded context')).every(m=>m.acknowledged));assert(box.filter(m=>m.text.includes('No ping pong')).every(m=>!m.acknowledged));}
  console.log('PASS default off, explicit validation, payload binding, idempotent send, busy coalescing, attributed prompt, same native identity, bounds, manual cursors');
  // Disable, stop, suspend, archive and scope changes cancel queued authorization.
  for(const action of ['disable','stop','suspend','archive','project']){
@@ -68,11 +70,15 @@ try{
    if(action==='suspend'){await api(path(id)+'/suspend',{});await api(path(id)+'/resume',{});await idle(id);}
    if(action==='archive'){await api(path(id),{archived:true},'PATCH');await api(path(id),{archived:false},'PATCH');}
    if(action==='project'){await api(path(id)+'/project',{projectId:other.id});await api(path(id)+'/project',{projectId:p.id});}
-   assert.equal((await policy(id)).policy.enabled,false);assert.equal((await policy(id)).pending,0);
+   // Only the human disables; Stop and archive drop the queued batch, others hold or follow the session.
+   assert.equal((await policy(id)).policy.enabled,action!=='disable',action);
+   if(['disable','stop','archive'].includes(action))assert.equal((await policy(id)).pending,0,action);
+   await api(path(id)+'/inbox-delivery',{enabled:false,requestId:crypto.randomUUID()},'PUT');await idle(id);
  }
- // Sender grant and project revocation remain revoked even if restored before dispatch.
- await authorize(id);await send(id);await api(path(sender)+'/agent-access',{},'PUT');await idle(sender);assert.equal((await policy(id)).policy.enabled,false);await api(path(sender)+'/agent-access',{communicate:true},'PUT');await idle(sender);
- await authorize(id);await send(id);await api(path(sender)+'/project',{projectId:other.id});await api(path(sender)+'/project',{projectId:p.id});assert.equal((await policy(id)).policy.enabled,false);
+ // A sender that loses its grant or moves project loses its queued wake; the recipient stays authorized.
+ await authorize(id);await send(id);await api(path(sender)+'/agent-access',{},'PUT');await idle(sender);assert.equal((await policy(id)).policy.enabled,true);assert.equal((await policy(id)).pending,0);await api(path(sender)+'/agent-access',{communicate:true},'PUT');await idle(sender);
+ await authorize(id);await send(id);await api(path(sender)+'/project',{projectId:other.id});await api(path(sender)+'/project',{projectId:p.id});assert.equal((await policy(id)).policy.enabled,true);assert.equal((await policy(id)).pending,0);
+ await api(path(id)+'/inbox-delivery',{enabled:false,requestId:crypto.randomUUID()},'PUT');
  // Quota pause wins even with an enabled inbox policy.
  await prompt(id,'quota unknown');await idle(id);assert((await snap(id)).session.continuation.limited);await authorize(id);await send(id);await delay(6000);assert.equal((await policy(id)).policy.attempts,0);assert.equal((await policy(id)).pending,1);
  await api(path(id)+'/stop',{});await prompt(id,'Human replacement');await idle(id);
@@ -82,11 +88,12 @@ try{
  const beforeDeadline=turns(await snap(id));await authorize(id,{deadline:Date.now()+8000,maxTurns:2});await send(id,'slow bounded native turn');
  await until(async()=>(await policy(id)).policy.attempts===1);await until(async()=>!(await policy(id)).policy.enabled);await idle(id);assert.equal(turns(await snap(id)),beforeDeadline+1);assert.equal(native(await snap(id)),originalNative);
  console.log('PASS disable/Stop/Suspend/archive, recipient and sender project changes, grant revocation, quota gate, deadline');
- // Human completion report revokes policy. Demo MCP does not call any model.
- await authorize(id);await send(id);await prompt(id,'mcp report_completion {"requestId":"inbox-complete","status":"completed","summary":"Fixture done"}');await idle(id);assert.equal((await policy(id)).policy.enabled,false);
+ // A completion report never revokes the recipient's authorization. Demo MCP does not call any model.
+ await authorize(id);await send(id);await prompt(id,'mcp report_completion {"requestId":"inbox-complete","status":"completed","summary":"Fixture done"}');await idle(id);assert.equal((await policy(id)).policy.enabled,true);
+ await api(path(id)+'/inbox-delivery',{enabled:false,requestId:crypto.randomUUID()},'PUT');await idle(id);
  // Mobile controls expose explicit authorization and visible bounded status.
  browser=await chromium.launch({headless:true});const page=await browser.newPage({viewport:{width:390,height:844}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
- await page.goto(base);await page.evaluate(id=>localStorage.setItem('agentworks-session',id),id);await page.reload();await expect(page.locator('.message-body.markdown h2').filter({hasText:'Agentworks inbox delivery'}).first()).toBeVisible();await expect(page.locator('.message-body.markdown blockquote strong').filter({hasText:'Review'}).first()).toBeVisible();await page.locator('#session-more').click();await page.locator('#session-agents').click();await expect(page.locator('#inbox-delivery-status')).toContainText('Off');
+ await page.goto(base);await page.evaluate(id=>localStorage.setItem('agentworks-session',id),id);await page.reload();await expect(page.locator('.message-body.markdown h2').filter({hasText:'Agentworks inbox delivery'}).first()).toBeVisible();await expect(page.locator('.message-body.markdown blockquote strong').filter({hasText:'Review'}).first()).toBeVisible();await page.locator('#session-more').click();await page.locator('#lifecycle-menu > summary').click();await page.locator('#session-agents').click();await expect(page.locator('#inbox-delivery-status')).toContainText('Off');
  await expect(page.locator('#inbox-maxTurns')).toBeVisible();await page.locator('#inbox-maxTurns').fill('2');await page.locator('#inbox-deadline').fill('');await page.locator('#inbox-delivery-controls button[type=submit]').click();await expect(page.locator('#inbox-delivery-status')).toContainText('Enabled');
  assert(await page.locator('#inbox-maxTurns').evaluate(n=>{const r=n.getBoundingClientRect();return r.width>0&&r.left>=0&&r.right<=innerWidth&&r.height>=44;}));
  assert(await page.locator('#inbox-unlimitedTurns').evaluate(n=>{const r=n.getBoundingClientRect();return r.width>0&&r.left>=0&&r.right<=innerWidth;}));
@@ -111,10 +118,10 @@ try{
  console.log('PASS restart preserves a standing authorization, never replays an uncertain claim, and resumes queued mail after the same native context is attached');
  // Missing native state never causes a replacement session.
  await api(path(id)+'/suspend',{});const nativeFile=join(env.AGENTWORKS_DEMO_STATE_DIR,originalNative+'.json');const saved=await readFile(nativeFile,'utf8');await writeFile(nativeFile,'{}');
- await api(path(id)+'/resume',{});await until(async()=>(await snap(id)).session.status==='error');await api(path(id)+'/inbox-delivery',{enabled:true,requestId:'unavailable',deadline:Date.now()+60000,maxTurns:1,cooldownSeconds:5,maxBatch:1},'PUT',409);await delay(1500);assert.equal((await policy(id)).policy.enabled,false);assert.equal(native(await snap(id)),originalNative);await writeFile(nativeFile,saved);
+ await api(path(id)+'/resume',{});await until(async()=>(await snap(id)).session.status==='error');await api(path(id)+'/inbox-delivery',{enabled:true,requestId:'unavailable',deadline:Date.now()+60000,maxTurns:1,cooldownSeconds:5,maxBatch:1},'PUT',409);await delay(1500);assert.equal((await policy(id)).held,'session needs attention');assert.equal(native(await snap(id)),originalNative);await writeFile(nativeFile,saved);
  // Deletion cascades policy/ledger, preserving historical peer messages.
  const doomed=await create('Deleted recipient');await authorize(doomed);await send(doomed);await api(path(doomed),undefined,'DELETE');assert.equal(sql(`SELECT count(*) FROM inbox_policies WHERE session_id='${doomed}'`)[0][0],0);assert.equal(sql(`SELECT count(*) FROM inbox_deliveries WHERE recipient='${doomed}'`)[0][0],0);
- assert.equal(sql('PRAGMA user_version')[0][0],11);
- console.log('PASS completion cancellation, accessible mobile enable/cancel, restart ambiguity/no replay, unavailable native context, deletion and schema v11');
+ assert.equal(sql('PRAGMA user_version')[0][0],13);
+ console.log('PASS completion keeps authorization, accessible mobile enable/cancel, restart ambiguity/no replay, unavailable native context, deletion and schema v13');
  console.log(`Fixture root: ${dir}`);
 }finally{if(browser)await browser.close();if(server)await stop();await removeFixture(dir);}

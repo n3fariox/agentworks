@@ -58,6 +58,14 @@ const usageStatus=setupUsageStatus({root:$('usage-status'),getProvider:()=>activ
   getShared:()=>active?sharedQuota.get(active.hostId,quotaFamily(active.provider,active.modelProvider)):null});
 const composerMenu=setupFlyout({menu:$('composer-menu'),triggers:[$('composer-more'),$('composer-info')]});
 const sessionMenu=setupFlyout({menu:$('session-menu'),triggers:[$('session-more')]});
+// Unacknowledged inbound peer messages: a dot on both ⋯ triggers and on Agents & inbox.
+function renderUnread(){
+  const n=active?.unacknowledged||0,label=n?`${n} unacknowledged message${n===1?'':'s'}`:'';
+  for(const id of ['session-more','lifecycle-menu','session-agents'])$(id).classList.toggle('has-unread',n>0);
+  $('session-more').setAttribute('aria-label',n?`Session options, ${label}`:'Session options');
+  $('lifecycle-menu').querySelector('summary').title=n?`Session actions · ${label}`:'Session actions';
+  $('session-agents').title=label;
+}
 setupResize({handle:$('sidebar-resize'),target:document.querySelector('.layout'),panel:$('sidebar'),variable:'--sidebar-width',key:'agentworks-sidebar-width',min:200,max:560,initial:228});
 const sidebarPin=setupSidebarPin({sidebar:$('sidebar'),button:$('sidebar-pin'),trigger:$('nav-sessions')});
 setupResize({handle:$('side-panel-resize'),target:$('side-panel'),panel:$('side-panel'),variable:'--side-panel-width',key:'agentworks-side-panel-width',min:300,max:960,initial:420,edge:'left'});
@@ -615,6 +623,7 @@ function connect(gen){
       if(tool){tool.header=d.header;scheduleDraw();}return;
     }
     if(Number.isSafeInteger(e.seq)&&e.kind!=='snapshot')eventSeq=Math.max(eventSeq??0,e.seq);
+    if(e.kind==='mailbox_updated'){if(Number.isSafeInteger(e.data.unacknowledged)){active.unacknowledged=e.data.unacknowledged;renderUnread();}return;}
     if(e.kind==='snapshot'){
       // A full snapshot replaces the transcript; a resumed one adds only newer events.
       if(e.resumed===null||e.resumed===undefined){
@@ -639,7 +648,7 @@ function connect(gen){
         subagents.setHeaders(e.toolHeaders);
       }
       for(const [id,view] of Object.entries(e.toolProgress||{}))applyToolProgress(tools.get(id),view,view.seq);
-      Object.assign(active,e.session);setTitle(active.title);
+      Object.assign(active,e.session);setTitle(active.title);renderUnread();
       active.continuation=e.session.continuation;
       approvals=new Map(e.approvals.map(a=>[a.id,a]));status=e.session.status;modelConfig=e.models;syncModelLabel();permissionModes=e.permissionModes;sessionConfig=e.sessionConfig;active.providerCapabilities=e.providerCapabilities;attachments.setPolicy(e.attachments);if(status==='suspended'&&!e.session.explicitlySuspended&&!active.providerHistoryDeletion)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();inputQueue.set(e.session.inputQueue);inputQueue.observe(status,{live:false});
       if(active.providerHistoryDeletion){$('session-notice').textContent=active.providerHistoryDeletion==='deleted'?'Provider history was deleted. This Agentworks transcript remains because local cleanup did not finish; retry Delete everywhere or delete this transcript.':'Provider-history deletion was not confirmed. This transcript is retained and resume is blocked; inspect provider history, then retry Delete everywhere or delete only this transcript.';$('session-notice').hidden=false;}

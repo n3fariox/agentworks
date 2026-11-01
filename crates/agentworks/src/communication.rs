@@ -117,6 +117,12 @@ fn now() -> i64 {
         .as_millis() as i64
 }
 
+/// Columns: id,sender,sender_title,recipient,recipient_title,text,reply_to,created,acknowledged.
+fn message_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    Ok(
+        json!({"id":r.get::<_,i64>(0)?,"uri":format!("{MESSAGE_URI}{}",r.get::<_,i64>(0)?),"sender":r.get::<_,String>(1)?,"senderUri":actor_uri(&r.get::<_,String>(1)?),"senderTitle":r.get::<_,String>(2)?,"recipient":r.get::<_,String>(3)?,"recipientUri":actor_uri(&r.get::<_,String>(3)?),"recipientTitle":r.get::<_,String>(4)?,"text":r.get::<_,String>(5)?,"replyTo":r.get::<_,Option<i64>>(6)?,"replyToUri":r.get::<_,Option<i64>>(6)?.map(|n|format!("{MESSAGE_URI}{n}")),"created":r.get::<_,i64>(7)?,"acknowledged":r.get::<_,bool>(8)?}),
+    )
+}
 impl crate::store::Store {
     pub fn access(&self, id: &str) -> Result<Access> {
         let raw: Option<String> = self
@@ -142,12 +148,54 @@ impl crate::store::Store {
             return Err(fail(StatusCode::BAD_REQUEST, "Invalid message cursor"));
         }
         let mut q=self.connection.prepare("SELECT id,sender,sender_title,recipient,recipient_title,text,reply_to,created,acknowledged FROM agent_messages WHERE (sender=?1 OR recipient=?1) AND id>?2 ORDER BY id LIMIT 21").map_err(db_error)?;
-        let mut messages=q.query_map(params![id,after],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"uri":format!("{MESSAGE_URI}{}",r.get::<_,i64>(0)?),"sender":r.get::<_,String>(1)?,"senderUri":actor_uri(&r.get::<_,String>(1)?),"senderTitle":r.get::<_,String>(2)?,"recipient":r.get::<_,String>(3)?,"recipientUri":actor_uri(&r.get::<_,String>(3)?),"recipientTitle":r.get::<_,String>(4)?,"text":r.get::<_,String>(5)?,"replyTo":r.get::<_,Option<i64>>(6)?,"replyToUri":r.get::<_,Option<i64>>(6)?.map(|n|format!("{MESSAGE_URI}{n}")),"created":r.get::<_,i64>(7)?,"acknowledged":r.get::<_,bool>(8)?}))).map_err(db_error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?;
+        let mut messages = q
+            .query_map(params![id, after], message_row)
+            .map_err(db_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(db_error)?;
         let has_more = messages.len() > 20;
         messages.truncate(20);
         Ok(
             json!({"nextCursor":messages.last().map(|v|v["id"].clone()).unwrap_or(json!(after)),"messages":messages,"hasMore":has_more}),
         )
+    }
+    /// Fetching one message means the reader saw its full text, so a received message is
+    /// acknowledged on read. Sent messages are readable but never acknowledged by the sender.
+    pub fn read_message(&self, id: &str, message: i64) -> Result<Value> {
+        let found=self.connection.query_row("SELECT id,sender,sender_title,recipient,recipient_title,text,reply_to,created,acknowledged FROM agent_messages WHERE id=?1 AND (sender=?2 OR recipient=?2)",params![message,id],message_row).optional().map_err(db_error)?;
+        let Some(mut found) = found else {
+            return Err(fail(
+                StatusCode::NOT_FOUND,
+                "Message not found in this mailbox",
+            ));
+        };
+        if found["recipient"] == id && found["acknowledged"] == false {
+            self.acknowledge(id, Some(message))?;
+            found["acknowledged"] = json!(true);
+        }
+        Ok(found)
+    }
+    /// Acknowledge one received message, or all of them with `None`. An acknowledged message
+    /// has been handled, so its pending wake is dropped too. Returns how many changed.
+    pub fn acknowledge(&self, recipient: &str, message: Option<i64>) -> Result<usize> {
+        let count = self
+            .connection
+            .execute(
+                "UPDATE agent_messages SET acknowledged=1 WHERE recipient=?1 AND acknowledged=0 AND (?2 IS NULL OR id=?2)",
+                params![recipient, message],
+            )
+            .map_err(db_error)?;
+        self.connection.execute("UPDATE inbox_deliveries SET state='cancelled',reason='Acknowledged before delivery' WHERE recipient=?1 AND state='queued' AND message_id IN (SELECT id FROM agent_messages WHERE recipient=?1 AND acknowledged=1 AND (?2 IS NULL OR id=?2))",params![recipient, message]).map_err(db_error)?;
+        Ok(count)
+    }
+    pub fn unacknowledged(&self, id: &str) -> Result<i64> {
+        self.connection
+            .query_row(
+                "SELECT count(*) FROM agent_messages WHERE recipient=?1 AND acknowledged=0",
+                [id],
+                |r| r.get(0),
+            )
+            .map_err(db_error)
     }
     pub fn audit(&self, actor: &str, action: &str, target: &str, outcome: &str) -> Result<()> {
         self.connection.execute("INSERT INTO agent_audit(actor,action,target,outcome,created) VALUES (?1,?2,?3,?4,?5)",params![actor,action,target,outcome,now()]).map_err(db_error)?;
@@ -389,6 +437,10 @@ pub fn send_as(app: &App, s: &Actor, req: SendMessage) -> Result<Value> {
         } else {
             let target = peer_of(app, &s.project, &req.recipient)?;
             require(app, &target, "communicate")?;
+            // Archived sessions keep their old mail but are not active recipients.
+            if target.data.lock().unwrap().lifecycle.archived {
+                return Err(fail(StatusCode::CONFLICT, "Recipient session is archived"));
+            }
             (target.id.clone(), target.display_title(), Some(target))
         };
     if target_id == s.id {
@@ -452,27 +504,40 @@ pub fn send_as(app: &App, s: &Actor, req: SendMessage) -> Result<Value> {
     tx.commit().map_err(db_error)?;
     drop(store);
     for session in [s.session.as_ref(), target.as_ref()].into_iter().flatten() {
-        session.emit("mailbox_updated", json!({"messageId":id}));
+        mailbox_updated(app, session, id);
     }
     Ok(json!({"id":id,"uri":format!("{MESSAGE_URI}{id}"),"duplicate":false}))
 }
-pub fn acknowledge(app: &App, recipient: &str, id: i64) -> Result<Value> {
-    let count = app
+/// Carries the session's live unacknowledged count for the browser's inbox indicator.
+pub fn mailbox_updated(app: &App, session: &Session, message: i64) {
+    let unacknowledged = app
         .store
         .lock()
         .unwrap()
+        .unacknowledged(&session.id)
+        .unwrap_or(0);
+    session.emit(
+        "mailbox_updated",
+        json!({"messageId":message,"unacknowledged":unacknowledged}),
+    );
+}
+pub fn acknowledge(app: &App, recipient: &str, id: i64) -> Result<Value> {
+    let store = app.store.lock().unwrap();
+    let known: bool = store
         .connection
-        .execute(
-            "UPDATE agent_messages SET acknowledged=1 WHERE id=?1 AND recipient=?2",
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_messages WHERE id=?1 AND recipient=?2)",
             params![id, recipient],
+            |r| r.get(0),
         )
         .map_err(db_error)?;
-    if count == 0 {
+    if !known {
         return Err(fail(
             StatusCode::NOT_FOUND,
             "Message not found in this inbox",
         ));
     }
+    store.acknowledge(recipient, Some(id))?;
     Ok(json!({"acknowledged":true}))
 }
 pub async fn get_access(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
@@ -488,7 +553,7 @@ pub async fn set_access(
     let s = session(&app, &id)?;
     let req = imply_coordinator_archive(req);
     if !req.communicate {
-        crate::inbox_delivery::revoke_related(&app, &s, "Communication grant revoked")?;
+        crate::inbox_delivery::drop_from_sender(&app, &s, "Sender communication grant revoked")?;
     }
     app.store.lock().unwrap().save_access(&id, &req)?;
     s.emit("agent_access", serde_json::to_value(&req).unwrap());
@@ -569,7 +634,27 @@ pub async fn ack_message(
 ) -> ApiResult {
     let _gate = app.communication_lock.lock().await;
     let s = session(&app, &id)?;
-    Ok(Json(acknowledge(&app, &s.id, message)?))
+    let result = acknowledge(&app, &s.id, message)?;
+    mailbox_updated(&app, &s, message);
+    Ok(Json(result))
+}
+/// Human-only: clear a backlog of old messages in one step. Agents acknowledge individually.
+pub async fn ack_all(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
+    let _gate = app.communication_lock.lock().await;
+    let s = session(&app, &id)?;
+    let count = {
+        let store = app.store.lock().unwrap();
+        let count = store.acknowledge(&s.id, None)?;
+        store.audit(
+            "human",
+            "acknowledge_all",
+            &s.id,
+            &format!("acknowledged:{count}"),
+        )?;
+        count
+    };
+    mailbox_updated(&app, &s, 0);
+    Ok(Json(json!({"acknowledged":count})))
 }
 pub async fn audit_log(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     session(&app, &id)?;
