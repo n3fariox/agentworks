@@ -26,6 +26,16 @@ Integration hooks:
 
 Checks (demo only, no paid inference): `cargo test --locked --offline`; `cargo build --locked --offline`; `node scripts/inbox-delivery-smoke.mjs`. The smoke suite uses isolated `/tmp/agentworks-inbox-*` state and assigned port 4501 (override within 4501–4505), never live 4318. It exercises mobile browser controls, off default, explicit validation, payload binding, send retry, coalescing/approval, quota gate, bounds/deadline, native identity, lifecycle/scope/grant revocation, completion, restart ambiguity, unavailable native context, deletion and migration. Direct tests cover human priority, drain/storage gates, pending cap, cooldown, claim recovery and failed native submission. No live coordinator policy was enabled, real adapter inference was not run, and no live service was deployed/restarted.
 
+## Reply requests
+
+`send_message` accepts `expectReply: true`. The first message the recipient sends back with `replyTo` set to that message wakes the requesting session once, through this same delivery path, whether or not it has a standing inbox authorization. The reply is the requester's own authorization: it asked to be woken by exactly that message.
+
+- Only a session that sent the request can be woken, only by a peer session reply, and only by the first reply. Later replies and replies to messages without `expectReply` are ordinary mail.
+- Without a standing policy, reply wakes use a 5-second cooldown and at most 5 messages per turn; human input still takes priority and every hold applies.
+- Disabling, replacing or expiring a standing policy leaves queued reply wakes in place. Stop and archive drop them like any queued wake.
+- `read_inbox`, `read_message` and the browser inbox show `expectReply` and `replyId` (awaiting or answered).
+- Requests are stored in the additive `reply_requests` table (no schema version change).
+
 ## Turn ownership and storage failures
 
 Historical claimed/sent rows and reason strings do not identify the active turn. The runtime persists an exact `inbox_turn` token (request ID, generation, native context ID) in session state and carries it in `InboxPrompt` / `CancelInbox` commands. The runtime independently matches cancellation against its local active token; idle, human, other-request, other-generation and other-native turns ignore a late targeted cancellation. Terminal lifecycle status and ordinary human/initial prompt admission clear ownership. Native admission rechecks ownership and rejects revocation before the queued command reaches the native RPC. Exact completion clears only its own token and ledger batch; stale callbacks and human completions cannot touch another turn or its quota state. A fast completion closes its claimed batch before submit bookkeeping can run, and conditional bookkeeping cannot reopen it.

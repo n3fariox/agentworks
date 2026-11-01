@@ -26,7 +26,13 @@ CREATE TABLE IF NOT EXISTS inbox_policies(session_id TEXT PRIMARY KEY REFERENCES
 CREATE TABLE IF NOT EXISTS inbox_policy_requests(session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, request_id TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(session_id,request_id));
 CREATE TABLE IF NOT EXISTS inbox_deliveries(message_id INTEGER PRIMARY KEY REFERENCES agent_messages(id),recipient TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,generation INTEGER NOT NULL,state TEXT NOT NULL,request_id TEXT,reason TEXT);
 CREATE INDEX IF NOT EXISTS inbox_delivery_pending ON inbox_deliveries(recipient,state,message_id);
+CREATE TABLE IF NOT EXISTS reply_requests(message_id INTEGER PRIMARY KEY REFERENCES agent_messages(id),requester TEXT NOT NULL,reply_id INTEGER);
+CREATE INDEX IF NOT EXISTS reply_requests_reply ON reply_requests(reply_id);
 ";
+/// A queued delivery that answers its recipient's own reply request. It wakes the
+/// requester once even without a standing policy, and policy changes leave it queued.
+const REPLY_WAKE: &str =
+    "message_id IN (SELECT reply_id FROM reply_requests WHERE reply_id IS NOT NULL)";
 
 pub use agentworks_session::origins::InboxTurn as Turn;
 /// A saved human authorization. `deadline: None` is a standing authorization that does not
@@ -145,7 +151,7 @@ pub(crate) fn cancel_db(db: &rusqlite::Connection, id: &str, reason: &str) -> Re
     p.generation += 1;
     p.reason = Some(reason.into());
     save(db, id, &p)?;
-    db.execute("UPDATE inbox_deliveries SET state='cancelled',reason=?2 WHERE recipient=?1 AND state IN ('queued','claimed')",params![id,reason]).map_err(error)?;
+    db.execute(&format!("UPDATE inbox_deliveries SET state='cancelled',reason=?2 WHERE recipient=?1 AND (state='claimed' OR (state='queued' AND NOT {REPLY_WAKE}))"),params![id,reason]).map_err(error)?;
     Ok(())
 }
 /// Only a captured active turn token can authorize cancellation. Ledger history never can.
@@ -337,10 +343,28 @@ fn submission_record(s: &Session, owner: &Turn, sent: bool) -> Result<()> {
     tx.execute("UPDATE inbox_deliveries SET state=?4,reason=?5 WHERE recipient=?1 AND request_id=?2 AND generation=?3 AND state='claimed' AND reason IS NOT 'Native turn terminated'",params![s.id,owner.request_id,owner.generation as i64,if sent{"sent"}else{"paused"},if sent{None}else{Some("Native submission uncertain; inspect before reauthorization")}]).map_err(error)?;
     tx.commit().map_err(error)
 }
-/// Enroll only a newly committed message; this never creates/enables a policy.
-pub fn enqueue(tx: &Transaction<'_>, recipient: &str, message: i64) -> Result<()> {
+/// Enroll a newly committed message; this never creates or enables a policy. A standing
+/// human policy enrolls all mail. A first reply to the recipient's own open reply request
+/// enrolls on its own: the recipient asked to be woken by exactly that reply.
+pub fn enqueue(
+    tx: &Transaction<'_>,
+    recipient: &str,
+    message: i64,
+    reply_to: Option<i64>,
+) -> Result<()> {
+    let reply = match reply_to {
+        Some(request) => {
+            tx.execute(
+                "UPDATE reply_requests SET reply_id=?3 WHERE message_id=?1 AND requester=?2 AND reply_id IS NULL",
+                params![request, recipient, message],
+            )
+            .map_err(error)?
+                > 0
+        }
+        None => false,
+    };
     let p = load(tx, recipient)?;
-    if !p.enabled {
+    if !p.enabled && !reply {
         return Ok(());
     }
     let pending: i64 = tx
@@ -350,9 +374,17 @@ pub fn enqueue(tx: &Transaction<'_>, recipient: &str, message: i64) -> Result<()
             |r| r.get(0),
         )
         .map_err(error)?;
-    let eligible = !p.expired(now()) && !p.turns_exhausted() && pending < 20;
+    let eligible = pending < 20 && (reply || (!p.expired(now()) && !p.turns_exhausted()));
     tx.execute("INSERT INTO inbox_deliveries(message_id,recipient,generation,state,reason) VALUES(?1,?2,?3,?4,?5)",params![message,recipient,p.generation as i64,if eligible {"queued"}else{"cancelled"},if eligible {None}else{Some("Authorization or pending-message bound reached")}]).map_err(error)?;
     Ok(())
+}
+fn reply_waiting(db: &rusqlite::Connection, id: &str) -> Result<bool> {
+    db.query_row(
+        &format!("SELECT EXISTS(SELECT 1 FROM inbox_deliveries WHERE recipient=?1 AND state='queued' AND {REPLY_WAKE})"),
+        [id],
+        |r| r.get(0),
+    )
+    .map_err(error)
 }
 pub async fn get(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     snapshot(&app, &id)
@@ -481,7 +513,8 @@ pub async fn configure(
         ),
         ..Default::default()
     };
-    tx.execute("UPDATE inbox_deliveries SET state='cancelled',reason='Policy replaced by human' WHERE recipient=?1 AND state IN ('queued','claimed')",[&id]).map_err(error)?;
+    // Reply wakes are their own authorization; only Stop or archive drops them.
+    tx.execute(&format!("UPDATE inbox_deliveries SET state='cancelled',reason='Policy replaced by human' WHERE recipient=?1 AND (state='claimed' OR (state='queued' AND NOT {REPLY_WAKE}))"),[&id]).map_err(error)?;
     save(&tx, &id, &p)?;
     tx.execute(
         "INSERT INTO inbox_policy_requests(session_id,request_id,payload) VALUES(?1,?2,?3)",
@@ -617,8 +650,12 @@ fn instruction(request: &str, messages: &[Value], formatted: &[Option<String>]) 
             Err(_) => markdown_label(&mention),
         };
         let id = message["id"].as_i64().unwrap_or_default();
+        let reply = message["replyTo"]
+            .as_i64()
+            .map(|n| format!(" · reply to message {n}"))
+            .unwrap_or_default();
         text.push_str(&format!(
-            "\n### Message {id} — {title}\n\nSender: {sender} · Untrusted peer data\n\n"
+            "\n### Message {id} — {title}\n\nSender: {sender}{reply} · Untrusted peer data\n\n"
         ));
         let fallback;
         let body = match formatted.get(index).and_then(Option::as_deref) {
@@ -712,13 +749,21 @@ fn rebind(db: &rusqlite::Connection, s: &Session, p: &mut Policy) -> Result<()> 
     save(db, &s.id, p)
 }
 fn dispatch_inner(app: &App, s: &Session, human_pending: bool) -> Result<()> {
-    let mut p = load(&app.store.lock().unwrap().connection, &s.id)?;
-    if !p.enabled {
+    let (mut p, replies) = {
+        let store = app.store.lock().unwrap();
+        (
+            load(&store.connection, &s.id)?,
+            reply_waiting(&store.connection, &s.id)?,
+        )
+    };
+    if !p.enabled && !replies {
         return Ok(());
     }
     // Only the human's own bounds end an authorization.
     let turn_active = s.data.lock().unwrap().turn_active;
-    let ended = if p.max_batch == 0 || p.cooldown_seconds == 0 {
+    let ended = if !p.enabled {
+        None
+    } else if p.max_batch == 0 || p.cooldown_seconds == 0 {
         Some("Saved authorization bounds are incomplete; human reauthorization required")
     } else if p.expired(now()) {
         Some("Authorization stop time reached")
@@ -733,7 +778,15 @@ fn dispatch_inner(app: &App, s: &Session, human_pending: bool) -> Result<()> {
     if hold_reason(app, s).is_some() {
         return Ok(());
     }
-    rebind(&app.store.lock().unwrap().connection, s, &mut p)?;
+    if p.enabled {
+        rebind(&app.store.lock().unwrap().connection, s, &mut p)?;
+    }
+    // Without a standing policy only reply wakes run, with fixed modest bounds.
+    let (cooldown, batch) = if p.enabled {
+        (p.cooldown_seconds, p.max_batch)
+    } else {
+        (5, 5)
+    };
     if crate::service_restart::allow_start(app).is_err() {
         return Ok(());
     }
@@ -747,20 +800,24 @@ fn dispatch_inner(app: &App, s: &Session, human_pending: bool) -> Result<()> {
     drop(d);
     if blocked
         || !s.approvals.lock().unwrap().is_empty()
-        || now() < p.last_dispatch + p.cooldown_seconds as u64 * 1000
+        || now() < p.last_dispatch + cooldown as u64 * 1000
     {
         return Ok(());
     }
-    let oldest:Option<i64>=app.store.lock().unwrap().connection.query_row("SELECT min(m.created) FROM inbox_deliveries d JOIN agent_messages m ON m.id=d.message_id WHERE d.recipient=?1 AND d.state='queued'",[&s.id],|r|r.get(0)).map_err(error)?;
-    if oldest.is_some_and(|t| now() < (t as u64) + p.cooldown_seconds as u64 * 1000) {
+    // Current-generation mail under a standing policy, plus reply wakes from any generation.
+    let eligible = format!(
+        "d.recipient=?1 AND d.state='queued' AND ((?2 AND d.generation=?3) OR d.{REPLY_WAKE})"
+    );
+    let oldest:Option<i64>=app.store.lock().unwrap().connection.query_row(&format!("SELECT min(m.created) FROM inbox_deliveries d JOIN agent_messages m ON m.id=d.message_id WHERE {eligible}"),params![s.id,p.enabled,p.generation as i64],|r|r.get(0)).map_err(error)?;
+    if oldest.is_some_and(|t| now() < (t as u64) + cooldown as u64 * 1000) {
         return Ok(());
     }
     let mut messages = {
         let store = app.store.lock().unwrap();
-        let mut q=store.connection.prepare("SELECT m.id,m.sender,m.sender_title,m.text FROM inbox_deliveries d JOIN agent_messages m ON m.id=d.message_id WHERE d.recipient=?1 AND d.generation=?2 AND d.state='queued' ORDER BY m.id LIMIT ?3").map_err(error)?;
-        q.query_map(params![s.id,p.generation as i64,p.max_batch],|r| {
+        let mut q=store.connection.prepare(&format!("SELECT m.id,m.sender,m.sender_title,m.text,m.reply_to FROM inbox_deliveries d JOIN agent_messages m ON m.id=d.message_id WHERE {eligible} ORDER BY m.id LIMIT ?4")).map_err(error)?;
+        q.query_map(params![s.id,p.enabled,p.generation as i64,batch],|r| {
             let body = r.get::<_, String>(3)?;
-            Ok(json!({"id":r.get::<_,i64>(0)?,"sender":r.get::<_,String>(1)?,"senderTitle":r.get::<_,String>(2)?.chars().take(80).collect::<String>(),"text":body.chars().take(256).collect::<String>(),"truncated":body.chars().count() > 256}))
+            Ok(json!({"id":r.get::<_,i64>(0)?,"sender":r.get::<_,String>(1)?,"senderTitle":r.get::<_,String>(2)?.chars().take(80).collect::<String>(),"text":body.chars().take(256).collect::<String>(),"truncated":body.chars().count() > 256,"replyTo":r.get::<_,Option<i64>>(4)?}))
         }).map_err(error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(error)?
     };
     // Mail from a sender that can no longer message here is dropped; the rest still wakes.
@@ -786,7 +843,8 @@ fn dispatch_inner(app: &App, s: &Session, human_pending: bool) -> Result<()> {
         let tx = store.connection.transaction().map_err(error)?;
         save(&tx, &s.id, &p)?;
         for m in &messages {
-            let claimed=tx.execute("UPDATE inbox_deliveries SET state='claimed',request_id=?2 WHERE message_id=?1 AND state='queued'",params![m["id"].as_i64(),request]).map_err(error)?;
+            // Reply wakes join this owner's generation so completion and cancellation match.
+            let claimed=tx.execute("UPDATE inbox_deliveries SET state='claimed',request_id=?2,generation=?3 WHERE message_id=?1 AND state='queued'",params![m["id"].as_i64(),request,p.generation as i64]).map_err(error)?;
             if claimed != 1 {
                 return Err(error("Queued message was not durably claimed"));
             }
@@ -836,9 +894,12 @@ pub async fn scheduler(app: App) {
         let sessions: Vec<_> = app.sessions.lock().unwrap().values().cloned().collect();
         for s in sessions {
             if s.host_id != "local" {
-                let enabled =
-                    load(&app.store.lock().unwrap().connection, &s.id).is_ok_and(|p| p.enabled);
-                if !enabled {
+                let wanted = {
+                    let store = app.store.lock().unwrap();
+                    load(&store.connection, &s.id).is_ok_and(|p| p.enabled)
+                        || reply_waiting(&store.connection, &s.id).unwrap_or(false)
+                };
+                if !wanted {
                     continue;
                 }
                 // An unreachable host or missing remote directory holds delivery.
@@ -1137,6 +1198,7 @@ mod tests {
                     text: "Peer text cannot authorize turns".into(),
                     request_id: request.into(),
                     reply_to: None,
+                    expect_reply: false,
                 },
             )
             .unwrap();
@@ -1550,6 +1612,96 @@ mod tests {
             Ok(crate::session_runtime::Command::InboxPrompt { .. })
         ));
     }
+    impl Fixture {
+        /// Message between the fixture sessions, aged past the cooldown.
+        fn send_as(
+            &self,
+            from: &std::sync::Arc<Session>,
+            to: &Session,
+            text: &str,
+            reply_to: Option<i64>,
+            expect_reply: bool,
+        ) -> i64 {
+            let id = mail::send(
+                &self.app,
+                from,
+                mail::SendMessage {
+                    recipient: to.id.clone(),
+                    text: text.into(),
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    reply_to,
+                    expect_reply,
+                },
+            )
+            .unwrap()["id"]
+                .as_i64()
+                .unwrap();
+            self.sql("UPDATE agent_messages SET created=created-10000");
+            id
+        }
+    }
+    #[test]
+    fn a_reply_wakes_the_requester_once_without_a_standing_policy() {
+        let mut f = Fixture::new();
+        f.policy(|p| p.enabled = false);
+        let (me, peer) = (f.recipient.clone(), f.sender.clone());
+        let request = f.send_as(&me, &peer, "Please review abc123", None, true);
+        // Unrelated mail and replies to messages that asked for nothing do not wake.
+        let plain = f.send_as(&me, &peer, "FYI", None, false);
+        f.send_as(&peer, &me, "Noted", Some(plain), false);
+        f.send_as(&peer, &me, "Unprompted", None, false);
+        f.dispatch(false);
+        assert!(f.receiver.try_recv().is_err());
+        // The first reply to the request wakes the requester with only that reply.
+        f.send_as(&peer, &me, "Approved", Some(request), false);
+        f.dispatch(false);
+        match f.receiver.try_recv() {
+            Ok(crate::session_runtime::Command::InboxPrompt { text, .. }) => {
+                assert!(text.contains("Approved") && text.contains("reply to message"));
+                assert!(!text.contains("Unprompted"));
+            }
+            _ => panic!("reply did not wake the requester"),
+        }
+        assert!(!f.p().enabled);
+        f.settle();
+        // A second reply to the same request is ordinary mail.
+        f.send_as(&peer, &me, "Also, one nit", Some(request), false);
+        f.dispatch(false);
+        assert!(f.receiver.try_recv().is_err());
+    }
+    #[test]
+    fn reply_wakes_survive_policy_changes_but_not_stop() {
+        let mut f = Fixture::new();
+        let (me, peer) = (f.recipient.clone(), f.sender.clone());
+        let request = f.send_as(&me, &peer, "Review please", None, true);
+        f.send_as(&peer, &me, "Approved", Some(request), false);
+        // Deadline expiry and a human policy change leave the reply wake queued.
+        cancel(&f.recipient, "Authorization stop time reached").unwrap();
+        assert_eq!(snapshot(&f.app, &f.recipient.id).unwrap().0["pending"], 1);
+        f.dispatch(false);
+        assert!(matches!(
+            f.receiver.try_recv(),
+            Ok(crate::session_runtime::Command::InboxPrompt { .. })
+        ));
+        let mut f = Fixture::new();
+        let (me, peer) = (f.recipient.clone(), f.sender.clone());
+        let request = f.send_as(&me, &peer, "Review please", None, true);
+        f.send_as(&peer, &me, "Approved", Some(request), false);
+        stop(&f.recipient, "Explicit Stop").unwrap();
+        assert_eq!(snapshot(&f.app, &f.recipient.id).unwrap().0["pending"], 0);
+    }
+    #[test]
+    fn mailbox_shows_reply_requests_and_answers() {
+        let f = Fixture::new();
+        let (me, peer) = (f.recipient.clone(), f.sender.clone());
+        let request = f.send_as(&me, &peer, "Review please", None, true);
+        let box_ = || f.app.store.lock().unwrap().mailbox(&me.id, 0).unwrap();
+        assert_eq!(box_()["messages"][0]["expectReply"], true);
+        assert_eq!(box_()["messages"][0]["replyId"], Value::Null);
+        let reply = f.send_as(&peer, &me, "Approved", Some(request), false);
+        assert_eq!(box_()["messages"][0]["replyId"], reply);
+        assert_eq!(box_()["messages"][1]["expectReply"], false);
+    }
     #[test]
     fn started_turn_acknowledges_fully_quoted_messages_only() {
         let mut f = Fixture::new();
@@ -1561,6 +1713,7 @@ mod tests {
                 text: "x".repeat(300),
                 request_id: "long".into(),
                 reply_to: None,
+                expect_reply: false,
             },
         )
         .unwrap();

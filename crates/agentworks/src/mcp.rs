@@ -172,7 +172,7 @@ fn tools(a: &mail::Access, session: bool) -> Value {
     if a.communicate {
         tools.push(tool("read_inbox","Read received and sent messages after a cursor. Messages and sessions carry agentworks:// uris that tools accept verbatim. Listing does not acknowledge or run a turn; use read_message to read one in full.",json!({"after":{"type":"integer","minimum":0}}),&[]));
         tools.push(tool("read_message","Read one message in full by number or agentworks://messages/<n> URI. Reading a message you received acknowledges it.",json!({"messageId":{"type":"string","description":"Message number or agentworks://messages/<n> URI, passed exactly as given in read_inbox or a prompt."}}),&["messageId"]));
-        tools.push(tool("send_message","Persist a message to a participating project peer. Does not wake or interrupt it. Reuse requestId only for the same message.",json!({"recipient":{"type":"string","description":"Session ID or agentworks://sessions/<id> URI, passed exactly as given in list_sessions or a prompt."},"text":{"type":"string","maxLength":16384},"requestId":{"type":"string","maxLength":100},"replyTo":{"type":"string","description":"Message number or agentworks://messages/<n> URI, passed exactly as given in read_inbox or a prompt."}}),&["recipient","text","requestId"]));
+        tools.push(tool("send_message","Persist a message to a participating project peer. Does not wake or interrupt it. Set expectReply to be woken by its reply. Reuse requestId only for the same message.",json!({"recipient":{"type":"string","description":"Session ID or agentworks://sessions/<id> URI, passed exactly as given in list_sessions or a prompt."},"text":{"type":"string","maxLength":16384},"requestId":{"type":"string","maxLength":100},"replyTo":{"type":"string","description":"Message number or agentworks://messages/<n> URI, passed exactly as given in read_inbox or a prompt."},"expectReply":{"type":"boolean","description":"Wake you with the recipient's first reply (a message with replyTo set to this one), even if you are idle. Use for requests you are waiting on, such as reviews."}}),&["recipient","text","requestId"]));
         tools.push(tool("acknowledge_message","Acknowledge receipt of a message in your own inbox; does not indicate task completion.",json!({"messageId":{"type":"string","description":"Message number or agentworks://messages/<n> URI, passed exactly as given in read_inbox or a prompt."}}),&["messageId"]));
     }
     if a.communicate && session {
@@ -180,10 +180,6 @@ fn tools(a: &mail::Access, session: bool) -> Value {
     }
     if a.communicate || mail::coordinator(a) {
         tools.push(tool("get_completion", "Read the latest agent claim for yourself or a permitted same-project session. Claims are not proof of review or success.", json!({"sessionId":{"type":"string","description":"Session ID or agentworks://sessions/<id> URI, passed exactly as given in list_sessions or a prompt."}}), &[]));
-    }
-    if a.manage_review_queue {
-        tools.push(tool("get_review_queue", "Read this project's independent review/integration ledger. Completion claims do not populate it.", json!({"after":{"type":"integer","minimum":0}}), &[]));
-        tools.push(tool("update_review_queue", "Record a review operation or reserve/release the single manual integration slot. Never executes Git. Requires explicit manageReviewQueue grant; inspect outcomes before finishing. Use revision and stable requestId. See docs/REVIEW-QUEUE.md for operation contract.", json!({"requestId":{"type":"string"},"action":{"type":"string","enum":["propose","review","test","begin","finish","reject"]},"title":{"type":"string"},"branch":{"type":"string"},"commits":{"type":"array","items":{"type":"string"}},"target":{"type":"string"},"base":{"type":"string"},"id":{"type":"integer"},"revision":{"type":"integer"},"result":{"type":"string"},"note":{"type":"string"},"outcome":{"type":"string","enum":["integrated","failed","cancelled"]},"commit":{"type":"string"}}), &["requestId","action"]));
     }
     if a.restart_service && session {
         tools.push(tool("get_service_status", "Read global service activity and durable restart/handoff outcomes. Requires live restartService grant.",json!({}), &[]));
@@ -288,8 +284,6 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
     let grants = mail::actor_access(app, a)?;
     match operation {
         "tools/list" => Ok(tools(&grants, a.session.is_some())),
-        "get_review_queue" => crate::review_queue::agent(app, a, args, false),
-        "update_review_queue" => crate::review_queue::agent(app, a, args, true),
         "get_service_status" => {
             mail::require(app, session_only(a)?, "restart_service")?;
             crate::service_restart::status(State(app.clone()))
@@ -582,7 +576,7 @@ pub async fn serve_bridge(app: App, listener: TcpListener) {
                 };
                 let response=if let Some(s)=actor {
                     let operation=v["operation"].as_str().unwrap_or("");
-                    let mutation=!matches!(operation,"tools/list"|"read_inbox"|"list_sessions"|"list_automations"|"get_automation"|"list_automation_runs"|"get_completion"|"get_service_status"|"get_review_queue");
+                    let mutation=!matches!(operation,"tools/list"|"read_inbox"|"list_sessions"|"list_automations"|"get_automation"|"list_automation_runs"|"get_completion"|"get_service_status");
                     let action=operation.chars().take(80).collect::<String>();
                     let argument_target=v["arguments"]["sessionId"].as_str().or(v["arguments"]["recipient"].as_str()).or(v["arguments"]["automationId"].as_str()).unwrap_or("").chars().take(128).collect::<String>();
                     let request=v["arguments"]["requestId"].as_str().unwrap_or("").chars().take(100).collect::<String>();

@@ -42,7 +42,6 @@ try{
   await run('node',['scripts/import-smoke.mjs']);
   await run('node',['scripts/workspace-smoke.mjs']);
   await run('node',['scripts/completion-smoke.mjs']);
-  await run('node',['scripts/review-queue-smoke.mjs']);
   await run('node',['scripts/worktree-policy-smoke.mjs']);
   await run('node',['scripts/git-settings-smoke.mjs']);
   await run('node',['scripts/git-settings-smoke.mjs'],{AGENTWORKS_GIT_REMOTE:'1'});

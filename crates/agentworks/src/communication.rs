@@ -29,9 +29,9 @@ impl Role {
             cancel_sessions: self == Self::Coordinator,
             run_automations: self == Self::Coordinator,
             restart_service: false,
-            manage_review_queue: false,
             archive_sessions: self == Self::Coordinator,
             manage_automations: false,
+            ..Default::default()
         }
     }
 }
@@ -56,8 +56,10 @@ pub struct Access {
     pub run_automations: bool,
     #[serde(default)]
     pub restart_service: bool,
-    #[serde(default)]
-    pub manage_review_queue: bool,
+    /// The review queue was removed. Saved grants and older clients may still send this
+    /// key, so it is accepted and ignored rather than rejected as unknown.
+    #[serde(default, rename = "manageReviewQueue", skip_serializing)]
+    pub _removed_review_queue: bool,
     /// Explicit controller grant; never inherited from a session role.
     #[serde(default)]
     pub archive_sessions: bool,
@@ -74,7 +76,6 @@ impl Access {
             || self.cancel_sessions
             || self.run_automations
             || self.restart_service
-            || self.manage_review_queue
             || self.archive_sessions
             || self.manage_automations
     }
@@ -94,6 +95,9 @@ pub struct SendMessage {
     pub request_id: String,
     #[serde(default, deserialize_with = "reply_ref")]
     pub reply_to: Option<i64>,
+    /// Wake the sending session once when the recipient first replies to this message.
+    #[serde(default)]
+    pub expect_reply: bool,
 }
 fn reply_ref<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<i64>, D::Error> {
     let v = Value::deserialize(d)?;
@@ -117,12 +121,14 @@ fn now() -> i64 {
         .as_millis() as i64
 }
 
-/// Columns: id,sender,sender_title,recipient,recipient_title,text,reply_to,created,acknowledged.
+/// Columns as selected by `MESSAGE_COLUMNS`.
 fn message_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     Ok(
-        json!({"id":r.get::<_,i64>(0)?,"uri":format!("{MESSAGE_URI}{}",r.get::<_,i64>(0)?),"sender":r.get::<_,String>(1)?,"senderUri":actor_uri(&r.get::<_,String>(1)?),"senderTitle":r.get::<_,String>(2)?,"recipient":r.get::<_,String>(3)?,"recipientUri":actor_uri(&r.get::<_,String>(3)?),"recipientTitle":r.get::<_,String>(4)?,"text":r.get::<_,String>(5)?,"replyTo":r.get::<_,Option<i64>>(6)?,"replyToUri":r.get::<_,Option<i64>>(6)?.map(|n|format!("{MESSAGE_URI}{n}")),"created":r.get::<_,i64>(7)?,"acknowledged":r.get::<_,bool>(8)?}),
+        json!({"id":r.get::<_,i64>(0)?,"uri":format!("{MESSAGE_URI}{}",r.get::<_,i64>(0)?),"sender":r.get::<_,String>(1)?,"senderUri":actor_uri(&r.get::<_,String>(1)?),"senderTitle":r.get::<_,String>(2)?,"recipient":r.get::<_,String>(3)?,"recipientUri":actor_uri(&r.get::<_,String>(3)?),"recipientTitle":r.get::<_,String>(4)?,"text":r.get::<_,String>(5)?,"replyTo":r.get::<_,Option<i64>>(6)?,"replyToUri":r.get::<_,Option<i64>>(6)?.map(|n|format!("{MESSAGE_URI}{n}")),"created":r.get::<_,i64>(7)?,"acknowledged":r.get::<_,bool>(8)?,"expectReply":r.get::<_,bool>(9)?,"replyId":r.get::<_,Option<i64>>(10)?}),
     )
 }
+/// `expectReply` and `replyId` show an outstanding or answered reply request.
+const MESSAGE_COLUMNS: &str = "SELECT m.id,m.sender,m.sender_title,m.recipient,m.recipient_title,m.text,m.reply_to,m.created,m.acknowledged,r.message_id IS NOT NULL,r.reply_id FROM agent_messages m LEFT JOIN reply_requests r ON r.message_id=m.id";
 impl crate::store::Store {
     pub fn access(&self, id: &str) -> Result<Access> {
         let raw: Option<String> = self
@@ -147,7 +153,7 @@ impl crate::store::Store {
         if after < 0 {
             return Err(fail(StatusCode::BAD_REQUEST, "Invalid message cursor"));
         }
-        let mut q=self.connection.prepare("SELECT id,sender,sender_title,recipient,recipient_title,text,reply_to,created,acknowledged FROM agent_messages WHERE (sender=?1 OR recipient=?1) AND id>?2 ORDER BY id LIMIT 21").map_err(db_error)?;
+        let mut q=self.connection.prepare(&format!("{MESSAGE_COLUMNS} WHERE (m.sender=?1 OR m.recipient=?1) AND m.id>?2 ORDER BY m.id LIMIT 21")).map_err(db_error)?;
         let mut messages = q
             .query_map(params![id, after], message_row)
             .map_err(db_error)?
@@ -162,7 +168,15 @@ impl crate::store::Store {
     /// Fetching one message means the reader saw its full text, so a received message is
     /// acknowledged on read. Sent messages are readable but never acknowledged by the sender.
     pub fn read_message(&self, id: &str, message: i64) -> Result<Value> {
-        let found=self.connection.query_row("SELECT id,sender,sender_title,recipient,recipient_title,text,reply_to,created,acknowledged FROM agent_messages WHERE id=?1 AND (sender=?2 OR recipient=?2)",params![message,id],message_row).optional().map_err(db_error)?;
+        let found = self
+            .connection
+            .query_row(
+                &format!("{MESSAGE_COLUMNS} WHERE m.id=?1 AND (m.sender=?2 OR m.recipient=?2)"),
+                params![message, id],
+                message_row,
+            )
+            .optional()
+            .map_err(db_error)?;
         let Some(mut found) = found else {
             return Err(fail(
                 StatusCode::NOT_FOUND,
@@ -304,7 +318,6 @@ fn permitted(a: &Access, capability: &str) -> bool {
         "cancel_sessions" => a.cancel_sessions,
         "run_automations" => a.run_automations,
         "restart_service" => a.restart_service,
-        "manage_review_queue" => a.manage_review_queue,
         "archive_sessions" => a.archive_sessions,
         "manage_automations" => a.manage_automations,
         _ => false,
@@ -497,9 +510,17 @@ pub fn send_as(app: &App, s: &Actor, req: SendMessage) -> Result<Value> {
     tx.execute("INSERT INTO agent_messages(sender,sender_title,recipient,recipient_title,text,reply_to,created,request_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![s.id,sender_title,target_id,target_title,req.text,req.reply_to,now(),req.request_id]).map_err(db_error)?;
     let id = tx.last_insert_rowid();
     tx.execute("INSERT INTO agent_audit(actor,action,target,outcome,created) VALUES (?1,'send_message',?2,'accepted',?3)",params![s.id,target_id,now()]).map_err(db_error)?;
+    // Only a session can be woken by the reply it asked for.
+    if req.expect_reply && s.session.is_some() {
+        tx.execute(
+            "INSERT INTO reply_requests(message_id,requester) VALUES(?1,?2)",
+            params![id, s.id],
+        )
+        .map_err(db_error)?;
+    }
     // Only session peers can feed opt-in wake delivery; controllers need an explicit prompt grant.
     if target.is_some() && s.session.is_some() {
-        crate::inbox_delivery::enqueue(&tx, &target_id, id)?;
+        crate::inbox_delivery::enqueue(&tx, &target_id, id, req.reply_to)?;
     }
     tx.commit().map_err(db_error)?;
     drop(store);

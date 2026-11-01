@@ -1529,7 +1529,7 @@ async function init(){
 }
 init().catch(error=>toast('Cannot reach the local server: '+error.message));
 
-setupCommunication({api,getActive:()=>active,getSessions:()=>sessions,selectSession,toast,uuid});
+setupCommunication({api,getActive:()=>active,getSessions:()=>sessions,selectSession,toast});
 setupInboxDelivery({api,getActive:()=>active,toast,uuid});
 
 const github=setupGithub({api,getActive:()=>active});

@@ -35,7 +35,6 @@ mod native_rename;
 mod notifications;
 mod permission_modes;
 mod recovery;
-mod review_queue;
 mod roles;
 mod service_restart;
 mod service_unit;
@@ -1291,10 +1290,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/api/projects/{id}/archive", post(archive_project))
         .route(
-            "/api/projects/{id}/review-queue",
-            get(review_queue::get).post(review_queue::post),
-        )
-        .route(
             "/api/projects/{id}/workspace-policy",
             get(worktrees::get_policy).put(worktrees::put_policy),
         )
@@ -2232,7 +2227,6 @@ async fn delete_project(
     if !app.catalog.lock().unwrap().contains(&id) {
         return Err(fail(StatusCode::BAD_REQUEST, "Project not found"));
     }
-    review_queue::ensure_project_removable(&app.store.lock().unwrap().connection, &id)?;
     app.store
         .lock()
         .unwrap()
@@ -3976,14 +3970,12 @@ mod tests {
         assert!(!participant.cancel_sessions);
         assert!(!participant.run_automations);
         assert!(!participant.restart_service);
-        assert!(!participant.manage_review_queue);
 
         let coordinator = initial_agent_access(None, false, communication::Role::Coordinator)
             .expect("explicit project coordinator role should be materialized");
         assert!(coordinator.start_sessions);
         assert!(coordinator.archive_sessions);
         assert!(!coordinator.restart_service);
-        assert!(!coordinator.manage_review_queue);
 
         assert!(initial_agent_access(None, true, communication::Role::Coordinator).is_none());
         let preserved = initial_agent_access(

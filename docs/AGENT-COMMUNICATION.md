@@ -6,7 +6,7 @@ Implemented: native Rust stdio MCP and private loopback service bridge; durable 
 
 The sections below describe the intended architecture, including later capabilities. The current implementation exposes no settings, deletion, access-grant, or harness-approval tools.
 
-The [review queue](REVIEW-QUEUE.md) adds separately opted-in `manageReviewQueue` MCP access for scoped review records and manual integration reservations. Existing Coordinator presets do not grant it; no queue tool executes Git.
+Review and merge coordination uses ordinary messages: send a review request with `expectReply` and the reply wakes you (see [inbox delivery](INBOX-DELIVERY.md#reply-requests)). The former review queue and its `manageReviewQueue` grant were removed; saved grants with that key are accepted and ignored.
 
 ## Communication role defaults
 

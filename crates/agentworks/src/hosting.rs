@@ -54,10 +54,6 @@ pub async fn asset(axum::extract::Path(name): axum::extract::Path<String>) -> Re
             "text/css; charset=utf-8",
             include_bytes!("../../../web/dashboard.css"),
         ),
-        "review-queue.js" => (
-            "text/javascript; charset=utf-8",
-            include_bytes!("../../../web/review-queue.js"),
-        ),
         "terminal.js" => (
             "text/javascript; charset=utf-8",
             include_bytes!("../../../web/terminal.js"),

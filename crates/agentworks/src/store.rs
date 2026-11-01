@@ -83,11 +83,10 @@ impl Store {
           CREATE INDEX IF NOT EXISTS agent_completions_latest ON agent_completions(author,id DESC);
           CREATE TABLE IF NOT EXISTS session_creations(request_key TEXT PRIMARY KEY,payload TEXT NOT NULL,session_id TEXT,error TEXT,mutation_started INTEGER NOT NULL DEFAULT 0);
           COMMIT;")?;
-        // C-01 controllers, C-05 review records, U-05 parser scripts, roles and A-01 schedules are additive schema migrations.
+        // C-01 controllers, U-05 parser scripts, roles and A-01 schedules are additive schema migrations.
         connection.execute_batch(&format!(
-            "BEGIN; {} {} {} {} {} {} {} PRAGMA user_version={SCHEMA_VERSION}; COMMIT;",
+            "BEGIN; {} {} {} {} {} {} PRAGMA user_version={SCHEMA_VERSION}; COMMIT;",
             crate::inbox_delivery::SCHEMA,
-            crate::review_queue::SCHEMA,
             crate::controllers::SCHEMA,
             crate::tool_progress::SCHEMA,
             crate::roles::SCHEMA,
