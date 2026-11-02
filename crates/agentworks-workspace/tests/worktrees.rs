@@ -120,6 +120,177 @@ impl Context for Fixture {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn assert_lfs_cow_sharing(owned: &cleanup::Owned) {
+    use std::os::unix::fs::MetadataExt;
+    if owned.population.as_deref() != Some("cow") {
+        return;
+    }
+    let template = owned
+        .common_dir
+        .join("agentworks-cow/v2")
+        .join(&owned.base_commit)
+        .join("asset.bin");
+    let target = owned.path.join("asset.bin");
+    assert_ne!(
+        std::fs::metadata(&template).unwrap().ino(),
+        std::fs::metadata(&target).unwrap().ino()
+    );
+    for file in [&template, &target] {
+        std::fs::File::open(file).unwrap().sync_all().unwrap();
+    }
+    if let Ok(extents) = Command::new("filefrag")
+        .arg("-v")
+        .arg(&template)
+        .arg(&target)
+        .output()
+    {
+        assert!(extents.status.success());
+        assert!(
+            String::from_utf8_lossy(&extents.stdout)
+                .matches("shared")
+                .count()
+                >= 2,
+            "Hydrated LFS template and checkout must share physical blocks: {}",
+            String::from_utf8_lossy(&extents.stdout)
+        );
+    }
+}
+
+async fn lfs_checkout(copy: agentworks_workspace::config::CopyMode) {
+    if !Command::new("git")
+        .args(["lfs", "version"])
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        eprintln!("Git LFS unavailable; skipping LFS integration test");
+        return;
+    }
+    let mut fixture = Fixture::new_in(std::env::current_dir().unwrap().join("target"));
+    fixture.settings.copy = copy;
+    fixture.git(&["lfs", "install", "--local", "--skip-repo"]);
+    std::fs::write(
+        fixture.repo.join(".gitattributes"),
+        "*.bin filter=lfs -text\n",
+    )
+    .unwrap();
+    let content = vec![42_u8; 8192];
+    std::fs::write(fixture.repo.join("asset.bin"), &content).unwrap();
+    fixture.git(&["add", "."]);
+    fixture.git(&[
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@localhost",
+        "commit",
+        "-m",
+        "LFS fixture",
+    ]);
+    // Model the usual install: LFS filters exist only in global config, which
+    // Agentworks deliberately ignores. Keep the object in the shared LFS store.
+    for key in [
+        "filter.lfs.clean",
+        "filter.lfs.smudge",
+        "filter.lfs.process",
+        "filter.lfs.required",
+    ] {
+        fixture.git(&["config", "--local", "--unset-all", key]);
+    }
+    let pointer = git::git(&fixture.repo, &fixture.root, &["show", "HEAD:asset.bin"])
+        .await
+        .unwrap()
+        .1;
+    assert!(pointer.starts_with("version https://git-lfs.github.com/spec/v1\n"));
+    if copy == agentworks_workspace::config::CopyMode::RequireCow {
+        let commit = git::git(&fixture.repo, &fixture.root, &["rev-parse", "HEAD"])
+            .await
+            .unwrap()
+            .1;
+        let legacy = fixture.repo.join(".git/agentworks-cow").join(commit);
+        fixture.git(&[
+            "-c",
+            "filter.lfs.process=",
+            "-c",
+            "filter.lfs.smudge=",
+            "-c",
+            "filter.lfs.required=false",
+            "worktree",
+            "add",
+            "--detach",
+            legacy.to_str().unwrap(),
+            "HEAD",
+        ]);
+        assert_eq!(
+            std::fs::read_to_string(legacy.join("asset.bin"))
+                .unwrap()
+                .trim_end(),
+            pointer
+        );
+    }
+    let result = worktrees::prepare_in(
+        &fixture,
+        Some(&fixture.workspace()),
+        Policy::default(),
+        false,
+        fixture.repo.clone(),
+        Some("creation"),
+    )
+    .await;
+    let (path, owned) = match result {
+        Err((_, message)) if message.contains("do not support reflinks") => {
+            eprintln!("Reflink filesystem unavailable: {message}");
+            return;
+        }
+        other => other.unwrap(),
+    };
+    let mut owned = owned.unwrap();
+    assert_eq!(std::fs::read(path.join("asset.bin")).unwrap(), content);
+    #[cfg(target_os = "linux")]
+    assert_lfs_cow_sharing(&owned);
+    let inspection = cleanup::inspect_in(&fixture, Some(owned.clone())).await;
+    assert!(!inspection.dirty.unwrap().any());
+    cleanup::remove_in(&fixture, &owned, inspection.fingerprint.as_deref(), false)
+        .await
+        .unwrap();
+    owned.removed = Some(1);
+    cleanup::restore_in(&fixture, &owned).await.unwrap();
+    owned.removed = None;
+    assert_eq!(std::fs::read(path.join("asset.bin")).unwrap(), content);
+    #[cfg(target_os = "linux")]
+    assert_lfs_cow_sharing(&owned);
+    assert!(
+        !cleanup::inspect_in(&fixture, Some(owned.clone()))
+            .await
+            .dirty
+            .unwrap()
+            .any()
+    );
+    std::fs::write(path.join("asset.bin"), "edited LFS file").unwrap();
+    assert_eq!(
+        std::fs::read(fixture.repo.join("asset.bin")).unwrap(),
+        content
+    );
+    if owned.population.as_deref() == Some("cow") {
+        let template = owned
+            .common_dir
+            .join("agentworks-cow/v2")
+            .join(&owned.base_commit)
+            .join("asset.bin");
+        assert_eq!(std::fs::read(template).unwrap(), content);
+    }
+}
+
+#[tokio::test]
+async fn plain_worktree_hydrates_lfs_on_create_and_restore() {
+    lfs_checkout(agentworks_workspace::config::CopyMode::Plain).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn cow_worktree_hydrates_lfs_on_create_and_restore() {
+    lfs_checkout(agentworks_workspace::config::CopyMode::RequireCow).await;
+}
+
 #[tokio::test]
 async fn owned_checkout_requires_current_confirmation_and_restores_retained_branch() {
     let fixture = Fixture::new();
@@ -333,6 +504,7 @@ async fn cow_checkout_is_clean_isolated_and_restorable_with_a_dirty_source() {
     let template_file = owned
         .common_dir
         .join("agentworks-cow")
+        .join("v2")
         .join(&owned.base_commit)
         .join("large.bin");
     std::fs::File::open(&template_file)

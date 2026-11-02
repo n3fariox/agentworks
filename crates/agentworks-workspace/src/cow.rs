@@ -145,7 +145,11 @@ pub async fn populate(
             "CoW probe failed; check permissions and available space",
         ));
     }
-    let template = cache.join(commit);
+    // v1 templates were checked out without global LFS filters and may contain
+    // clean pointer files. Retain them, but never seed new checkouts from them.
+    let templates = cache.join("v2");
+    checked_directory(&templates)?;
+    let template = templates.join(commit);
     let template_text = template
         .to_str()
         .ok_or_else(|| error("CoW template path must be UTF-8"))?;
