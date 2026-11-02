@@ -141,3 +141,4 @@ body[data-workspace-view=host-terminal] .workspace-context{display:none}
 .message-body div.user-formatted>:last-child{margin-bottom:0}
 
 .model-viewer{display:block;width:100%;height:clamp(320px,65vh,760px);border:0;border-radius:8px;background:#171a1e}
+.background-job-preview:not([hidden]){display:block;margin-top:5px;color:var(--muted);font-size:11px;line-height:1.5;min-width:0}.background-job-preview>span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.background-jobs[open]>summary .background-job-preview{display:none}
