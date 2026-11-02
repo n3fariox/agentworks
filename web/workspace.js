@@ -148,7 +148,10 @@ export function createWorkspace(hooks){
       const frame=el('iframe','model-viewer');frame.title='3D model: '+filename;frame.setAttribute('referrerpolicy','no-referrer');
       frame.src=appUrl('model-viewer-frame.html')+'#'+encodeURIComponent(JSON.stringify({url:fileUrl(file),path:file.path}));body.append(frame);
     }
-    else if(file.type?.startsWith('image/')){const image=el('img','file-image');image.src=fileUrl(file);image.alt=file.path;body.append(image);}
+    else if(file.type?.startsWith('image/')){
+      const image=el('img','file-image');image.src=fileUrl(file);image.alt=file.path;hooks.imageViewer.decorate(image);body.append(image);
+      const enlarge=el('button','text-button','Enlarge image');enlarge.type='button';enlarge.onclick=()=>image.click();actions.prepend(enlarge);
+    }
     else if(file.type?.startsWith('text/')){
       if(!file.source&&file.html){body.innerHTML=file.html;decorate(body,file,side);enhanceMermaid(body,file.mermaidClass);}else body.append(el('pre','workspace-source',file.text.slice(0,100000)));
       hooks.enhanceBlocks?.(body,`workspace:${file.location.id}:${file.path}`,{language:!file.source&&file.html?'':/\.([\w+-]+)$/.exec(file.path)?.[1]||'',lineNumbers:file.source||!file.html,raw:file.source||!file.html?file.text:undefined});

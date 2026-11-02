@@ -23,7 +23,7 @@ test.beforeAll(async()=>{
   await writeFile(join(fixture,'docs/deep/file with spaces.md'),'# Nested preview\n');
   await writeFile(join(fixture,'file with spaces.rs'),Array.from({length:90},(_,i)=>`// line ${i+1}`).join('\n'));
   await symlink('/etc/passwd',join(fixture,'escape.txt'));
-  server=spawn(resolve('target/debug/agentworks'),[],{env:{...process.env,
+  server=spawn(process.env.AGENTWORKS_TEST_BINARY||resolve('target/debug/agentworks'),[],{env:{...process.env,
     AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:'4498',AGENTWORKS_ROOTS:fixture,
     AGENTWORKS_CATALOG_PATH:join(fixture,'catalog.json'),AGENTWORKS_DB_PATH:join(fixture,'sessions.sqlite3'),AGENTWORKS_DEMO_STATE_DIR:join(fixture,'demo')},stdio:['ignore','pipe','pipe']});
   server.on('error',e=>{log+=e.message;exited=true;});server.on('exit',()=>exited=true);
@@ -95,6 +95,37 @@ test('file references: absolute, encoded and spaced paths, line navigation, exte
  await context.route('https://example.com/**',route=>route.fulfill({body:'External destination'}));
  const opened=page.waitForEvent('popup');await external.click();const popup=await opened;await popup.waitForLoadState();expect(popup.url()).toBe('https://example.com/a:42?q=x#part');await popup.close();
  const response=await page.request.get(`/api/sessions/${session.id}/file?path=${encodeURIComponent('../'.repeat(15)+'etc/passwd')}`);expect(response.status()).toBe(403);
+});
+
+for(const view of ['files','side','phone-side'])test(`file browser images open the shared zoom viewer (${view})`,async({page})=>{
+ const mobile=view==='phone-side';
+ await page.setViewportSize(mobile?{width:390,height:844}:{width:1100,height:800});
+ const png=await page.evaluate(()=>{const c=document.createElement('canvas');c.width=2000;c.height=1400;return c.toDataURL('image/png').split(',')[1];});
+ await writeFile(join(fixture,'browser image.png'),Buffer.from(png,'base64'));
+ await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),session.id);await page.goto('/');
+ await expect(page.locator('#session-state')).toHaveText('Ready');
+ if(view==='files')await page.locator('#nav-files').click();
+ else{if(mobile)await page.locator('#session-more').click();await page.locator('#session-files').click();}
+ const entries=page.locator(view==='files'?'#file-entries':'#side-file-entries');
+ await entries.locator('button[data-path="browser image.png"]').click();
+ const preview=page.locator(view==='files'?'#workspace-file-detail':'#workspace-preview');
+ const inline=preview.getByRole('button',{name:'Enlarge image: browser image.png',exact:true});
+ await expect(inline).toBeVisible();
+ await preview.getByRole('button',{name:'Enlarge image',exact:true}).click();
+ const viewer=page.getByRole('dialog',{name:'Image viewer'}),output=viewer.locator('output');
+ await expect(viewer).toBeVisible();
+ await expect(viewer.locator('img')).toHaveJSProperty('naturalWidth',2000);
+ await expect(viewer.locator('img')).toHaveAttribute('src',await inline.getAttribute('src'));
+ const fit=await output.textContent();expect(parseInt(fit)).toBeLessThan(100);
+ await viewer.getByRole('button',{name:'Actual size'}).click();await expect(output).toHaveText('100%');
+ await viewer.getByRole('button',{name:'Zoom in'}).click();await expect(output).toHaveText('125%');
+ await viewer.getByRole('button',{name:'Fit image'}).click();await expect(output).toHaveText(fit);
+ await viewer.getByRole('button',{name:'Close image viewer'}).click();await expect(viewer).not.toBeVisible();
+ await expect(inline).toBeFocused();await expect(preview).toBeVisible();
+ await inline.press('Enter');await expect(viewer).toBeVisible();
+ await page.keyboard.press('Escape');await expect(inline).toBeFocused();
+ await inline.click();await expect(viewer).toBeVisible();await page.keyboard.press('Escape');
+ await expect(preview.getByRole('link',{name:'Download'})).toBeVisible();
 });
 
 test('inline image viewer: fit, actual size, keyboard/wheel zoom, pan, focus and chat restoration',async({page})=>{

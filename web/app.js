@@ -1493,7 +1493,7 @@ document.addEventListener('keydown',event=>{if(event.key==='n'&&!event.ctrlKey&&
 const diffView=setupDiff({api,root:$('side-diff'),enhanceBlocks:display.enhance});
 timeoutControls=setupTimeoutControls({$,api,getActive:()=>active});
 parserScripts=setupParserScripts({$,api,el});
-workspace=createWorkspace({api,toast,labels,uuid,
+workspace=createWorkspace({api,toast,labels,uuid,imageViewer,
   viewChanged(view){
     if(view==='host-terminal'){
       terminalHost=hosts.find(host=>host.id===(terminalHost?.id||localStorage.getItem('agentworks-terminal-host')));
