@@ -1,6 +1,7 @@
 //! GitHub context. Git metadata may come from workers; credentials and API
 //! traffic always belong to this server's OS user. No agent write tools here.
 mod browser;
+mod session_pivot;
 use crate::{ApiResult, App, fail, session};
 use axum::{
     Json,
@@ -10,6 +11,7 @@ use axum::{
 pub use browser::{pulls, save_polling};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+pub use session_pivot::sessions;
 use std::{
     collections::HashMap,
     process::Stdio,

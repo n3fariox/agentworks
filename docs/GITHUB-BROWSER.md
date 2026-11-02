@@ -18,7 +18,11 @@ Dashboard and session context reads share normalized PR records keyed by host/ac
 
 Right-click a PR row, use the keyboard context-menu key, or use **Open in session…**. On touch screens the same delegated long-press menu is available, along with the visible button.
 
-This opens the existing **New Session** dialog. It prefills the title, new-worktree mode, a unique local branch based on the PR branch, and the observed PR head commit. Choose the project, execution host and harness using the normal dialog. The prefill survives project-policy loading and project changes. Nothing is created until you submit the dialog.
+**Open in session…** looks up sessions using the full GitHub host/repository/PR number. If there are matches, a chooser shows each session’s title, project, execution host, harness, status and directory. Choose one to switch to its conversation, or choose **New session…**. This navigation uses normal session-opening behavior, including reconnect/resume rules, without sending a prompt or changing its checkout. If there are no matches, it opens the New Session dialog directly. The context menu also offers **New session…** to go straight to creation.
+
+Associations come from saved explicit PR attachments and the PR tracker’s last observed matches, across all credential accounts and execution hosts. Archived matches appear in a collapsed **Archived sessions** section below active matches. Opening one shows its saved conversation without unarchiving it or automatically resuming a suspended harness; normal session actions still provide explicit unarchive. When only archived matches exist, the chooser remains available with an empty active section and the archived group. Deleted sessions are excluded. Lookups happen on demand and do not poll GitHub or inspect workers. A branch change is reflected after the normal tracker refresh; during an outage, a last observed match may remain available. The session is rechecked before opening, so a deleted session produces an error. A session archived after being listed as active asks you to reopen the chooser and use its archived entry. No selection restores or unarchives a session.
+
+New-session creation uses the existing **New Session** dialog. It prefills the title, new-worktree mode, a unique local branch based on the PR branch, and the observed PR head commit. Choose the project, execution host and harness using the normal dialog. The prefill survives project-policy loading and project changes. Nothing is created until you submit the dialog.
 
 On submission:
 
@@ -32,6 +36,7 @@ The Git fetch uses the execution host's normal Git credentials. Integration toke
 ## APIs
 
 - `GET /api/github/pulls`: cached/due authored/assigned/review-requested PR groups by host, account messages, per-host interval and next polling eligibility. Calling this endpoint explicitly opts into the broad listing read; the background session tracker does not invoke it.
+- `GET /api/github/sessions?host=…&owner=…&repo=…&number=…`: local associated-session lookup, with session metadata, project/host display names and attachment/observation provenance. No GitHub requests or persistent mutations.
 - `PUT /api/github/polling`: `{host, intervalSeconds}`. The host must be configured or present in the latest discovered accounts. Reschedules its session watches. Does not enable an account.
 - `GET /api/github/connections`: additionally returns per-host `polling` preferences.
 - A new-worktree submission can include `workspace.pullRequest: {host,owner,repo,number,headSha}` with `baseRef` equal to `headSha`. This pins and validates the PR checkout; it grants no GitHub write authority.

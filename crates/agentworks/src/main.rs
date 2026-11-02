@@ -1423,6 +1423,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/api/github/verify", post(github::verify))
         .route("/api/github/pulls", get(github::pulls))
+        .route("/api/github/sessions", get(github::sessions))
         .route(
             "/api/github/polling",
             axum::routing::put(github::save_polling),

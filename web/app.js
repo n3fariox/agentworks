@@ -603,7 +603,7 @@ function selectSession(s) {
   setTitle(s.title);$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;
   $('session-notice').hidden=true;document.body.classList.remove('menu-open');sidebarPin.close();sidebar();updateControls();connect(generation);
   workspace?.sessionSelected(s);sidePanel?.sessionChanged();sessionTerminal?.sessionChanged();promptResize.size();
-  if(s.status==='suspended'&&!s.explicitlySuspended)resumeSession(s.id);
+  if(s.status==='suspended'&&!s.explicitlySuspended&&!s.archived)resumeSession(s.id);
 }
 function connect(gen){
   if(gen!==generation||!active)return;
@@ -650,7 +650,7 @@ function connect(gen){
       for(const [id,view] of Object.entries(e.toolProgress||{}))applyToolProgress(tools.get(id),view,view.seq);
       Object.assign(active,e.session);setTitle(active.title);renderUnread();
       active.continuation=e.session.continuation;
-      approvals=new Map(e.approvals.map(a=>[a.id,a]));status=e.session.status;modelConfig=e.models;syncModelLabel();permissionModes=e.permissionModes;sessionConfig=e.sessionConfig;active.providerCapabilities=e.providerCapabilities;attachments.setPolicy(e.attachments);if(status==='suspended'&&!e.session.explicitlySuspended&&!active.providerHistoryDeletion)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();inputQueue.set(e.session.inputQueue);inputQueue.observe(status,{live:false});
+      approvals=new Map(e.approvals.map(a=>[a.id,a]));status=e.session.status;modelConfig=e.models;syncModelLabel();permissionModes=e.permissionModes;sessionConfig=e.sessionConfig;active.providerCapabilities=e.providerCapabilities;attachments.setPolicy(e.attachments);if(status==='suspended'&&!e.session.explicitlySuspended&&!e.session.archived&&!active.providerHistoryDeletion)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();inputQueue.set(e.session.inputQueue);inputQueue.observe(status,{live:false});
       if(active.providerHistoryDeletion){$('session-notice').textContent=active.providerHistoryDeletion==='deleted'?'Provider history was deleted. This Agentworks transcript remains because local cleanup did not finish; retry Delete everywhere or delete this transcript.':'Provider-history deletion was not confirmed. This transcript is retained and resume is blocked; inspect provider history, then retry Delete everywhere or delete only this transcript.';$('session-notice').hidden=false;}
       if(e.storageError){$('session-notice').textContent=e.storageError;$('session-notice').hidden=false;}
     }else{

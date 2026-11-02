@@ -541,3 +541,7 @@ body[data-code-theme=github-light] .source-line::before{color:#6e7781}
 #lifecycle-menu>summary{position:relative}
 .session-more.has-unread::after,#lifecycle-menu.has-unread>summary::after{content:'';position:absolute;top:3px;right:3px;width:7px;height:7px;border-radius:50%;background:#ef6b6b;box-shadow:0 0 0 2px var(--bg)}
 #session-agents.has-unread::after{content:'';display:inline-block;width:7px;height:7px;margin-left:7px;border-radius:50%;background:#ef6b6b;vertical-align:middle}
+
+#github-session-dialog{width:min(640px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overflow:auto}.github-session-list{display:flex;flex-direction:column;gap:8px;margin-top:16px;max-height:50dvh;overflow:auto}.github-session-choice{background:var(--bg);border:1px solid var(--border);border-radius:8px;font-size:13px;display:flex;flex-direction:column;gap:6px;width:100%;padding:12px;text-align:left;overflow-wrap:anywhere}.github-session-choice:hover{background:#24262c}.github-session-choice small{color:var(--muted);font-size:11px;line-height:1.5}#github-session-dialog .dialog-footer .text-button{font-size:13px;padding:10px}
+
+.github-session-choices{display:flex;flex-direction:column;gap:8px}.github-session-archived{border-top:1px solid var(--border);margin-top:8px;padding-top:14px}.github-session-archived>summary{cursor:pointer;color:var(--muted);padding:6px 0}.github-session-archived .field-note{margin:8px 0 12px}

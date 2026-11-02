@@ -265,6 +265,7 @@ function githubBrowserData(){
 for(const mobile of [false,true])test(`GitHub sidebar tables and PR-to-session prefill ${mobile?'mobile':'desktop'}`,async({page})=>{
   if(mobile)await page.setViewportSize({width:390,height:844});
   const dataset=githubBrowserData();let reads=0;
+  await page.route('**/api/github/sessions?*',route=>route.fulfill({json:{sessions:[]}}));
   await page.route('**/api/github/pulls',route=>{reads++;return route.fulfill({json:dataset});});
   await page.goto(base);expect(reads).toBe(0);await page.locator('#nav-github').click();
   await expect(page.locator('.github-pr-table')).toHaveCount(3);await expect(page.locator('.github-browser-row')).toHaveCount(3);
@@ -300,4 +301,91 @@ test('each host keeps one table while its repository groups collapse independent
   const data=githubBrowserData();data.hosts=data.hosts.slice(0,1);const extra=structuredClone(data.hosts[0].rows[0]);extra.repository.name='other';extra.pr.number=104;extra.pr.url='https://github.com/team/other/pull/104';extra.badge.label='PR#104';extra.badge.url=extra.pr.url;data.hosts[0].rows.push(extra);
   await page.route('**/api/github/pulls',route=>route.fulfill({json:data}));await page.goto(base+'/?view=github');await expect(page.locator('.github-pr-table')).toHaveCount(1);await expect(page.locator('.github-browser-row')).toHaveCount(2);
   await page.getByRole('button',{name:'Toggle github.com/team/repo',exact:true}).click();await expect(page.locator('.github-browser-row[data-number="100"]')).toBeHidden();await expect(page.locator('.github-browser-row[data-number="104"]')).toBeVisible();
+});
+
+for(const mobile of [false,true])test(`PR pivots to existing sessions and still offers new session ${mobile?'mobile':'desktop'}`,async({page})=>{
+  if(mobile)await page.setViewportSize({width:390,height:844});
+  const dataset=githubBrowserData(),number=mobile?821:820;
+  const item=dataset.hosts[1].rows[0];item.pr.number=number;item.badge.label=`PR#${number}`;
+  dataset.hosts=[dataset.hosts[1]];
+  const first=await api('/api/sessions',{provider:'demo',cwd:repo,title:'Review <b>one</b>'});
+  const second=await api('/api/sessions',{provider:'demo',cwd:linked,title:'Review two'});
+  const wrongNumber=await api('/api/sessions',{provider:'demo',cwd:repo,title:'Wrong host'});
+  const archived=await api('/api/sessions',{provider:'demo',cwd:repo,title:'Archived review'});
+  const links=[{host:'ghe-a.example.com',owner:'team',repo:'repo',kind:'pullRequest',number}];
+  for(const s of [first,second,archived])await api(`/api/sessions/${s.id}/github`,{links});
+  await api(`/api/sessions/${wrongNumber.id}/github`,{links:[{...links[0],number:number+10000}]});
+  await api(`/api/sessions/${archived.id}`,{archived:true},'PATCH');
+  await page.route('**/api/github/pulls',route=>route.fulfill({json:dataset}));
+  let creates=0,prompts=0;
+  page.on('request',request=>{if(request.method()==='POST'&&request.url()===base+'/api/sessions')creates++;if(request.method()==='POST'&&request.url().endsWith('/prompt'))prompts++;});
+  await page.goto(base+'/?view=github');
+  const row=page.locator('.github-browser-row').first();
+  if(mobile)await row.getByRole('button',{name:'Open in session…'}).click();else{await row.click({button:'right'});await page.getByRole('menuitem',{name:'Open in session…'}).click();}
+  const dialog=page.locator('#github-session-dialog');await expect(dialog).toBeVisible();await expect(dialog.locator('.github-session-active .github-session-choice')).toHaveCount(2);await expect(dialog.locator('.github-session-archived')).not.toHaveAttribute('open','');await expect(dialog.locator('.github-session-archived .github-session-choice')).toHaveCount(1);
+  await expect(dialog).toContainText('Ungrouped · Local');await expect(dialog.locator('b')).toHaveCount(0);
+  await page.screenshot({path:`.cache/github-session-pivot-${mobile?'mobile':'desktop'}-20261101.png`});
+  await dialog.getByRole('button',{name:/Review two/}).click();
+  await expect(dialog).toBeHidden();await expect(page.locator('body')).toHaveAttribute('data-workspace-view','sessions');await expect(page.locator('#header-title')).toHaveText('Review two');
+  expect(creates).toBe(0);expect(prompts).toBe(0);
+  expect((await api(`/api/sessions/${second.id}`)).events.filter(e=>e.kind==='user')).toEqual([]);
+  // Return and choose a new session even though existing matches are available.
+  if(mobile)await page.locator('#session-home').click();
+  await page.locator('#nav-github').click();await row.getByRole('button',{name:'Open in session…'}).click();await expect(dialog).toBeVisible();
+  await dialog.getByRole('button',{name:'New session…',exact:true}).click();await expect(page.locator('#create-dialog')).toBeVisible();await expect(page.locator('#worktree-branch')).toHaveValue(new RegExp(`pr-${number}-`));
+  expect(creates).toBe(0);expect(prompts).toBe(0);
+});
+
+test('PR session lookup cancellation and errors never create a session or navigate',async({page})=>{
+  await page.route('**/api/github/pulls',route=>route.fulfill({json:githubBrowserData()}));
+  let release;const blocked=new Promise(resolve=>release=resolve);
+  await page.route('**/api/github/sessions?*',async route=>{await blocked;await route.fulfill({json:{sessions:[]}});});
+  await page.goto(base+'/?view=github');await page.locator('.github-browser-row').first().getByRole('button',{name:'Open in session…'}).click();
+  const dialog=page.locator('#github-session-dialog');await expect(dialog).toBeVisible();await page.keyboard.press('Escape');release();
+  await expect(dialog).toBeHidden();await expect(page.locator('#create-dialog')).toBeHidden();
+  await page.unroute('**/api/github/sessions?*');await page.route('**/api/github/sessions?*',route=>route.fulfill({status:503,body:'Lookup unavailable'}));
+  await page.locator('.github-browser-row').first().getByRole('button',{name:'Open in session…'}).click();await expect(dialog).toContainText('Lookup unavailable');await expect(page.locator('#create-dialog')).toBeHidden();
+  await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
+  // Direct New session remains reachable from the keyboard context menu.
+  const row=page.locator('.github-browser-row').first();await row.focus();await page.keyboard.press('Shift+F10');await page.getByRole('menuitem',{name:'New session…',exact:true}).click();await expect(page.locator('#create-dialog')).toBeVisible();
+});
+
+test('PR pivot rechecks archived/deleted sessions and cancellation during selection',async({page})=>{
+  const session=await create(repo),item=githubBrowserData().hosts[1].rows[0];item.pr.number=940;item.badge.label='PR#940';
+  await api(`/api/sessions/${session.id}/github`,{links:[{host:'ghe-a.example.com',owner:'team',repo:'repo',kind:'pullRequest',number:940}]});
+  const data=githubBrowserData();data.hosts=[{...data.hosts[1],rows:[item]}];
+  await page.route('**/api/github/pulls',route=>route.fulfill({json:data}));
+  await page.goto(base+'/?view=github');const dialog=page.locator('#github-session-dialog'),open=page.locator('.github-browser-row').getByRole('button',{name:'Open in session…'});
+  await open.click();await expect(dialog.locator('.github-session-choice')).toHaveCount(1);
+  await api(`/api/sessions/${session.id}`,{archived:true},'PATCH');await dialog.locator('.github-session-choice').click();await expect(dialog).toContainText('This session has been archived');await expect(page.locator('body')).toHaveAttribute('data-workspace-view','github');
+  await dialog.getByRole('button',{name:'Cancel',exact:true}).click();await api(`/api/sessions/${session.id}`,{archived:false},'PATCH');
+  await open.click();await expect(dialog.locator('.github-session-choice')).toHaveCount(1);
+  await page.route(`**/api/sessions/${session.id}?view=meta`,route=>route.fulfill({status:404,body:'Session not found'}));
+  await dialog.locator('.github-session-choice').click();await expect(dialog).toContainText('Session not found');await expect(page.locator('#create-dialog')).toBeHidden();
+  await dialog.getByRole('button',{name:'Cancel',exact:true}).click();await page.unroute(`**/api/sessions/${session.id}?view=meta`);
+  let release;const blocked=new Promise(resolve=>release=resolve);await page.route(`**/api/sessions/${session.id}?view=meta`,async route=>{await blocked;await route.fulfill({json:session});});
+  await open.click();await dialog.locator('.github-session-choice').click();await page.keyboard.press('Escape');release();await expect(dialog).toBeHidden();await expect(page.locator('body')).toHaveAttribute('data-workspace-view','github');
+});
+
+for(const mobile of [false,true])test(`archived-only PR matches open from the lower section without unarchiving ${mobile?'mobile':'desktop'}`,async({page})=>{
+  if(mobile)await page.setViewportSize({width:390,height:844});
+  const number=mobile?951:950,session=await api('/api/sessions',{provider:'demo',cwd:repo,title:'Earlier PR review'});
+  // A restart-suspended archived session must stay suspended on initial selection
+  // and when its websocket snapshot arrives.
+  await page.route(`**/api/sessions/${session.id}?view=meta`,route=>route.fulfill({json:{...session,archived:true,status:'suspended',explicitlySuspended:false}}));
+  await page.routeWebSocket(`**/api/sessions/${session.id}/events*`,ws=>{
+    const server=ws.connectToServer();server.onMessage(message=>{const event=JSON.parse(String(message));if(event.kind==='snapshot')Object.assign(event.session,{archived:true,status:'suspended',explicitlySuspended:false});ws.send(JSON.stringify(event));});
+  });
+  await api(`/api/sessions/${session.id}/github`,{links:[{host:'ghe-a.example.com',owner:'team',repo:'repo',kind:'pullRequest',number}]});
+  await api(`/api/sessions/${session.id}`,{archived:true},'PATCH');
+  const data=githubBrowserData();data.hosts=[data.hosts[1]];data.hosts[0].rows[0].pr.number=number;data.hosts[0].rows[0].badge.label=`PR#${number}`;
+  await page.route('**/api/github/pulls',route=>route.fulfill({json:data}));
+  let mutations=0;page.on('request',request=>{if(['POST','PATCH','DELETE','PUT'].includes(request.method())&&new URL(request.url()).pathname.startsWith('/api/sessions'))mutations++;});
+  await page.goto(base+'/?view=github');await page.locator('.github-browser-row').getByRole('button',{name:'Open in session…'}).click();
+  const dialog=page.locator('#github-session-dialog'),archived=dialog.locator('.github-session-archived');
+  await expect(dialog).toContainText('No active sessions for this PR.');await expect(archived).not.toHaveAttribute('open','');await expect(archived.locator('.github-session-choice')).toBeHidden();
+  await archived.locator('summary').click();await expect(archived.locator('.github-session-choice')).toBeVisible();
+  await page.screenshot({path:`.cache/github-session-pivot-archived-${mobile?'mobile':'desktop'}-20261102.png`});
+  await archived.getByRole('button',{name:/Earlier PR review/}).click();await expect(dialog).toBeHidden();await expect(page.locator('body')).toHaveAttribute('data-workspace-view','sessions');await expect(page.locator('#header-title')).toHaveText('Earlier PR review');
+  await expect(page.locator('#resume-session')).toBeVisible();expect((await api(`/api/sessions/${session.id}?view=meta`)).archived).toBe(true);expect(mutations).toBe(0);
 });

@@ -12,7 +12,7 @@ export function createWorkspace(hooks){
   let catalog={projects:[],locations:[],hosts:[]},sessions=[],definitions=[],runs=[],contextGeneration=0,filesGeneration=0,automationGeneration=0,editorGeneration=0,editing=null,runStarting=false,pendingFile=null;
   const pendingRuns=read(sessionStorage,'agentworks-pending-runs',{});
   const api=hooks.api;
-  const githubBrowser=setupGithubBrowser({api,root:$('github-browser'),openSession:row=>hooks.openGithubSession(row),openSettings:()=>{hooks.openSettings();$('settings-tab-github').click();}});
+  const githubBrowser=setupGithubBrowser({api,root:$('github-browser'),openSession:row=>hooks.openGithubSession(row),selectSession:session=>hooks.selectSession(session),openSettings:()=>{hooks.openSettings();$('settings-tab-github').click();}});
   const save=()=>localStorage.setItem('agentworks-workspace',JSON.stringify({view:state.view,projectId:state.projectId,locationKey:state.locationKey,path:state.path,filePath:state.file?.path||null,automationId:state.automationId}));
   function option(select,value,label){const node=el('option','',label);node.value=value;select.append(node);}
   function options(select,items,value){const signature=JSON.stringify(items);if(select.dataset.items!==signature){select.replaceChildren();for(const [id,label]of items)option(select,id,label);select.dataset.items=signature;}select.value=value;}
