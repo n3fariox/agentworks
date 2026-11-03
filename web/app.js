@@ -600,8 +600,8 @@ function openProjectDialog(project=null){
   policyEditor.open(editingProject);$('project-dialog').showModal();$('project-name').focus();
 }
 function resetTranscript(){eventSeq=null;backgroundJobs.reset();subagents.reset();transcript=[];tools=new Map();compactions=new Map();approvals=new Map();assistant=null;nodes.clear();turnEnds=new Map();workLogs?.reset();$('messages').replaceChildren();$('approval-area').replaceChildren();}
-// The desktop header and the phone session bar both show the session title.
-function setTitle(title){$('header-title').textContent=title;$('session-heading-title').textContent=title;}
+// Keep the session identity in sync across desktop and phone layouts.
+function setTitle(title){$('header-title').textContent=title;$('session-heading-title').textContent=title;$('session-location-title').textContent=title;$('session-location-title').title=title;}
 // Phone navigation: the session browser and a chat are separate history
 // entries, so the system Back button returns from a chat to the browser.
 const phone=()=>matchMedia('(max-width:650px)').matches;

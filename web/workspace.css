@@ -151,3 +151,9 @@ body[data-workspace-view=host-terminal] .workspace-context{display:none}
   html[data-composer-viewport] :is(#prompt,#prompt-editor,#prompt-editor .cm-scroller){max-height:min(320px,calc(var(--composer-viewport-height) * .35))}
   html[data-composer-viewport] .composer-wrap{flex-shrink:0}
 }
+
+/* Session navigation lives in the sidebar; keep directory controls for other views. */
+body[data-workspace-view=sessions]:not(.menu-open) main>header{display:none}
+@media(min-width:801px){body[data-workspace-view=sessions] main>header{display:none}}
+.session-location{width:100%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:#777f8c}
+#session-location-title{font-weight:550;color:var(--text)}

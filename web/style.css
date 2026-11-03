@@ -188,7 +188,7 @@ body[data-code-wrap=scroll] .tool-card pre,body[data-code-wrap=scroll] .approval
   .session-bar .session-menu>.toolbar-group>select,.session-menu #session-project{width:100%;max-width:none;font-size:14px;padding:8px}
   .session-menu #lifecycle-menu{border-top:1px solid var(--border);font-size:14px}
   .session-menu #lifecycle-menu>summary{border:0;padding:12px 0;min-height:44px}
-  .session-menu #project-path{order:0;white-space:normal;overflow-wrap:anywhere;border-top:1px solid var(--border);padding:10px 0 6px}
+  .session-menu .session-location{order:0;white-space:normal;overflow-wrap:anywhere;border-top:1px solid var(--border);padding:10px 0 6px}
   /* The palette or a test can open Session actions while the popover is shut:
      show only its bottom sheet. */
   .session-menu:not(.open):has(#lifecycle-menu[open]){display:block;visibility:hidden}
