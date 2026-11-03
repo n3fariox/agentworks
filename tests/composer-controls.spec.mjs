@@ -11,11 +11,11 @@ test.beforeAll(async()=>{
   });await new Promise(ok=>server.listen(4523,'127.0.0.1',ok));
 });
 test.afterAll(async()=>{await new Promise(ok=>server.close(ok));});
-async function fixture(page,{delaySend=false,finishFirst=false}={}){
+async function fixture(page,{delaySend=false,finishFirst=false,commands=[]}={}){
   const sessions=['one','two'].map(id=>({id,title:id,provider:'demo',cwd:'/fixture',status:'idle',hostId:'local'}));
   const history=new Map(sessions.map(s=>[s.id,[]])),sockets=new Map(),writes=[];let release,seq=0;
   const send=(kind,data,id='one')=>{const event={kind,data,seq:++seq};history.get(id).push(event);if(kind==='status')sessions.find(s=>s.id===id).status=data.status;sockets.get(id)?.send(JSON.stringify(event));return event;};
-  const snapshot=s=>({kind:'snapshot',session:s,events:history.get(s.id),approvals:[],commands:[]});
+  const snapshot=s=>({kind:'snapshot',session:s,events:history.get(s.id),approvals:[],commands});
   await page.addInitScript(()=>localStorage.setItem('agentworks-session','one'));
   await page.routeWebSocket('**/api/sessions/*/events',ws=>{const s=sessions.find(s=>ws.url().includes('/'+s.id+'/'));sockets.set(s.id,ws);ws.send(JSON.stringify(snapshot(s)));});
   await page.route('**/api/**',async route=>{
@@ -124,4 +124,27 @@ test('native textarea drag retains the chosen height when typing resumes',async(
   await page.mouse.move(box.x+box.width-3,box.y+box.height-3);await page.mouse.down();await page.mouse.move(box.x+box.width-3,box.y+box.height+90,{steps:8});await page.mouse.up();
   const height=await prompt(page).evaluate(n=>n.getBoundingClientRect().height);expect(height).toBeGreaterThan(box.height+40);
   await prompt(page).fill('Writing after a manual drag');await expect.poll(()=>prompt(page).evaluate(n=>n.getBoundingClientRect().height)).toBe(height);
+});
+
+for(const source of [true,false])test(`skills complete at the caret while slash commands stay at the start (${source?'source':'formatted'})`,async({page})=>{
+  await page.addInitScript(source=>localStorage.setItem('agentworks-composer-source',String(source)),source);
+  const f=await fixture(page,{commands:[{name:'help'},{name:'$demo-skill'},{name:'$other-skill'}]});
+  const area=prompt(page),input=source?area:page.locator('#prompt-editor .cm-content'),list=page.locator('#command-list');
+  await input.fill('$demo');await expect(list.getByRole('button')).toHaveCount(1);
+  await list.getByRole('button').click();await expect(area).toHaveValue('$demo-skill ');
+  await input.fill('Please use $demo');await expect(list.getByRole('button')).toHaveCount(1);
+  await list.getByRole('button').click();await expect(area).toHaveValue('Please use $demo-skill ');
+  await input.fill('First line\nUse $demo for this task');
+  await area.evaluate(n=>{n.setSelectionRange(20,20);n.dispatchEvent(new Event('click'));});
+  await expect(list.getByRole('button')).toHaveCount(1);await list.getByRole('button').click();
+  await expect(area).toHaveValue('First line\nUse $demo-skill for this task');
+  expect(await area.evaluate(n=>n.selectionStart)).toBe(27);
+  for(const text of ['Please /help','First line\n/help','word$demo']){
+    await input.fill(text);await expect(list).toBeHidden();
+  }
+  await input.fill('/he');await expect(list.getByRole('button')).toHaveText('/help');
+  await list.getByRole('button').click();await expect(area).toHaveValue('/help ');
+  await input.fill('Please use $');await expect(list.getByRole('button')).toHaveCount(2);
+  await area.evaluate(n=>{n.setSelectionRange(0,12);n.dispatchEvent(new Event('click'));});
+  await expect(list).toBeHidden();expect(f.writes).toHaveLength(0);
 });

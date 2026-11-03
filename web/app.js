@@ -325,15 +325,30 @@ async function loadCreateModels(){
   finally{if(gen===discoveryGeneration){$('load-models').disabled=false;createChanged();}}
 }
 function commandText(command){return command.name.startsWith('$')?command.name:'/'+command.name.replace(/^\//,'');}
+function commandRange(){
+  const prompt=$('prompt'),caret=prompt.selectionStart;
+  if(caret!==prompt.selectionEnd)return null;
+  const before=prompt.value.slice(0,caret);
+  const match=/(?:^|\s)(\$[^\s$]*)$/.exec(before)||/^(\/\S*)$/.exec(before);
+  return match?{start:caret-match[1].length,end:caret,query:match[1].toLowerCase()}:null;
+}
+function updateCommands(){commandsOpen=!!commandRange();renderCommands();}
 function renderCommands(){
   const list=$('command-list');list.replaceChildren();list.hidden=!commandsOpen;
   if(!commandsOpen)return;
-  const query=$('prompt').value.trim().toLowerCase();
-  const items=availableCommands.filter(c=>!/^[/\$]\S*$/.test(query)||commandText(c).toLowerCase().includes(query));
+  const range=commandRange();
+  const items=availableCommands.filter(c=>!range||commandText(c).toLowerCase().includes(range.query));
   if(!items.length)list.append(el('p','field-note','No matching commands advertised by this harness.'));
   for(const command of items){
     const button=el('button','',commandText(command));button.type='button';button.append(el('small','',command.description||''));
-    button.onclick=()=>{$('prompt').value=commandText(command)+' ';commandsOpen=false;renderCommands();$('prompt').dispatchEvent(new Event('input'));$('prompt').focus();};list.append(button);
+    button.addEventListener('pointerdown',event=>event.preventDefault());
+    button.onclick=()=>{
+      const prompt=$('prompt'),value=prompt.value,insert=commandText(command)+' ';
+      const start=range?.start??0,end=range?.end??value.length;
+      prompt.value=value.slice(0,start)+insert+value.slice(end).replace(/^ /,'');
+      prompt.setSelectionRange(start+insert.length,start+insert.length);
+      commandsOpen=false;renderCommands();prompt.dispatchEvent(new Event('input'));prompt.focus();
+    };list.append(button);
   }
 }
 function importHost(){return hosts.find(h=>h.id===$('import-host').value&&h.kind==='remote')||null;}
@@ -1396,7 +1411,9 @@ $('composer').onsubmit=async event=>{
     if(attached.length)attachments.clear(sid,attached);
   }catch(e){toast(e.message);}finally{updateControls();}
 };
-$('prompt').oninput=()=>{renderComposer();mentions.update();commandsOpen=/^[/\$]\S*$/.test($('prompt').value);renderCommands();if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));}};
+$('prompt').oninput=()=>{renderComposer();mentions.update();updateCommands();if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));}};
+$('prompt').addEventListener('click',updateCommands);
+$('prompt').addEventListener('keyup',event=>{if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End'].includes(event.key))updateCommands();});
 $('prompt').onkeydown=event=>{if(mentions.keydown(event))return;if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing&&!composerKeyboard.matches){event.preventDefault();$('composer').requestSubmit();}};
 $('resume-session').onclick=()=>{if(active)resumeSession(active.id);};
 $('stop').onclick=async()=>{if(!active)return;const sid=active.id,seq=currentUserSeq;$('stop').disabled=true;try{await api(`/api/sessions/${sid}/cancel${seq!=null?'?userSeq='+seq:''}`,{method:'POST',body:'{}'});}catch(e){toast(e.message);}finally{updateControls();}};
