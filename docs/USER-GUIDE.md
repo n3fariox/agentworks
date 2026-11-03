@@ -125,6 +125,8 @@ Usage-limit continuation is opt-in per session (off for existing and new session
 
 ## Display preferences
 
+Your messages use Markdown by default. The chat box formats headings, bold, italics, links and lists as you type; move the cursor into a formatted span to edit its Markdown markers. **Source** switches the same box to source editing; **Formatted** switches back. This choice is remembered in your browser. On mobile and touch devices, Enter adds a line and tapping Send submits the message. On desktop, Enter sends and Shift+Enter adds a line. The saved draft and submitted message retain the original Markdown. **Settings → Display → Markdown in your messages** turns formatting off for both the editor and your chat log.
+
 Settings includes browser-local wrapping, syntax-highlighting and plain-prose preferences for chat blocks and file previews. Blocks offer original-text copy and a plain/code toggle; unsupported or large blocks remain unhighlighted. Tool/approval literals follow wrapping preferences. Successful settings saves use green status feedback; failures remain explicit.
 
 For development coordinated by a saved Agentworks session, see the [bounded self-improvement workflow and transfer helper](SELF-IMPROVEMENT.md). Supervised restart is implemented in R-06; the helper can explicitly grant it to the selected coordinator but does not start turns, enable timers or deploy.
