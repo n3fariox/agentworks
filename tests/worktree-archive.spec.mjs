@@ -63,7 +63,7 @@ test('archiving a worktree shared with another session asks before removing it a
   await expect(remove).toHaveText('Archive, remove worktree');await expect(remove).toBeDisabled();
   await page.locator('#worktree-archive-unused').check();await remove.click();
   await expect.poll(()=>writes.length).toBe(1);
-  expect(writes[0]).toEqual({path:'/api/sessions/two',body:{archived:true,worktree:'remove',confirmUnused:true}});
+  expect(writes[0]).toEqual({path:'/api/sessions/two',body:{archived:true,worktree:'remove',confirmUnused:['three']}});
   await expect(page.locator('#toast')).toContainText('Worktree removed');
 });
 

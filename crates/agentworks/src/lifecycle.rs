@@ -25,9 +25,9 @@ pub struct Update {
     worktree: Option<crate::worktree_cleanup::Cleanup>,
     /// Fingerprint from `GET /worktree` that the human confirmed for dirty removal.
     confirm_dirty: Option<String>,
-    /// Human assurance that sessions sharing the worktree no longer use it.
+    /// IDs of sessions sharing the worktree that the human confirmed no longer use it.
     #[serde(default)]
-    confirm_unused: bool,
+    confirm_unused: Vec<String>,
 }
 impl Update {
     /// MCP archive exposes only the default safe cleanup policy.
@@ -37,7 +37,7 @@ impl Update {
             archived: Some(true),
             worktree: None,
             confirm_dirty: None,
-            confirm_unused: false,
+            confirm_unused: Vec::new(),
         }
     }
 }
@@ -59,7 +59,7 @@ pub async fn update(
         ));
     }
     if req.archived != Some(true)
-        && (req.worktree.is_some() || req.confirm_dirty.is_some() || req.confirm_unused)
+        && (req.worktree.is_some() || req.confirm_dirty.is_some() || !req.confirm_unused.is_empty())
     {
         return Err(fail(
             StatusCode::BAD_REQUEST,
@@ -75,7 +75,7 @@ pub async fn update(
                 &s,
                 req.worktree.unwrap_or_default(),
                 req.confirm_dirty.as_deref(),
-                req.confirm_unused,
+                &req.confirm_unused,
             )
             .await?,
         );

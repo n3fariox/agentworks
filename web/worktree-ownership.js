@@ -30,7 +30,7 @@ export function setupWorktreeOwnership({api,toast}){
     $('worktree-archive-remove').disabled=inUse;
     return new Promise(resolve=>{pending=resolve;dialog.showModal();(archived?$('worktree-archive-cancel'):$('worktree-archive-keep')).focus();});
   }
-  const removal=status=>({confirmDirty:isDirty(status)?status.fingerprint:undefined,confirmUnused:status.cleanup.overridable||undefined});
+  const removal=status=>({confirmDirty:isDirty(status)?status.fingerprint:undefined,confirmUnused:status.cleanup.overridable?status.sharedWith.map(other=>other.id):undefined});
   // Returns the updated session, or null when the human cancels.
   async function archive(session){
     const path=`/api/sessions/${encodeURIComponent(session.id)}`;
