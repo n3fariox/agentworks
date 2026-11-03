@@ -65,6 +65,7 @@ struct Session {
     settings: Value,
     host_policy: Value,
     roots: Vec<String>,
+    skills: Vec<Value>,
     configuring: bool,
     usage: Value,
     last_completed: Option<String>,
@@ -314,6 +315,7 @@ impl Bridge {
                         host_policy: policy(&settings),
                         settings,
                         roots,
+                        skills: Vec::new(),
                         configuring: false,
                         usage: Value::Null,
                         last_completed: None,
@@ -326,11 +328,15 @@ impl Bridge {
                     self.replay_tree(cx, &id).await?;
                 }
                 let options = self.config_options(&id).await?;
-                update(
-                    cx,
-                    &id,
-                    json!({"sessionUpdate":"available_commands_update","availableCommands":commands::available()}),
-                )?;
+                // Discovery must not prevent opening a conversation if skills are unavailable.
+                if let Err(error) = self.refresh_skills(&id, cx).await {
+                    eprintln!("Codex skill discovery failed: {error}");
+                    update(
+                        cx,
+                        &id,
+                        json!({"sessionUpdate":"available_commands_update","availableCommands":commands::available()}),
+                    )?;
+                }
                 self.restore_tasks(cx, &id).await;
                 Ok(json!({"sessionId":id,"configOptions":options}))
             }
@@ -476,7 +482,17 @@ impl Bridge {
             }
             "_session/async_task/stop" => self.stop_task(cx, &p).await,
             "session/prompt" => {
-                if let Some((name, args)) = commands::parse(&p["prompt"]) {
+                let id = field(&p, "sessionId")?;
+                let skill = commands::parse(&p["prompt"]).is_some_and(|(name, _)| {
+                    !commands::available().iter().any(|c| c["name"] == name)
+                        && self
+                            .sessions
+                            .lock()
+                            .unwrap()
+                            .get(id)
+                            .is_some_and(|s| s.skills.iter().any(|s| s["name"] == name))
+                });
+                if let Some((name, args)) = commands::parse(&p["prompt"]).filter(|_| !skill) {
                     if p["prompt"].as_array().is_some_and(|v| v.len() != 1) {
                         return Err(invalid(
                             "Send slash commands without attachments or extra context",
@@ -577,7 +593,12 @@ impl Bridge {
 
     async fn prompt(&self, p: Value) -> Result<Value> {
         let id = field(&p, "sessionId")?;
-        let input = prompt_input(&p["prompt"])?;
+        let mut input = prompt_input(&p["prompt"])?;
+        {
+            let sessions = self.sessions.lock().unwrap();
+            let session = sessions.get(id).ok_or_else(|| invalid("Unknown session"))?;
+            commands::skill_input(&mut input, &session.skills);
+        }
         self.run_turn(id, "turn/start", json!({"threadId":id,"input":input}))
             .await
     }
