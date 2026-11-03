@@ -18,6 +18,7 @@ serde_json.workspace = true
 futures = "0.3"
 jiff = "0.2.38"
 tokio-util = "0.7"
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
 uuid = { workspace = true, features = ["serde"] }
 pulldown-cmark = "0.13"
 ammonia = "4"

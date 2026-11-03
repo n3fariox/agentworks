@@ -32,6 +32,7 @@ mod model_providers;
 mod model_viewer;
 mod native_rename;
 mod notifications;
+mod pam;
 mod permission_modes;
 mod recovery;
 mod roles;
@@ -42,10 +43,12 @@ mod session_config;
 mod session_runtime;
 mod store;
 mod terminal;
+mod tls;
 mod tool_bodies;
 mod tool_headers;
 mod tool_progress;
 mod transcript_history;
+mod web_auth;
 mod workspace;
 mod worktree_cleanup;
 mod worktrees;
@@ -103,6 +106,7 @@ struct App {
     host_usage: Arc<host_usage::Hub>,
     account_quota: Arc<account_quota::Hub>,
     github: Arc<github::Hub>,
+    web_auth: Arc<web_auth::WebAuth>,
 
     /// U-05 progress parser thread and installed scripts.
     progress: tool_progress::Hub,
@@ -573,6 +577,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if roots.is_empty() || roots.iter().any(|p| !p.is_dir()) {
         return Err("AGENTWORKS_ROOTS must contain existing directories".into());
     }
+    let tls = tls::Config::from_env()?;
+    let acceptor = tls.as_ref().map(tls::Config::acceptor).transpose()?;
     let listener = tokio::net::TcpListener::bind((bind, port)).await?;
     let catalog_path = std::env::var_os("AGENTWORKS_CATALOG_PATH")
         .map(PathBuf::from)
@@ -593,6 +599,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Another Agentworks process is already using this catalog",
     )
     .map_err(|e| e.to_string())?;
+    let web_auth = web_auth::WebAuth::configure(
+        tls.is_some(),
+        catalog_path.with_extension("web-sign-ins.json"),
+    )?;
     let mut store = store::Store::open(&db_path).map_err(|e| e.to_string())?;
     store
         .import_legacy(&db_path.with_file_name("legacy-sessions.json"))
@@ -629,6 +639,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         host_usage: Arc::new(host_usage::Hub::default()),
         account_quota: Arc::default(),
         github: Arc::new(github::Hub::default()),
+        web_auth: Arc::new(web_auth),
 
         progress,
     };
@@ -736,6 +747,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/api/service/restart/cancel", post(service_restart::cancel))
         .route("/", get(hosting::index))
+        .route("/api/auth", get(web_auth::status))
+        .route("/api/auth/login", post(web_auth::login))
+        .route("/api/auth/logout", post(web_auth::logout))
+        .route(
+            "/login.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/login.js"),
+                )
+            }),
+        )
         .route(
             "/app.js",
             get(|| async {
@@ -1414,16 +1437,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(DefaultBodyLimit::max(128 * 1024))
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app.clone());
+    let scheme = if tls.is_some() { "https" } else { "http" };
     println!("Agentworks listening on {bind}:{port}");
-    println!("Local URL: http://127.0.0.1:{port}");
+    println!("Local URL: {scheme}://127.0.0.1:{port}");
+    if tls.as_ref().is_some_and(tls::Config::requires_client_cert) {
+        println!("TLS client certificates required.");
+    }
+    if let Some(sign_in) = app.web_auth.describe() {
+        println!("{sign_in}.");
+    }
     println!(
         "Persistent sessions: {}. Ctrl-C to stop.",
         db_path.display()
     );
     // The listener is bound, so connections queue until serve() accepts them.
     service_restart::ready(&app);
-    axum::serve(listener, router)
-        .with_graceful_shutdown(async move {
+    let listener = tls::Listener::new(listener, acceptor)?;
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<tls::ClientAddr>(),
+    )
+    .with_graceful_shutdown(async move {
             #[cfg(unix)]
             {
                 let mut terminate=tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("register SIGTERM handler");
@@ -1463,8 +1497,16 @@ async fn guard(
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let direct_host = allowed_host(host, app.bind, app.port);
-    let forwarded_origin = browser_origin::forwarded_origin(&headers);
+    let direct_host = allowed_host(host, app.bind, app.port, app.web_auth.secure);
+    let peer = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<tls::ClientAddr>>()
+        .map(|info| info.0.0.ip());
+    // Forwarded headers count only from a trusted proxy (any peer when none is configured).
+    let proxied = app.web_auth.proxies.trusts(peer);
+    let forwarded_origin = proxied
+        .then(|| browser_origin::forwarded_origin(&headers))
+        .flatten();
     let ws = req.uri().path().ends_with("/events");
     let origin = headers
         .get(header::ORIGIN)
@@ -1490,8 +1532,9 @@ async fn guard(
     }
     let write = !matches!(req.method().as_str(), "GET" | "HEAD");
     if write || ws {
-        if !(direct_host && origin == format!("http://{host}"))
-            && !browser_origin::origin_matches_forwarded(&headers, origin)
+        let scheme = if app.web_auth.secure { "https" } else { "http" };
+        if !(direct_host && origin == format!("{scheme}://{host}"))
+            && !(proxied && browser_origin::origin_matches_forwarded(&headers, origin))
         {
             if ws {
                 eprintln!(
@@ -1508,7 +1551,13 @@ async fn guard(
     let mermaid_frame = req.uri().path() == "/mermaid-frame.html";
     let model_frame =
         cfg!(feature = "model-viewer") && req.uri().path() == "/model-viewer-frame.html";
-    let mut response = next.run(req).await;
+    let denied = app
+        .web_auth
+        .deny(req.method(), req.uri().path(), req.headers(), peer);
+    let mut response = match denied {
+        Some(denied) => denied,
+        None => next.run(req).await,
+    };
     let h = response.headers_mut();
     h.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
     h.insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
@@ -1536,7 +1585,7 @@ fn log_header(headers: &HeaderMap, name: impl axum::http::header::AsHeaderName) 
         .unwrap_or_else(|| "<missing>".into())
 }
 
-fn allowed_host(host: &str, bind: IpAddr, port: u16) -> bool {
+fn allowed_host(host: &str, bind: IpAddr, port: u16, secure: bool) -> bool {
     let Ok(authority) = host.parse::<axum::http::uri::Authority>() else {
         return false;
     };
@@ -1551,7 +1600,8 @@ fn allowed_host(host: &str, bind: IpAddr, port: u16) -> bool {
             .is_ok_and(|ip| ip.is_loopback());
     // An SSH tunnel's browser-facing port can differ from the listening port.
     // The write/WebSocket guard still enforces exact Origin/Host agreement.
-    if !loopback && authority.port_u16().unwrap_or(80) != port {
+    let default_port = if secure { 443 } else { 80 };
+    if !loopback && authority.port_u16().unwrap_or(default_port) != port {
         return false;
     }
     if !bind.is_loopback() {
@@ -3948,15 +3998,17 @@ mod tests {
     fn host_checks_follow_bind_address() {
         let local = "127.0.0.1".parse().unwrap();
         let network = "0.0.0.0".parse().unwrap();
-        assert!(allowed_host("127.0.0.1:4317", local, 4317));
-        assert!(!allowed_host("agentbox:4317", local, 4317));
-        assert!(allowed_host("localhost:5555", local, 4317));
-        assert!(allowed_host("127.0.0.1:5555", local, 4317));
-        assert!(!allowed_host("localhost.evil:5555", local, 4317));
-        assert!(allowed_host("agentbox:4317", network, 4317));
-        assert!(allowed_host("100.64.1.2:4317", network, 4317));
-        assert!(!allowed_host("agentbox:9999", network, 4317));
-        assert!(!allowed_host("", network, 4317));
+        assert!(allowed_host("127.0.0.1:4317", local, 4317, false));
+        assert!(!allowed_host("agentbox:4317", local, 4317, false));
+        assert!(allowed_host("localhost:5555", local, 4317, false));
+        assert!(allowed_host("127.0.0.1:5555", local, 4317, false));
+        assert!(!allowed_host("localhost.evil:5555", local, 4317, false));
+        assert!(allowed_host("agentbox:4317", network, 4317, false));
+        assert!(allowed_host("100.64.1.2:4317", network, 4317, false));
+        assert!(!allowed_host("agentbox:9999", network, 4317, false));
+        assert!(!allowed_host("", network, 4317, false));
+        assert!(allowed_host("agentbox", network, 443, true));
+        assert!(!allowed_host("agentbox", network, 443, false));
     }
     #[test]
     fn markdown_removes_active_content() {

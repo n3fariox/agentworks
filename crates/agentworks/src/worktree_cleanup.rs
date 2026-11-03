@@ -404,6 +404,7 @@ mod tests {
                 host_usage: Arc::new(crate::host_usage::Hub::default()),
                 account_quota: Arc::default(),
                 github: Arc::new(crate::github::Hub::default()),
+                web_auth: Default::default(),
                 progress: crate::tool_progress::Hub::empty(),
             };
             let f = Self {
