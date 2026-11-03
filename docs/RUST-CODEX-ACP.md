@@ -81,7 +81,7 @@ reconnect and authentication commands are not implemented. `/rename` changes the
 native conversation name; the Agentworks display title is managed separately.
 Unknown slash commands and unsupported arguments fail instead of becoming model
 instructions. Send slash commands separately from attachments or carried context.
-Native `$skill` invocations remain normal prompts and run in the Codex harness.
+Configured, enabled skills are discovered through `skills/list` and advertised as `$name` entries. Both `/` and `$` find them in the composer. `$name` invocations (including within a message) attach native skill inputs with their `SKILL.md` paths; a leading `/name` also invokes a discovered skill unless that name belongs to a built-in command. `/skills` refreshes the advertised list.
 Review reports also arrive through native review-mode items. The adapter preserves
 the review API's owning turn ID when Codex emits an internal turn-start ID, and
 waits for the owning turn's completion before accepting the next prompt.

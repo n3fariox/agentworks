@@ -130,6 +130,9 @@ for(const source of [true,false])test(`skills complete at the caret while slash 
   await page.addInitScript(source=>localStorage.setItem('agentworks-composer-source',String(source)),source);
   const f=await fixture(page,{commands:[{name:'help'},{name:'$demo-skill'},{name:'$other-skill'}]});
   const area=prompt(page),input=source?area:page.locator('#prompt-editor .cm-content'),list=page.locator('#command-list');
+  await input.fill('/');await expect(list.getByRole('button')).toHaveCount(3);
+  await input.fill('/demo');await expect(list.getByRole('button')).toHaveText('$demo-skill');
+  await list.getByRole('button').click();await expect(area).toHaveValue('$demo-skill ');
   await input.fill('$demo');await expect(list.getByRole('button')).toHaveCount(1);
   await list.getByRole('button').click();await expect(area).toHaveValue('$demo-skill ');
   await input.fill('Please use $demo');await expect(list.getByRole('button')).toHaveCount(1);

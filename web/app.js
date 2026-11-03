@@ -337,7 +337,7 @@ function renderCommands(){
   const list=$('command-list');list.replaceChildren();list.hidden=!commandsOpen;
   if(!commandsOpen)return;
   const range=commandRange();
-  const items=availableCommands.filter(c=>!range||commandText(c).toLowerCase().includes(range.query));
+  const items=availableCommands.filter(c=>!range||commandText(c).toLowerCase().includes(range.query)||range.query.startsWith('/')&&c.name.startsWith('$')&&('/'+c.name.slice(1)).toLowerCase().includes(range.query));
   if(!items.length)list.append(el('p','field-note','No matching commands advertised by this harness.'));
   for(const command of items){
     const button=el('button','',commandText(command));button.type='button';button.append(el('small','',command.description||''));
