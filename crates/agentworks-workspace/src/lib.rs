@@ -7,6 +7,7 @@ pub mod diff;
 pub mod directories;
 pub mod git;
 pub mod hooks;
+pub mod paths;
 pub mod worktrees;
 
 // Shared with application credential digests; retains the existing implementation and test vectors.

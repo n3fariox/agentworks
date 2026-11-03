@@ -264,6 +264,7 @@ dependencies = [
 name = "agentworks-workspace"
 version = "0.1.0"
 dependencies = [
+ "dunce",
  "http",
  "libc",
  "serde",

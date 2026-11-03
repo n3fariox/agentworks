@@ -380,18 +380,15 @@ impl Catalog {
             if root.trim().is_empty() {
                 return Err("Working directory cannot be empty".into());
             }
-            let root = root.trim().trim_end_matches('/').to_string();
-            let root = if root.is_empty() {
-                "/".to_string()
-            } else {
-                root
+            // Stored `/`-separated for every host OS; Windows workers accept that form.
+            let Some(root) = agentworks_workspace::paths::normalize(&root)
+                .filter(|r| r.len() <= 4096 && !r.chars().any(char::is_control))
+            else {
+                return Err(format!(
+                    "Use absolute paths (/srv/work, C:/work) or ~/… paths, not {}",
+                    root.trim()
+                ));
             };
-            if !(root.starts_with('/') || root == "~" || root.starts_with("~/"))
-                || root.len() > 4096
-                || root.chars().any(char::is_control)
-            {
-                return Err(format!("Use absolute paths or ~/… paths, not {root}"));
-            }
             if !cleaned.contains(&root) {
                 cleaned.push(root);
             }
@@ -704,6 +701,22 @@ mod tests {
             )
             .unwrap();
         assert_eq!(rooted.roots, ["~/projects", "/srv/app"]);
+        // Windows hosts: either separator, stored `/`-separated and deduplicated.
+        let windows = catalog
+            .set_host_roots(
+                &host.id,
+                vec!["C:\\work\\".into(), "c:/work".into(), "D:".into()],
+            )
+            .unwrap();
+        assert_eq!(windows.roots, ["C:/work", "D:/"]);
+        assert!(
+            catalog
+                .set_host_roots(&host.id, vec!["C:work".into()])
+                .is_err()
+        );
+        catalog
+            .set_host_roots(&host.id, vec!["~/projects".into(), "/srv/app".into()])
+            .unwrap();
         let remote = catalog
             .location_on(&host.id, Path::new("/srv/app"))
             .unwrap();

@@ -72,7 +72,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         "hostMetrics": if crate::metrics::supported() { 1 } else { 0 },
         "providerAuthTerminal": true,
         "managedCodexAuth": true,
-        "home": home(),
+        "home": agentworks_workspace::paths::display(&home()),
     });
     ws.send(Message::text(hello.to_string()))
         .await
@@ -766,7 +766,7 @@ async fn workspace_request(request: &Value) -> Result<Value, String> {
                         parent.as_deref().unwrap_or(""),
                         name.as_deref().unwrap_or(""),
                     )
-                    .map(|path| json!({"path":path}))
+                    .map(|path| json!({"path":agentworks_workspace::paths::display(&path)}))
                 } else {
                     crate::directories::browse(&context.roots, parent.as_deref(), hidden)
                 }
@@ -876,18 +876,17 @@ fn check_dir(path: &str) -> Result<String, String> {
         None if path == "~" => home(),
         None => PathBuf::from(path),
     };
-    let canonical = std::fs::canonicalize(&expanded)
+    let canonical = agentworks_workspace::paths::canonicalize(&expanded)
         .map_err(|_| format!("{path} does not exist on this host."))?;
     if !canonical.is_dir() {
         return Err(format!("{path} is not a directory on this host."));
     }
-    Ok(canonical.to_string_lossy().into_owned())
+    Ok(agentworks_workspace::paths::display(&canonical))
 }
 
+/// `$HOME`, or the profile directory on Windows, which does not set `HOME`.
 fn home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| "/".into())
+    std::env::home_dir().unwrap_or_else(|| "/".into())
 }
 
 fn hostname() -> Option<String> {

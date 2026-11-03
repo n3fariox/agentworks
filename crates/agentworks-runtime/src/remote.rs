@@ -665,7 +665,7 @@ impl Live {
     pub fn home_terminal(self: &Arc<Self>) -> Result<crate::terminal::Handle, String> {
         let home = self.worker["home"]
             .as_str()
-            .filter(|home| home.starts_with('/'))
+            .filter(|home| agentworks_workspace::paths::normalize(home).is_some())
             .ok_or_else(|| "Update the remote worker to enable host terminals.".to_string())?;
         self.terminal(home)
     }

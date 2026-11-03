@@ -124,9 +124,9 @@ pub(crate) async fn repository(
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )
     .await?;
-    let dir = std::fs::canonicalize(dir).map_err(|_| bad("Git directory is unavailable"))?;
-    let common =
-        std::fs::canonicalize(common).map_err(|_| bad("Git common directory is unavailable"))?;
+    let dir = crate::paths::canonicalize(dir).map_err(|_| bad("Git directory is unavailable"))?;
+    let common = crate::paths::canonicalize(common)
+        .map_err(|_| bad("Git common directory is unavailable"))?;
     allowed(app, &dir)?;
     allowed(app, &common)?;
     let main_top = common

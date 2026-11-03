@@ -70,5 +70,7 @@ pub async fn create(State(app): State<App>, Json(req): Json<Create>) -> ApiResul
                     "Could not create the folder",
                 )
             })??;
-    Ok(Json(json!({ "path": path })))
+    Ok(Json(
+        json!({ "path": agentworks_workspace::paths::display(&path) }),
+    ))
 }
