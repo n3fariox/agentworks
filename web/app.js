@@ -1708,6 +1708,9 @@ async function archiveSession(session){
   const id=session.id;
   try{const updated=await worktreeOwnership.archive(session);if(!updated)return;if(active?.id===id)Object.assign(active,updated);await refreshSessions();updateControls();}catch(e){toast(e.message);}
 }
+async function removeRetainedWorktree(session){
+  try{if(await worktreeOwnership.removeRetained(session))await refreshSessions();}catch(e){toast(e.message);}
+}
 $('archive-session').onclick=()=>archiveSession(active);
 $('fork-session').onclick=()=>openFork();
 setupContextMenu({onError:message=>toast(message),resolve(target){
@@ -1719,6 +1722,7 @@ setupContextMenu({onError:message=>toast(message),resolve(target){
     return {origin:row,focus:row.querySelector('.session-select')||row,label:`Actions for ${session.title}`,actions:[
       {label:'Fork session…',run:()=>openFork(session)},
       {label:session.archived?'Unarchive session':'Archive session',run:()=>archiveSession(session)},
+      ...(session.archived&&session.worktree?.owned&&!session.worktree.removed?[{label:'Remove worktree…',danger:true,run:()=>removeRetainedWorktree(session)}]:[]),
       {label:'Delete history…',danger:true,run:()=>deleteSession(session)},
     ]};
   }

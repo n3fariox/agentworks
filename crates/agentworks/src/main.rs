@@ -2250,7 +2250,7 @@ async fn archive_project(
                 )
             };
             if req.archived && !was_archived {
-                git_settings::exit(&app, s, "archive").await?;
+                git_settings::exit(&app, s, "archive", &[]).await?;
             }
             if !req.archived && was_archived && hooks {
                 worktree_cleanup::restore(&app, s).await?;
@@ -3399,7 +3399,7 @@ async fn delete_session(
     let s = session(&app, &id)?;
     inbox_delivery::drop_from_sender(&app, &s, "Sender deleted")?;
     let _ = lifecycle::suspend_locked(&s).await?;
-    git_settings::exit(&app, &s, "delete").await?;
+    git_settings::exit(&app, &s, "delete", &[]).await?;
     if options.provider_history {
         // Stop the active adapter before asking a separate connection to delete
         // its durable session, so it cannot rewrite history after deletion.
