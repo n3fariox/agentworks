@@ -61,14 +61,65 @@ fn account_key(connection: &Connection) -> String {
         connection.login.to_ascii_lowercase()
     )
 }
+// Account-private review state stays on the membership row, outside the shared
+// PR status pool: a session refresh must not erase another account's reminder.
+const PENDING_REVIEW_FIELDS: &str = r#"
+ pendingReview: reviews(first:1, author:$login, states:[PENDING]) {
+   totalCount nodes { state author { login } comments { totalCount } }
+ }
+"#;
+fn pending_reviews(raw: &Value, login: &str) -> Value {
+    let mut result = json!({"complete":false,"accounts":[],"fetchedAt":now(),"stale":false});
+    let reviews = &raw["pendingReview"];
+    let (Some(total), Some(nodes)) = (reviews["totalCount"].as_u64(), reviews["nodes"].as_array())
+    else {
+        return result;
+    };
+    if nodes.len() as u64 > total || (total > 0 && nodes.is_empty()) {
+        return result;
+    }
+    let mut comments = 0u64;
+    for review in nodes {
+        if review["state"] != "PENDING"
+            || !review["author"]["login"]
+                .as_str()
+                .is_some_and(|s| s.eq_ignore_ascii_case(login))
+        {
+            return result;
+        }
+        let Some(count) = review["comments"]["totalCount"].as_u64() else {
+            return result;
+        };
+        comments = comments.saturating_add(count);
+    }
+    result["complete"] = json!(total == nodes.len() as u64);
+    if total > 0 {
+        result["accounts"] = json!([{"login":login,"commentCount":comments}]);
+    }
+    result
+}
+fn merge_pending_reviews(a: &Value, b: &Value) -> Value {
+    let mut accounts: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+    for value in [a, b] {
+        for account in value["accounts"].as_array().into_iter().flatten() {
+            if let Some(login) = account["login"].as_str() {
+                accounts.insert(login.to_ascii_lowercase(), account.clone());
+            }
+        }
+    }
+    json!({"complete":a["complete"] == true && b["complete"] == true,
+        "stale":a["stale"] == true || b["stale"] == true,
+        "fetchedAt":a["fetchedAt"].as_u64().unwrap_or_default().min(b["fetchedAt"].as_u64().unwrap_or_default()),
+        "accounts":accounts.into_values().collect::<Vec<_>>()})
+}
 async fn search(client: &octocrab::Octocrab, connection: &Connection) -> Result<Value, Failure> {
     // Separate searches make authored OR assigned OR review-requested explicit on public and GHE hosts.
     let query = format!(
-        r#"query($authored:String!,$assigned:String!,$reviewRequested:String!,$a:String,$b:String,$c:String) {{
+        r#"query($authored:String!,$assigned:String!,$reviewRequested:String!,$login:String!,$a:String,$b:String,$c:String) {{
       viewer {{ login }}
-      authored: search(query:$authored,type:ISSUE,first:100,after:$a) {{ issueCount pageInfo {{ hasNextPage endCursor }} nodes {{ ... on PullRequest {{ {PR_FIELDS} repository {{ name owner {{ login }} }} }} }} }}
-      assigned: search(query:$assigned,type:ISSUE,first:100,after:$b) {{ issueCount pageInfo {{ hasNextPage endCursor }} nodes {{ ... on PullRequest {{ {PR_FIELDS} repository {{ name owner {{ login }} }} }} }} }}
-      reviewRequested: search(query:$reviewRequested,type:ISSUE,first:100,after:$c) {{ issueCount pageInfo {{ hasNextPage endCursor }} nodes {{ ... on PullRequest {{ {PR_FIELDS} repository {{ name owner {{ login }} }} }} }} }}
+      authored: search(query:$authored,type:ISSUE,first:100,after:$a) {{ issueCount pageInfo {{ hasNextPage endCursor }} nodes {{ ... on PullRequest {{ {PR_FIELDS} {PENDING_REVIEW_FIELDS} repository {{ name owner {{ login }} }} }} }} }}
+      assigned: search(query:$assigned,type:ISSUE,first:100,after:$b) {{ issueCount pageInfo {{ hasNextPage endCursor }} nodes {{ ... on PullRequest {{ {PR_FIELDS} {PENDING_REVIEW_FIELDS} repository {{ name owner {{ login }} }} }} }} }}
+      reviewRequested: search(query:$reviewRequested,type:ISSUE,first:100,after:$c) {{ issueCount pageInfo {{ hasNextPage endCursor }} nodes {{ ... on PullRequest {{ {PR_FIELDS} {PENDING_REVIEW_FIELDS} repository {{ name owner {{ login }} }} }} }} }}
     }}"#
     );
     let mut a = Value::Null;
@@ -78,7 +129,7 @@ async fn search(client: &octocrab::Octocrab, connection: &Connection) -> Result<
     let mut rows: HashMap<String, Value> = HashMap::new();
     let mut complete = false;
     for _ in 0..5 {
-        let data=graphql(client,&connection.host,query.clone(),json!({"authored":format!("is:pr is:open author:{} sort:updated-desc",connection.login),"assigned":format!("is:pr is:open assignee:{} sort:updated-desc",connection.login),"reviewRequested":format!("is:pr is:open review-requested:{} sort:updated-desc",connection.login),"a":a,"b":b,"c":c})).await?;
+        let data=graphql(client,&connection.host,query.clone(),json!({"login":connection.login,"authored":format!("is:pr is:open author:{} sort:updated-desc",connection.login),"assigned":format!("is:pr is:open assignee:{} sort:updated-desc",connection.login),"reviewRequested":format!("is:pr is:open review-requested:{} sort:updated-desc",connection.login),"a":a,"b":b,"c":c})).await?;
         if !data["viewer"]["login"]
             .as_str()
             .is_some_and(|s| s.eq_ignore_ascii_case(&connection.login))
@@ -118,7 +169,7 @@ async fn search(client: &octocrab::Octocrab, connection: &Connection) -> Result<
                     // Scope the destination to the authenticated host and validated repository.
                     resource["url"]=json!(format!("https://{}/{owner}/{repo}/pull/{number}",connection.host));
                     resource["title"]=json!(raw["title"].as_str().unwrap_or_default().chars().take(256).collect::<String>());
-                    json!({"repository":{"host":connection.host,"owner":owner,"name":repo},"pr":resource,"authored":false,"assigned":false,"reviewRequested":false,"login":connection.login})
+                    json!({"repository":{"host":connection.host,"owner":owner,"name":repo},"pr":resource,"authored":false,"assigned":false,"reviewRequested":false,"login":connection.login,"pendingReviews":pending_reviews(raw,&connection.login)})
                 });
                 row[*name] = json!(true);
             }
@@ -264,6 +315,13 @@ pub async fn pulls(State(app): State<App>) -> ApiResult {
                         .tooltip
                         .push_str(" · Status unavailable or out of date");
                 }
+                if row["pendingReviews"].is_null() {
+                    row["pendingReviews"] = pending_reviews(&Value::Null, &connection.login);
+                }
+                row["pendingReviews"]["stale"] = json!(stale);
+                if stale {
+                    row["pendingReviews"]["complete"] = json!(false);
+                }
                 row["badge"] = json!(badge);
                 row["fetchedAt"] = value["fetchedAt"].clone();
                 row["stale"] = json!(stale);
@@ -288,12 +346,14 @@ pub async fn pulls(State(app): State<App>) -> ApiResult {
                 let assigned = old["assigned"] == true || row["assigned"] == true;
                 let review_requested =
                     old["reviewRequested"] == true || row["reviewRequested"] == true;
+                let pending = merge_pending_reviews(&old["pendingReviews"], &row["pendingReviews"]);
                 if old["stale"] == true && row["stale"] == false {
                     *old = row;
                 }
                 old["authored"] = json!(authored);
                 old["assigned"] = json!(assigned);
                 old["reviewRequested"] = json!(review_requested);
+                old["pendingReviews"] = pending;
             } else {
                 unique.insert(key, row);
             }
@@ -309,15 +369,25 @@ pub async fn pulls(State(app): State<App>) -> ApiResult {
 mod tests {
     use super::*;
     fn raw(number: u64) -> Value {
-        json!({"id":format!("pr-{number}"),"number":number,"title":"<b>PR title</b>","url":"https://ignored.invalid","state":"OPEN","isDraft":false,"headRefName":"feature/topic","headRefOid":"a".repeat(40),"headRepository":{"nameWithOwner":"team/repo"},"baseRefName":"main","author":{"login":"fixture"},"reviewDecision":"APPROVED","repository":{"name":"repo","owner":{"login":"team"}},"commits":{"nodes":[{"commit":{"oid":"a".repeat(40),"statusCheckRollup":{"state":"SUCCESS","contexts":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}}]}})
+        let mut pr = json!({"id":format!("pr-{number}"),"number":number,"title":"<b>PR title</b>","url":"https://ignored.invalid","state":"OPEN","isDraft":false,"headRefName":"feature/topic","headRefOid":"a".repeat(40),"headRepository":{"nameWithOwner":"team/repo"},"baseRefName":"main","author":{"login":"fixture"},"reviewDecision":"APPROVED","repository":{"name":"repo","owner":{"login":"team"}},"commits":{"nodes":[{"commit":{"oid":"a".repeat(40),"statusCheckRollup":{"state":"SUCCESS","contexts":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}}]}});
+        pr["pendingReview"] = if number == 1 {
+            json!({"totalCount":1,"nodes":[{"state":"PENDING","author":{"login":"fixture"},"comments":{"totalCount":3}}]})
+        } else {
+            json!({"totalCount":0,"nodes":[]})
+        };
+        pr
     }
     #[tokio::test]
     async fn all_categories_are_identity_checked_and_deduplicated_on_all_hosts() {
         let wrong = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mode = wrong.clone();
-        let router=axum::Router::new().route("/{*path}",axum::routing::post(move |Path(path):Path<String>,Json(body):Json<Value>|{let wrong=mode.load(std::sync::atomic::Ordering::SeqCst);async move {
+        let submitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let submitted_mode = submitted.clone();
+        let router=axum::Router::new().route("/{*path}",axum::routing::post(move |Path(path):Path<String>,Json(body):Json<Value>|{let wrong=mode.load(std::sync::atomic::Ordering::SeqCst);let submitted=submitted_mode.load(std::sync::atomic::Ordering::SeqCst);async move {
+            let pr = |number| { let mut value=raw(number); if submitted { value["pendingReview"]=json!({"totalCount":0,"nodes":[]}); } value };
+            assert_eq!(body["variables"]["login"],"fixture");assert!(body["query"].as_str().unwrap().contains("author:$login, states:[PENDING]"));
             assert!(matches!(path.as_str(),"graphql"|"api/graphql"));assert_eq!(body["variables"]["authored"],"is:pr is:open author:fixture sort:updated-desc");assert_eq!(body["variables"]["assigned"],"is:pr is:open assignee:fixture sort:updated-desc");assert_eq!(body["variables"]["reviewRequested"],"is:pr is:open review-requested:fixture sort:updated-desc");
-            Json(json!({"data":{"viewer":{"login":if wrong {"another"} else {"fixture"}},"authored":{"issueCount":1,"pageInfo":{"hasNextPage":false},"nodes":[raw(1)]},"assigned":{"issueCount":2,"pageInfo":{"hasNextPage":false},"nodes":[raw(1),raw(2)]},"reviewRequested":{"issueCount":2,"pageInfo":{"hasNextPage":false},"nodes":[raw(1),raw(3)]}}}))
+            Json(json!({"data":{"viewer":{"login":if wrong {"another"} else {"fixture"}},"authored":{"issueCount":1,"pageInfo":{"hasNextPage":false},"nodes":[pr(1)]},"assigned":{"issueCount":2,"pageInfo":{"hasNextPage":false},"nodes":[pr(1),pr(2)]},"reviewRequested":{"issueCount":2,"pageInfo":{"hasNextPage":false},"nodes":[pr(1),pr(3)]}}}))
         }}));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -347,6 +417,11 @@ mod tests {
             assert_eq!(both["authored"], true);
             assert_eq!(both["assigned"], true);
             assert_eq!(both["reviewRequested"], true);
+            assert_eq!(
+                both["pendingReviews"]["accounts"],
+                json!([{"login":"fixture","commentCount":3}])
+            );
+            assert_eq!(both["pendingReviews"]["complete"], true);
             let requested = value["rows"]
                 .as_array()
                 .unwrap()
@@ -361,6 +436,25 @@ mod tests {
                 format!("https://{host}/team/repo/pull/1")
             );
         }
+        submitted.store(true, std::sync::atomic::Ordering::SeqCst);
+        let cleared = search(
+            &client,
+            &Connection {
+                host: "github.com".into(),
+                login: "fixture".into(),
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{}", e.message));
+        assert!(
+            cleared["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["pendingReviews"]["accounts"] == json!([])
+                    && r["pendingReviews"]["complete"] == true)
+        );
         wrong.store(true, std::sync::atomic::Ordering::SeqCst);
         assert!(
             search(
@@ -375,6 +469,83 @@ mod tests {
             .is_err()
         );
         server.abort();
+    }
+    #[test]
+    fn pending_reviews_are_personal_and_unknown_is_not_a_clear_result() {
+        let pending = pending_reviews(&raw(1), "FIXTURE");
+        assert_eq!(pending["accounts"][0]["commentCount"], 3);
+        assert_eq!(pending["complete"], true);
+        assert_eq!(pending_reviews(&raw(1), "someone-else")["complete"], false);
+        assert_eq!(pending_reviews(&Value::Null, "fixture")["complete"], false);
+        let mut body_only = raw(1);
+        body_only["pendingReview"]["nodes"][0]["comments"]["totalCount"] = json!(0);
+        assert_eq!(
+            pending_reviews(&body_only, "fixture")["accounts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let mut submitted = raw(1);
+        submitted["pendingReview"]["nodes"][0]["state"] = json!("COMMENTED");
+        assert_eq!(
+            pending_reviews(&submitted, "fixture")["accounts"],
+            json!([])
+        );
+        assert_eq!(pending_reviews(&submitted, "fixture")["complete"], false);
+    }
+    #[tokio::test]
+    async fn pending_reminders_survive_account_dedup_pool_overlays_and_outages() {
+        let f = crate::github_tracking::tests::Fixture::new().await;
+        let repo = Repository {
+            host: "github.com".into(),
+            owner: "team".into(),
+            name: "repo".into(),
+        };
+        f.app
+            .catalog
+            .lock()
+            .unwrap()
+            .data
+            .github
+            .connections
+            .push(Connection {
+                host: repo.host.clone(),
+                login: "second".into(),
+                enabled: true,
+            });
+        {
+            let mut hub = f.app.github.state.lock().await;
+            for login in ["fixture", "second"] {
+                let connection = Connection {
+                    host: repo.host.clone(),
+                    login: login.into(),
+                    enabled: true,
+                };
+                let mut reminder = pending_reviews(&raw(1), "fixture");
+                reminder["accounts"][0]["login"] = json!(login);
+                let pr = normalize(&raw(1), "pullRequest", false, None);
+                hub.browser.insert(account_key(&connection),(Instant::now(),json!({"rows":[{"repository":repo,"pr":pr,"authored":true,"assigned":false,"reviewRequested":false,"pendingReviews":reminder}],"complete":true,"fetchedAt":now()})));
+                // Session status has no private review data and must not erase it.
+                remember_prs(&mut hub, &repo, login, &json!({"resources":[pr]}));
+            }
+            hub.failures.insert(
+                "github.com:fixture".into(),
+                (now() + 300000, "Fixture outage".into()),
+            );
+        }
+        let Json(result) = pulls(State(f.app.clone())).await.unwrap();
+        let rows = result["hosts"][0]["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0]["pendingReviews"]["accounts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(rows[0]["pendingReviews"]["complete"], false);
+        assert_eq!(rows[0]["pendingReviews"]["stale"], true);
     }
     #[tokio::test]
     async fn host_cadence_cache_and_shared_pr_records_serve_both_consumers() {

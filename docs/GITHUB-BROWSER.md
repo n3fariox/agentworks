@@ -10,6 +10,16 @@ Each collapsible host contains a **Review requested** section first, followed by
 
 PR badges use the same Rust presentation function as session badges: green for approved; red for unapproved with failing CI; yellow for review required or changes requested; neutral for drafts, unknown or unavailable status. Approval has priority over CI failure. The table also shows review and CI independently. Account failures retain cached rows with neutral status and an explanation, rather than reporting a definitive empty result. Search is bounded to five pages per category (authored, assigned and review requested); incomplete results are labeled.
 
+## Unsubmitted review reminders
+
+A pending review from one of the enabled signed-in accounts adds a bright **! Unsubmitted review** link, amber row background and a strong left edge. The link opens the PR’s Files changed tab so you can finish the review. Comment counts appear when available; a pending review without inline comments still gets a reminder. This is separate from a PR being marked draft and does not change approval/CI badge colors.
+
+A dashboard banner counts affected PRs even when filters or collapsed groups hide them. **Show these PRs** clears the other filters, selects pending reviews and expands the affected host/repository groups. **Column filters → Draft review** also distinguishes pending, confirmed absent and unavailable results.
+
+The existing GraphQL membership query reads [pending reviews](https://docs.github.com/en/graphql/reference/pulls) filtered to the verified token identity, plus comment counts. It does not fetch comment bodies or submit reviews. Positive reminders from multiple accounts survive row deduplication and session-status cache updates. The next successful membership refresh removes the reminder after a review is submitted or deleted. During an outage, cached reminders remain visibly labeled **last seen**; unavailable information is not treated as confirmation that no draft review exists.
+
+This is a built-in dashboard signal, using the configured host polling cadence while the view is open. It covers PRs already included by the authored/assigned/review-requested membership searches; it does not discover unrelated PRs solely from a private pending review. It does not add a hook invocation, new polling loop or GitHub write operation.
+
 ## Polling and shared data
 
 **Settings → GitHub** includes a polling interval for each configured or discovered host. The default is **5 minutes**, adjustable from **1 to 60 minutes**. Public GitHub can use a longer interval while internal hosts use a shorter one. The setting is shared by session PR tracking, context-cache freshness, dashboard membership, and badge freshness. It is saved in the main-host catalog as `github.pollIntervals` (seconds by hostname).
@@ -39,7 +49,7 @@ The Git fetch uses the execution host's normal Git credentials. Integration toke
 
 ## APIs
 
-- `GET /api/github/pulls`: cached/due authored/assigned/review-requested PR groups by host, account messages, per-host interval and next polling eligibility. Calling this endpoint explicitly opts into the broad listing read; the background session tracker does not invoke it.
+- `GET /api/github/pulls`: cached/due authored/assigned/review-requested PR groups by host, account messages, per-host interval and next polling eligibility. Rows also include account-scoped `pendingReviews` metadata (`complete`, `stale`, `fetchedAt`, and positive `accounts` with `login`/`commentCount`). Calling this endpoint explicitly opts into the broad listing read; the background session tracker does not invoke it.
 - `GET /api/github/sessions?host=…&owner=…&repo=…&number=…`: local associated-session lookup, with session metadata, project/host display names and attachment/observation provenance. No GitHub requests or persistent mutations.
 - `PUT /api/github/polling`: `{host, intervalSeconds}`. The host must be configured or present in the latest discovered accounts. Reschedules its session watches. Does not enable an account.
 - `GET /api/github/connections`: additionally returns per-host `polling` preferences.

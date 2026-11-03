@@ -155,8 +155,11 @@ for(const mobile of [false,true])test(`session browser PR badges ${mobile?'mobil
     await expect(badge).toHaveAttribute('target','_blank');await expect(badge).toHaveAttribute('rel','noopener noreferrer');
     expect(await badge.evaluate(n=>n.closest('button'))).toBeNull(); // native link and selection button are siblings
     expect(await badge.evaluate(n=>n.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true})))).toBe(true);
-    const metaBox=await row.locator('small').boundingBox(),badgeBox=await badge.boundingBox();
-    expect(badgeBox.y).toBeGreaterThanOrEqual(metaBox.y+metaBox.height);
+    // The live sidebar can replace a row between separate geometry reads.
+    await expect.poll(()=>row.evaluate(n=>{
+      const meta=n.querySelector('small'),badge=n.querySelector('.session-badge');
+      return !!meta?.getClientRects().length&&!!badge?.getClientRects().length&&badge.getBoundingClientRect().y>=meta.getBoundingClientRect().bottom;
+    })).toBe(true);
   }
   await page.screenshot({path:join('.cache',`session-badges-third-line-${mobile?'mobile':'desktop'}-20261029.png`),animations:'disabled'});
   if(!mobile)await page.locator('#sessions').screenshot({path:join('.cache','session-badges-third-line-preview-20261029.png'),animations:'disabled'});
@@ -259,7 +262,7 @@ test('GitHub PR hook starter installs and its registration is displayed',async({
 
 function githubBrowserData(){
   const sha=git(repo,'rev-parse','HEAD');
-  const hosts=['github.com','ghe-a.example.com','ghe-b.example.com'].map((host,i)=>({host,accounts:[i?'work':'personal'],intervalMs:300000,nextPollAt:Date.now()+300000,messages:[],rows:[{repository:{host,owner:'team',name:'repo'},pr:{number:100+i,title:i===1?'<img src=x onerror=alert(1)>':'A pull request',author:'me',headBranch:'feature/topic',headSha:sha,state:'OPEN',draft:false,reviewSummary:{state:i===0?'APPROVED':'REVIEW_REQUIRED'},checks:{state:i===1?'FAILURE':'PENDING'},url:`https://${host}/team/repo/pull/${100+i}`},authored:i===0,assigned:i===1,reviewRequested:i===2,stale:false,badge:{label:`PR#${100+i}`,tone:['success','danger','warning'][i],tooltip:'PR status',url:`https://${host}/team/repo/pull/${100+i}`}}]}));
+  const hosts=['github.com','ghe-a.example.com','ghe-b.example.com'].map((host,i)=>({host,accounts:[i?'work':'personal'],intervalMs:300000,nextPollAt:Date.now()+300000,messages:[],rows:[{repository:{host,owner:'team',name:'repo'},pr:{number:100+i,title:i===1?'<img src=x onerror=alert(1)>':'A pull request',author:'me',headBranch:'feature/topic',headSha:sha,state:'OPEN',draft:false,reviewSummary:{state:i===0?'APPROVED':'REVIEW_REQUIRED'},checks:{state:i===1?'FAILURE':'PENDING'},url:`https://${host}/team/repo/pull/${100+i}`},authored:i===0,assigned:i===1,reviewRequested:i===2,pendingReviews:{complete:true,accounts:[],stale:false},stale:false,badge:{label:`PR#${100+i}`,tone:['success','danger','warning'][i],tooltip:'PR status',url:`https://${host}/team/repo/pull/${100+i}`}}]}));
   return {hosts,defaultIntervalMs:300000};
 }
 for(const mobile of [false,true])test(`GitHub sidebar tables and PR-to-session prefill ${mobile?'mobile':'desktop'}`,async({page})=>{
@@ -438,4 +441,26 @@ test('PR context menu opens a validated PR URL in a new tab and omits unsafe URL
   await page.goto(base+'/?view=github');const row=page.locator('.github-browser-row[data-number="12"]');await row.scrollIntoViewIfNeeded();await row.focus();await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));await page.keyboard.press('Shift+F10');
   const popup=page.waitForEvent('popup');await page.getByRole('menuitem',{name:'Open PR in new tab',exact:true}).click();const tab=await popup;await tab.waitForLoadState();expect(tab.url()).toBe('https://github.com/team/beta/pull/12');expect(await tab.evaluate(()=>window.opener)).toBe(null);await tab.close();
   const unsafe=page.locator('.github-browser-row[data-number="11"]');await unsafe.focus();await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));await page.keyboard.press('Shift+F10');await expect(page.getByRole('menuitem',{name:'Open PR in new tab',exact:true})).toHaveCount(0);
+});
+
+for(const mobile of [false,true])test(`unsubmitted reviews get loud row reminders that survive filters and clear after polling ${mobile?'mobile':'desktop'}`,async({page})=>{
+  if(mobile)await page.setViewportSize({width:390,height:844});await page.clock.install();
+  const data=githubBrowserData();
+  data.hosts[0].rows[0].pendingReviews={complete:true,stale:false,accounts:[{login:'personal',commentCount:3},{login:'alternate',commentCount:2}],fetchedAt:Date.now()};
+  data.hosts[1].rows[0].pendingReviews={complete:false,stale:true,accounts:[{login:'work',commentCount:0}],fetchedAt:Date.now()};
+  data.hosts[2].rows[0].pr.draft=true;data.hosts[2].rows[0].pendingReviews={complete:false,accounts:[],stale:false};
+  let reads=0;await page.route('**/api/github/pulls',route=>{reads++;for(const host of data.hosts)host.nextPollAt=Date.now()+300000;return route.fulfill({json:data});});
+  await page.addInitScript(()=>{localStorage.setItem('agentworks-github-collapsed',JSON.stringify(['host:github.com','github.com/team/repo']));localStorage.setItem('agentworks-github-table',JSON.stringify({field:'updated',direction:'desc',groupRepos:true}));});
+  await page.goto(base+'/?view=github');const summary=page.locator('.github-draft-review-summary');await expect(summary).toContainText('2 PRs have unsubmitted reviews');await expect(page.locator('.github-browser-row.has-pending-review')).toHaveCount(2);
+  await page.locator('.github-column-filters>summary').click();await page.getByLabel('Filter Author',{exact:true}).fill('nobody');await expect(page.locator('.github-browser-row')).toHaveCount(0);await expect(summary).toBeVisible();
+  await summary.getByRole('button',{name:'Show these PRs'}).click();await expect(page.locator('.github-browser-row')).toHaveCount(2);
+  const first=page.locator('.github-browser-row[data-number="100"]'),stale=page.locator('.github-browser-row[data-number="101"]');
+  await expect(first).toBeVisible();await expect(first.locator('.github-draft-review-alert')).toContainText('5 draft comments');await expect(first.locator('.github-draft-review-alert')).toHaveAttribute('href','https://github.com/team/repo/pull/100/files');await expect(first.locator('.github-draft-review-alert')).toHaveAttribute('target','_blank');await expect(first.locator('.github-draft-review-alert')).toHaveAttribute('title',/personal: 3.*alternate: 2/);
+  await expect(stale.locator('.github-draft-review-alert')).toContainText('Unsubmitted review');await expect(stale.locator('.github-draft-review-alert')).toContainText('last seen');await expect(stale.locator('.github-draft-review-alert')).not.toContainText('0 draft comments');
+  await page.locator('.github-column-filters>summary').click();await expect(page.locator('.github-column-filters')).not.toHaveAttribute('open','');await first.scrollIntoViewIfNeeded();
+  await page.screenshot({path:`.cache/github-unsubmitted-review-${mobile?'mobile':'desktop'}-20261103.png`});expect(reads).toBe(1);
+  await page.locator('.github-column-filters>summary').click();
+  await page.getByRole('button',{name:'Clear filters',exact:true}).click();await expect(page.locator('.github-browser-row[data-number="102"] .github-draft-review-alert')).toHaveCount(0);await expect(page.locator('#github-browser')).toContainText('Draft review status is unavailable for 1 PR.');
+  for(const host of data.hosts)for(const row of host.rows){row.pendingReviews={complete:true,accounts:[],stale:false};row.stale=false;}
+  await page.clock.fastForward(300001);await expect(summary).toHaveCount(0);await expect(page.locator('.github-browser-row.has-pending-review')).toHaveCount(0);await expect(page.locator('.github-browser-row')).toHaveCount(3);expect(reads).toBe(2);
 });
