@@ -19,6 +19,7 @@ import {enhanceMermaid} from './mermaid.js';
 import {setupMarkdownComposer} from './markdown-composer.bundle.js';
 import {setupDisplayPreferences} from './display-preferences.js';
 import {setupWorkLogs,observeTool} from './work-logs.js';
+import {applyCompaction,renderCompaction} from './compaction.js';
 import {setupUsageStatus, watchSharedQuota, quotaFamily} from './usage-status.js';
 import {setupFlyout} from './flyout.js';
 import {setupResize,setupPromptResize} from './resize-handle.js';
@@ -84,7 +85,7 @@ let currentUserSeq=null;
 let sidePanel=null;
 setInterval(()=>usageStatus.render(),60000);
 let timeoutControls=null,parserScripts=null;
-let transcript=[], tools=new Map(), approvals=new Map(), assistant=null, status='starting';
+let transcript=[], tools=new Map(), compactions=new Map(), approvals=new Map(), assistant=null, status='starting';
 const backgroundJobs=createBackgroundJobs({root:$('background-jobs'),api,getActive:()=>active,isConnected:()=>connected,onChange:()=>scheduleDraw()});
 const subagents=createSubagents({storage:localStorage,getSessionId:()=>active?.id,jobResult:job=>[`${job.name||'Background job'} · ${backgroundJobs.label(job.state)}`,...jobResultLines(job)].join('\n'),append:()=>{},tabs:$('session-tabs'),panel:$('subagent-view'),messages:$('messages'),onSelect:view=>{sessionTerminal.select(view);scheduleDraw();},uuid,applyToolUpdate,renderToolActivity,renderMessage:(body,item)=>{if(item.role==='Agent')updateMarkdown(item,body);else body.textContent=item.text;},el});
 // L-05 hook: activity indicator and explicit queued inputs (server-owned state).
@@ -583,7 +584,7 @@ function openProjectDialog(project=null){
   projectDirectory.open(saved||(!project&&$('create-dialog').open?{hostId:$('create-host').value||'local',path:''}:null));
   policyEditor.open(editingProject);$('project-dialog').showModal();$('project-name').focus();
 }
-function resetTranscript(){eventSeq=null;backgroundJobs.reset();subagents.reset();transcript=[];tools=new Map();approvals=new Map();assistant=null;nodes.clear();turnEnds=new Map();workLogs?.reset();$('messages').replaceChildren();$('approval-area').replaceChildren();}
+function resetTranscript(){eventSeq=null;backgroundJobs.reset();subagents.reset();transcript=[];tools=new Map();compactions=new Map();approvals=new Map();assistant=null;nodes.clear();turnEnds=new Map();workLogs?.reset();$('messages').replaceChildren();$('approval-area').replaceChildren();}
 // The desktop header and the phone session bar both show the session title.
 function setTitle(title){$('header-title').textContent=title;$('session-heading-title').textContent=title;}
 // Phone navigation: the session browser and a chat are separate history
@@ -967,6 +968,11 @@ function consume(e,live=false){
         let tool=tools.get(d.toolCallId);
         if(!tool){tool={id:d.toolCallId,type:'tool',title:'Tool activity'};tools.set(d.toolCallId,tool);transcript.push(tool);}if(applyToolUpdate(tool,d,e.seq,live&&!replaying?Date.now():null))observeTool(tool,{live:live&&!replaying});break;
       }
+      case 'compaction_update':case 'compaction_summary_chunk':{
+        assistant=null;let item=compactions.get(d.compactionId);
+        if(!item){item={id:'compaction-'+d.compactionId,type:'compaction',meta:{}};compactions.set(d.compactionId,item);transcript.push(item);}
+        applyCompaction(item,d);break;
+      }
       case 'plan':{
         const text=(d.entries||[]).map(p=>`- ${p.status==='completed'?'✓':'○'} ${p.content}`).join('\n');
         transcript.push({id:itemId(),type:'plan',text});break;
@@ -1172,6 +1178,10 @@ function draw(){
       }else if(item.type==='image'){
         node=el('div','message');const image=el('img','agent-image');
         if(/^image\/(png|jpeg|gif|webp)$/.test(item.content.mimeType)&&item.content.data.length<14*1024*1024){image.src=`data:${item.content.mimeType};base64,${item.content.data}`;image.alt='Image from agent';imageViewer.decorate(image);node.append(image);}else node.textContent='Unsupported image format';
+      }else if(item.type==='compaction'){
+        node=el('details','compaction-card');node.append(el('summary'),el('div','compaction-summary'));
+        // Nothing to expand without a summary.
+        node.querySelector('summary').onclick=event=>{if(!item.summary)event.preventDefault();};
       }else node=el('div',item.type==='error'?'error-card':'notice-card',item.text);
       nodes.set(item.id,node);area.append(node);
     }else if(!node.isConnected)area.append(node);
@@ -1181,6 +1191,7 @@ function draw(){
     }else if(item.type==='tool'){
       renderToolActivity(node,item,['running','waiting','cancelling'].includes(status));
     }else if(item.type==='job')renderJobResult(node,item);
+    else if(item.type==='compaction')renderCompaction(node,item);
   }
   subagents.sync(['running','waiting','cancelling'].includes(status));
   const pending=$('approval-area');for(const node of [...pending.children])if(!node.classList.contains('question'))node.remove();

@@ -127,6 +127,10 @@ impl Bridge {
     }
     async fn request(&self, method: &str, mut p: Value) -> Result<Value> {
         if method == "initialize" {
+            // Goose's older schema drops `session.compaction`; our Goose patch reads this.
+            if p["clientCapabilities"]["session"]["compaction"].is_object() {
+                p["clientCapabilities"]["_meta"]["agentworks/compaction"] = json!(true);
+            }
             let mut result = self.rpc(method, p).await?;
             result["agentCapabilities"]["sessionCapabilities"]["systemPrompt"] = json!({});
             result["agentCapabilities"]["sessionCapabilities"]["fork"] = json!({});
