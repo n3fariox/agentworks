@@ -203,14 +203,22 @@ fn install_release(releases: &Path, name: Option<&str>) -> Result<PathBuf> {
     }
     let target = releases.join(&name);
     place(releases, &exe, &hash, &target)?;
-    // Enrollment ships the release's `-worker` sibling to remote hosts.
-    if let Some(worker) = crate::enrollment::worker_executable() {
-        place(
-            releases,
-            &worker,
-            &digest(&worker)?,
-            &releases.join(format!("{name}-worker")),
-        )?;
+    // Enrollment ships the release's `-worker` siblings to remote hosts.
+    for (worker, suffix) in [
+        (crate::enrollment::worker_executable(), "-worker"),
+        (
+            crate::enrollment::windows_worker_executable(),
+            "-worker.exe",
+        ),
+    ] {
+        if let Some(worker) = worker {
+            place(
+                releases,
+                &worker,
+                &digest(&worker)?,
+                &releases.join(format!("{name}{suffix}")),
+            )?;
+        }
     }
     fs::File::open(releases)?.sync_all()?;
     Ok(target)

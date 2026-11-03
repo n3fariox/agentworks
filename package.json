@@ -3,6 +3,7 @@
   "private": true,
   "scripts": {
     "build": "scripts/mise-cargo.sh build --locked -p agentworks -p agentworks-worker",
+    "build:windows-worker": "scripts/build-windows-worker.sh",
     "start": "scripts/mise-cargo.sh run --locked",
     "test:smoke": "node scripts/smoke.mjs",
     "test:browser": "playwright test",

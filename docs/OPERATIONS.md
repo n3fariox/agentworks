@@ -57,6 +57,16 @@ Manual setup requirements:
 
 No ports or socket files are opened on either machine. SSH provides authentication and encryption, so there is no separate enrollment secret. Hover a host's status dot for details. When a host is offline, the reason, including ssh's last output, also appears under it. **↻** reconnects immediately, and **×** removes a host with no sessions, stops its worker, and deletes its managed private key from this server. Remote files and its public authorized-key entry remain; remove them manually if desired. `AGENTWORKS_SSH` selects a different ssh program.
 
+### Windows hosts
+
+Choose **Windows** under **Host OS**. There is no detection: the dialog's choice decides which bootstrap runs. The host needs the built-in OpenSSH Server, x86_64, and Windows 10 1803 or later (for `tar.exe`); any default SSH shell works, because every step runs as an encoded Windows PowerShell 5.1 command that cmd.exe and PowerShell parse the same way.
+
+- Build the Windows worker on the server first: `npm run build:windows-worker -- --release`. It cross-compiles with MinGW-w64 (`pacman -S mingw-w64-gcc`, `apt install gcc-mingw-w64-x86-64`) and places `agentworks-worker.exe` beside the server binary of the same profile; `service --install` copies it into the release directory as `<release>-worker.exe`. The debug build links but is over 1 GB, so use release builds for Windows hosts.
+- The dedicated key goes where sshd reads it: for members of Administrators under the default `sshd_config` (`Match Group administrators`), `%ProgramData%\ssh\administrators_authorized_keys`, otherwise `%USERPROFILE%\.ssh\authorized_keys`. A new administrators file gets the SYSTEM/Administrators-only ACL sshd requires.
+- The bundle is copied with `scp` (SFTP), because Windows PowerShell takes over redirected stdin. It is verified with `Get-FileHash`, extracted with `%SystemRoot%\System32\tar.exe` into `%USERPROFILE%\AppData\Local\agentworks\releases\<attempt UUID>\`, and checked with `agentworks.exe --worker-protocol`.
+- The saved worker command is `cmd.exe /d /c "%USERPROFILE%\…\launch.cmd"`; `launch.cmd` sets the runtime directory and uses mise when installed, like the Unix launcher. No `agentworks` shim is added to PATH.
+- Working directories must currently be given as `~/…` paths; drive-letter paths such as `C:\work` are rejected by the server's path validation.
+
 ## Multiple project directories
 
 By default, sessions can select the current directory or its subdirectories. Use **Settings** to edit allowed roots, or supply initial defaults when starting the server:

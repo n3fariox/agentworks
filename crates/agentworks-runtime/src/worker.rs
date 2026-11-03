@@ -891,8 +891,7 @@ fn home() -> PathBuf {
 }
 
 fn hostname() -> Option<String> {
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .ok()
+    sysinfo::System::host_name()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
