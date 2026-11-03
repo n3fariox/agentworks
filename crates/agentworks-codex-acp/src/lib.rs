@@ -85,6 +85,8 @@ struct Bridge {
     questions: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     boolean_config: AtomicBool,
     subagents: AtomicBool,
+    /// The client shows ACP compaction updates.
+    compaction: AtomicBool,
     children: Mutex<HashMap<String, String>>,
     limits: Mutex<Map<String, Value>>,
     async_tasks: Mutex<async_tasks::Tasks>,
@@ -143,6 +145,10 @@ impl Bridge {
                 );
                 self.subagents.store(
                     p["clientCapabilities"]["subagents"].is_object(),
+                    Ordering::Relaxed,
+                );
+                self.compaction.store(
+                    p["clientCapabilities"]["session"]["compaction"].is_object(),
                     Ordering::Relaxed,
                 );
                 self.rpc("initialize", json!({"clientInfo":{"name":"agentworks","title":"Agentworks","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}})).await?;
@@ -692,8 +698,9 @@ impl Bridge {
                     self.observe_tasks(&cx, method, p)?;
                     let id = p["threadId"].as_str().unwrap_or("");
                     if self.children.lock().unwrap().contains_key(id) {
-                        if let Some(event) = event_update(method, p)
-                            .filter(|_| self.subagents.load(Ordering::Relaxed))
+                        if let Some(event) =
+                            event_update(method, p, self.compaction.load(Ordering::Relaxed))
+                                .filter(|_| self.subagents.load(Ordering::Relaxed))
                         {
                             update(&cx, id, event)?;
                         }
@@ -763,7 +770,9 @@ impl Bridge {
                                 );
                             }
                         }
-                        if let Some(mut event) = event_update(method, p) {
+                        if let Some(mut event) =
+                            event_update(method, p, self.compaction.load(Ordering::Relaxed))
+                        {
                             if event["sessionUpdate"] == "usage_update" {
                                 if let Some(s) = self.sessions.lock().unwrap().get_mut(id) {
                                     s.usage = event.clone();
@@ -1002,8 +1011,13 @@ fn prompt_input(blocks: &Value) -> Result<Vec<Value>> {
         Ok(json!({"type":"text","text":text,"text_elements":[]}))
     }).collect()
 }
-fn event_update(method: &str, p: &Value) -> Option<Value> {
+fn event_update(method: &str, p: &Value, compaction: bool) -> Option<Value> {
     match method {
+        "item/started" | "item/completed"
+            if compaction && p["item"]["type"] == "contextCompaction" =>
+        {
+            Some(compaction_update(&p["item"], method == "item/completed"))
+        }
         "item/completed" if p["item"]["type"] == "exitedReviewMode" => Some(
             json!({"sessionUpdate":"agent_message_chunk","messageId":p["item"]["id"],"content":{"type":"text","text":p["item"]["review"]}}),
         ),
@@ -1034,6 +1048,10 @@ fn event_update(method: &str, p: &Value) -> Option<Value> {
         _ => None,
     }
 }
+/// Status only: the item carries just its id, and Codex keeps the summary encrypted.
+fn compaction_update(item: &Value, done: bool) -> Value {
+    json!({"sessionUpdate":"compaction_update","compactionId":item["id"],"status":if done {"completed"} else {"in_progress"}})
+}
 fn tool_update(item: &Value, done: bool) -> Option<Value> {
     let kind = match item["type"].as_str()? {
         "commandExecution" => "execute",
@@ -1060,8 +1078,9 @@ fn tool_update(item: &Value, done: bool) -> Option<Value> {
     }
     Some(result)
 }
-fn replay_item(cx: &ConnectionTo<Client>, id: &str, item: &Value) -> Result<()> {
+fn replay_item(cx: &ConnectionTo<Client>, id: &str, item: &Value, compaction: bool) -> Result<()> {
     match item["type"].as_str() {
+        Some("contextCompaction") if compaction => update(cx, id, compaction_update(item, true)),
         Some("agentMessage" | "exitedReviewMode") => update(
             cx,
             id,
@@ -1150,6 +1169,7 @@ pub async fn run() -> Result<()> {
         questions: Mutex::default(),
         boolean_config: AtomicBool::new(false),
         subagents: AtomicBool::new(false),
+        compaction: AtomicBool::new(false),
         children: Mutex::default(),
         limits: Mutex::default(),
         async_tasks: Mutex::default(),

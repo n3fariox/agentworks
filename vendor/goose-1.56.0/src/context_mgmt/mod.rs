@@ -71,6 +71,9 @@ pub struct CompactionResult {
     /// compaction. Smaller than the billable output when the raw response was
     /// rewritten to the rendered structured summary.
     pub retained_context_tokens: i32,
+    /// Agentworks patch: the summary text that replaced the history, for ACP
+    /// `compaction_update`. See vendor/GOOSE-SOURCES.md.
+    pub summary: String,
 }
 
 /// Compact messages by summarizing them
@@ -162,6 +165,7 @@ pub async fn compact_messages(
         final_messages.push(updated_msg);
     }
 
+    let summary = summary_message.as_concat_text();
     let summary_msg = summary_message.with_metadata(MessageMetadata::agent_only());
 
     let mut continuation_messages = vec![summary_msg];
@@ -220,6 +224,7 @@ pub async fn compact_messages(
         conversation,
         usage: summarization_usage,
         retained_context_tokens,
+        summary,
     })
 }
 

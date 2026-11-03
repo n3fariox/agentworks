@@ -4,10 +4,10 @@ use agent_client_protocol::schema::{
     ProtocolVersion,
     v1::{
         AuthenticateRequest, BooleanConfigOptionCapabilities, ClientCapabilities,
-        ClientSessionCapabilities, ElicitationCapabilities, ElicitationFormCapabilities,
-        InitializeRequest, ListSessionsRequest, NewSessionRequest, RequestPermissionOutcome,
-        RequestPermissionRequest, RequestPermissionResponse, SessionConfigOptionsCapabilities,
-        SubagentCapabilities,
+        ClientSessionCapabilities, CompactionCapabilities, ElicitationCapabilities,
+        ElicitationFormCapabilities, InitializeRequest, ListSessionsRequest, NewSessionRequest,
+        RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+        SessionConfigOptionsCapabilities, SubagentCapabilities,
     },
 };
 use agent_client_protocol::{Agent, Client, ConnectionTo, DynConnectTo};
@@ -19,10 +19,12 @@ pub fn initialize_request() -> InitializeRequest {
     InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
         ClientCapabilities::new()
             .session(
-                ClientSessionCapabilities::new().config_options(
-                    SessionConfigOptionsCapabilities::new()
-                        .boolean(BooleanConfigOptionCapabilities::new()),
-                ),
+                ClientSessionCapabilities::new()
+                    .config_options(
+                        SessionConfigOptionsCapabilities::new()
+                            .boolean(BooleanConfigOptionCapabilities::new()),
+                    )
+                    .compaction(CompactionCapabilities::new()),
             )
             .subagents(SubagentCapabilities::new())
             .elicitation(ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()))
