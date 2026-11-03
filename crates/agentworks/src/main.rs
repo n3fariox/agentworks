@@ -1079,6 +1079,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route(
+            "/markdown-composer.bundle.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/markdown-composer.bundle.js"),
+                )
+            }),
+        )
+        .route(
+            "/markdown-composer-LICENSES.txt",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                    include_str!("../../../web/markdown-composer-LICENSES.txt"),
+                )
+            }),
+        )
+        .route(
             "/display-preferences.js",
             get(|| async {
                 (
@@ -3632,6 +3650,8 @@ async fn file(
 #[derive(Deserialize)]
 struct Markdown {
     text: String,
+    #[serde(default)]
+    user: bool,
     /// Agent messages name their session so its `chat.agent` formatters apply.
     #[serde(default, rename = "sessionId")]
     session_id: Option<String>,
@@ -3645,26 +3665,21 @@ async fn markdown(State(app): State<App>, Json(req): Json<Markdown>) -> Json<Val
         Some(s) => {
             let (hub, text) = (app.progress.clone(), req.text.clone());
             tokio::task::spawn_blocking(move || {
-                chat_format::apply_in_session(
-                    &hub,
-                    &s.id,
-                    &s.provider,
-                    &s.cwd.to_string_lossy(),
-                    &text,
-                )
+                let apply = if req.user {
+                    chat_format::apply_user_in_session
+                } else {
+                    chat_format::apply_in_session
+                };
+                apply(&hub, &s.id, &s.provider, &s.cwd.to_string_lossy(), &text)
             })
             .await
             .unwrap_or(req.text)
         }
         None => req.text,
     };
-    let req = Markdown {
-        text,
-        session_id: None,
-    };
     let marker = format!("awmermaid-{}", &Uuid::new_v4().simple().to_string()[..16]);
     Json(
-        json!({"html":render_markdown_with_marker(&req.text, &marker), "mermaidClass":format!("language-{marker}")}),
+        json!({"html":render_markdown_with_marker(&text, &marker), "mermaidClass":format!("language-{marker}")}),
     )
 }
 #[derive(Deserialize)]

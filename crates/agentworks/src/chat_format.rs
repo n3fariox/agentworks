@@ -69,13 +69,29 @@ pub fn format_in_session(
 /// An agent message's Markdown with each formatted line replaced.
 #[cfg(test)]
 pub fn apply(hub: &Hub, provider: &str, cwd: &str, text: &str) -> String {
-    apply_impl(hub, None, provider, cwd, text)
+    apply_impl(hub, None, "chat.agent", provider, cwd, text)
 }
 pub fn apply_in_session(hub: &Hub, session: &str, provider: &str, cwd: &str, text: &str) -> String {
-    apply_impl(hub, Some(session), provider, cwd, text)
+    apply_impl(hub, Some(session), "chat.agent", provider, cwd, text)
 }
-fn apply_impl(hub: &Hub, session: Option<&str>, provider: &str, cwd: &str, text: &str) -> String {
-    let Some(formatted) = format_in_session(hub, session, "chat.agent", provider, cwd, text) else {
+pub fn apply_user_in_session(
+    hub: &Hub,
+    session: &str,
+    provider: &str,
+    cwd: &str,
+    text: &str,
+) -> String {
+    apply_impl(hub, Some(session), "chat.user", provider, cwd, text)
+}
+fn apply_impl(
+    hub: &Hub,
+    session: Option<&str>,
+    kind: &str,
+    provider: &str,
+    cwd: &str,
+    text: &str,
+) -> String {
+    let Some(formatted) = format_in_session(hub, session, kind, provider, cwd, text) else {
         return text.to_owned();
     };
     text.split('\n')

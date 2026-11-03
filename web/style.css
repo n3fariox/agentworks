@@ -545,3 +545,25 @@ body[data-code-theme=github-light] .source-line::before{color:#6e7781}
 #github-session-dialog{width:min(640px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overflow:auto}.github-session-list{display:flex;flex-direction:column;gap:8px;margin-top:16px;max-height:50dvh;overflow:auto}.github-session-choice{background:var(--bg);border:1px solid var(--border);border-radius:8px;font-size:13px;display:flex;flex-direction:column;gap:6px;width:100%;padding:12px;text-align:left;overflow-wrap:anywhere}.github-session-choice:hover{background:#24262c}.github-session-choice small{color:var(--muted);font-size:11px;line-height:1.5}#github-session-dialog .dialog-footer .text-button{font-size:13px;padding:10px}
 
 .github-session-choices{display:flex;flex-direction:column;gap:8px}.github-session-archived{border-top:1px solid var(--border);margin-top:8px;padding-top:14px}.github-session-archived>summary{cursor:pointer;color:var(--muted);padding:6px 0}.github-session-archived .field-note{margin:8px 0 12px}
+
+#prompt-editor{min-height:48px;max-height:min(320px,40dvh);resize:vertical;overflow:auto}
+#prompt-editor .cm-editor{color:var(--text);font-family:inherit;font-size:13px;line-height:1.6;min-height:48px;height:100%;background:transparent}
+#prompt-editor .cm-editor.cm-focused{outline:none}
+#prompt-editor .cm-scroller{font-family:inherit;line-height:1.6;overflow:auto;max-height:min(320px,40dvh)}
+#prompt-editor .cm-content{padding:3px 0;caret-color:var(--text);min-height:48px;overflow-wrap:anywhere}
+#prompt-editor .cm-line{padding:0 3px}
+#prompt-editor .cm-placeholder{color:#777f8d}
+#prompt-editor .cm-cursor{border-left-color:var(--text)}
+#prompt-editor .cm-selectionBackground{background:#6f5c9855}
+#prompt-editor .cm-md-strong{font-weight:700}
+#prompt-editor .cm-md-em{font-style:italic}
+#prompt-editor .cm-md-strike{text-decoration:line-through}
+#prompt-editor .cm-md-inline-code{font-family:ui-monospace,monospace;background:#23262b;border-radius:4px;color:#d1c7ed}
+#prompt-editor .cm-md-heading{font-weight:600;line-height:1.4;padding-top:5px;padding-bottom:5px}
+#prompt-editor .cm-md-h1{font-size:24px}#prompt-editor .cm-md-h2{font-size:20px}#prompt-editor .cm-md-h3{font-size:17px}
+#prompt-editor .cm-md-link{color:var(--accent);text-decoration:underline}
+#prompt-editor .cm-md-bullet{color:var(--accent);padding:0 3px}
+#prompt-editor .cm-md-quote{border-left:2px solid #635776;padding-left:10px;color:var(--muted)}
+#prompt-editor .cm-md-code-line{font:12px/1.7 ui-monospace,monospace;background:#171a1e}
+#composer-source{flex-shrink:0;font-size:10px}
+@media(max-width:650px){#prompt-editor .cm-editor,#prompt-editor .cm-content{font-size:16px}}

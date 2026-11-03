@@ -39,6 +39,8 @@ npm start -- --features model-viewer
 
 Default builds exclude the viewer and its CAD/WebAssembly assets. Enabled builds embed all assets locally and load the viewer only when a model is opened in Files or the chat sidebar. Controls include rotate, pan, zoom, fit, an edges toggle, and an Albedo toggle for base colors/textures without lighting or metallic reflections. The Albedo preference is remembered for subsequent previews. Supported previews: FCStd, STEP/STP, IGES/IGS, BREP/BRP, GLB/glTF, STL, OBJ, FBX, DAE, 3MF, AMF, PLY, OFF, 3DM, 3DS, IFC, BIM, and WRL. Export Blender projects as GLB; `.blend` is unsupported. glTF buffers/textures and OBJ materials/textures resolve relative to the model through the existing file API. The existing 10 MB per-file limit applies; previews allow up to 64 files and 64 MB combined. Third-party notices are served at `model-viewer-assets/LICENSES.txt`; OpenCascade and other importer notices are included with their assets. Regenerate the assets after updating viewer dependencies.
 
+The inline Markdown composer is bundled locally, including its third-party license notices. After changing its source or dependencies, run `npm ci --prefix web && npm run build:markdown-composer --prefix web` before building Rust.
+
 ## Connect an agent
 
 Claude and Codex reuse the host CLI sign-in. Run Agentworks as the same OS user as those CLIs; refresh expired credentials with `codex login` or Claude’s `/login`. OpenCode requires its native CLI and is restricted to advertised free models. The demo needs no account.
