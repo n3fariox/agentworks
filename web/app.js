@@ -1747,6 +1747,13 @@ $('lifecycle-menu').querySelector('.lifecycle-actions').addEventListener('click'
 const serviceSection=document.createElement('fieldset');serviceSection.id='service-controls';
 serviceSection.innerHTML=`<legend>Service · all projects</legend><p id="service-status" role="status" aria-live="polite">Loading service status…</p><label for="service-mode">Restart behavior</label><select id="service-mode"><option value="wait">Wait until all work is idle</option><option value="interrupt">Interrupt ALL active sessions</option></select><label for="service-expiry">Drain expiry (seconds, 5–900)</label><input id="service-expiry" type="number" min="5" max="900" value="300"><label for="service-release">Prepared release (blank keeps current executable)</label><input id="service-release" maxlength="128" placeholder="Immutable release basename"><button type="button" id="service-restart">Restart service</button><button type="button" id="service-cancel" hidden>Cancel pending restart</button><p id="service-error" class="error-text" role="alert"></p>`;
 $('settings-service-slot').replaceWith(serviceSection);
+api('/api/auth').then(auth=>{
+ if(!auth.user)return;
+ const row=document.createElement('p');row.id='auth-status';row.append(`Signed in as ${auth.user}. `);
+ const out=document.createElement('button');out.type='button';out.id='sign-out';out.textContent='Sign out';
+ out.onclick=async()=>{try{await api('/api/auth/logout',{method:'POST'});}finally{location.reload();}};
+ row.append(out);serviceSection.append(row);
+}).catch(()=>{});
 let servicePending=null,servicePolling=false;
 async function refreshService(){
  if(servicePolling||!$('settings-dialog').open)return;servicePolling=true;

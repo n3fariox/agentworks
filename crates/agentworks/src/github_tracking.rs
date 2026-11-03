@@ -563,6 +563,7 @@ pub(crate) mod tests {
                 host_usage: Arc::new(crate::host_usage::Hub::default()),
                 account_quota: Arc::default(),
                 github: Arc::new(crate::github::Hub::default()),
+                web_auth: Default::default(),
                 progress,
             };
             app.progress.bind_badge_sessions(&app.sessions);

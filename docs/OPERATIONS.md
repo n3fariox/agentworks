@@ -73,7 +73,27 @@ Use `AGENTWORKS_PORT=4318` to choose a different port. The default bind address 
 AGENTWORKS_BIND=0.0.0.0 ./target/debug/agentworks
 ```
 
-Open `http://<host-address>:4317` remotely. Network binding accepts the hostnames/IPs used to reach this listener and still requires matching browser origins for commands and WebSockets. The prototype relies on your private network for access; application login remains later work.
+Open `http://<host-address>:4317` remotely. Network binding accepts the hostnames/IPs used to reach this listener and still requires matching browser origins for commands and WebSockets. Without the options below, access control relies on your private network.
+
+### HTTPS, client certificates and sign-in
+
+All three are off by default and set through the server's environment (or `service.env`):
+
+| Variable | Effect |
+| --- | --- |
+| `AGENTWORKS_TLS_CERT`, `AGENTWORKS_TLS_KEY` | PEM certificate chain and private key. The listener then serves HTTPS only (`https://<host>:4317`). Set both or neither. |
+| `AGENTWORKS_TLS_CLIENT_CA` | PEM bundle of CAs. Requires TLS. Every connection must then present a client certificate signed by one of them; the TLS handshake fails otherwise, before any HTTP is processed. |
+| `AGENTWORKS_PAM_SERVICE` | Enables password sign-in through this PAM service, such as `login` or a dedicated `/etc/pam.d/agentworks`. Requires TLS, or `AGENTWORKS_TRUSTED_PROXIES` for a proxy that terminates HTTPS. The service must have its own file in `/etc/pam.d`, `/usr/lib/pam.d` or `/usr/etc/pam.d`; startup refuses otherwise, so a typo never falls through to PAM's `other` service. Linux only. |
+| `AGENTWORKS_PAM_USERS` | Comma-separated accounts allowed to sign in. Defaults to the user running the server. Anyone signed in controls the agents, which run as the server's user. |
+| `AGENTWORKS_TRUSTED_PROXIES` | Comma-separated proxy addresses or CIDR ranges, such as `127.0.0.1,::1` or `10.0.0.5/32`. `X-Forwarded-*` headers are then honoured only from these peers; unset, any peer's are (see [hosting](HOSTING.md#public-mount-and-proxy-contract)). |
+| `AGENTWORKS_PAM_CONFDIR` | Reads PAM configuration from this directory instead of `/etc/pam.d`. Used by tests. |
+
+Invalid or partial settings stop startup rather than falling back to plain HTTP. Certificates are read at startup; restart the service after renewing them. A certificate for a LAN name or VPN address can come from your own CA (the same one can issue client certificates) or, for example, from `tailscale cert`.
+
+With PAM sign-in, every page and API request needs a session cookie, apart from the sign-in page and the files the browser fetches without credentials while installing the app. Signing in runs the PAM service's `auth` and `account` stacks with the browser's address as `PAM_RHOST`; behind a trusted proxy that is the last `X-Forwarded-For` hop, the one the proxy appended. Attempts are serialized and each failure waits two seconds, in addition to any delay or lockout the PAM stack applies (for example `pam_faillock`). Failures are logged with the username and address. A successful sign-in lasts 30 days. Settings → **Service** shows the account and a **Sign out** button, which revokes the session. Sessions survive service restarts: only SHA-256 hashes of the cookies are kept, in `web-sign-ins.json` beside the catalog (`0600`); delete that file and restart to sign out every browser. The cookie is `Secure`, `HttpOnly` and `SameSite=Lax`. Its name comes from the app's public URL and its `Path` is the public mount, both reported by the browser at sign-in (a stripping proxy hides the mount from the server). Instances on different ports, or at different mounts of one domain, therefore keep separate sign-ins, and a mount's cookie is not sent to its siblings. libpam is loaded only when sign-in is enabled. A non-root server can usually verify only its own user's password through `pam_unix`, which matches the default allow list.
+
+Behind a proxy that terminates HTTPS, set `AGENTWORKS_TRUSTED_PROXIES` to the proxy's address and keep the backend reachable only by it, for example bound to loopback. Without the listener's own TLS, every request must then come from a listed proxy with a single `X-Forwarded-Proto: https`; anything else, including direct plain-HTTP access from the same machine, gets 403 before any password or cookie is read. The proxy must overwrite `X-Forwarded-Proto` and `X-Forwarded-Host` and append the client to `X-Forwarded-For`. Alternatively, keep the listener's own TLS and accept only the proxy's client certificate with `AGENTWORKS_TLS_CLIENT_CA`; client addresses are then logged as the proxy's.
+
 
 For HTTPS at a public subpath, configure the proxy to normalize the trailing slash,
 strip the public prefix, preserve WebSocket upgrades, and overwrite forwarded
@@ -90,11 +110,11 @@ Traefik example](HOSTING.md).
 - The browser loads the most recent 3,000 events / approximately 4 MB. The full event log stays in SQLite, without automatic transcript expiration.
 - One ACP adapter process per session. Cancellation clears pending approvals; stopping the server ends its harness processes and terminals.
 - File previews follow live paths rather than keeping artifact snapshots. Concurrent filesystem replacement is outside the trusted-project boundary.
-- Image output, chat attachments, and supported question forms are available. Application login and native Windows delivery remain future work.
+- Image output, chat attachments, and supported question forms are available. Native Windows delivery remains future work.
 
 ## Harness environment
 
-Every harness process, local or remote, gets `AGENTWORKS_SESSION_ID` and `AGENTWORKS_SESSION_URI` (`agentworks://sessions/<id>`), so scripts, hooks and tools it runs can tell which session they serve. Remote workers older than this release omit them. The service's own configuration and process-manager state are withheld: listen address and port, roots, catalog and database paths, auth mode, model-provider directory, PWA switch, supervisor and release settings, and systemd variables such as `NOTIFY_SOCKET` and `INVOCATION_ID` (the full list is `SERVICE_ENVIRONMENT` in `crates/agentworks-runtime/src/provider.rs`). An Agentworks server or test started from inside a harness therefore does not inherit the live service's store, port or supervisor. Its defaults still apply: the default store is `.agentworks/` in the checkout the binary was built from, so a build in the checkout that also holds the live store opens that store unless the paths are set. Local harnesses also read your current login environment on each start; see [lifecycle](LIFECYCLE.md).
+Every harness process, local or remote, gets `AGENTWORKS_SESSION_ID` and `AGENTWORKS_SESSION_URI` (`agentworks://sessions/<id>`), so scripts, hooks and tools it runs can tell which session they serve. Remote workers older than this release omit them. The service's own configuration and process-manager state are withheld: listen address and port, TLS and sign-in settings, roots, catalog and database paths, auth mode, model-provider directory, PWA switch, supervisor and release settings, and systemd variables such as `NOTIFY_SOCKET` and `INVOCATION_ID` (the full list is `SERVICE_ENVIRONMENT` in `crates/agentworks-runtime/src/provider.rs`). An Agentworks server or test started from inside a harness therefore does not inherit the live service's store, port or supervisor. Its defaults still apply: the default store is `.agentworks/` in the checkout the binary was built from, so a build in the checkout that also holds the live store opens that store unless the paths are set. Local harnesses also read your current login environment on each start; see [lifecycle](LIFECYCLE.md).
 
 ## Persistent sessions
 

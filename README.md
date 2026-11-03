@@ -89,4 +89,4 @@ See [agent communication](docs/AGENT-COMMUNICATION.md) for roles and permissions
 
 Sessions and transcripts persist locally, but running harnesses and terminals stop with the server. Interrupted turns are recorded and are not automatically replayed. Keep the catalog, SQLite database, and provider conversation stores when updating or backing up.
 
-Agentworks assumes trusted projects and private-network access. Agent permissions and allowed directory roots do not provide OS isolation; application login and stronger process separation remain future work.
+Agentworks assumes trusted projects and private-network access. Optional HTTPS, client certificates and PAM sign-in are described in [operations](docs/OPERATIONS.md#https-client-certificates-and-sign-in). Agent permissions and allowed directory roots do not provide OS isolation; stronger process separation remains future work.
