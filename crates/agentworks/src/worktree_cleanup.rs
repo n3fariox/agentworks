@@ -66,6 +66,7 @@ pub(crate) async fn inspect(app: &App, s: &Session) -> Inspection {
                 locked: false,
                 shared_with: Vec::new(),
                 blocker: Some(reason),
+                in_use: false,
             },
         }
     };
@@ -74,6 +75,7 @@ pub(crate) async fn inspect(app: &App, s: &Session) -> Inspection {
         result.blocker = if busy {
             Some("Session is running; stop it before removing its worktree".into())
         } else if !result.shared_with.is_empty() {
+            result.in_use = true;
             Some("Another session uses this worktree".into())
         } else {
             None
@@ -100,6 +102,7 @@ fn view(s: &Session, i: &Inspection) -> Value {
         "cleanup": {
             "allowed": i.state == "present" && i.blocker.is_none(),
             "requiresConfirmation": dirty,
+            "overridable": i.state == "present" && i.in_use,
             "reason": match i.state.as_str() {
                 "unowned" => Some("This session did not create its worktree; Agentworks never removes it".into()),
                 "removed" => Some("Removed on archive; unarchive to recreate it from the retained branch".into()),
@@ -128,13 +131,17 @@ fn persist(s: &Session) -> Result<(), Error> {
 }
 
 /// Callers hold the run lock. Retained outcomes are successful for `Auto`; `Remove` fails instead.
+/// `unused` is the human's assurance that sessions sharing the checkout no longer need it.
 pub async fn cleanup(
     app: &App,
     s: &Session,
     mode: Cleanup,
     confirm: Option<&str>,
+    unused: bool,
 ) -> Result<Value, Error> {
     let first = inspect(app, s).await;
+    let overridden = mode == Cleanup::Remove && unused;
+    let blocker = |i: &Inspection| i.blocker.clone().filter(|_| !(overridden && i.in_use));
     let summary = view(s, &first);
     let retained = |reason: &str| -> Result<Value, Error> {
         if mode == Cleanup::Remove {
@@ -156,12 +163,12 @@ pub async fn cleanup(
             "Worktree changes differ from the confirmed state; review them and confirm again",
         ));
     }
-    crate::git_settings::exit(app, s, "archive").await?;
+    crate::git_settings::exit(app, s, "archive", overridden).await?;
     if mode == Cleanup::Keep {
         return Ok(json!({"outcome":"retained","reason":"Kept by request","worktree":summary}));
     }
-    if let Some(reason) = &first.blocker {
-        return retained(reason);
+    if let Some(reason) = blocker(&first) {
+        return retained(&reason);
     }
     let o = first.owned.clone().expect("owned worktree");
     let dirty = first.dirty.as_ref().is_some_and(Dirty::any);
@@ -189,7 +196,7 @@ pub async fn cleanup(
     let _workspace = app.workspace_lock.lock().await;
     // The harness may have written files before it stopped.
     let second = inspect(app, s).await;
-    if second.blocker.is_some() || second.fingerprint != first.fingerprint {
+    if blocker(&second).is_some() || second.fingerprint != first.fingerprint {
         return retained("Worktree changed while preparing removal; inspect it and retry");
     }
     let removal = if s.host_id == "local" {
@@ -260,6 +267,9 @@ pub async fn status(State(app): State<App>, Path(id): Path<String>) -> ApiResult
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Removal {
     confirm_dirty: Option<String>,
+    /// Remove even though other sessions still point into the checkout.
+    #[serde(default)]
+    confirm_unused: bool,
 }
 /// Explicit later removal for an archived session whose worktree was retained.
 pub async fn remove(
@@ -272,10 +282,15 @@ pub async fn remove(
     if !s.data.lock().unwrap().lifecycle.archived {
         return Err(conflict("Archive the session before removing its worktree"));
     }
-    remove_locked(&app, &s, req.confirm_dirty.as_deref()).await
+    remove_locked(&app, &s, req.confirm_dirty.as_deref(), req.confirm_unused).await
 }
-async fn remove_locked(app: &App, s: &Arc<Session>, confirm: Option<&str>) -> ApiResult {
-    let outcome = cleanup(app, s, Cleanup::Remove, confirm).await?;
+async fn remove_locked(
+    app: &App,
+    s: &Arc<Session>,
+    confirm: Option<&str>,
+    unused: bool,
+) -> ApiResult {
+    let outcome = cleanup(app, s, Cleanup::Remove, confirm, unused).await?;
     persist(s)?;
     s.emit("session_updated", s.meta());
     Ok(Json(outcome))

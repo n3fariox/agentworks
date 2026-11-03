@@ -145,7 +145,13 @@ pub async fn run(
 }
 
 /// Called under the run lock for archive/delete, even when archive keeps the checkout.
-pub async fn exit(app: &App, s: &Session, reason: &str) -> Result<(), (StatusCode, String)> {
+/// `unused` skips the shared-checkout guard after a human confirmed the other sessions are done.
+pub async fn exit(
+    app: &App,
+    s: &Session,
+    reason: &str,
+    unused: bool,
+) -> Result<(), (StatusCode, String)> {
     let needed = s
         .data
         .lock()
@@ -158,11 +164,19 @@ pub async fn exit(app: &App, s: &Session, reason: &str) -> Result<(), (StatusCod
         return Ok(());
     }
     let _workspace = app.workspace_lock.lock().await;
-    exit_locked(app, s, reason).await
+    exit_guarded(app, s, reason, unused).await
 }
 
 /// Caller already holds the workspace lock (project cascade deletion).
 pub async fn exit_locked(app: &App, s: &Session, reason: &str) -> Result<(), (StatusCode, String)> {
+    exit_guarded(app, s, reason, false).await
+}
+async fn exit_guarded(
+    app: &App,
+    s: &Session,
+    reason: &str,
+    unused: bool,
+) -> Result<(), (StatusCode, String)> {
     let needed = s
         .data
         .lock()
@@ -181,7 +195,7 @@ pub async fn exit_locked(app: &App, s: &Session, reason: &str) -> Result<(), (St
         ));
     }
     let inspection = crate::worktree_cleanup::inspect(app, s).await;
-    if let Some(reason) = inspection.blocker {
+    if let Some(reason) = inspection.blocker.filter(|_| !(unused && inspection.in_use)) {
         return Err(fail(StatusCode::CONFLICT, reason));
     }
     crate::service_restart::stop_requester(app, &s.id)?;

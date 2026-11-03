@@ -61,6 +61,9 @@ pub struct Inspection {
     pub shared_with: Vec<Value>,
     /// Why removal is unsafe regardless of the dirty state.
     pub blocker: Option<String>,
+    /// The blocker is only that other sessions use the checkout; a human may override it.
+    #[serde(default)]
+    pub in_use: bool,
 }
 
 fn conflict(message: impl Into<String>) -> Error {
@@ -136,6 +139,7 @@ pub async fn inspect_in(
         locked: false,
         shared_with: Vec::new(),
         blocker: None,
+        in_use: false,
     };
     let Some(o) = owned else {
         return result;

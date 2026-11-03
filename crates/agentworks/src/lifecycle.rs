@@ -25,6 +25,9 @@ pub struct Update {
     worktree: Option<crate::worktree_cleanup::Cleanup>,
     /// Fingerprint from `GET /worktree` that the human confirmed for dirty removal.
     confirm_dirty: Option<String>,
+    /// Human assurance that sessions sharing the worktree no longer use it.
+    #[serde(default)]
+    confirm_unused: bool,
 }
 impl Update {
     /// MCP archive exposes only the default safe cleanup policy.
@@ -34,6 +37,7 @@ impl Update {
             archived: Some(true),
             worktree: None,
             confirm_dirty: None,
+            confirm_unused: false,
         }
     }
 }
@@ -54,10 +58,12 @@ pub async fn update(
             "Use a title of 1–80 characters without control characters",
         ));
     }
-    if req.archived != Some(true) && (req.worktree.is_some() || req.confirm_dirty.is_some()) {
+    if req.archived != Some(true)
+        && (req.worktree.is_some() || req.confirm_dirty.is_some() || req.confirm_unused)
+    {
         return Err(fail(
             StatusCode::BAD_REQUEST,
-            "worktree and confirmDirty only apply when archiving",
+            "worktree, confirmDirty and confirmUnused only apply when archiving",
         ));
     }
     let was_archived = s.data.lock().unwrap().lifecycle.archived;
@@ -69,6 +75,7 @@ pub async fn update(
                 &s,
                 req.worktree.unwrap_or_default(),
                 req.confirm_dirty.as_deref(),
+                req.confirm_unused,
             )
             .await?,
         );
