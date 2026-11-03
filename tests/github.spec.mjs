@@ -109,7 +109,7 @@ for(const mobile of [false,true])test(`GitHub display, safe text and detached li
   });
   async function openGithub(){if(mobile)await page.locator('#session-more').click();await page.locator('#session-github').click();}
   await page.goto(base);
-  await page.locator('#prompt').fill('Keep my draft');await openGithub();
+  await page.locator('#prompt-editor .cm-content').fill('Keep my draft');await openGithub();
   await expect(page.locator('#github-resources')).toContainText('PR head differs from checkout');
   await expect(page.locator('#github-resources')).toContainText('Changes requested');
   await expect(page.locator('#github-resources img')).toHaveCount(0);
