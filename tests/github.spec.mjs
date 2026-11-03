@@ -300,6 +300,7 @@ test('GitHub listing runs only in the visible view and per-host intervals save t
 test('each host keeps one table while its repository groups collapse independently',async({page})=>{
   const data=githubBrowserData();data.hosts=data.hosts.slice(0,1);const extra=structuredClone(data.hosts[0].rows[0]);extra.repository.name='other';extra.pr.number=104;extra.pr.url='https://github.com/team/other/pull/104';extra.badge.label='PR#104';extra.badge.url=extra.pr.url;data.hosts[0].rows.push(extra);
   await page.route('**/api/github/pulls',route=>route.fulfill({json:data}));await page.goto(base+'/?view=github');await expect(page.locator('.github-pr-table')).toHaveCount(1);await expect(page.locator('.github-browser-row')).toHaveCount(2);
+  await page.getByLabel('Group by repository',{exact:true}).check();
   await page.getByRole('button',{name:'Toggle github.com/team/repo',exact:true}).click();await expect(page.locator('.github-browser-row[data-number="100"]')).toBeHidden();await expect(page.locator('.github-browser-row[data-number="104"]')).toBeVisible();
 });
 
@@ -388,4 +389,53 @@ for(const mobile of [false,true])test(`archived-only PR matches open from the lo
   await page.screenshot({path:`.cache/github-session-pivot-archived-${mobile?'mobile':'desktop'}-20261102.png`});
   await archived.getByRole('button',{name:/Earlier PR review/}).click();await expect(dialog).toBeHidden();await expect(page.locator('body')).toHaveAttribute('data-workspace-view','sessions');await expect(page.locator('#header-title')).toHaveText('Earlier PR review');
   await expect(page.locator('#resume-session')).toBeVisible();expect((await api(`/api/sessions/${session.id}?view=meta`)).archived).toBe(true);expect(mutations).toBe(0);
+});
+
+function tableControlData(){
+  const data=githubBrowserData(),host=data.hosts[0],base=host.rows[0];
+  const entry=(number,title,repo,author,updated,created,flags,review,checks)=>{
+    const row=structuredClone(base);Object.assign(row,{authored:false,assigned:false,reviewRequested:false,...flags});row.repository.name=repo;
+    Object.assign(row.pr,{number,title,author,updatedAt:updated,createdAt:created,headBranch:`feature/${number}`,reviewSummary:{state:review},checks:{state:checks},url:`https://github.com/team/${repo}/pull/${number}`});row.badge.label=`PR#${number}`;return row;
+  };
+  host.rows=[
+    entry(11,'Alpha','zeta','bob','2026-10-01T12:00:00Z','2026-09-01T12:00:00Z',{assigned:true},'REVIEW_REQUIRED','PENDING'),
+    entry(16,'Undated','zeta','bob',null,null,{authored:true},'NONE','UNKNOWN'),
+    entry(13,'Middle','zeta','alice','2026-11-02T23:59:59Z','2026-10-03T12:00:00Z',{authored:true},'CHANGES_REQUESTED','FAILURE'),
+    entry(15,'Draft review','gamma','charlie','2026-11-01T12:00:00Z','2026-10-05T12:00:00Z',{reviewRequested:true},'UNKNOWN','UNKNOWN'),
+    entry(12,'Zulu','beta','zoe','2026-11-03T13:00:00Z','2026-10-02T12:00:00Z',{assigned:true},'APPROVED','SUCCESS'),
+    entry(14,'Review me','alpha','alice','2026-11-03T15:00:00Z','2026-10-04T12:00:00Z',{reviewRequested:true,assigned:true},'REVIEW_REQUIRED','PENDING'),
+  ];host.rows.find(r=>r.pr.number===15).pr.draft=true;data.hosts=[host];return data;
+}
+const prNumbers=area=>area.locator('.github-browser-row').evaluateAll(rows=>rows.map(row=>Number(row.dataset.number)));
+
+for(const mobile of [false,true])test(`PR table sorting, column filters and review section ${mobile?'mobile':'desktop'}`,async({page})=>{
+  if(mobile)await page.setViewportSize({width:390,height:844});let reads=0;
+  await page.route('**/api/github/pulls',route=>{reads++;return route.fulfill({json:tableControlData()});});
+  await page.goto(base+'/?view=github');const requested=page.locator('.github-pr-category[data-category=requested]'),other=page.locator('.github-pr-category[data-category=other]');
+  await expect(other.locator('.github-browser-row')).toHaveCount(4);expect(await prNumbers(requested)).toEqual([14,15]);expect(await prNumbers(other)).toEqual([12,13,11,16]);
+  await expect(page.locator('.github-pr-category').first()).toHaveAttribute('data-category','requested');await expect(page.locator('.github-browser-row[data-number="14"]')).toHaveCount(1);await expect(requested).toContainText('Assigned to me · Review requested');
+  await other.getByRole('button',{name:'Sort by Updated',exact:true}).click();expect(await prNumbers(other)).toEqual([11,13,12,16]);await expect(other.locator('th[aria-sort=ascending]')).toContainText('Updated');
+  await page.getByRole('combobox',{name:'Sort PRs by',exact:true}).selectOption('created');expect(await prNumbers(other)).toEqual([13,12,11,16]);
+  await page.getByRole('combobox',{name:'Sort PRs by',exact:true}).selectOption('title');expect(await prNumbers(other)).toEqual([11,13,16,12]);
+  await page.getByRole('combobox',{name:'Sort PRs by',exact:true}).selectOption('updated');
+  await page.locator('.github-column-filters>summary').click();await page.getByLabel('Filter Author',{exact:true}).fill('ALICE');await expect(page.locator('.github-browser-row')).toHaveCount(2);
+  await page.getByLabel('Filter CI',{exact:true}).selectOption('Failing');await expect(page.locator('.github-browser-row')).toHaveCount(1);expect(await prNumbers(other)).toEqual([13]);
+  await page.getByRole('button',{name:'Clear filters',exact:true}).click();await page.getByLabel('Filter Updated from',{exact:true}).fill('2026-11-02');await page.getByLabel('Filter Updated through',{exact:true}).fill('2026-11-02');expect(await prNumbers(other)).toEqual([13]);await expect(requested).toHaveCount(0);
+  await page.getByRole('button',{name:'Clear filters',exact:true}).click();await page.getByLabel('Filter Included because',{exact:true}).selectOption('reviewRequested');expect(await prNumbers(requested)).toEqual([14,15]);await expect(other).toHaveCount(0);
+  await page.getByRole('button',{name:'Clear filters',exact:true}).click();
+  const title=page.getByLabel('Filter Pull request',{exact:true});await title.pressSequentially('feature/13');await expect(title).toBeFocused();await expect(title).toHaveValue('feature/13');expect(await prNumbers(other)).toEqual([13]);
+  await page.getByRole('button',{name:'Clear filters',exact:true}).click();await page.getByLabel('Filter Repository',{exact:true}).fill('absent');await expect(page.locator('#github-browser')).toContainText('No PRs match the column filters.');
+  await page.getByRole('button',{name:'Clear filters',exact:true}).click();
+  await page.locator('.github-column-filters>summary').click();await page.screenshot({path:`.cache/github-pr-table-controls-${mobile?'mobile':'desktop'}-20261102.png`});
+  expect(reads).toBe(1);expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  await page.getByRole('combobox',{name:'Sort PRs by',exact:true}).selectOption('number');await page.reload();await expect(page.getByRole('combobox',{name:'Sort PRs by',exact:true})).toHaveValue('number');expect(await prNumbers(other)).toEqual([11,12,13,16]);
+});
+
+test('PR context menu opens a validated PR URL in a new tab and omits unsafe URLs',async({page})=>{
+  const data=tableControlData();data.hosts[0].rows.find(r=>r.pr.number===11).pr.url='javascript:alert(1)';
+  await page.route('**/api/github/pulls',route=>route.fulfill({json:data}));
+  await page.route('https://github.com/team/beta/pull/12',route=>route.fulfill({body:'PR fixture'}));
+  await page.goto(base+'/?view=github');const row=page.locator('.github-browser-row[data-number="12"]');await row.scrollIntoViewIfNeeded();await row.focus();await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));await page.keyboard.press('Shift+F10');
+  const popup=page.waitForEvent('popup');await page.getByRole('menuitem',{name:'Open PR in new tab',exact:true}).click();const tab=await popup;await tab.waitForLoadState();expect(tab.url()).toBe('https://github.com/team/beta/pull/12');expect(await tab.evaluate(()=>window.opener)).toBe(null);await tab.close();
+  const unsafe=page.locator('.github-browser-row[data-number="11"]');await unsafe.focus();await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));await page.keyboard.press('Shift+F10');await expect(page.getByRole('menuitem',{name:'Open PR in new tab',exact:true})).toHaveCount(0);
 });

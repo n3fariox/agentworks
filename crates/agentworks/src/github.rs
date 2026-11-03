@@ -803,7 +803,7 @@ fn checkout_snapshot(snapshot: &mut Value, sha: Option<&str>) {
 }
 const PR_FIELDS: &str = r#"
  id number title url state isDraft headRefName headRefOid headRepository { nameWithOwner }
- baseRefName reviewDecision author { login } updatedAt
+ baseRefName reviewDecision author { login } updatedAt createdAt
  latestOpinionatedReviews(first:50) { pageInfo { hasNextPage } nodes { state commit { oid } } }
  commits(last:1) { nodes { commit { oid statusCheckRollup { state contexts(first:50) {
  pageInfo { hasNextPage } nodes {
@@ -985,7 +985,7 @@ fn normalize(resource: &Value, kind: &str, explicit: bool, sha: Option<&str>) ->
     let rollup = &resource["commits"]["nodes"][0]["commit"]["statusCheckRollup"];
     json!({"fetchedAt":now(),"id":resource["id"],"kind":kind,"number":resource["number"],"title":resource["title"],"url":resource["url"],"state":resource["state"],"draft":resource["isDraft"],"headSha":resource["headRefOid"],"baseBranch":resource["baseRefName"],"explicit":explicit,
         "headMatches":sha.is_some_and(|sha| resource["headRefOid"] == sha),"reviewDecision":resource["reviewDecision"],"reviewSummary":review_summary(resource),
-        "headBranch":resource["headRefName"],"headRepository":resource["headRepository"]["nameWithOwner"],"author":resource["author"]["login"],"updatedAt":resource["updatedAt"],
+        "headBranch":resource["headRefName"],"headRepository":resource["headRepository"]["nameWithOwner"],"author":resource["author"]["login"],"updatedAt":resource["updatedAt"],"createdAt":resource["createdAt"],
         "checks":if rollup.is_null() { json!({"state":"UNKNOWN","items":[],"complete":false}) } else { json!({"state":rollup["state"],"items":rollup["contexts"]["nodes"],"complete":rollup["contexts"]["pageInfo"]["hasNextPage"] == false}) }})
 }
 
@@ -1109,9 +1109,11 @@ mod tests {
     }
     #[test]
     fn checks_are_commit_scoped_and_absent_is_unknown() {
-        let pr = json!({"number":1,"headRefOid":"old"});
+        let pr = json!({"number":1,"headRefOid":"old","createdAt":"2026-10-01T12:00:00Z","updatedAt":"2026-11-02T12:00:00Z"});
         let normalized = normalize(&pr, "pullRequest", false, Some("new"));
         assert_eq!(normalized["headMatches"], false);
+        assert_eq!(normalized["createdAt"], pr["createdAt"]);
+        assert_eq!(normalized["updatedAt"], pr["updatedAt"]);
         assert_eq!(normalized["checks"]["state"], "UNKNOWN");
     }
     #[tokio::test]

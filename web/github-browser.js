@@ -54,29 +54,102 @@ export function setupGithubBrowser({api,root,openSession,selectSession,openSetti
       (activeList.querySelector('button')||archivedSection?.querySelector('summary'))?.focus();
     }catch(e){if(version===pivotGeneration&&chooser.open){content.textContent='Could not load associated sessions.';error.textContent=e.message;}}
   }
+  const columns=[['title','Pull request'],['repository','Repository'],['author','Author'],['included','Included because'],['review','Review'],['ci','CI'],['updated','Updated'],['created','Created']];
+  const filters={title:'',repository:'',author:'',included:'',review:'',ci:'',updatedFrom:'',updatedThrough:'',createdFrom:'',createdThrough:''};
+  let sort={field:'updated',direction:'desc'},groupRepos=false,filtersOpen=false;
+  try{const saved=JSON.parse(localStorage.getItem('agentworks-github-table')||'null');if(saved&&[...columns.map(c=>c[0]),'number'].includes(saved.field)&&['asc','desc'].includes(saved.direction)){sort={field:saved.field,direction:saved.direction};groupRepos=!!saved.groupRepos;}}catch{}
+  const saveTable=()=>{try{localStorage.setItem('agentworks-github-table',JSON.stringify({...sort,groupRepos}));}catch{}};
+  const review=item=>item.pr.draft?'Draft':({APPROVED:'Approved',REVIEW_REQUIRED:'In review',CHANGES_REQUESTED:'Changes requested',NONE:'No review',UNKNOWN:'Unknown'}[item.pr.reviewSummary?.state||item.pr.reviewDecision]||'Unknown');
+  const ci=item=>({SUCCESS:'Passing',FAILURE:'Failing',ERROR:'Failing',PENDING:'Pending',EXPECTED:'Waiting'}[item.pr.checks?.state]||'Unknown');
+  const included=item=>[item.authored?'Created by me':'',item.assigned?'Assigned to me':'',item.reviewRequested?'Review requested':''].filter(Boolean).join(' · ');
+  const timestamp=value=>{const n=Date.parse(value);return Number.isFinite(n)?n:null;};
+  function value(item,field){
+    return ({title:item.pr.title||'',repository:`${item.repository.host}/${item.repository.owner}/${item.repository.name}`,author:item.pr.author||'Unknown',included:included(item),review:review(item),ci:ci(item),number:item.pr.number,updated:timestamp(item.pr.updatedAt),created:timestamp(item.pr.createdAt)})[field];
+  }
+  function matches(item){
+    for(const field of ['title','repository','author']){
+      const text=field==='title'?`${item.pr.number} ${item.pr.title||''} ${item.pr.headBranch||''}`:value(item,field);
+      if(!text.toLowerCase().includes(filters[field].trim().toLowerCase()))return false;
+    }
+    if(filters.included&&!item[filters.included])return false;
+    if(filters.review&&review(item)!==filters.review)return false;
+    if(filters.ci&&ci(item)!==filters.ci)return false;
+    for(const field of ['updated','created']){
+      const date=value(item,field),from=timestamp(filters[field+'From']),through=timestamp(filters[field+'Through']);
+      if((from!==null&&(date===null||date<from))||(through!==null&&(date===null||date>=through+86400000)))return false;
+    }
+    return true;
+  }
+  function sorted(items){return [...items].sort((a,b)=>{
+    const av=value(a,sort.field),bv=value(b,sort.field);
+    // Undated records remain last in either direction.
+    if(av===null||bv===null){if(av!==bv)return av===null?1:-1;}
+    const comparison=typeof av==='number'&&typeof bv==='number'?av-bv:String(av??'').localeCompare(String(bv??''),undefined,{numeric:true,sensitivity:'base'});
+    return comparison*(sort.direction==='asc'?1:-1)||value(a,'repository').localeCompare(value(b,'repository'))||a.pr.number-b.pr.number;
+  });}
+  function setSort(field){sort=sort.field===field?{field,direction:sort.direction==='asc'?'desc':'asc'}:{field,direction:['updated','created'].includes(field)?'desc':'asc'};saveTable();render();}
+  function controls(){
+    const area=el('div',undefined,'github-table-controls'),bar=el('div',undefined,'github-table-toolbar');
+    const label=el('label','Sort by '),select=el('select');select.setAttribute('aria-label','Sort PRs by');select.dataset.githubControl='sort';
+    for(const [key,title] of [...columns,['number','PR number']]){const option=el('option',title);option.value=key;select.append(option);}select.value=sort.field;
+    select.onchange=()=>{const field=select.value;sort={field,direction:['updated','created'].includes(field)?'desc':'asc'};saveTable();render();};label.append(select);
+    const direction=el('button',sort.direction==='desc'?'Descending ↓':'Ascending ↑','text-button');direction.dataset.githubControl='direction';direction.setAttribute('aria-label','Reverse PR sort order');direction.onclick=()=>{sort.direction=sort.direction==='asc'?'desc':'asc';saveTable();render();};
+    const groupLabel=el('label',undefined,'workspace-check'),check=el('input');check.type='checkbox';check.checked=groupRepos;check.dataset.githubControl='group';check.onchange=()=>{groupRepos=check.checked;saveTable();render();};groupLabel.append(check,document.createTextNode('Group by repository'));
+    bar.append(label,direction,groupLabel);area.append(bar);
+    const panel=el('details',undefined,'github-column-filters');panel.open=filtersOpen;const count=Object.values(filters).filter(Boolean).length;panel.append(el('summary',`Column filters${count?` · ${count} active`:''}`));panel.ontoggle=()=>{if(panel.isConnected)filtersOpen=panel.open;};
+    const grid=el('div',undefined,'github-filter-grid');
+    const fields=[['title','Pull request'],['repository','Repository'],['author','Author'],['included','Included because',[['authored','Created by me'],['assigned','Assigned to me'],['reviewRequested','Review requested']]],['review','Review',['Approved','In review','Changes requested','No review','Draft','Unknown']],['ci','CI',['Passing','Failing','Pending','Waiting','Unknown']],['updatedFrom','Updated from'],['updatedThrough','Updated through'],['createdFrom','Created from'],['createdThrough','Created through']];
+    for(const [key,title,options] of fields){
+      const label=el('label',title),input=el(options?'select':'input');input.dataset.githubControl=key;input.setAttribute('aria-label',`Filter ${title}`);
+      if(options){const all=el('option','Any');all.value='';input.append(all);for(const entry of options){const [v,text]=Array.isArray(entry)?entry:[entry,entry],option=el('option',text);option.value=v;input.append(option);}}
+      else{input.type=/From$|Through$/.test(key)?'date':'search';if(input.type==='search')input.placeholder=key==='title'?'Title, PR number or branch':'Contains…';}
+      input.value=filters[key];input.oninput=()=>{filters[key]=input.value;render();};label.append(input);grid.append(label);
+    }
+    const clear=el('button','Clear filters','text-button');clear.onclick=()=>{for(const key in filters)filters[key]='';render();};grid.append(clear);panel.append(grid);area.append(panel);return area;
+  }
+  function dateCell(item,field){const cell=el('td'),raw=item.pr[field==='updated'?'updatedAt':'createdAt'];if(timestamp(raw)===null){cell.textContent='Unknown';return cell;}const time=el('time',new Date(raw).toLocaleString(undefined,{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}));time.dateTime=raw;time.title=raw;cell.append(time);return cell;}
+  function table(host,items,category){
+    const scroll=el('div',undefined,'github-browser-scroll'),table=el('table',undefined,'github-pr-table'),head=el('thead'),heading=el('tr');table.setAttribute('aria-label',`${host.host} · ${category}`);
+    for(const [field,title] of columns){const cell=el('th'),button=el('button',`${title}${sort.field===field?(sort.direction==='desc'?' ↓':' ↑'):''}`,'text-button');cell.scope='col';cell.setAttribute('aria-sort',sort.field===field?(sort.direction==='desc'?'descending':'ascending'):'none');button.dataset.githubControl=`heading:${host.host}:${category}:${field}`;button.setAttribute('aria-label',`Sort by ${title}`);button.onclick=()=>setSort(field);cell.append(button);heading.append(cell);}heading.append(el('th',''));head.append(heading);table.append(head);
+    const repos=new Map();for(const row of sorted(items)){const key=groupRepos?row.repository.owner+'/'+row.repository.name:'';if(!repos.has(key))repos.set(key,[]);repos.get(key).push(row);}
+    for(const [name,items] of repos){
+      const key=host.host+'/'+name,body=el('tbody');
+      if(groupRepos){const groupRow=el('tr'),cell=el('th'),toggle=el('button',`${collapsed.has(key)?'▸':'▾'} ${name} · ${items.length}`,'text-button');cell.colSpan=columns.length+1;cell.scope='rowgroup';toggle.dataset.githubControl=`repo:${host.host}:${category}:${name}`;toggle.setAttribute('aria-expanded',String(!collapsed.has(key)));toggle.setAttribute('aria-label',`Toggle ${host.host}/${name}`);cell.append(toggle);groupRow.append(cell);body.append(groupRow);
+        toggle.onclick=()=>{if(collapsed.has(key))collapsed.delete(key);else collapsed.add(key);try{localStorage.setItem('agentworks-github-collapsed',JSON.stringify([...collapsed]));}catch{}render();};}
+      for(const item of items){
+        const pr=item.pr,prKey=JSON.stringify([host.host,item.repository.owner,item.repository.name,pr.number]),row=el('tr',undefined,'github-browser-row');row.dataset.prKey=prKey;row.dataset.number=pr.number;row.tabIndex=0;row.hidden=groupRepos&&collapsed.has(key);rows.set(prKey,item);
+        const title=el('td'),link=el('a',item.badge.label,`session-badge ${item.badge.tone}`),href=destination(pr.url);link.title=item.badge.tooltip;if(href){link.href=href;link.target='_blank';link.rel='noopener noreferrer';}title.append(link,el('span',pr.title,'github-pr-title'),el('small',pr.headBranch||'','field-note'));
+        row.append(title,el('td',`${item.repository.owner}/${item.repository.name}`),el('td',pr.author||'Unknown'),el('td',included(item)),el('td',review(item)),el('td',ci(item)),dateCell(item,'updated'),dateCell(item,'created'));
+        const action=el('td'),open=el('button','Open in session…','text-button');open.onclick=()=>pivot(item);action.append(open);row.append(action);body.append(row);
+      }
+      table.append(body);
+    }
+    scroll.append(table);return scroll;
+  }
   function render(){
+    // Native details toggles dispatch their event later; read the live state
+    // before replacing controls in response to the next input event.
+    const filterPanel=root.querySelector('.github-column-filters');if(filterPanel)filtersOpen=filterPanel.open;
+    const focus=document.activeElement,control=focus?.dataset.githubControl,selection=typeof focus?.selectionStart==='number'?[focus.selectionStart,focus.selectionEnd]:null;
+    const viewport=root.closest('#workspace-github'),scrollTop=viewport?.scrollTop;
+    const tableScroll=new Map([...root.querySelectorAll('.github-browser-scroll')].map(n=>[n.querySelector('table')?.getAttribute('aria-label'),n.scrollLeft]));
     root.replaceChildren();rows.clear();const header=el('div',undefined,'github-browser-heading');header.append(el('h1','GitHub'),el('span','Open PRs created by you, assigned to you, or awaiting your review','field-note'));const settings=el('button','Connection and polling settings','text-button');settings.onclick=openSettings;header.append(settings);root.append(header);
     if(!data){root.append(el('p','Loading pull requests…','field-note'));return;}
     if(!data.hosts.length){root.append(el('p','Enable a GitHub account in Settings to see your pull requests.','field-note'));return;}
+    root.append(controls());
     for(const host of data.hosts){
-      const section=group('host:'+host.host,`${host.host} · ${host.rows.length} open ${host.rows.length===1?'PR':'PRs'}`);section.append(el('p',`${host.accounts.join(', ')} · Poll every ${host.intervalMs/60000} min`,'field-note'));
+      const filtered=host.rows.filter(matches),section=group('host:'+host.host,`${host.host} · ${filtered.length}${filtered.length!==host.rows.length?` of ${host.rows.length}`:''} open ${host.rows.length===1?'PR':'PRs'}`);section.append(el('p',`${host.accounts.join(', ')} · Poll every ${host.intervalMs/60000} min`,'field-note'));
       for(const message of host.messages)section.append(el('p',`${message.login}: ${message.message}`,'field-note'));
-      const repos=new Map();for(const row of host.rows){const key=row.repository.owner+'/'+row.repository.name;if(!repos.has(key))repos.set(key,[]);repos.get(key).push(row);}
-      const scroll=el('div',undefined,'github-browser-scroll'),table=el('table',undefined,'github-pr-table'),head=el('thead'),heading=el('tr');
-      for(const title of ['Pull request','Author','Included because','Review','CI',''])heading.append(el('th',title));head.append(heading);table.append(head);
-      for(const [name,items] of repos){
-        const key=host.host+'/'+name,body=el('tbody'),groupRow=el('tr'),cell=el('th'),toggle=el('button',`${collapsed.has(key)?'▸':'▾'} ${name} · ${items.length}`,'text-button');cell.colSpan=6;cell.scope='rowgroup';toggle.setAttribute('aria-expanded',String(!collapsed.has(key)));toggle.setAttribute('aria-label',`Toggle ${host.host}/${name}`);cell.append(toggle);groupRow.append(cell);body.append(groupRow);
-        for(const item of items){
-          const pr=item.pr,prKey=JSON.stringify([host.host,name,pr.number]),row=el('tr',undefined,'github-browser-row');row.dataset.prKey=prKey;row.dataset.number=pr.number;row.tabIndex=0;row.hidden=collapsed.has(key);rows.set(prKey,item);
-          const title=el('td'),link=el('a',item.badge.label,`session-badge ${item.badge.tone}`),href=destination(pr.url);link.title=item.badge.tooltip;if(href){link.href=href;link.target='_blank';link.rel='noopener noreferrer';}title.append(link,el('span',pr.title,'github-pr-title'),el('small',pr.headBranch||'','field-note'));row.append(title,el('td',pr.author||'Unknown'),el('td',[item.authored?'Created by me':'',item.assigned?'Assigned to me':'',item.reviewRequested?'Review requested':''].filter(Boolean).join(' · ')),el('td',pr.draft?'Draft':({APPROVED:'Approved',REVIEW_REQUIRED:'In review',CHANGES_REQUESTED:'Changes requested',NONE:'No review',UNKNOWN:'Unknown'}[pr.reviewSummary?.state||pr.reviewDecision]||'Unknown')),el('td',({SUCCESS:'Passing',FAILURE:'Failing',ERROR:'Failing',PENDING:'Pending',EXPECTED:'Waiting'}[pr.checks?.state]||'Unknown')));
-          const action=el('td'),open=el('button','Open in session…','text-button');open.onclick=()=>pivot(item);action.append(open);row.append(action);body.append(row);
-        }
-        toggle.onclick=()=>{const open=toggle.getAttribute('aria-expanded')!=='true';toggle.setAttribute('aria-expanded',String(open));toggle.textContent=`${open?'▾':'▸'} ${name} · ${items.length}`;for(const row of body.querySelectorAll('.github-browser-row'))row.hidden=!open;if(open)collapsed.delete(key);else collapsed.add(key);try{localStorage.setItem('agentworks-github-collapsed',JSON.stringify([...collapsed]));}catch{}};
-        table.append(body);
+      for(const [kind,title] of [['requested','Review requested'],['other','Created or assigned']]){
+        const items=filtered.filter(item=>kind==='requested'?item.reviewRequested:!item.reviewRequested);
+        if(!items.length)continue;
+        const category=el('section',undefined,'github-pr-category');category.dataset.category=kind;category.append(el('h2',`${title} · ${items.length}`),table(host,items,title));section.append(category);
       }
-      scroll.append(table);section.append(scroll);
-      if(!host.rows.length)section.append(el('p',host.messages.length?'Pull requests are unavailable; check the connection messages above.':'No open PRs found for these accounts.','field-note'));root.append(section);
+      if(!filtered.length)section.append(el('p',host.rows.length?'No PRs match the column filters.':host.messages.length?'Pull requests are unavailable; check the connection messages above.':'No open PRs found for these accounts.','field-note'));root.append(section);
     }
+    if(control){const replacement=[...root.querySelectorAll('[data-github-control]')].find(n=>n.dataset.githubControl===control);replacement?.focus({preventScroll:true});if(selection&&replacement?.type==='search')replacement.setSelectionRange(...selection);}
+    for(const n of root.querySelectorAll('.github-browser-scroll'))n.scrollLeft=tableScroll.get(n.querySelector('table')?.getAttribute('aria-label'))||0;
+    if(viewport&&scrollTop!==undefined)viewport.scrollTop=scrollTop;
   }
   async function load(){
     if(!active||document.hidden||busy)return;const version=generation;busy=true;
@@ -88,6 +161,6 @@ export function setupGithubBrowser({api,root,openSession,selectSession,openSetti
   document.addEventListener('github-polling-changed',()=>{clearTimeout(timer);if(active)load();});
   return {
     setActive(value){if(active===value)return;active=value;generation++;clearTimeout(timer);if(value){render();load();}else if(chooser.open)closePivot();},
-    context(target){const row=target.closest('.github-browser-row'),item=row&&rows.get(row.dataset.prKey);if(!item)return null;return {origin:row,focus:row.querySelector('button'),label:`Actions for PR #${item.pr.number}`,actions:[{label:'Open in session…',run:()=>pivot(item)},{label:'New session…',run:()=>openSession(item)}]};},
+    context(target){const row=target.closest('.github-browser-row'),item=row&&rows.get(row.dataset.prKey);if(!item)return null;return {origin:row,focus:row.querySelector('button'),label:`Actions for PR #${item.pr.number}`,actions:[{label:'Open in session…',run:()=>pivot(item)},{label:'New session…',run:()=>openSession(item)},...(destination(item.pr.url)?[{label:'Open PR in new tab',run:()=>window.open(destination(item.pr.url),'_blank','noopener,noreferrer')}]:[])]};},
   };
 }
