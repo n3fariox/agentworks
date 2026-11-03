@@ -16,6 +16,7 @@ import {createWorkspace} from './workspace.js';
 import {setupCommunication} from './communication.js';
 import {setupPalettes} from './palettes.js';
 import {enhanceMermaid} from './mermaid.js';
+import {setupMarkdownComposer} from './markdown-composer.bundle.js';
 import {setupDisplayPreferences} from './display-preferences.js';
 import {setupWorkLogs,observeTool} from './work-logs.js';
 import {setupUsageStatus, watchSharedQuota, quotaFamily} from './usage-status.js';
@@ -69,7 +70,15 @@ function renderUnread(){
 setupResize({handle:$('sidebar-resize'),target:document.querySelector('.layout'),panel:$('sidebar'),variable:'--sidebar-width',key:'agentworks-sidebar-width',min:200,max:560,initial:228});
 const sidebarPin=setupSidebarPin({sidebar:$('sidebar'),button:$('sidebar-pin'),trigger:$('nav-sessions')});
 setupResize({handle:$('side-panel-resize'),target:$('side-panel'),panel:$('side-panel'),variable:'--side-panel-width',key:'agentworks-side-panel-width',min:300,max:960,initial:420,edge:'left'});
+const composerKeyboard=matchMedia('(pointer:coarse), (max-width:800px)');
+function updateComposerKeyboard(){
+  $('prompt').setAttribute('enterkeyhint',composerKeyboard.matches?'enter':'send');
+  $('composer-hint').textContent=composerKeyboard.matches?'Enter for a new line · Tap Send to send':'Enter to send · Shift + Enter for a new line';
+}
+updateComposerKeyboard();
+composerKeyboard.addEventListener('change',()=>{updateComposerKeyboard();renderComposer();});
 const promptResize=setupPromptResize($('prompt'));
+const markdownComposer=setupMarkdownComposer({area:$('prompt'),host:$('prompt-editor'),toggle:$('composer-source'),storage:localStorage});
 const promptRecovery=setupPromptRecovery({area:$('prompt'),storage:sessionStorage,getSession:()=>active?.id,onChange:()=>{$('prompt').dispatchEvent(new Event('input'));}});
 let currentUserSeq=null;
 let sidePanel=null;
@@ -108,7 +117,7 @@ const createPlace=setupCreatePlace({$,el,used:(hostId,projectId)=>!!(projectDire
 const policyEditor=setupPolicyEditor({$,api});
 const directoryPicker=setupDirectoryPicker({$,api});
 const projectDirectory=setupProjectDirectory({$,picker:directoryPicker,hosts:()=>hosts});
-const display=setupDisplayPreferences();display.mount($('display-preferences'));
+const display=setupDisplayPreferences({onChange:()=>{draw();renderComposer();}});display.mount($('display-preferences'));
 workLogs=setupWorkLogs({el});workLogs.mount($('display-preferences'),()=>scheduleDraw());
 // U-02: policy lives on the server; the browser only requests permission and shows.
 const notifications=setupNotifications({getSessions:()=>sessions,getActive:()=>active,selectSession,toast});
@@ -602,7 +611,7 @@ function selectSession(s) {
   github.sessionChanged();
   setTitle(s.title);$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;
   $('session-notice').hidden=true;document.body.classList.remove('menu-open');sidebarPin.close();sidebar();updateControls();connect(generation);
-  workspace?.sessionSelected(s);sidePanel?.sessionChanged();sessionTerminal?.sessionChanged();promptResize.size();
+  workspace?.sessionSelected(s);sidePanel?.sessionChanged();sessionTerminal?.sessionChanged();promptResize.size();renderComposer();
   if(s.status==='suspended'&&!s.explicitlySuspended&&!s.archived)resumeSession(s.id);
 }
 function connect(gen){
@@ -1047,6 +1056,7 @@ function updateControls(){
   attachments.render();
   $('prompt').placeholder=status==='starting'?'Starting your agent…':status==='waiting'?'Respond to the permission request above…':busy?'Your agent is working… type to queue a follow-up':status==='error'?'Session unavailable. Use Resume session to try again.':'What would you like to work on?';
   if(subagents.viewingChild())$('prompt').placeholder=busy?'Queue a message for the main agent…':'Message the main agent…';
+  renderComposer();
 }
 function scheduleDraw(){if(!drawTimer)drawTimer=setTimeout(()=>{drawTimer=null;draw();},70);}
 function fileUrl(path,download=false){return appUrl(`/api/sessions/${active.id}/file?path=${encodeURIComponent(path)}${download?'&download=true':''}`);}
@@ -1067,8 +1077,7 @@ async function formatUserLines(sessionId,text){
   if(state===undefined)userFormatting.set(sessionId,request.then(lines=>userFormatting.set(sessionId,lines?'on':'off'),()=>userFormatting.delete(sessionId)));
   return request;
 }
-// User messages show exactly as typed, apart from session links and lines a
-// chat.user formatter rewrote, which arrive as sanitized HTML.
+// Plain-text mode keeps session links and sanitized chat.user formatter output.
 function paintUserLines(body,text,lines){
   body.replaceChildren();
   text.split('\n').forEach((line,i)=>{
@@ -1079,6 +1088,9 @@ function paintUserLines(body,text,lines){
   });
 }
 function renderUserMessage(message,body){
+  if(display.preferences().userMarkdown==='on'){updateUserMarkdown(message,body);return;}
+  body.classList.remove('markdown');
+  if(body.dataset.format!=='plain'){delete body.dataset.source;body.dataset.format='plain';}
   if(body.dataset.source!==message.text){
     body.dataset.source=message.text;paintUserLines(body,message.text,message.userLines);
     const id=active?.id;
@@ -1086,11 +1098,29 @@ function renderUserMessage(message,body){
       message.userFormatPending=true;
       formatUserLines(id,message.text).then(lines=>{
         message.userLines=lines;
-        if(lines&&body.dataset.source===message.text){paintUserLines(body,message.text,lines);decorateMarkdown(body);}
+        if(lines&&body.dataset.source===message.text&&body.dataset.format==='plain'){paintUserLines(body,message.text,lines);decorateMarkdown(body);}
       }).catch(()=>{}).finally(()=>{message.userFormatPending=false;});
     }
   }
   decorateMarkdown(body);
+}
+// Capture both the source and display mode so delayed responses cannot overwrite
+// a newer draft or a switch back to plain text.
+function updateUserMarkdown(message,body){
+  const format='user-markdown';
+  if(body.dataset.source===message.text&&body.dataset.format===format)return;
+  body.dataset.source=message.text;body.dataset.format=format;
+  body.classList.remove('markdown');body.textContent=message.text;
+  clearTimeout(message.markdownTimer);
+  const text=message.text,sessionId=active?.id;
+  message.markdownTimer=setTimeout(async()=>{
+    message.markdownTimer=null;
+    try{
+      const result=await api('/api/markdown',{method:'POST',body:JSON.stringify({text,user:true,...(sessionId?{sessionId}:{})})});
+      if(body.dataset.source!==text||body.dataset.format!==format||active?.id!==sessionId)return;
+      message.html=result.html;body.innerHTML=result.html;body.classList.add('markdown');decorateMarkdown(body,message.referenceCwd?message.referenceCwd.replace(/\/$/,'')+'/':'');enhanceMermaid(body,result.mermaidClass);display.enhance(body,message.id);
+    }catch{/* The original text stays readable if rendering is unavailable. */}
+  },200);
 }
 function updateMarkdown(message,body){
   if(body.dataset.source===message.text)return;
@@ -1111,8 +1141,13 @@ function updateMarkdown(message,body){
     }
   },status==='idle'?0:250);
 }
+function renderComposer(){
+  markdownComposer.sync({markdown:display.preferences().userMarkdown==='on',sessionId:active?.id});
+}
+
 function draw(){
   if(!active)return;
+  renderComposer();
   backgroundJobs.render();
   const area=$('messages'),visible=!area.hidden&&!$('session-chat').hidden;const atBottom=visible&&area.scrollHeight-area.scrollTop-area.clientHeight<100;
   const empty=area.querySelector('.session-empty');if(transcript.length)empty?.remove();
@@ -1313,10 +1348,15 @@ function pendingFor(sid,text,attached=[]){
 // draft is the composer text; submission.text may carry resolved @mentions.
 function settle(sid,submission,draft=submission.text){
   const recovered=promptRecovery.recovered(sid,submission.requestId);
-  if(!recovered&&active?.id===sid&&$('prompt').value===draft){$('prompt').value='';promptResize.size();}
+  if(!recovered&&active?.id===sid&&$('prompt').value===draft){$('prompt').value='';promptResize.size();renderComposer();}
   if(!recovered&&drafts[sid]===draft)delete drafts[sid];sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));
   if(pendingSends[sid]?.requestId===submission.requestId){delete pendingSends[sid];sessionStorage.setItem('agentworks-pending-sends',JSON.stringify(pendingSends));}
 }
+// Keep the active mobile keyboard attached while Send handles the tap.
+// Keyboard activation of the button keeps its normal focus behavior.
+$('send').addEventListener('pointerdown',event=>{
+  if(composerKeyboard.matches&&event.isPrimary&&event.button===0&&markdownComposer.hasFocus())event.preventDefault();
+});
 $('composer').onsubmit=async event=>{
   event.preventDefault();const text=$('prompt').value;if(!active)return;
   const sid=active.id,attached=attachments.ids(sid);
@@ -1345,8 +1385,8 @@ $('composer').onsubmit=async event=>{
     if(attached.length)attachments.clear(sid,attached);
   }catch(e){toast(e.message);}finally{updateControls();}
 };
-$('prompt').oninput=()=>{mentions.update();commandsOpen=/^[/\$]\S*$/.test($('prompt').value);renderCommands();if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));}};
-$('prompt').onkeydown=event=>{if(mentions.keydown(event))return;if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault();$('composer').requestSubmit();}};
+$('prompt').oninput=()=>{renderComposer();mentions.update();commandsOpen=/^[/\$]\S*$/.test($('prompt').value);renderCommands();if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));}};
+$('prompt').onkeydown=event=>{if(mentions.keydown(event))return;if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing&&!composerKeyboard.matches){event.preventDefault();$('composer').requestSubmit();}};
 $('resume-session').onclick=()=>{if(active)resumeSession(active.id);};
 $('stop').onclick=async()=>{if(!active)return;const sid=active.id,seq=currentUserSeq;$('stop').disabled=true;try{await api(`/api/sessions/${sid}/cancel${seq!=null?'?userSeq='+seq:''}`,{method:'POST',body:'{}'});}catch(e){toast(e.message);}finally{updateControls();}};
 async function deleteSession(session,providerHistory=false){
@@ -1489,7 +1529,7 @@ $('settings-form').onsubmit=async event=>{
     $('settings-dialog').close();toast('Settings saved. They apply to new sessions.','success');
   }catch(e){$('settings-error').textContent='Host settings were not saved: '+e.message+' Display preferences are stored separately in this browser.';}finally{$('save-settings').disabled=false;}
 };
-document.addEventListener('keydown',event=>{if(event.key==='n'&&!event.ctrlKey&&!event.metaKey&&!event.altKey&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)&&!document.querySelector('dialog[open]')){event.preventDefault();openCreate();}});
+document.addEventListener('keydown',event=>{if(event.key==='n'&&!event.ctrlKey&&!event.metaKey&&!event.altKey&&!document.activeElement?.isContentEditable&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)&&!document.querySelector('dialog[open]')){event.preventDefault();openCreate();}});
 const diffView=setupDiff({api,root:$('side-diff'),enhanceBlocks:display.enhance});
 timeoutControls=setupTimeoutControls({$,api,getActive:()=>active});
 parserScripts=setupParserScripts({$,api,el});
@@ -1508,7 +1548,7 @@ workspace=createWorkspace({api,toast,labels,uuid,imageViewer,
   },getConfig:()=>config,getActive:()=>active,selectSession,openCreate,refreshSessions,enhanceBlocks:display.enhance,openSettings,
   overview(){ $('conversation').hidden=true;$('welcome').hidden=false;localStorage.removeItem('agentworks-session'); },
   openPanel:tab=>sidePanel?.open(tab),
-  appendDraft(text){if(!active)return;const current=$('prompt').value;$('prompt').value=current?current+'\n\n'+text:text;drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));promptResize.size();},
+  appendDraft(text){if(!active)return;const current=$('prompt').value;$('prompt').value=current?current+'\n\n'+text:text;drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));promptResize.size();renderComposer();},
 });
 const sessionTerminal=setupTerminal({$,api,getActive:()=>active,socketUrl,onSelect:view=>{subagents.select(view);updateControls();scheduleDraw();}});
 const hostTerminal=setupTerminal({$:id=>$(id==='session-terminal'?'host-terminal-view':id.replace(/^terminal-/,'host-terminal-')),api,getActive:()=>terminalHost,socketUrl,tabs:false,endpoint:id=>`/api/hosts/${id}/terminal`});

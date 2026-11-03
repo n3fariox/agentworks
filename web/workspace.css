@@ -141,3 +141,13 @@ body[data-workspace-view=host-terminal] .workspace-context{display:none}
 .message-body div.user-formatted>:last-child{margin-bottom:0}
 
 .model-viewer{display:block;width:100%;height:clamp(320px,65vh,760px);border:0;border-radius:8px;background:#171a1e}
+.background-job-preview:not([hidden]){display:block;margin-top:5px;color:var(--muted);font-size:11px;line-height:1.5;min-width:0}.background-job-preview>span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.background-jobs[open]>summary .background-job-preview{display:none}
+
+/* The visual viewport excludes the on-screen keyboard on iOS and Android. */
+@media(max-width:800px){
+  html[data-composer-viewport] body .layout{position:fixed;top:var(--composer-viewport-top);left:0;right:0;height:var(--composer-viewport-height);min-height:0}
+  html[data-composer-viewport] .layout>main{height:100%;min-height:0}
+  html[data-composer-viewport] #sidebar{height:calc(var(--composer-viewport-height) - 59px)}
+  html[data-composer-viewport] :is(#prompt,#prompt-editor,#prompt-editor .cm-scroller){max-height:min(320px,calc(var(--composer-viewport-height) * .35))}
+  html[data-composer-viewport] .composer-wrap{flex-shrink:0}
+}

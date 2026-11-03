@@ -1,14 +1,15 @@
 import {localState as localStorage} from './hosting.js';
-// Browser-local display preferences for code/literal blocks.
+// Browser-local display preferences for user messages and code/literal blocks.
 // Raw block text is captured before decoration and is the only source for Copy.
 const KEY='agentworks-display-preferences';
 const CHOICES={
+  userMarkdown:[['on','On (formatted Markdown editor)'],['off','Off (plain text)']],
   wrap:[['auto','Wrap on narrow screens'],['wrap','Always wrap'],['scroll','Never wrap (scroll)']],
   theme:[['default','Default'],['monokai','Monokai'],['github-light','GitHub Light']],
   highlight:[['on','Highlight supported languages'],['off','Off (plain monospace)']],
   prose:[['detect','Show as plain text'],['code','Keep as code']],
 };
-const LABELS={wrap:'Long lines in code blocks',highlight:'Syntax highlighting',theme:'Syntax color theme',prose:'Prose in unlabeled code blocks'};
+const LABELS={userMarkdown:'Markdown in your messages',wrap:'Long lines in code blocks',highlight:'Syntax highlighting',theme:'Syntax color theme',prose:'Prose in unlabeled code blocks'};
 const HIGHLIGHT_LIMIT=60000,TOKEN_LIMIT=20000;
 
 export function loadDisplayPreferences(storage=localStorage){
@@ -114,7 +115,7 @@ export function renderLines(code,raw,language,{diff=false,highlight=true}={}){
   code.replaceChildren(fragment);
 }
 
-export function setupDisplayPreferences({root=document,storage=localStorage}={}){
+export function setupDisplayPreferences({root=document,storage=localStorage,onChange=()=>{}}={}){
   let preferences=loadDisplayPreferences(storage);
   const overrides=new Map();
   const apply=()=>{root.body.dataset.codeWrap=preferences.wrap;root.body.dataset.codeTheme=preferences.theme;for(const block of root.querySelectorAll('.code-block'))renderBlock(block);};
@@ -185,7 +186,7 @@ export function setupDisplayPreferences({root=document,storage=localStorage}={})
         preferences={...preferences,[key]:select.value};
         try{storage.setItem(KEY,JSON.stringify(preferences));note.textContent=`${LABELS[key]} saved in this browser.`;}
         catch{note.textContent=`${LABELS[key]} applied, but this browser could not remember it.`;}
-        apply();
+        apply();onChange({...preferences});
       };
       const row=root.createElement('div');row.className='display-field';row.append(label,select);fieldset.append(row);
     }

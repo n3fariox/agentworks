@@ -1864,8 +1864,12 @@ impl Bridge {
             }
         };
         let settings = settings(&cwd);
-        let allow_bypass = (unsafe { libc::geteuid() } != 0
-            || std::env::var_os("IS_SANDBOX").is_some())
+        // Claude Code refuses bypass mode as root only on Unix.
+        #[cfg(unix)]
+        let root = unsafe { libc::geteuid() } == 0;
+        #[cfg(not(unix))]
+        let root = false;
+        let allow_bypass = (!root || std::env::var_os("IS_SANDBOX").is_some())
             && settings["permissions"]["disableBypassPermissionsMode"] != "disable";
         let mut command = Command::new(
             std::env::var_os("CLAUDE_CODE_EXECUTABLE").unwrap_or_else(|| "claude".into()),

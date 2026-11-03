@@ -547,3 +547,24 @@ body[data-code-theme=github-light] .source-line::before{color:#6e7781}
 .github-session-choices{display:flex;flex-direction:column;gap:8px}.github-session-archived{border-top:1px solid var(--border);margin-top:8px;padding-top:14px}.github-session-archived>summary{cursor:pointer;color:var(--muted);padding:6px 0}.github-session-archived .field-note{margin:8px 0 12px}
 
 .github-table-toolbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.github-table-toolbar label{font-size:12px;margin:0;display:flex;gap:8px;align-items:center}.github-table-toolbar input[type=checkbox]{width:auto}.github-table-toolbar select{width:auto;padding:6px;font-size:12px}.github-column-filters{margin:12px 0}.github-column-filters>summary{cursor:pointer;color:var(--muted);font-size:12px;padding:8px 0}.github-filter-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;padding:12px;border:1px solid var(--border);border-radius:8px}.github-filter-grid label{margin:0;font-size:11px}.github-filter-grid input,.github-filter-grid select{min-width:0;width:100%;font-size:12px;padding:8px;margin-top:6px}.github-pr-category{margin:20px 0 6px}.github-pr-category h2{font-size:14px;margin:0 0 8px}.github-pr-category[data-category=requested]>h2{color:var(--accent)}.github-pr-table th>.text-button{padding:0;text-align:left;white-space:nowrap;font-weight:600;font-size:12px}.github-pr-table time{font-size:11px;white-space:nowrap}.github-pr-table td{font-size:12px}.github-pr-table td:last-child{min-width:125px}@media(max-width:650px){.github-table-toolbar select,.github-filter-grid input,.github-filter-grid select{font-size:16px}}
+#prompt-editor{min-height:48px;max-height:min(320px,40dvh);resize:vertical;overflow:auto}
+#prompt-editor .cm-editor{color:var(--text);font-family:inherit;font-size:13px;line-height:1.6;min-height:48px;height:100%;background:transparent}
+#prompt-editor .cm-editor.cm-focused{outline:none}
+#prompt-editor .cm-scroller{font-family:inherit;line-height:1.6;overflow:auto;max-height:min(320px,40dvh)}
+#prompt-editor .cm-content{padding:3px 0;caret-color:var(--text);min-height:48px;overflow-wrap:anywhere}
+#prompt-editor .cm-line{padding:0 3px}
+#prompt-editor .cm-placeholder{color:#777f8d}
+#prompt-editor .cm-cursor{border-left-color:var(--text)}
+#prompt-editor .cm-selectionBackground{background:#6f5c9855}
+#prompt-editor .cm-md-strong{font-weight:700}
+#prompt-editor .cm-md-em{font-style:italic}
+#prompt-editor .cm-md-strike{text-decoration:line-through}
+#prompt-editor .cm-md-inline-code{font-family:ui-monospace,monospace;background:#23262b;border-radius:4px;color:#d1c7ed}
+#prompt-editor .cm-md-heading{font-weight:600;line-height:1.4;padding-top:5px;padding-bottom:5px}
+#prompt-editor .cm-md-h1{font-size:24px}#prompt-editor .cm-md-h2{font-size:20px}#prompt-editor .cm-md-h3{font-size:17px}
+#prompt-editor .cm-md-link{color:var(--accent);text-decoration:underline}
+#prompt-editor .cm-md-bullet{color:var(--accent);padding:0 3px}
+#prompt-editor .cm-md-quote{border-left:2px solid #635776;padding-left:10px;color:var(--muted)}
+#prompt-editor .cm-md-code-line{font:12px/1.7 ui-monospace,monospace;background:#171a1e}
+#composer-source{flex-shrink:0;font-size:10px}
+@media(max-width:650px){#prompt-editor .cm-editor,#prompt-editor .cm-content{font-size:16px}}

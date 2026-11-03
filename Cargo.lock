@@ -116,19 +116,16 @@ name = "agentworks"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol 3.4.0",
- "agentworks-claude-acp",
- "agentworks-codex-acp",
- "agentworks-demo-acp",
  "agentworks-runtime",
  "agentworks-session",
  "agentworks-starlark",
  "agentworks-terminal",
+ "agentworks-worker",
  "agentworks-workspace",
  "ammonia",
  "axum",
  "base64 0.22.1",
  "futures",
- "goose",
  "jiff",
  "libc",
  "octocrab",
@@ -136,7 +133,6 @@ dependencies = [
  "reqwest 0.13.5",
  "rig-core",
  "rig-reqwest",
- "rmcp",
  "rusqlite",
  "serde",
  "serde_json",
@@ -144,7 +140,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.29.0",
  "tokio-util",
- "tracing-subscriber",
  "uuid",
  "windows-sys 0.61.2",
 ]
@@ -177,6 +172,20 @@ dependencies = [
  "serde_json",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "agentworks-goose-acp"
+version = "0.1.0"
+dependencies = [
+ "agent-client-protocol 3.4.0",
+ "agentworks-runtime",
+ "goose",
+ "reqwest 0.13.5",
+ "rmcp",
+ "serde_json",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -233,6 +242,21 @@ dependencies = [
  "serde",
  "tokio",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "agentworks-worker"
+version = "0.1.0"
+dependencies = [
+ "agentworks-claude-acp",
+ "agentworks-codex-acp",
+ "agentworks-demo-acp",
+ "agentworks-goose-acp",
+ "agentworks-runtime",
+ "rmcp",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]

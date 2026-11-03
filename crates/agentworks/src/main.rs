@@ -18,7 +18,6 @@ mod git_context;
 mod git_settings;
 mod github;
 mod github_tracking;
-mod goose_acp;
 mod host_usage;
 mod hosting;
 mod hosts;
@@ -50,10 +49,7 @@ mod transcript_history;
 mod workspace;
 mod worktree_cleanup;
 mod worktrees;
-use agentworks_runtime::{
-    provider::{cli_provider, installed, key_present, use_api_key},
-    worker as agent,
-};
+use agentworks_runtime::provider::{cli_provider, installed, key_present, use_api_key};
 use agentworks_session::{SessionData, timeouts};
 use agentworks_workspace::sha256;
 use catalog::{Catalog, Settings};
@@ -546,55 +542,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.get(1).is_some_and(|arg| arg == "recovery") {
         return recovery::run(&args[2..]).map_err(|e| e.to_string().into());
     }
-    if args.get(1).is_some_and(|arg| arg == "goose-browser-url") {
-        // Browser launchers discard stdout; the sign-in PTY is our UI.
-        use std::io::Write;
-        let url = args.get(2).ok_or("Missing authorization URL")?;
-        let mut tty = std::fs::OpenOptions::new().write(true).open("/dev/tty")?;
-        writeln!(tty, "Open this URL in your browser:\n{url}")?;
-        return Ok(());
-    }
-    if args.get(1).is_some_and(|arg| arg == "goose-login") {
-        tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_target(false)
-            .init();
-        let result = goose_acp::login(args.get(2).map(String::as_str).unwrap_or("")).await;
-        match result {
-            Ok(()) => println!(
-                "Sign-in completed. You can close this terminal and start a Goose session."
-            ),
-            Err(error) => {
-                eprintln!("Sign-in failed: {error}");
-                std::process::exit(1);
-            }
-        }
-        return Ok(());
-    }
-    if args.get(1).is_some_and(|arg| arg == "goose-acp") {
-        let result = goose_acp::run().await;
-        if let Err(error) = &result {
-            eprintln!("agentworks goose-acp: {error}");
-        }
-        std::process::exit(i32::from(result.is_err()));
-    }
-    if let Some(bridge @ ("codex-acp" | "claude-acp")) = args.get(1).map(String::as_str) {
-        let result = if bridge == "codex-acp" {
-            agentworks_codex_acp::run().await
-        } else {
-            agentworks_claude_acp::run().await
-        };
-        if let Err(error) = &result {
-            eprintln!("agentworks {bridge}: {error}");
-        }
-        std::process::exit(i32::from(result.is_err()));
-    }
-    if args.get(1).is_some_and(|a| a == "demo-acp") {
-        let result = agentworks_demo_acp::run().await;
-        if let Err(error) = &result {
-            eprintln!("agentworks demo-acp: {error}");
-        }
-        std::process::exit(i32::from(result.is_err()));
+    if let Some(result) = agentworks_worker::dispatch(&args).await {
+        return result;
     }
     if args.get(1).is_some_and(|a| a == "--service-protocol") {
         // 2: restarts are launched by systemd through the release directory's `current` link.
@@ -603,32 +552,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.get(1).is_some_and(|a| a == "service") {
         return service_unit::run(&args[2..]).map_err(|e| e.to_string().into());
-    }
-    if args.get(1).is_some_and(|a| a == "mcp") {
-        return mcp::stdio().await.map_err(|e| e.to_string().into());
-    }
-    if args.get(1).is_some_and(|a| a == "agent") {
-        // Worker cleanup completes inside run(). Tokio stdin uses an uncancellable
-        // blocking reader, so runtime shutdown can hang while a dead peer still
-        // holds stdin open. Only this stateless CLI mode exits explicitly.
-        let code = match agent::run(&args[2..]).await {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("agentworks agent: {error}");
-                1
-            }
-        };
-        std::process::exit(code);
-    }
-    if args.get(1).is_some_and(|a| a == "--probe") {
-        let provider = args.get(2).map(String::as_str).unwrap_or("demo");
-        if !agentworks_runtime::remote::PROVIDERS.contains(&provider) {
-            return Err(
-                "Use --probe claude|claude-rust|codex|codex-rust|goose|opencode|demo".into(),
-            );
-        }
-        agentworks_runtime::acp::probe(provider).await?;
-        return Ok(());
     }
     let auth_mode = std::env::var("AGENTWORKS_AUTH_MODE").unwrap_or_else(|_| "existing".into());
     if !["existing", "api_key"].contains(&auth_mode.as_str()) {
@@ -1152,6 +1075,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (
                     [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
                     include_str!("../../../web/mermaid-frame.bundle.js"),
+                )
+            }),
+        )
+        .route(
+            "/markdown-composer.bundle.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/markdown-composer.bundle.js"),
+                )
+            }),
+        )
+        .route(
+            "/markdown-composer-LICENSES.txt",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                    include_str!("../../../web/markdown-composer-LICENSES.txt"),
                 )
             }),
         )
@@ -3709,6 +3650,8 @@ async fn file(
 #[derive(Deserialize)]
 struct Markdown {
     text: String,
+    #[serde(default)]
+    user: bool,
     /// Agent messages name their session so its `chat.agent` formatters apply.
     #[serde(default, rename = "sessionId")]
     session_id: Option<String>,
@@ -3722,26 +3665,21 @@ async fn markdown(State(app): State<App>, Json(req): Json<Markdown>) -> Json<Val
         Some(s) => {
             let (hub, text) = (app.progress.clone(), req.text.clone());
             tokio::task::spawn_blocking(move || {
-                chat_format::apply_in_session(
-                    &hub,
-                    &s.id,
-                    &s.provider,
-                    &s.cwd.to_string_lossy(),
-                    &text,
-                )
+                let apply = if req.user {
+                    chat_format::apply_user_in_session
+                } else {
+                    chat_format::apply_in_session
+                };
+                apply(&hub, &s.id, &s.provider, &s.cwd.to_string_lossy(), &text)
             })
             .await
             .unwrap_or(req.text)
         }
         None => req.text,
     };
-    let req = Markdown {
-        text,
-        session_id: None,
-    };
     let marker = format!("awmermaid-{}", &Uuid::new_v4().simple().to_string()[..16]);
     Json(
-        json!({"html":render_markdown_with_marker(&req.text, &marker), "mermaidClass":format!("language-{marker}")}),
+        json!({"html":render_markdown_with_marker(&text, &marker), "mermaidClass":format!("language-{marker}")}),
     )
 }
 #[derive(Deserialize)]

@@ -38,7 +38,7 @@ async function openSession(page,id=session.id){
   await page.goto('/');
   await expect(page.locator('#session-state')).toHaveText('Ready');
 }
-async function type(page,text){await page.locator('#prompt').fill(text);await page.locator('#prompt').press('Enter');}
+async function type(page,text){await page.locator('#prompt-editor .cm-content').fill(text);await page.locator('#send').click();}
 
 test.beforeAll(async()=>{
   await mkdir('.cache',{recursive:true});fixture=await mkdtemp(resolve('.cache/input-queue-'));
@@ -164,7 +164,7 @@ test('session switching keeps drafts and per-session queues; replay shows unknow
   await type(page,'slow switching');
   await expect(page.locator('#activity-indicator')).toBeVisible();
   await type(page,'queued in A');
-  await page.locator('#prompt').fill('unsent draft A');
+  await page.locator('#prompt-editor .cm-content').fill('unsent draft A');
   await page.locator('.session-item',{hasText:'Queue other'}).first().click();
   await expect(page.locator('#input-queue')).toBeHidden();
   await page.locator('.session-item',{hasText:'Queue test'}).first().click();
@@ -298,10 +298,10 @@ test('Stop and Suspend win over turn-end dispatch',async()=>{
 
 test('Send then Enter race queues the second input exactly once without losing it',async({page})=>{
   await openSession(page);
-  await page.locator('#prompt').fill('slow race first');
+  await page.locator('#prompt-editor .cm-content').fill('slow race first');
   await page.locator('#send').click();
-  await page.locator('#prompt').fill('race second');
-  await page.locator('#prompt').press('Enter');
+  await page.locator('#prompt-editor .cm-content').fill('race second');
+  await page.locator('#prompt-editor .cm-content').press('Enter');
   await expect(page.locator('#input-queue .queue-text')).toHaveText(['race second']);
   await expect(page.locator('#prompt')).toHaveValue('');
   await until(async()=>(await api(`/api/sessions/${session.id}/queue`)).queue.items[0]?.state==='sent',25000);
