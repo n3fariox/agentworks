@@ -29,7 +29,7 @@ target/debug/agentworks service --install --restart  # also switch to it now
 
 `--install`:
 
-- copies the running executable into the release directory as `agentworks-<sha256 prefix>` (mode 0500), or uses it in place if it is already there; `--release NAME` picks the name;
+- copies the running executable into the release directory as `agentworks-<sha256 prefix>` (mode 0500), or uses it in place if it is already there; `--release NAME` picks the name. A current `agentworks-worker` beside the executable is copied as `<name>-worker` for host enrollment; it answers only `--worker-protocol`, so it is never accepted as a restart target;
 - points the `current` and `stable` links in the release directory at it;
 - checks that `service.env` sets absolute `AGENTWORKS_CATALOG_PATH` and `AGENTWORKS_DB_PATH`;
 - renders `scripts/service/agentworks.service.in` (embedded in the binary) into `$XDG_CONFIG_HOME/systemd/user/agentworks.service`, keeping a differing previous unit as `agentworks.service.bak`;

@@ -3,7 +3,7 @@
 set -eu
 chmod 700 agentworks launch
 # Fail here for incompatible libc/loaders, before saving this host.
-./agentworks --service-protocol
+./agentworks --worker-protocol
 mkdir -p "$HOME/.local/bin"
 # A host-specific command is recorded for reconnects; this is only a convenience.
 # Do not replace an existing user command.

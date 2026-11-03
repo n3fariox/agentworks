@@ -63,8 +63,9 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         "workspace": true,
         "gitSettings": true,
         "gitContext": true,
-        "modelProviders": true,
-        "sharedModelProviders": true,
+        // Model-provider profiles only run on the embedded Goose harness.
+        "modelProviders": cfg!(feature = "goose"),
+        "sharedModelProviders": cfg!(feature = "goose"),
         "worktreeCleanup": true,
         "directories": true,
         "terminal": true,
@@ -354,8 +355,12 @@ async fn ownership_at(dir: &Path, host_id: &str) -> Result<std::fs::File, String
         .map_err(|e| format!("Could not create worker lock directory: {e}"))?;
     let mut options = std::fs::OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
-    use std::os::unix::fs::OpenOptionsExt;
-    options.mode(0o600);
+    // Windows: the file inherits the private ACL of the user's profile directory.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
     let file = options
         .open(dir.join(format!("{id}.lock")))
         .map_err(|e| format!("Could not open worker ownership lock: {e}"))?;
@@ -476,6 +481,9 @@ async fn run_process(
     if let Some(id) = request["session"].as_str() {
         command.envs(crate::provider::session_environment(id));
     }
+    // Windows has no process groups; a Job Object below owns the adapter's descendants.
+    #[cfg(unix)]
+    command.process_group(0);
     let mut child = command
         .args(config.arguments())
         .current_dir(&cwd)
@@ -484,11 +492,21 @@ async fn run_process(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .process_group(0)
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("Could not start {provider}: {e}"))?;
+    #[cfg(unix)]
     let group = child.id().ok_or("The process exited immediately")? as i32;
+    // A descendant started before assignment escapes the job. ACP adapters wait
+    // for `initialize`, and nothing is written to stdin until input_task runs.
+    #[cfg(windows)]
+    let job = {
+        let job = agentworks_terminal::pty::windows::Job::new()
+            .map_err(|e| format!("Could not start {provider}: {e}"))?;
+        job.assign(child.raw_handle().ok_or("The process exited immediately")?)
+            .map_err(|e| format!("Could not start {provider}: {e}"))?;
+        job
+    };
     let (Some(mut stdin), Some(stdout), Some(stderr)) =
         (child.stdin.take(), child.stdout.take(), child.stderr.take())
     else {
@@ -547,9 +565,20 @@ async fn run_process(
         _ = stopped => {
             // Do not reap the group leader before escalation: its PID must
             // remain reserved until we have sent the final group signal.
-            unsafe { libc::killpg(group, libc::SIGTERM); }
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            unsafe { libc::killpg(group, libc::SIGKILL); }
+            #[cfg(unix)]
+            {
+                unsafe { libc::killpg(group, libc::SIGTERM); }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                unsafe { libc::killpg(group, libc::SIGKILL); }
+            }
+            // Without SIGTERM, closing stdin is the polite request to exit; the job
+            // keeps descendants addressable after the adapter itself has gone.
+            #[cfg(windows)]
+            {
+                input_task.abort();
+                let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+                job.terminate();
+            }
             child.wait().await
         }
     };
@@ -755,7 +784,8 @@ fn available_providers(env: &HashMap<String, String>) -> Vec<&'static str> {
     PROVIDERS
         .into_iter()
         .filter(|provider| match crate::provider::cli_provider(provider) {
-            "goose" | "demo" => true,
+            "demo" => true,
+            "goose" => cfg!(feature = "goose"),
             "codex" => {
                 let executable = env
                     .get("CODEX_PATH")
@@ -885,7 +915,7 @@ mod tests {
         let providers = available_providers(&env);
         assert!(providers.contains(&"codex-rust"));
         assert!(providers.contains(&"codex"));
-        assert!(providers.contains(&"goose"));
+        assert_eq!(providers.contains(&"goose"), cfg!(feature = "goose"));
     }
     #[test]
     fn native_claude_serves_both_claude_ids() {

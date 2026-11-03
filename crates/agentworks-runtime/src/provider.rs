@@ -65,7 +65,8 @@ pub fn installed(provider: &str) -> bool {
             });
     }
     match provider {
-        "demo" | "goose" => true,
+        "demo" => true,
+        "goose" => cfg!(feature = "goose"),
         "opencode" => opencode_path().is_some(),
         _ => false,
     }
@@ -363,7 +364,7 @@ mod tests {
                 );
             }
         }
-        assert!(installed("goose"));
+        assert_eq!(installed("goose"), cfg!(feature = "goose"));
         assert!(
             !agent_config("goose", false, true)
                 .environment()

@@ -322,17 +322,49 @@ async fn enroll(
     Err("Host installed and saved; worker connection is taking longer than expected. Check its status in Hosts.".into())
 }
 
+/// The worker-only executable built or installed beside this one (`<exe>-worker`),
+/// if it speaks this server's worker protocol. Cargo relinks only changed binaries,
+/// so timestamps cannot tell a stale sibling from a current one.
+pub fn worker_executable() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let mut name = exe.file_name()?.to_os_string();
+    name.push("-worker");
+    let worker = exe.with_file_name(name);
+    let probe = std::process::Command::new(&worker)
+        .arg("--worker-protocol")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let reply: serde_json::Value = serde_json::from_slice(&probe.stdout).ok()?;
+    (probe.status.success() && reply["workerProtocol"] == agentworks_runtime::remote::PROTOCOL)
+        .then_some(worker)
+}
+
 async fn bundle(dir: &Path, out: &Output) -> Result<PathBuf> {
     let staging = dir.join("runtime");
     tokio::fs::create_dir_all(&staging)
         .await
         .map_err(|e| e.to_string())?;
-    tokio::fs::copy(
-        std::env::current_exe().map_err(|e| e.to_string())?,
-        staging.join("agentworks"),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    // The full service also serves every worker subcommand, so it remains a fallback.
+    // Either way the payload is named `agentworks`, which `launch` and hosts expect.
+    let executable = match tokio::task::spawn_blocking(worker_executable)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        Some(worker) => worker,
+        None => {
+            output(
+                out,
+                b"No current agentworks-worker beside this server; installing the full Agentworks binary.\r\n",
+            )
+            .await?;
+            std::env::current_exe().map_err(|e| e.to_string())?
+        }
+    };
+    tokio::fs::copy(executable, staging.join("agentworks"))
+        .await
+        .map_err(|e| e.to_string())?;
     for (file, bytes) in [
         (
             "launch",

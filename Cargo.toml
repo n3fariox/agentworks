@@ -11,6 +11,8 @@ members = [
     "crates/agentworks-session",
     "crates/agentworks-workspace",
     "crates/agentworks-starlark",
+    "crates/agentworks-goose-acp",
+    "crates/agentworks-worker",
 ]
 default-members = ["crates/agentworks"]
 
