@@ -342,6 +342,26 @@ pub(crate) async fn worktree_operation(
         .map_err(|e| fail(StatusCode::CONFLICT, e))
 }
 
+/// Fills a worktree that `prepare_workspace` reserved on the host.
+pub(crate) async fn populate_worktree(
+    app: &App,
+    host: &str,
+    owned: &crate::worktree_cleanup::Owned,
+) -> Result<crate::worktree_cleanup::Owned, (StatusCode, String)> {
+    let roots = host_roots(app, host)?;
+    let live = connected(app, host)?;
+    let result = live
+        .workspace(json!({"operation":"populateWorktree","owned":owned,"roots":roots}))
+        .await
+        .map_err(|e| fail(StatusCode::CONFLICT, e))?;
+    serde_json::from_value(result["owned"].clone()).map_err(|_| {
+        fail(
+            StatusCode::BAD_GATEWAY,
+            "Invalid remote workspace ownership",
+        )
+    })
+}
+
 pub(crate) async fn prepare_workspace(
     app: &App,
     host: &str,
@@ -414,7 +434,9 @@ pub(crate) async fn prepare_workspace(
     if mode == crate::worktrees::Mode::NewWorktree {
         crate::worktrees::arm_creation(app, key)?;
     }
-    let result = live.workspace(json!({"gitSettings":git_settings,"operation":"prepare","cwd":source,"roots":roots,"policy":policy,"workspace":if req.external_id.is_some() { json!({"mode":"directory"}) } else { json!(req.workspace) }})).await
+    // Workers that can reserve a worktree let the session fill it while it starts.
+    let defer = live.worker()["deferredWorktree"] == true;
+    let result = live.workspace(json!({"gitSettings":git_settings,"operation":"prepare","defer":defer,"cwd":source,"roots":roots,"policy":policy,"workspace":if req.external_id.is_some() { json!({"mode":"directory"}) } else { json!(req.workspace) }})).await
         .map_err(|e| fail(StatusCode::CONFLICT, format!("{e} Inspect retained remote branches/files before retrying.")))?;
     let path = result["cwd"]
         .as_str()

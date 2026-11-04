@@ -85,16 +85,36 @@ pub(crate) async fn git_limit(
     args: &[&str],
     limit: u64,
 ) -> Result<String, Error> {
+    git_within(app, cwd, args, limit, Duration::from_secs(10)).await
+}
+/// How long a step that writes a checkout may take; large repositories need
+/// well over the usual Git deadline.
+pub(crate) const CHECKOUT_TIMEOUT: Duration = Duration::from_secs(600);
+/// Runs a Git command that writes a checkout, under `CHECKOUT_TIMEOUT`.
+pub(crate) async fn git_checkout(
+    app: &(impl Context + ?Sized),
+    cwd: &FsPath,
+    args: &[&str],
+) -> Result<String, Error> {
+    git_within(app, cwd, args, 256 * 1024, CHECKOUT_TIMEOUT).await
+}
+async fn git_within(
+    app: &(impl Context + ?Sized),
+    cwd: &FsPath,
+    args: &[&str],
+    limit: u64,
+    timeout: Duration,
+) -> Result<String, Error> {
     let root = allowed(app, cwd)?;
-    let (ok, out, err, _) = tokio::time::timeout(
-        Duration::from_secs(10),
-        crate::git::git_bounded(cwd, &root, args, limit),
-    )
-    .await
-    .map_err(|_| {
-        conflict("Git operation timed out; inspect retained branch and files before retrying")
-    })?
-    .map_err(conflict)?;
+    let (ok, out, err, _) =
+        tokio::time::timeout(timeout, crate::git::git_bounded(cwd, &root, args, limit))
+            .await
+            .map_err(|_| {
+                conflict(
+                    "Git operation timed out; inspect retained branch and files before retrying",
+                )
+            })?
+            .map_err(conflict)?;
     if !ok {
         return Err(bad(format!(
             "Git operation failed: {}",
@@ -228,6 +248,38 @@ pub async fn prepare_in(
     external: bool,
     source: PathBuf,
     creation_key: Option<&str>,
+) -> Result<(PathBuf, Option<Owned>), Error> {
+    prepare_with(
+        app,
+        workspace,
+        policy,
+        external,
+        source,
+        creation_key,
+        false,
+    )
+    .await
+}
+/// Like `prepare_in`, but a new worktree is only validated and its destination
+/// reserved: the returned ownership is `pending` until `populate_owned` fills it.
+pub async fn reserve_in(
+    app: &(impl Context + ?Sized),
+    workspace: Option<&Workspace>,
+    policy: Policy,
+    external: bool,
+    source: PathBuf,
+    creation_key: Option<&str>,
+) -> Result<(PathBuf, Option<Owned>), Error> {
+    prepare_with(app, workspace, policy, external, source, creation_key, true).await
+}
+async fn prepare_with(
+    app: &(impl Context + ?Sized),
+    workspace: Option<&Workspace>,
+    policy: Policy,
+    external: bool,
+    source: PathBuf,
+    creation_key: Option<&str>,
+    defer: bool,
 ) -> Result<(PathBuf, Option<Owned>), Error> {
     // Histories are loaded in their actual supplied provider cwd, never in a new worktree.
     let mode = if external {
@@ -404,12 +456,9 @@ pub async fn prepare_in(
                     bad("Could not reserve worktree destination directory")
                 }
             })?;
-            app.checked(path_str)?;
-            let population = populate(app, &repo, &path, &commit, &branch, true, &settings).await
-                .map_err(|(code, message)| (code, format!("{message}. Destination {} and any branch/files are retained; no cleanup was attempted", path.display())))?;
             let cwd = app.checked(path_str)?;
             // Only checkouts created here are owned; selected/directory worktrees never are.
-            owned = Some(Owned {
+            let mut created = Owned {
                 path: cwd.clone(),
                 branch,
                 common_dir: repo.common.clone(),
@@ -422,13 +471,20 @@ pub async fn prepare_in(
                     definitions: config.hooks,
                     ..Default::default()
                 }),
-                population: Some(population),
+                population: None,
                 settings: Some(settings),
-            });
+                pending: Some(repo.top.clone()),
+            };
+            if !defer {
+                populate_owned(app, &mut created).await?;
+            }
+            owned = Some(created);
             cwd
         }
     };
-    if policy.require_worktree && !repository(app, &cwd).await?.linked {
+    // A reserved checkout is linked once populated; until then Git would find the main one.
+    let reserved = owned.as_ref().is_some_and(|o| o.pending.is_some());
+    if policy.require_worktree && !reserved && !repository(app, &cwd).await?.linked {
         return Err(bad(
             "Project policy requires the final cwd to be a linked Git worktree",
         ));
@@ -439,6 +495,46 @@ pub async fn prepare_in(
             .ok_or_else(|| bad("Working directory must be UTF-8"))?,
     )?;
     Ok((cwd, owned))
+}
+
+/// Fills a checkout reserved by `reserve_in`, then records how it was populated.
+/// A failure leaves the destination and any branch in place for inspection.
+pub async fn populate_owned(app: &(impl Context + ?Sized), owned: &mut Owned) -> Result<(), Error> {
+    let Some(top) = owned.pending.clone() else {
+        return Ok(());
+    };
+    let top = app.checked(
+        top.to_str()
+            .ok_or_else(|| bad("Repository path must be UTF-8"))?,
+    )?;
+    let repo = Repository {
+        top,
+        main_top: owned.main_top.clone(),
+        common: owned.common_dir.clone(),
+        linked: false,
+    };
+    allowed(app, &repo.common)?;
+    // Git may fill only the empty directory reserved for this session.
+    let untouched = std::fs::symlink_metadata(&owned.path)
+        .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+        && std::fs::read_dir(&owned.path).is_ok_and(|mut entries| entries.next().is_none());
+    if !untouched {
+        return Err(conflict(format!(
+            "Worktree destination {} changed before Git could fill it; inspect it before retrying",
+            owned.path.display()
+        )));
+    }
+    let settings = owned.settings.clone().unwrap_or_default();
+    let population = populate(app, &repo, &owned.path, &owned.base_commit, &owned.branch, true, &settings).await
+        .map_err(|(code, message)| (code, format!("{message}. Destination {} and any branch/files are retained; no cleanup was attempted", owned.path.display())))?;
+    let path = owned
+        .path
+        .to_str()
+        .ok_or_else(|| bad("Worktree path must be UTF-8"))?;
+    owned.path = app.checked(path)?;
+    owned.population = Some(population);
+    owned.pending = None;
+    Ok(())
 }
 
 pub(crate) async fn populate(
@@ -461,7 +557,7 @@ pub(crate) async fn populate(
                 args.extend(["--no-track", "-b", branch]);
             }
             args.extend(["--", path, if new { commit } else { branch }]);
-            git(app, &repo.top, &args).await?;
+            git_checkout(app, &repo.top, &args).await?;
             Ok(reason)
         }
     }

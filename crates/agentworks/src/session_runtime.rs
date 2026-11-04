@@ -146,6 +146,7 @@ async fn open_session(
             "Provider-history deletion was requested; inspect or retry deletion before continuing",
         ));
     }
+    s.startup("Initializing the agent");
     let started = Instant::now();
     let init = initialize_on(
         connection,
@@ -154,6 +155,11 @@ async fn open_session(
     )
     .await?;
     tracing::info!(elapsed_ms = ms(started), "Initialized the agent");
+    s.startup(if s.data.lock().unwrap().provider_session_id.is_some() {
+        "Resuming the agent session"
+    } else {
+        "Opening the agent session"
+    });
     let started = Instant::now();
     let opened = open_initialized(connection, s, init).await;
     tracing::info!(
@@ -473,11 +479,13 @@ pub async fn run(
             Default::default()
         } else {
             let fresh = s.fresh_environment.swap(false, Ordering::SeqCst);
+            s.startup("Reading the login environment");
             let step = Instant::now();
             let login = crate::login_env::changes(&s.cwd, fresh).await;
             tracing::info!(elapsed_ms = ms(step), "Read the login environment");
             login
         };
+        s.startup("Starting the agent");
         let agent = profile_agent(
             &s.provider,
             host_profile,
@@ -500,6 +508,7 @@ pub async fn run(
             .as_deref()
             .map(|id| agentworks_runtime::model_providers::connection(id, &s.host_id))
             .transpose()?;
+        s.startup("Starting the agent on the host");
         let (lines, guard) = live.spawn_profile(
             &s.provider,
             &s.cwd.to_string_lossy(),

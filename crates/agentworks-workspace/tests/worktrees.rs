@@ -350,6 +350,52 @@ async fn owned_checkout_requires_current_confirmation_and_restores_retained_bran
 }
 
 #[tokio::test]
+async fn reserved_worktree_is_filled_later_and_only_while_untouched() {
+    let fixture = Fixture::new();
+    let (path, owned) = worktrees::reserve_in(
+        &fixture,
+        Some(&fixture.workspace()),
+        Policy {
+            require_worktree: true,
+            ..Policy::default()
+        },
+        false,
+        fixture.repo.clone(),
+        Some("creation"),
+    )
+    .await
+    .unwrap();
+    let mut owned = owned.unwrap();
+    assert_eq!(fixture.reservations.load(Ordering::SeqCst), 1);
+    assert!(owned.pending.is_some() && owned.population.is_none());
+    assert_eq!(std::fs::read_dir(&path).unwrap().count(), 0);
+
+    // A destination that changed after the reservation is never filled.
+    let mut touched = owned.clone();
+    std::fs::write(path.join("stray"), "").unwrap();
+    let error = worktrees::populate_owned(&fixture, &mut touched)
+        .await
+        .unwrap_err();
+    assert_eq!(error.0, StatusCode::CONFLICT);
+    std::fs::remove_file(path.join("stray")).unwrap();
+
+    worktrees::populate_owned(&fixture, &mut owned)
+        .await
+        .unwrap();
+    assert!(owned.pending.is_none() && owned.population.is_some());
+    assert_eq!(
+        std::fs::read_to_string(path.join("tracked.txt")).unwrap(),
+        "committed\n"
+    );
+    assert!(
+        cleanup::inspect_in(&fixture, Some(owned))
+            .await
+            .blocker
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn failed_durable_reservation_prevents_directory_and_branch_creation() {
     let mut fixture = Fixture::new();
     fixture.reject_reservation = true;

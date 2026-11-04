@@ -791,6 +791,9 @@ impl Live {
         let timeout =
             if request["type"] == "workspace" && request["operation"] == "runWorktreeHooks" {
                 Duration::from_secs(360)
+            } else if request["type"] == "workspace" && request["operation"] == "populateWorktree" {
+                // A checkout of a large repository; Git's own deadline is shorter.
+                Duration::from_secs(660)
             } else if request["type"] == "workspace" {
                 Duration::from_secs(120)
             } else {
@@ -1065,6 +1068,7 @@ fn check_hello(hello: &Value) -> Result<Value, String> {
         "mcpRelay": hello["mcpRelay"],
         "workspace": hello["workspace"] == true,
         "gitSettings": hello["gitSettings"] == true,
+        "deferredWorktree": hello["deferredWorktree"] == true,
         "modelProviders": hello["modelProviders"] == true,
         "sharedModelProviders": hello["sharedModelProviders"] == true,
         "worktreeCleanup": hello["worktreeCleanup"] == true,

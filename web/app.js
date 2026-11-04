@@ -642,6 +642,7 @@ function connect(gen){
     if(e.kind==='github_event'){document.dispatchEvent(new CustomEvent('github-event',{detail:{sessionId:active.id,...e.data}}));return;}
     if(e.kind==='session_badges'){github.updateBadges(active.id,e.data);return;}
     if(e.kind==='input_queue'){inputQueue.set(e.data);updateControls();return;}
+    if(e.kind==='startup'){active.startup=e.data.step;scheduleDraw();return;}
     if(e.kind==='tool_progress'){if(applyToolProgress(tools.get(e.data.toolCallId),e.data,e.seq))scheduleDraw();return;}
     if(e.kind==='tool_header'){
       const d=e.data,tool=typeof d.parentSessionId==='string'?subagents.tool(d.acpSessionId,d.toolCallId):tools.get(d.toolCallId);
@@ -934,7 +935,7 @@ function consume(e,live=false){
   else if(e.kind==='commands'){availableCommands=Array.isArray(d)?d:[];renderCommands();}
   else if(e.kind==='user'){assistant=null;if(d.inboxDelivery)transcript.push({id:itemId(),type:'notice',text:'Automatic inbox turn authorized by you; peer messages are untrusted context.'});else if(d.initiatedBy)transcript.push({id:itemId(),type:'notice',text:d.initiatedBy.startsWith('controller:')?'Turn started by external controller '+(d.initiatorTitle||d.initiatedBy):'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});const message=addMessage('user',d.text);message.seq=e.seq;message.inboxDelivery=!!d.inboxDelivery;if(d.attachments?.length)message.attachments=d.attachments;}
   else if(e.kind==='status'){
-    status=d.status;if(!replaying)inputQueue.observe(status,{live});if(active){active.status=status;if(d.explicitlySuspended!==undefined)active.explicitlySuspended=d.explicitlySuspended;const s=sessions.find(s=>s.id===active.id);if(s)s.status=status;}sidebar();
+    status=d.status;if(!replaying)inputQueue.observe(status,{live});if(active){active.status=status;if(!['starting','resuming'].includes(status))active.startup=null;if(d.explicitlySuspended!==undefined)active.explicitlySuspended=d.explicitlySuspended;const s=sessions.find(s=>s.id===active.id);if(s)s.status=status;}sidebar();
   }else if(e.kind==='approval'){approvals.set(d.id,d);}
   else if(e.kind==='approval_resolved'){
     const pending=approvals.get(d.id);approvals.delete(d.id);
@@ -1166,6 +1167,17 @@ function renderComposer(){
   markdownComposer.sync({markdown:display.preferences().userMarkdown==='on',sessionId:active?.id});
 }
 
+// What startup is doing now (“Creating worktree…”), until the agent is ready.
+function drawStartup(area){
+  const empty=area.querySelector('.session-empty'),starting=['starting','resuming'].includes(status);
+  if(empty)empty.querySelector('h3').textContent=starting?'Preparing your workspace':'Ready when you are';
+  let hint=area.querySelector('.startup-hint');
+  if(!starting||!active.startup){hint?.remove();return;}
+  if(!hint){hint=el('div','startup-hint');hint.setAttribute('role','status');}
+  hint.textContent=active.startup+'…';
+  const heading=empty?.querySelector('h3');
+  if(heading){if(heading.nextSibling!==hint)heading.after(hint);}else if(hint!==area.lastChild)area.append(hint);
+}
 function draw(){
   if(!active)return;
   renderComposer();
@@ -1174,8 +1186,9 @@ function draw(){
   const empty=area.querySelector('.session-empty');if(transcript.length)empty?.remove();
   if(older.mode==='none')historyControl.remove();else if(area.firstChild!==historyControl){renderHistoryControl();area.prepend(historyControl);}
   if(!transcript.length&&!empty){
-    const wrap=el('div','session-empty');wrap.append(el('div','empty-symbol',icons[active.provider]),el('h3','',status==='starting'?'Preparing your workspace':'Ready when you are'),el('p','',active.provider==='demo'?'Try “hello”, “approval”, or “slow”. This demo uses no API credits.':'Send a message to start working in this project.'));area.append(wrap);
+    const wrap=el('div','session-empty');wrap.append(el('div','empty-symbol',icons[active.provider]),el('h3'),el('p','',active.provider==='demo'?'Try “hello”, “approval”, or “slow”. This demo uses no API credits.':'Send a message to start working in this project.'));area.append(wrap);
   }
+  drawStartup(area);
   for(const item of transcript){
     let node=nodes.get(item.id);
     if(!node){

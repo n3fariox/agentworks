@@ -425,6 +425,7 @@ mod tests {
                 hooks: None,
                 population: None,
                 settings: None,
+                pending: None,
             };
             f.session("owner", Some(owned));
             f.session("early", None);

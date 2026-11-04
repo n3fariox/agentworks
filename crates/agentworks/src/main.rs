@@ -303,6 +303,12 @@ impl Session {
             self.emit("async_task_finished", result);
         }
     }
+    /// Shows what startup is doing until the session is ready. Not part of the
+    /// transcript: a browser that connects later reads it from the snapshot.
+    fn startup(&self, step: &str) {
+        self.data.lock().unwrap().startup = Some(step.into());
+        let _ = self.tx.send(json!({"kind":"startup","data":{"step":step}}));
+    }
     fn status(&self, status: &str) {
         {
             let mut data = self.data.lock().unwrap();
@@ -311,6 +317,9 @@ impl Session {
             } else {
                 status.into()
             };
+            if !matches!(status, "starting" | "resuming") {
+                data.startup = None;
+            }
             if matches!(status, "idle" | "error" | "closed" | "suspended") {
                 data.turn_active = false;
                 data.inbox_turn = None;
@@ -376,7 +385,7 @@ impl Session {
         let data = self.data.lock().unwrap();
         let (events, resumed) = events(&data.events, data.seq);
         json!({"kind":"snapshot","seq":data.seq,"resumed":resumed,"session":{"id":self.id,"provider":self.provider,
-            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"modelProvider":data.model_provider,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None},"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"]),"unacknowledged":unacknowledged} ,"events":events,
+            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"modelProvider":data.model_provider,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None},"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"]),"unacknowledged":unacknowledged,"startup":data.startup} ,"events":events,
             "truncated":data.events.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
             "asyncTasks":data.async_tasks.snapshot(),"providerCapabilities":data.agent_capabilities["sessionCapabilities"],"sessionConfig":data.session_config,"permissionModes":data.permission_modes,"models":data.models,"attachments":attachments::policy(&self.provider,&data.prompt_capabilities),"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|a.event(id)).collect::<Vec<_>>(),
@@ -2373,7 +2382,8 @@ async fn list_sessions(
 async fn activity(State(app): State<App>) -> Json<Value> {
     // The async preparation guard releases on success, failure and cancellation.
     // It also covers brief policy/root edits, conservatively reporting those as busy.
-    let workspace_preparing = app.workspace_lock.try_lock().is_err();
+    let workspace_preparing =
+        app.workspace_lock.try_lock().is_err() || worktrees::populating();
     let sessions: Vec<_> = app
         .sessions
         .lock()
@@ -2957,6 +2967,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
             worktree: owned_worktree,
             role,
             native_rename: false,
+            startup: None,
         }),
         tx,
         commands: Mutex::new(None),
@@ -3043,10 +3054,15 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
         total_ms = agentworks_runtime::log::ms(started),
         "Created the session"
     );
-    start_worker(app, &s);
+    spawn_worker(app, &s, true);
     Ok(Json(s.meta()))
 }
 fn start_worker(app: &App, s: &Arc<Session>) {
+    spawn_worker(app, s, false);
+}
+/// `created`: this is the first start of a new session, which fills its
+/// reserved worktree before anything else.
+fn spawn_worker(app: &App, s: &Arc<Session>, created: bool) {
     *s.mcp_token.lock().unwrap() = Uuid::new_v4().to_string();
     let mut handle = s.worker.lock().unwrap();
     if let Some(worker) = handle.take() {
@@ -3059,11 +3075,24 @@ fn start_worker(app: &App, s: &Arc<Session>) {
     // A root span: a resume or restart has no create request to nest under.
     let span = tracing::info_span!(parent: None, "session", id = %s.id, host = %hosts::name(app, &s.host_id), provider = %s.provider);
     let worker = tokio::spawn(async move {
+        if let Err(message) = worktrees::populate(&app_for_diagnostics, &worker_s, created).await {
+            tracing::warn!("Could not create the worktree: {message}");
+            worker_s.emit("error", json!({"message":message}));
+            worker_s.status("error");
+            return;
+        }
         let entered = {
             let started = std::time::Instant::now();
             let _run = app_for_diagnostics.run_lock.lock().await;
             let _workspace = app_for_diagnostics.workspace_lock.lock().await;
             let locked = std::time::Instant::now();
+            if worker_s.data.lock().unwrap().worktree.as_ref().is_some_and(|o| {
+                o.hooks
+                    .as_ref()
+                    .is_some_and(|h| h.enter != agentworks_workspace::hooks::Status::Succeeded)
+            }) {
+                worker_s.startup("Running worktree enter hooks");
+            }
             let entered = git_settings::run(&app_for_diagnostics, &worker_s, "enter", "create").await;
             tracing::info!(
                 wait_ms = locked.duration_since(started).as_millis() as u64,

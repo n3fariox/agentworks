@@ -23,6 +23,10 @@ pub struct Owned {
     pub population: Option<String>,
     #[serde(default)]
     pub settings: Option<crate::config::Settings>,
+    /// While set, the destination is reserved but Git has not filled it yet;
+    /// the repository top-level to populate it from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize)]

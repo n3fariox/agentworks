@@ -610,6 +610,7 @@ impl Store {
                 worktree: None,
                 role: None,
                 native_rename: false,
+                startup: None,
             };
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO sessions(id,metadata,state) VALUES (?1,?2,?3)",
@@ -942,6 +943,7 @@ mod tests {
             worktree: None,
             role: None,
             native_rename: false,
+            startup: None,
         };
         {
             let mut store = Store::open(&path).unwrap();

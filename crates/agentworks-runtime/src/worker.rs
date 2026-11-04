@@ -69,6 +69,8 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         "workspace": true,
         "gitSettings": true,
         "gitContext": true,
+        // `prepare` can reserve a new worktree for `populateWorktree` to fill later.
+        "deferredWorktree": true,
         // Model-provider profiles only run on the embedded Goose harness.
         "modelProviders": cfg!(feature = "goose"),
         "sharedModelProviders": cfg!(feature = "goose"),
@@ -794,17 +796,24 @@ async fn workspace_request(request: &Value) -> Result<Value, String> {
                     .map_err(|_| "Invalid workspace")?;
             let policy = serde_json::from_value(request["policy"].clone())
                 .map_err(|_| "Invalid workspace policy")?;
-            let (cwd, owned) = crate::worktrees::prepare_in(
-                &context,
-                workspace.as_ref(),
-                policy,
-                false,
-                cwd,
-                None,
-            )
-            .await
+            let (cwd, owned) = if request["defer"] == true {
+                crate::worktrees::reserve_in(&context, workspace.as_ref(), policy, false, cwd, None)
+                    .await
+            } else {
+                crate::worktrees::prepare_in(&context, workspace.as_ref(), policy, false, cwd, None)
+                    .await
+            }
             .map_err(|e| e.1)?;
             Ok(json!({"cwd":cwd,"owned":owned}))
+        }
+        Some("populateWorktree") => {
+            let mut owned: crate::worktree_cleanup::Owned =
+                serde_json::from_value(request["owned"].clone())
+                    .map_err(|_| "Invalid worktree ownership")?;
+            crate::worktrees::populate_owned(&context, &mut owned)
+                .await
+                .map_err(|e| e.1)?;
+            Ok(json!({"owned":owned}))
         }
         Some("browseDirectories" | "createDirectory") => {
             // `~` is the worker's home; any other path is resolved and contained by

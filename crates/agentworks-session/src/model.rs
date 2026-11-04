@@ -98,6 +98,9 @@ pub struct SessionData {
     /// The running turn is a native `/rename`; its reported title is adopted.
     #[serde(skip)]
     pub native_rename: bool,
+    /// The startup step in progress, shown until the session is ready.
+    #[serde(skip)]
+    pub startup: Option<String>,
 }
 
 /// The resolved text of a role at the time a session was created. Later edits
