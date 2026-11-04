@@ -728,11 +728,13 @@ fn hold_reason(app: &App, s: &Session) -> Option<&'static str> {
 }
 /// Follow the session to its current project, native context and directory. The human
 /// authorized wakes for this session, not for a snapshot of where it used to be.
-fn rebind(db: &rusqlite::Connection, s: &Session, p: &mut Policy) -> Result<()> {
-    let (project, native) = {
-        let d = s.data.lock().unwrap();
-        (d.project_id.clone(), d.provider_session_id.clone())
-    };
+fn rebind(
+    db: &rusqlite::Connection,
+    s: &Session,
+    p: &mut Policy,
+    project: Option<String>,
+    native: Option<String>,
+) -> Result<()> {
     let cwd = s.cwd.to_string_lossy().into_owned();
     if p.project == project
         && p.native == native
@@ -779,7 +781,19 @@ fn dispatch_inner(app: &App, s: &Session, human_pending: bool) -> Result<()> {
         return Ok(());
     }
     if p.enabled {
-        rebind(&app.store.lock().unwrap().connection, s, &mut p)?;
+        // Event publication locks session state before the store. Snapshot and
+        // release state first so rebinding never takes those locks in reverse.
+        let (project, native) = {
+            let d = s.data.lock().unwrap();
+            (d.project_id.clone(), d.provider_session_id.clone())
+        };
+        rebind(
+            &app.store.lock().unwrap().connection,
+            s,
+            &mut p,
+            project,
+            native,
+        )?;
     }
     // Without a standing policy only reply wakes run, with fixed modest bounds.
     let (cooldown, batch) = if p.enabled {
@@ -1249,6 +1263,28 @@ mod tests {
         assert_eq!(f.p().attempts, 1);
         assert!(f.receiver.try_recv().is_err());
         assert_eq!(snapshot(&f.app, &f.recipient.id).unwrap().0["pending"], 0);
+    }
+    #[test]
+    fn rebinding_does_not_wait_for_session_state_while_holding_store() {
+        let f = Fixture::new();
+        let mut policy = f.p();
+        let session = f.recipient.clone();
+        let state = f.recipient.data.lock().unwrap();
+        let project = state.project_id.clone();
+        let native = Some("replacement".into());
+        let (done, completed) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let store = session.store.lock().unwrap();
+            rebind(&store.connection, &session, &mut policy, project, native).unwrap();
+            done.send(()).unwrap();
+        });
+        // A concurrent publisher may hold session state while waiting for the
+        // store. Rebinding must finish without trying to acquire that state.
+        let result = completed.recv_timeout(std::time::Duration::from_secs(5));
+        drop(state);
+        worker.join().unwrap();
+        result.expect("rebinding waited for session state while holding the store");
+        assert_eq!(f.p().native.as_deref(), Some("replacement"));
     }
     #[test]
     fn native_identity_follows_the_session_and_invalid_senders_are_dropped() {
