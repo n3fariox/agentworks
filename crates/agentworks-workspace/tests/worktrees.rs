@@ -350,7 +350,7 @@ async fn owned_checkout_requires_current_confirmation_and_restores_retained_bran
 }
 
 #[tokio::test]
-async fn reserved_worktree_is_filled_later_and_only_while_untouched() {
+async fn reserved_worktree_is_filled_later_and_retried_only_while_untouched() {
     let fixture = Fixture::new();
     let (path, owned) = worktrees::reserve_in(
         &fixture,
@@ -377,7 +377,27 @@ async fn reserved_worktree_is_filled_later_and_only_while_untouched() {
         .await
         .unwrap_err();
     assert_eq!(error.0, StatusCode::CONFLICT);
+    assert!(error.1.contains("no longer empty"), "{}", error.1);
     std::fs::remove_file(path.join("stray")).unwrap();
+
+    // A failed fill that left Git unchanged can simply be tried again.
+    let mut failing = owned.clone();
+    failing.base_commit = "0".repeat(40);
+    assert!(
+        worktrees::populate_owned(&fixture, &mut failing)
+            .await
+            .is_err()
+    );
+    assert!(failing.pending.is_some());
+    assert_eq!(std::fs::read_dir(&path).unwrap().count(), 0);
+
+    // A branch left behind means Git got partway: never filled over it.
+    fixture.git(&["branch", &owned.branch]);
+    let error = worktrees::populate_owned(&fixture, &mut owned.clone())
+        .await
+        .unwrap_err();
+    assert!(error.1.contains("branch already exists"), "{}", error.1);
+    fixture.git(&["branch", "-D", &owned.branch]);
 
     worktrees::populate_owned(&fixture, &mut owned)
         .await

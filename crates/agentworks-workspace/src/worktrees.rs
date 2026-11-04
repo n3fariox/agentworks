@@ -499,6 +499,9 @@ async fn prepare_with(
 
 /// Fills a checkout reserved by `reserve_in`, then records how it was populated.
 /// A failure leaves the destination and any branch in place for inspection.
+/// Safe to call again after a failure or restart: it proceeds only while the
+/// destination is still empty and the branch does not exist, so Git had
+/// changed nothing; otherwise it refuses and names what is left.
 pub async fn populate_owned(app: &(impl Context + ?Sized), owned: &mut Owned) -> Result<(), Error> {
     let Some(top) = owned.pending.clone() else {
         return Ok(());
@@ -514,19 +517,34 @@ pub async fn populate_owned(app: &(impl Context + ?Sized), owned: &mut Owned) ->
         linked: false,
     };
     allowed(app, &repo.common)?;
+    let left = |what: &str| {
+        conflict(format!(
+            "Worktree creation stopped partway: {what}. {} and branch {} were left as they are; remove them, or delete this session and start a new one",
+            crate::paths::display(&owned.path),
+            owned.branch
+        ))
+    };
     // Git may fill only the empty directory reserved for this session.
     let untouched = std::fs::symlink_metadata(&owned.path)
         .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
         && std::fs::read_dir(&owned.path).is_ok_and(|mut entries| entries.next().is_none());
     if !untouched {
-        return Err(conflict(format!(
-            "Worktree destination {} changed before Git could fill it; inspect it before retrying",
-            owned.path.display()
-        )));
+        return Err(left("the reserved directory is no longer empty"));
+    }
+    // An exact listing: the pattern also matches refs below the branch name.
+    let branch = format!("refs/heads/{}", owned.branch);
+    let refs = git(
+        app,
+        &repo.top,
+        &["for-each-ref", "--format=%(refname)", &branch],
+    )
+    .await?;
+    if refs.lines().any(|line| line == branch) {
+        return Err(left("its branch already exists"));
     }
     let settings = owned.settings.clone().unwrap_or_default();
     let population = populate(app, &repo, &owned.path, &owned.base_commit, &owned.branch, true, &settings).await
-        .map_err(|(code, message)| (code, format!("{message}. Destination {} and any branch/files are retained; no cleanup was attempted", owned.path.display())))?;
+        .map_err(|(code, message)| (code, format!("{message}. Destination {} and any branch/files are retained; Resume session retries only if Git changed neither", crate::paths::display(&owned.path))))?;
     let path = owned
         .path
         .to_str()

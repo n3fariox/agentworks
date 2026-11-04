@@ -2382,8 +2382,7 @@ async fn list_sessions(
 async fn activity(State(app): State<App>) -> Json<Value> {
     // The async preparation guard releases on success, failure and cancellation.
     // It also covers brief policy/root edits, conservatively reporting those as busy.
-    let workspace_preparing =
-        app.workspace_lock.try_lock().is_err() || worktrees::populating();
+    let workspace_preparing = app.workspace_lock.try_lock().is_err() || worktrees::populating();
     let sessions: Vec<_> = app
         .sessions
         .lock()
@@ -3054,15 +3053,10 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
         total_ms = agentworks_runtime::log::ms(started),
         "Created the session"
     );
-    spawn_worker(app, &s, true);
+    start_worker(app, &s);
     Ok(Json(s.meta()))
 }
 fn start_worker(app: &App, s: &Arc<Session>) {
-    spawn_worker(app, s, false);
-}
-/// `created`: this is the first start of a new session, which fills its
-/// reserved worktree before anything else.
-fn spawn_worker(app: &App, s: &Arc<Session>, created: bool) {
     *s.mcp_token.lock().unwrap() = Uuid::new_v4().to_string();
     let mut handle = s.worker.lock().unwrap();
     if let Some(worker) = handle.take() {
@@ -3075,7 +3069,7 @@ fn spawn_worker(app: &App, s: &Arc<Session>, created: bool) {
     // A root span: a resume or restart has no create request to nest under.
     let span = tracing::info_span!(parent: None, "session", id = %s.id, host = %hosts::name(app, &s.host_id), provider = %s.provider);
     let worker = tokio::spawn(async move {
-        if let Err(message) = worktrees::populate(&app_for_diagnostics, &worker_s, created).await {
+        if let Err(message) = worktrees::populate(&app_for_diagnostics, &worker_s).await {
             tracing::warn!("Could not create the worktree: {message}");
             worker_s.emit("error", json!({"message":message}));
             worker_s.status("error");

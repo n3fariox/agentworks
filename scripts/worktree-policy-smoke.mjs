@@ -53,13 +53,15 @@ try{
  const busy=await api('/api/activity');assert.equal(busy.workspacePreparing,true);assert.equal(busy.safeToClose,false);
  await unlink(gate);const prepared=await inFlight;await idle(prepared.id);await remove(prepared);await unlink(gate+'.entered');assert.equal((await api('/api/activity')).workspacePreparing,false);
  // The checkout is filled after creation returns. A failure there errors the session,
- // retains the reserved directory, releases activity, and a retry never replays it.
+ // retains the reserved directory and releases activity; the same request returns the
+ // same session, and Resume fills it once Git is known to be unchanged.
  await writeFile(gate,'fail');const populationRequest={provider:'demo',cwd:repo,requestId:'failed-population',workspace:{mode:'newWorktree'}};
  const failed=await api('/api/sessions','POST',populationRequest);
  const failedState=await until(async()=>{const s=await api('/api/sessions/'+failed.id);return s.session.status==='error'&&s;});
  assert.match(failedState.events.filter(e=>e.kind==='error').at(-1).data.message,/simulated checkout failure.*retained/s);await access(failed.cwd);
  assert.equal((await api('/api/activity')).workspacePreparing,false);await unlink(gate);await unlink(gate+'.entered');
- assert.equal((await api('/api/sessions','POST',populationRequest)).id,failed.id);assert.equal((await api('/api/sessions/'+failed.id)).session.status,'error');await remove(failed);
+ assert.equal((await api('/api/sessions','POST',populationRequest)).id,failed.id);assert.equal((await api('/api/sessions/'+failed.id)).session.status,'error');
+ await api('/api/sessions/'+failed.id+'/resume','POST',{});await idle(failed.id);assert.equal(git(failed.cwd,'rev-parse','--abbrev-ref','HEAD'),failed.worktree.branch);await remove(failed);
  await writeFile(gate+'.overflow','large');await api('/api/worktrees/list','POST',{cwd:repo},409);await unlink(gate+'.overflow');
  const ordinary=await create({cwd:plain});await idle(ordinary.id);assert.equal(ordinary.cwd,plain);await remove(ordinary);
  // Capacity rejection is mutation-free: retain payload binding, permit unchanged retry.

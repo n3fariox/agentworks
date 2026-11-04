@@ -242,9 +242,9 @@ pub fn populating() -> bool {
 }
 
 /// Fills the worktree reserved for a new session, before its harness starts.
-/// `fresh` is false when a restart finds one still unfilled: the earlier
-/// attempt may have changed Git, so it is never replayed.
-pub async fn populate(app: &App, s: &crate::Session, fresh: bool) -> Result<(), String> {
+/// After a failure or restart, Resume calls this again; `populate_owned`
+/// retries only when the earlier attempt left Git unchanged.
+pub async fn populate(app: &App, s: &crate::Session) -> Result<(), String> {
     let Some(mut owned) = s
         .data
         .lock()
@@ -255,13 +255,6 @@ pub async fn populate(app: &App, s: &crate::Session, fresh: bool) -> Result<(), 
     else {
         return Ok(());
     };
-    if !fresh {
-        return Err(format!(
-            "Creating the worktree at {} did not finish before Agentworks stopped. It was not retried; inspect it and branch {}, then start a new session.",
-            agentworks_workspace::paths::display(&owned.path),
-            owned.branch
-        ));
-    }
     // One checkout at a time, as when creation held the workspace lock: the
     // CoW cache refuses concurrent use.
     let _populating = match POPULATING.try_lock() {
