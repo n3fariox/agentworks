@@ -13,6 +13,7 @@ use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ConnectionT
 use agentworks_runtime::acp::initialize_on;
 #[cfg(test)]
 use agentworks_runtime::acp::initialize_request;
+use agentworks_runtime::log::ms;
 use agentworks_runtime::provider::parse_model_config;
 use agentworks_runtime::provider::{
     agent_config, cli_provider, is_free_model, prepare, safe_error, session_environment,
@@ -25,7 +26,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
@@ -145,12 +146,31 @@ async fn open_session(
             "Provider-history deletion was requested; inspect or retry deletion before continuing",
         ));
     }
+    let started = Instant::now();
     let init = initialize_on(
         connection,
         &s.provider,
         s.host_id == "local" && use_api_key(),
     )
     .await?;
+    tracing::info!(elapsed_ms = ms(started), "Initialized the agent");
+    let started = Instant::now();
+    let opened = open_initialized(connection, s, init).await;
+    tracing::info!(
+        elapsed_ms = ms(started),
+        ok = opened.is_ok(),
+        "Opened the provider session"
+    );
+    opened
+}
+
+/// Creates, forks, loads or resumes the provider session once `initialize` has
+/// answered with the agent's capabilities.
+async fn open_initialized(
+    connection: &ConnectionTo<Agent>,
+    s: &Session,
+    init: Value,
+) -> Result<Value, agent_client_protocol::Error> {
     s.data.lock().unwrap().agent_capabilities = init["agentCapabilities"].clone();
     s.emit(
         "async_task_connection",
@@ -407,6 +427,7 @@ pub async fn run(
     s: Arc<Session>,
     mut commands: mpsc::Receiver<Command>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let started = Instant::now();
     if s.host_id == "local" {
         prepare(&s.provider)?;
     }
@@ -452,18 +473,24 @@ pub async fn run(
             Default::default()
         } else {
             let fresh = s.fresh_environment.swap(false, Ordering::SeqCst);
-            crate::login_env::changes(&s.cwd, fresh).await
+            let step = Instant::now();
+            let login = crate::login_env::changes(&s.cwd, fresh).await;
+            tracing::info!(elapsed_ms = ms(step), "Read the login environment");
+            login
         };
-        (
-            DynConnectTo::new(profile_agent(
-                &s.provider,
-                host_profile,
-                s.data.lock().unwrap().model_provider.as_deref(),
-                Some(&s.id),
-                login,
-            )?),
-            None,
-        )
+        let agent = profile_agent(
+            &s.provider,
+            host_profile,
+            s.data.lock().unwrap().model_provider.as_deref(),
+            Some(&s.id),
+            login,
+        )?
+        .with_debug(|line, direction| {
+            if matches!(direction, agent_client_protocol::LineDirection::Stderr) {
+                tracing::debug!("agent stderr: {line}");
+            }
+        });
+        (DynConnectTo::new(agent), None)
     } else {
         let live = crate::hosts::registry()
             .and_then(|hosts| hosts.live(&s.host_id))
@@ -481,6 +508,7 @@ pub async fn run(
             Some(&s.id),
         )?;
         guard.bind_mcp(s.mcp_endpoint, s.mcp_token.lock().unwrap().clone());
+        tracing::info!(total_ms = ms(started), "Asked the host to start the agent");
         // Keep the worker process alive until this runtime returns or is cancelled.
         (DynConnectTo::new(lines), Some(guard))
     };
@@ -647,6 +675,7 @@ pub async fn run(
             let restored=crate::session_config::restore(&connection,&provider_id,config.clone(),&saved_config).await?;
             if restored!=config {crate::session_config::publish(&s,&restored);}
             crate::limit_resume::ready(&s);
+            tracing::info!(total_ms = ms(started), "The session is ready");
             s.emit("ready",json!({"providerSessionId":provider_id,"configuration":serde_json::to_value(&created).unwrap_or(Value::Null)}));
             if !s.start_queued_prompt().map_err(|e|agent_client_protocol::Error::internal_error().data(e))? {s.status("idle");}
             while let Some(command)=commands.recv().await {

@@ -1,5 +1,6 @@
 //! Provider launch configuration, ACP discovery, and SSH worker execution.
 pub mod acp;
+pub mod log;
 pub mod mcp_relay;
 
 pub mod metrics;

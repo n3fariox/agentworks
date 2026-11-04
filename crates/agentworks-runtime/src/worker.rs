@@ -23,6 +23,7 @@ use tokio::{
     sync::{mpsc, oneshot},
 };
 use tokio_tungstenite::tungstenite::Message;
+use tracing::Instrument;
 
 const USAGE: &str = "Usage: agentworks agent --stdio (started by the Agentworks server over SSH)";
 const STDERR_LINES: usize = 8;
@@ -49,7 +50,12 @@ pub async fn run(args: &[String]) -> Result<(), String> {
     let mcp = crate::mcp_relay::WorkerBridge::start(out.clone())
         .await
         .map_err(|e| e.to_string())?;
+    let started = Instant::now();
     let base = mise_env(&home()).await;
+    tracing::info!(
+        elapsed_ms = crate::log::ms(started),
+        "Read the home directory's mise environment"
+    );
     let providers = available_providers(&base);
     let hello = json!({
         "type": "hello",
@@ -93,6 +99,9 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         }
         _ => return Err("The server sent an unexpected reply".into()),
     }
+    if let Some(filter) = reply["log"].as_str() {
+        crate::log::adopt(filter);
+    }
     let _ownership = ownership_at(
         &home().join(".cache/agentworks/workers"),
         reply["hostId"].as_str().unwrap_or(""),
@@ -103,7 +112,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
     ))
     .await
     .map_err(|e| format!("Could not confirm host ownership: {e}"))?;
-    eprintln!("agentworks agent: connected ({})", providers.join(", "));
+    tracing::info!("Connected ({})", providers.join(", "));
 
     let (mut sink, mut frames) = ws.split();
     let writer = tokio::spawn(async move {
@@ -270,7 +279,9 @@ pub async fn run(args: &[String]) -> Result<(), String> {
                             Vec::new()
                         };
                         workspace_tasks.spawn(async move {
+                            let queued = Instant::now();
                             let _guard = lock.lock().await;
+                            let started = Instant::now();
                             let result = async {
                                 if active { return Err("An agent is still running in this worktree; stop it and retry".into()); }
                                 // A kill request only initiates process-group shutdown. Wait for
@@ -280,6 +291,13 @@ pub async fn run(args: &[String]) -> Result<(), String> {
                                 }
                                 workspace_request(&request).await
                             }.await;
+                            tracing::debug!(
+                                operation = request["operation"].as_str().unwrap_or(""),
+                                wait_ms = started.duration_since(queued).as_millis() as u64,
+                                elapsed_ms = crate::log::ms(started),
+                                ok = result.is_ok(),
+                                "Workspace request finished"
+                            );
                             let mut reply = json!({"type":"reply","request":request["request"]});
                             match result {
                                 Ok(value) => reply["result"] = value,
@@ -342,7 +360,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
     // Keep exclusive host ownership until any Git mutation finishes. A lost reply
     // retains its checkout; a replacement must not race the old worker.
     while workspace_tasks.join_next().await.is_some() {}
-    eprintln!("agentworks agent: the link closed");
+    tracing::info!("The link closed");
     ended
 }
 
@@ -410,13 +428,23 @@ fn start(request: Value, channel: u32, out: mpsc::Sender<Message>) -> Process {
     let (completed, finished) = tokio::sync::watch::channel(false);
     let (input, lines) = mpsc::unbounded_channel();
     let (stop, stopped) = oneshot::channel();
-    let task = tokio::spawn(async move {
-        if let Err(message) = run_process(request, channel, out.clone(), lines, stopped).await {
-            let exit = json!({"type":"exit","channel":channel,"message":message});
-            let _ = out.send(Message::text(exit.to_string())).await;
+    let span = tracing::info_span!(
+        "agent",
+        session = %request["session"].as_str().unwrap_or("-"),
+        provider = %request["provider"].as_str().unwrap_or(""),
+        channel,
+    );
+    let task = tokio::spawn(
+        async move {
+            if let Err(message) = run_process(request, channel, out.clone(), lines, stopped).await {
+                tracing::warn!("Could not run the agent: {message}");
+                let exit = json!({"type":"exit","channel":channel,"message":message});
+                let _ = out.send(Message::text(exit.to_string())).await;
+            }
+            let _ = completed.send(true);
         }
-        let _ = completed.send(true);
-    });
+        .instrument(span),
+    );
     Process {
         cwd,
         finished,
@@ -444,12 +472,22 @@ async fn run_process(
             cwd.display()
         ));
     }
+    let started = Instant::now();
     crate::provider::prepare(provider).map_err(|e| format!("Could not prepare {provider}: {e}"))?;
+    tracing::info!(
+        elapsed_ms = crate::log::ms(started),
+        "Prepared the provider"
+    );
     // Environment discovery must not block link pings, other channels or kill.
+    let step = Instant::now();
     let env = tokio::select! {
         env = mise_env(&cwd) => env,
         _ = &mut stopped => return Ok(()),
     };
+    tracing::info!(
+        elapsed_ms = crate::log::ms(step),
+        "Read the mise environment"
+    );
     // Remote sessions always use the host's own sign-ins.
     let config = crate::provider::agent_config(
         provider,
@@ -495,6 +533,12 @@ async fn run_process(
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("Could not start {provider}: {e}"))?;
+    tracing::info!(
+        pid = child.id(),
+        total_ms = crate::log::ms(started),
+        "Started the agent"
+    );
+    let spawned = Instant::now();
     #[cfg(unix)]
     let group = child.id().ok_or("The process exited immediately")? as i32;
     // A descendant started before assignment escapes the job. ACP adapters wait
@@ -523,43 +567,57 @@ async fn run_process(
     });
     let errors: Arc<Mutex<VecDeque<String>>> = Default::default();
     let collected = errors.clone();
-    let stderr_task = tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let line: String = line.trim().chars().take(300).collect();
-            if line.is_empty() {
-                continue;
+    let stderr_task = tokio::spawn(
+        async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let line: String = line.trim().chars().take(300).collect();
+                if line.is_empty() {
+                    continue;
+                }
+                tracing::debug!("agent stderr: {line}");
+                let mut tail = collected.lock().unwrap();
+                if tail.len() == STDERR_LINES {
+                    tail.pop_front();
+                }
+                tail.push_back(line);
             }
-            let mut tail = collected.lock().unwrap();
-            if tail.len() == STDERR_LINES {
-                tail.pop_front();
-            }
-            tail.push_back(line);
         }
-    });
+        .in_current_span(),
+    );
     let stdout_out = out.clone();
-    let mut stdout_task = tokio::spawn(async move {
-        let out = stdout_out;
-        let mut reader = BufReader::new(stdout);
-        let mut line = Vec::new();
-        loop {
-            line.clear();
-            match reader.read_until(b'\n', &mut line).await {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    while line.last().is_some_and(|b| *b == b'\n' || *b == b'\r') {
-                        line.pop();
-                    }
-                    let mut frame = Vec::with_capacity(line.len() + 4);
-                    frame.extend_from_slice(&channel.to_be_bytes());
-                    frame.extend_from_slice(&line);
-                    if out.send(Message::binary(frame)).await.is_err() {
-                        return;
+    let mut stdout_task = tokio::spawn(
+        async move {
+            let out = stdout_out;
+            let mut reader = BufReader::new(stdout);
+            let mut line = Vec::new();
+            let mut first = true;
+            loop {
+                line.clear();
+                match reader.read_until(b'\n', &mut line).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        while line.last().is_some_and(|b| *b == b'\n' || *b == b'\r') {
+                            line.pop();
+                        }
+                        if std::mem::take(&mut first) {
+                            tracing::debug!(
+                                elapsed_ms = crate::log::ms(spawned),
+                                "First output from the agent"
+                            );
+                        }
+                        let mut frame = Vec::with_capacity(line.len() + 4);
+                        frame.extend_from_slice(&channel.to_be_bytes());
+                        frame.extend_from_slice(&line);
+                        if out.send(Message::binary(frame)).await.is_err() {
+                            return;
+                        }
                     }
                 }
             }
         }
-    });
+        .in_current_span(),
+    );
     let status = tokio::select! {
         status = child.wait() => status,
         _ = stopped => {
@@ -596,6 +654,7 @@ async fn run_process(
     if !tail.is_empty() {
         message.push_str(&format!(" Last output: {}", tail.join(" / ")));
     }
+    tracing::info!("{message}");
     let exit = json!({"type":"exit","channel":channel,"message":message});
     let _ = out.send(Message::text(exit.to_string())).await;
     Ok(())
@@ -834,15 +893,12 @@ async fn mise_env(dir: &Path) -> HashMap<String, String> {
                     return map;
                 }
             }
-            Ok(Ok(output)) => eprintln!(
-                "agentworks agent: mise env in {} failed: {}",
+            Ok(Ok(output)) => tracing::warn!(
+                "mise env in {} failed: {}",
                 dir.display(),
                 String::from_utf8_lossy(&output.stderr).trim()
             ),
-            _ => eprintln!(
-                "agentworks agent: mise env in {} did not finish",
-                dir.display()
-            ),
+            _ => tracing::warn!("mise env in {} did not finish", dir.display()),
         }
     }
     HashMap::new()

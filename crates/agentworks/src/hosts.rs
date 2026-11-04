@@ -80,7 +80,7 @@ pub async fn remove(State(app): State<App>, Path(id): Path<String>) -> ApiResult
                     .is_some_and(|name| uuid::Uuid::parse_str(&name.to_string_lossy()).is_ok())
             {
                 if tokio::fs::remove_dir_all(dir).await.is_err() {
-                    eprintln!("Could not remove a deleted host's managed SSH key directory");
+                    tracing::warn!("Could not remove a deleted host's managed SSH key directory");
                 }
             }
         }
@@ -275,6 +275,17 @@ pub(crate) fn diagnostic(app: &App, host: &str, provider: &str, message: &str) -
     )
 }
 
+/// A host's display name for logs; `local` and unknown hosts keep their ID.
+pub(crate) fn name(app: &App, host_id: &str) -> String {
+    app.catalog
+        .lock()
+        .unwrap()
+        .data
+        .hosts
+        .iter()
+        .find(|h| h.id == host_id)
+        .map_or_else(|| host_id.to_owned(), |h| h.name.clone())
+}
 fn host_roots(app: &App, host_id: &str) -> Result<Vec<String>, (StatusCode, String)> {
     app.catalog
         .lock()

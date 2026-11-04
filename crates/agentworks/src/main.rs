@@ -79,6 +79,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tracing::Instrument;
 use uuid::Uuid;
 
 const MAX_EVENTS: usize = 3000;
@@ -269,9 +270,9 @@ impl Session {
         }
         if let Err(error) = self.store.lock().unwrap().event(&self.id, &state, &event) {
             if state.storage_error.is_none() {
-                eprintln!(
-                    "Could not persist session {}: {}",
-                    self.id,
+                tracing::error!(
+                    session = %self.id,
+                    "Could not persist the session: {}",
                     agentworks_runtime::provider::safe_error(&error.to_string())
                 );
             }
@@ -557,6 +558,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.get(1).is_some_and(|a| a == "service") {
         return service_unit::run(&args[2..]).map_err(|e| e.to_string().into());
     }
+    agentworks_runtime::log::init();
     let auth_mode = std::env::var("AGENTWORKS_AUTH_MODE").unwrap_or_else(|_| "existing".into());
     if !["existing", "api_key"].contains(&auth_mode.as_str()) {
         return Err("AGENTWORKS_AUTH_MODE must be existing or api_key".into());
@@ -1513,7 +1515,7 @@ async fn guard(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if ws {
-        eprintln!(
+        tracing::debug!(
             "WebSocket request path={:?} host={:?} origin={:?} x_forwarded_proto={:?} x_forwarded_host={:?} direct_host={} forwarded_origin={:?}",
             req.uri().path(),
             log_header(&headers, header::HOST),
@@ -1526,7 +1528,7 @@ async fn guard(
     }
     if !direct_host && forwarded_origin.is_none() {
         if ws {
-            eprintln!("WebSocket rejected reason=unrecognized_host");
+            tracing::info!("WebSocket rejected reason=unrecognized_host");
         }
         return (StatusCode::FORBIDDEN, "Unrecognized host").into_response();
     }
@@ -1537,7 +1539,7 @@ async fn guard(
             && !(proxied && browser_origin::origin_matches_forwarded(&headers, origin))
         {
             if ws {
-                eprintln!(
+                tracing::info!(
                     "WebSocket rejected reason=origin_mismatch path={:?}",
                     req.uri().path()
                 );
@@ -1546,7 +1548,7 @@ async fn guard(
         }
     }
     if ws {
-        eprintln!("WebSocket guard passed path={:?}", req.uri().path());
+        tracing::debug!("WebSocket guard passed path={:?}", req.uri().path());
     }
     let mermaid_frame = req.uri().path() == "/mermaid-frame.html";
     let model_frame =
@@ -2673,7 +2675,9 @@ fn initial_agent_access(
     explicit.or_else(|| (!automation).then(|| project_role.access()))
 }
 
+#[tracing::instrument(name = "create", skip_all, fields(host = %hosts::name(app, req.host_id.as_deref().unwrap_or("local")), provider = %req.provider))]
 async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&str>) -> ApiResult {
+    let started = std::time::Instant::now();
     // A request without a directory starts in the project's directory on that host.
     if req.cwd.trim().is_empty() {
         let host = req.host_id.as_deref().unwrap_or("local");
@@ -2704,6 +2708,10 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
         req.model_provider.as_deref(),
     )
     .await?;
+    tracing::debug!(
+        elapsed_ms = agentworks_runtime::log::ms(started),
+        "Selected the model provider"
+    );
     // Checked before any workspace is prepared, so a bad role leaves nothing behind.
     let role = match req.inherited_role.clone() {
         Some(role) => Some(role),
@@ -2742,6 +2750,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
             },
         ));
     }
+    let step = std::time::Instant::now();
     let source = match &remote_host {
         Some(host) => tokio::time::timeout(
             std::time::Duration::from_secs(12),
@@ -2756,6 +2765,10 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
         })??,
         None => checked_cwd(app, &req.cwd)?,
     };
+    tracing::info!(
+        elapsed_ms = agentworks_runtime::log::ms(step),
+        "Checked the directory"
+    );
     // Registered imports/resume retain their original context, even after policy changes.
     if let Some(external) = &req.external_id {
         let existing = app
@@ -2803,6 +2816,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
         ));
     }
     // Prepare workspaces on the machine that owns their files.
+    let step = std::time::Instant::now();
     let (cwd, owned_worktree) = if let Some(host) = remote_host.as_deref() {
         hosts::prepare_workspace(app, host, &req, source, creation_key).await?
     } else {
@@ -2818,6 +2832,11 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
             )
         })??
     };
+    tracing::info!(
+        elapsed_ms = agentworks_runtime::log::ms(step),
+        worktree = owned_worktree.is_some(),
+        "Prepared the workspace"
+    );
     let mut catalog = app.catalog.lock().unwrap();
     if req
         .project_id
@@ -3019,6 +3038,11 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
         sessions.insert(s.id.clone(), s.clone());
     }
     s.emit("status", json!({"status":"starting"}));
+    tracing::info!(
+        session = %s.id,
+        total_ms = agentworks_runtime::log::ms(started),
+        "Created the session"
+    );
     start_worker(app, &s);
     Ok(Json(s.meta()))
 }
@@ -3032,18 +3056,30 @@ fn start_worker(app: &App, s: &Arc<Session>) {
     *s.commands.lock().unwrap() = Some(commands);
     let worker_s = s.clone();
     let app_for_diagnostics = app.clone();
+    // A root span: a resume or restart has no create request to nest under.
+    let span = tracing::info_span!(parent: None, "session", id = %s.id, host = %hosts::name(app, &s.host_id), provider = %s.provider);
     let worker = tokio::spawn(async move {
         let entered = {
+            let started = std::time::Instant::now();
             let _run = app_for_diagnostics.run_lock.lock().await;
             let _workspace = app_for_diagnostics.workspace_lock.lock().await;
-            git_settings::run(&app_for_diagnostics, &worker_s, "enter", "create").await
+            let locked = std::time::Instant::now();
+            let entered = git_settings::run(&app_for_diagnostics, &worker_s, "enter", "create").await;
+            tracing::info!(
+                wait_ms = locked.duration_since(started).as_millis() as u64,
+                elapsed_ms = agentworks_runtime::log::ms(locked),
+                "Ran the enter hook"
+            );
+            entered
         };
         if let Err((_, message)) = entered {
+            tracing::warn!("The enter hook failed: {message}");
             worker_s.emit("error", json!({"message":message}));
             worker_s.status("error");
             return;
         }
         if let Err(error) = session_runtime::run(worker_s.clone(), rx).await {
+            tracing::warn!("The session stopped: {error}");
             worker_s.clear_approvals();
             // A dropped host link is handled like a server restart: the turn
             // is not retried and the session resumes once the host is back.
@@ -3079,7 +3115,7 @@ fn start_worker(app: &App, s: &Arc<Session>) {
             );
             worker_s.status("error");
         }
-    });
+    }.instrument(span));
     *handle = Some(worker);
 }
 async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
@@ -3599,12 +3635,12 @@ async fn events(
     let s = match session(&app, &id) {
         Ok(session) => session,
         Err(error) => {
-            eprintln!("Session WebSocket route rejected reason=session_not_found");
+            tracing::info!(session = %id, "Session WebSocket route rejected reason=session_not_found");
             return Err(error);
         }
     };
     Ok(ws.on_upgrade(move |socket| {
-        eprintln!("Session WebSocket upgraded");
+        tracing::debug!(session = %s.id, "Session WebSocket upgraded");
         event_socket(socket, s, query.after)
     }))
 }

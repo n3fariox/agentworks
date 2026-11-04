@@ -29,9 +29,7 @@ pub async fn changes(cwd: &Path, fresh: bool) -> BTreeMap<String, String> {
     match read(cwd, fresh).await {
         Ok(login) => differing(login, std::env::vars()),
         Err(error) => {
-            eprintln!(
-                "agentworks: login environment unavailable; using the service environment: {error}"
-            );
+            tracing::warn!("Login environment unavailable; using the service environment: {error}");
             BTreeMap::new()
         }
     }

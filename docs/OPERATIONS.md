@@ -126,6 +126,19 @@ Traefik example](HOSTING.md).
 
 Every harness process, local or remote, gets `AGENTWORKS_SESSION_ID` and `AGENTWORKS_SESSION_URI` (`agentworks://sessions/<id>`), so scripts, hooks and tools it runs can tell which session they serve. Remote workers older than this release omit them. The service's own configuration and process-manager state are withheld: listen address and port, TLS and sign-in settings, roots, catalog and database paths, auth mode, model-provider directory, PWA switch, supervisor and release settings, and systemd variables such as `NOTIFY_SOCKET` and `INVOCATION_ID` (the full list is `SERVICE_ENVIRONMENT` in `crates/agentworks-runtime/src/provider.rs`). An Agentworks server or test started from inside a harness therefore does not inherit the live service's store, port or supervisor. Its defaults still apply: the default store is `.agentworks/` in the checkout the binary was built from, so a build in the checkout that also holds the live store opens that store unless the paths are set. Local harnesses also read your current login environment on each start; see [lifecycle](LIFECYCLE.md).
 
+## Logs
+
+The server logs timestamped lines to stderr, which the service unit sends to its journal: `journalctl --user -u agentworks.service`. A remote worker logs to its stderr, which arrives over ssh. The server writes those lines into its own log under the host's name, with the worker's timestamp after the server's. Both machines' activity for a session therefore appears in one place.
+
+`AGENTWORKS_LOG` sets the filter in `RUST_LOG` syntax; the default is `info`. Workers use the server's setting unless their own environment sets `AGENTWORKS_LOG`. Server lines carry the session ID and host. Worker lines carry the session ID.
+
+At `info`, starting a session logs each step with its duration (`elapsed_ms`, or `total_ms` since the start):
+
+- Server: checking the directory, preparing the workspace, waiting for locks and running the enter hook, reading the login environment (local) or asking the host to start the agent (remote), then ACP `initialize`, opening the provider session, and ready.
+- Worker: preparing the provider, `mise env`, and starting the agent process.
+
+Gaps between consecutive timestamps show where startup time goes. At `debug`, every request to a host is logged with its duration, along with each worker workspace operation, including time spent queued behind another one. `debug` also logs harness stderr and the time from spawning a remote agent to its first output. `debug,agent_client_protocol=info` leaves out the ACP library's own debug output.
+
 ## Persistent sessions
 
 Session options show the adapter’s advertised settings, including reasoning effort, collaboration/plan mode, and fast mode where available. Settings can be changed while the session is idle. Select choices (including grouped choices) and boolean toggles are supported; unknown setting types are retained without an editable control. Model and permission selectors stay synchronized with provider changes. ACP v1 adapters that expose only session modes use `session/set_mode`. Additional settings are saved and reapplied on reconnect when still advertised.

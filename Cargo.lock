@@ -141,6 +141,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite 0.29.0",
  "tokio-util",
+ "tracing",
  "uuid",
  "windows-sys 0.61.2",
 ]
@@ -205,6 +206,8 @@ dependencies = [
  "sysinfo",
  "tokio",
  "tokio-tungstenite 0.29.0",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -257,6 +260,7 @@ dependencies = [
  "rmcp",
  "serde_json",
  "tokio",
+ "tracing",
  "tracing-subscriber",
 ]
 

@@ -70,10 +70,11 @@ pub async fn dispatch(args: &[String]) -> Option<Result<(), Box<dyn Error>>> {
             // Worker cleanup completes inside run(). Tokio stdin uses an uncancellable
             // blocking reader, so runtime shutdown can hang while a dead peer still
             // holds stdin open. Only this stateless CLI mode exits explicitly.
+            agentworks_runtime::log::init();
             let code = match agentworks_runtime::worker::run(&args[2..]).await {
                 Ok(()) => 0,
                 Err(error) => {
-                    eprintln!("agentworks agent: {error}");
+                    tracing::error!("Worker stopped: {error}");
                     1
                 }
             };
