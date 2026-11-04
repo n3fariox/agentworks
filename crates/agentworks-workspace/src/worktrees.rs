@@ -98,6 +98,43 @@ pub(crate) async fn git_checkout(
 ) -> Result<String, Error> {
     git_within(app, cwd, args, 256 * 1024, CHECKOUT_TIMEOUT).await
 }
+/// Checks Git's branch namespace before reserving a session. A branch conflicts
+/// if it already exists, is an existing branch's parent, or has existing child
+/// refs below it.
+async fn branch_ref_conflicts(
+    app: &(impl Context + ?Sized),
+    repo: &FsPath,
+    branch: &str,
+) -> Result<bool, Error> {
+    let requested = format!("refs/heads/{branch}");
+    let refs = git(
+        app,
+        repo,
+        &["for-each-ref", "--format=%(refname)", &requested],
+    )
+    .await?;
+    if refs.lines().any(|name| {
+        name == requested
+            || name
+                .strip_prefix(&requested)
+                .is_some_and(|rest| rest.starts_with('/'))
+    }) {
+        return Ok(true);
+    }
+
+    let mut ancestor = requested.as_str();
+    while let Some((parent, _)) = ancestor.rsplit_once('/') {
+        if parent == "refs/heads" {
+            break;
+        }
+        let refs = git(app, repo, &["for-each-ref", "--format=%(refname)", parent]).await?;
+        if refs.lines().any(|name| name == parent) {
+            return Ok(true);
+        }
+        ancestor = parent;
+    }
+    Ok(false)
+}
 async fn git_within(
     app: &(impl Context + ?Sized),
     cwd: &FsPath,
@@ -340,6 +377,11 @@ async fn prepare_with(
                 &["check-ref-format", &format!("refs/heads/{branch}")],
             )
             .await?;
+            if branch_ref_conflicts(app, &repo.top, &branch).await? {
+                return Err(bad(
+                    "Branch already exists or conflicts with an existing branch",
+                ));
+            }
             let base = workspace
                 .and_then(|w| w.base_ref.as_deref())
                 .unwrap_or("HEAD");
@@ -531,16 +573,10 @@ pub async fn populate_owned(app: &(impl Context + ?Sized), owned: &mut Owned) ->
     if !untouched {
         return Err(left("the reserved directory is no longer empty"));
     }
-    // An exact listing: the pattern also matches refs below the branch name.
-    let branch = format!("refs/heads/{}", owned.branch);
-    let refs = git(
-        app,
-        &repo.top,
-        &["for-each-ref", "--format=%(refname)", &branch],
-    )
-    .await?;
-    if refs.lines().any(|line| line == branch) {
-        return Err(left("its branch already exists"));
+    if branch_ref_conflicts(app, &repo.top, &owned.branch).await? {
+        return Err(left(
+            "its branch already exists or conflicts with another branch",
+        ));
     }
     let settings = owned.settings.clone().unwrap_or_default();
     let population = populate(app, &repo, &owned.path, &owned.base_commit, &owned.branch, true, &settings).await

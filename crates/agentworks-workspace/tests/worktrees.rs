@@ -350,6 +350,31 @@ async fn owned_checkout_requires_current_confirmation_and_restores_retained_bran
 }
 
 #[tokio::test]
+async fn reservation_rejects_branch_ref_namespace_conflicts_before_session_creation() {
+    let fixture = Fixture::new();
+    fixture.git(&["branch", "feature"]);
+
+    let error = match worktrees::reserve_in(
+        &fixture,
+        Some(&fixture.workspace()),
+        Policy::default(),
+        false,
+        fixture.repo.clone(),
+        Some("creation"),
+    )
+    .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("reservation accepted a conflicting branch name"),
+    };
+
+    assert_eq!(error.0, StatusCode::BAD_REQUEST);
+    assert!(error.1.contains("Branch already exists"), "{}", error.1);
+    assert!(!fixture.root.join("checkout").exists());
+    assert_eq!(fixture.reservations.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn reserved_worktree_is_filled_later_and_retried_only_while_untouched() {
     let fixture = Fixture::new();
     let (path, owned) = worktrees::reserve_in(
