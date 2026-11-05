@@ -3303,11 +3303,19 @@ async fn prompt(
         ));
     }
     let s = session(&app, &id)?;
-    if idle_sleep::asleep(&s) {
-        idle_sleep::wake_for_prompt(&app, &s).await?;
-    }
-    let _run = app.run_lock.lock().await;
-    service_restart::allow_start(&app)?;
+    let _run = loop {
+        if idle_sleep::asleep(&s) {
+            idle_sleep::wake_for_prompt(&app, &s).await?;
+        }
+        let run = app.run_lock.lock().await;
+        service_restart::allow_start(&app)?;
+        // The idle sweep may have won run_lock after the first check.
+        if idle_sleep::asleep(&s) {
+            drop(run);
+            continue;
+        }
+        break run;
+    };
     // L-05: a request ID bound into the explicit queue is never also sent directly.
     match input_queue::check_binding(&s, &req.request_id, &req.text)? {
         input_queue::Bound::Duplicate(_) => {

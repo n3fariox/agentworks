@@ -1279,6 +1279,11 @@ mod tests {
             vec![json!({"asyncTaskId":"job","state":"completed"})];
         assert!(crate::idle_sleep::sleepable(s));
 
+        // The sweep marks intent before stop_worker changes status to suspended.
+        s.data.lock().unwrap().lifecycle.asleep = true;
+        assert!(crate::idle_sleep::asleep(s));
+        s.data.lock().unwrap().lifecycle.asleep = false;
+
         crate::idle_sleep::sleep(s, 7_200_000).await;
         assert!(crate::idle_sleep::asleep(s));
         assert!(!s.data.lock().unwrap().lifecycle.suspended);

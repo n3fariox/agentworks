@@ -24,7 +24,9 @@ fn limit_ms(app: &App) -> Option<u64> {
 
 pub fn asleep(s: &Session) -> bool {
     let d = s.data.lock().unwrap();
-    d.lifecycle.asleep && !d.lifecycle.suspended && d.status == "suspended"
+    // The flag is set before stopping the worker. Treat that transition as
+    // asleep too, so a prompt racing the sweep will wake after it gets run_lock.
+    d.lifecycle.asleep && !d.lifecycle.suspended
 }
 
 /// Idle with nothing in flight that a harness restart would interrupt or lose.
@@ -144,13 +146,19 @@ pub async fn scheduler(app: App) {
         if due.is_empty() {
             continue;
         }
+        // Match the bridge, inbox and queue lock order. This prevents an MCP
+        // prompt from passing its asleep check while the sweep starts stopping
+        // that session under the bridge's communication lock.
+        let _communication = app.communication_lock.lock().await;
         let _run = app.run_lock.lock().await;
         if crate::service_restart::allow_start(&app).is_err() {
             continue;
         }
+        // The setting can change while this sweep waits for either gate.
+        let current_limit = limit_ms(&app);
         for (s, idle_ms) in due {
             // Re-checked under the lock: a prompt may have started meanwhile.
-            if sleepable(&s) {
+            if current_limit.is_some_and(|limit| idle_ms >= limit) && sleepable(&s) {
                 sleep(&s, idle_ms).await;
                 idle.remove(&s.id);
             }
