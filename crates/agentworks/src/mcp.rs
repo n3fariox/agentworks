@@ -82,7 +82,7 @@ fn tools(a: &mail::Access, session: bool) -> Value {
         tools.push(tool("start_session","Start a session using the project's configured communication role; no grants are copied from the caller. Does not submit a prompt. Reuse requestId on retry.",json!({"provider":{"type":"string","enum":agentworks_runtime::remote::PROVIDERS},"cwd":{"type":"string"},"inheritResumePolicy":{"type":"boolean","default":false},"title":{"type":"string"},"model":{"type":"string"},"modelProvider":{"type":"string"},"requestId":{"type":"string","maxLength":50},"workspace":{"type":"object","properties":{"mode":{"type":"string","enum":["directory","newWorktree","existingWorktree"]},"branch":{"type":"string"},"baseRef":{"type":"string"},"path":{"type":"string"}},"required":["mode"],"additionalProperties":false}}),&["provider","cwd","requestId"]));
     }
     if a.prompt_sessions {
-        tools.push(tool("prompt_session","Submit a new turn to an idle session in this project; starts model work. Reuse requestId on retry.",json!({"sessionId":{"type":"string","description":"Session ID or agentworks://sessions/<id> URI, passed exactly as given in list_sessions or a prompt."},"text":{"type":"string"},"requestId":{"type":"string","maxLength":50}}),&["sessionId","text","requestId"]));
+        tools.push(tool("prompt_session","Submit a new turn to an idle session in this project; starts model work. A sleeping session is woken and asks you to retry shortly. Reuse requestId on retry.",json!({"sessionId":{"type":"string","description":"Session ID or agentworks://sessions/<id> URI, passed exactly as given in list_sessions or a prompt."},"text":{"type":"string"},"requestId":{"type":"string","maxLength":50}}),&["sessionId","text","requestId"]));
     }
     if (session && mail::coordinator(a)) || (!session && a.archive_sessions) {
         tools.push(tool("archive_session", "Archive a session in this controller’s project. Stops its terminal. Default worktree cleanup removes only safe, clean owned worktrees and retains dirty, busy or unsafe worktrees. Does not merge or delete branches. No unarchive or cleanup override is available.", json!({"sessionId":{"type":"string","minLength":1,"description":"Session ID or agentworks://sessions/<id> URI."}}), &["sessionId"]));
@@ -332,6 +332,17 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
                 return Err(crate::fail(
                     StatusCode::BAD_REQUEST,
                     "Cannot prompt your own active session",
+                ));
+            }
+            // The bridge holds communication_lock, which a waking harness needs for
+            // its own MCP connection, so start the wake here and let the caller retry.
+            if let Ok(s) = crate::session(app, &target.id)
+                && crate::idle_sleep::asleep(&s)
+            {
+                crate::idle_sleep::start_waking(app, &s).await?;
+                return Err(crate::fail(
+                    StatusCode::CONFLICT,
+                    "That session was asleep and is waking up; call prompt_session again in a few seconds",
                 ));
             }
             let request = request_id(&args)?;

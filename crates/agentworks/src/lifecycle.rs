@@ -179,6 +179,7 @@ pub async fn suspend_locked(s: &Session) -> ApiResult {
     {
         let mut data = s.data.lock().unwrap();
         data.lifecycle.suspended = true;
+        data.lifecycle.asleep = false;
         data.continuation.stop("Explicit suspend");
         data.queued_prompt = None;
         data.input_queue

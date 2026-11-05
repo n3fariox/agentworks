@@ -21,6 +21,7 @@ mod github_tracking;
 mod host_usage;
 mod hosting;
 mod hosts;
+mod idle_sleep;
 mod inbox_delivery;
 mod input_queue;
 mod lifecycle;
@@ -181,6 +182,7 @@ impl Session {
             // the lock. Publish the actual state rather than an obsolete transition.
             data["status"] = json!(state.status);
             data["explicitlySuspended"] = json!(state.lifecycle.suspended);
+            data["asleep"] = json!(state.lifecycle.asleep);
         }
         if let Some(origin) = state.automation.as_mut().filter(|a| a.outcome.is_none()) {
             origin.outcome = match kind {
@@ -343,7 +345,7 @@ impl Session {
                 .to_owned()
         });
         json!({"id":self.id,"provider":self.provider,"cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"model":model,
-            "archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"created":self.created,"status":data.status,"turnRunning":data.turn_active,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"]),
+            "archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"asleep":data.lifecycle.asleep,"created":self.created,"status":data.status,"turnRunning":data.turn_active,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"]),
             "projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"modelProvider":data.model_provider,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"providerCapabilities":data.agent_capabilities["sessionCapabilities"],"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None}})
     }
     /// Full snapshot for the HTTP API, with every retained event as stored.
@@ -385,7 +387,7 @@ impl Session {
         let data = self.data.lock().unwrap();
         let (events, resumed) = events(&data.events, data.seq);
         json!({"kind":"snapshot","seq":data.seq,"resumed":resumed,"session":{"id":self.id,"provider":self.provider,
-            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"modelProvider":data.model_provider,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None},"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"]),"unacknowledged":unacknowledged,"startup":data.startup} ,"events":events,
+            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"asleep":data.lifecycle.asleep,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"modelProvider":data.model_provider,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None},"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"]),"unacknowledged":unacknowledged,"startup":data.startup} ,"events":events,
             "truncated":data.events.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
             "asyncTasks":data.async_tasks.snapshot(),"providerCapabilities":data.agent_capabilities["sessionCapabilities"],"sessionConfig":data.session_config,"permissionModes":data.permission_modes,"models":data.models,"attachments":attachments::policy(&self.provider,&data.prompt_capabilities),"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|a.event(id)).collect::<Vec<_>>(),
@@ -750,6 +752,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input_scheduler = tokio::spawn(input_queue::scheduler(app.clone()));
     tokio::spawn(automations::scheduler(app.clone()));
     tokio::spawn(github_tracking::scheduler(app.clone()));
+    tokio::spawn(idle_sleep::scheduler(app.clone()));
     tokio::spawn(mcp::serve_bridge(app.clone(), mcp_listener));
     let router = Router::new()
         .route(
@@ -1698,7 +1701,7 @@ async fn get_settings(State(app): State<App>) -> Json<Value> {
     let roots = effective_roots(&app);
     let settings = app.catalog.lock().unwrap().data.settings.clone();
     Json(
-        json!({"git":settings.git.unwrap_or_default(),"roots":roots,"maxActiveSessions":settings.max_active_sessions.unwrap_or(catalog::DEFAULT_ACTIVE_SESSIONS),"defaultModels":settings.default_models,"claudeDefaultPermissionMode":settings.claude_default_permission_mode.unwrap_or_default(),"codexDefaultPermissionMode":settings.codex_default_permission_mode.unwrap_or_default(),"defaultCommunicationRole":settings.default_communication_role.unwrap_or_default(),"hiddenProviders":settings.hidden_providers.unwrap_or_default()}),
+        json!({"git":settings.git.unwrap_or_default(),"roots":roots,"maxActiveSessions":settings.max_active_sessions.unwrap_or(catalog::DEFAULT_ACTIVE_SESSIONS),"idleSleepMinutes":settings.idle_sleep_minutes.unwrap_or(catalog::DEFAULT_IDLE_SLEEP_MINUTES),"defaultModels":settings.default_models,"claudeDefaultPermissionMode":settings.claude_default_permission_mode.unwrap_or_default(),"codexDefaultPermissionMode":settings.codex_default_permission_mode.unwrap_or_default(),"defaultCommunicationRole":settings.default_communication_role.unwrap_or_default(),"hiddenProviders":settings.hidden_providers.unwrap_or_default()}),
     )
 }
 
@@ -1772,6 +1775,14 @@ async fn save_settings(State(app): State<App>, Json(mut settings): Json<Settings
             ),
         ));
     }
+    if settings.idle_sleep_minutes.is_some_and(|n| {
+        n != 0 && !(catalog::MIN_IDLE_SLEEP_MINUTES..=catalog::MAX_IDLE_SLEEP_MINUTES).contains(&n)
+    }) {
+        return Err(fail(
+            StatusCode::BAD_REQUEST,
+            "Sleep idle sessions after 1 hour to 7 days, or never",
+        ));
+    }
     for (provider, model) in &settings.default_models {
         if !agentworks_runtime::remote::PROVIDERS.contains(&provider.as_str())
             || model.is_empty()
@@ -1810,6 +1821,7 @@ async fn save_settings(State(app): State<App>, Json(mut settings): Json<Settings
             .or(current.default_communication_role);
         settings.timeouts = settings.timeouts.take().or(current.timeouts.clone());
         settings.max_active_sessions = settings.max_active_sessions.or(current.max_active_sessions);
+        settings.idle_sleep_minutes = settings.idle_sleep_minutes.or(current.idle_sleep_minutes);
         settings.notifications = current.notifications.clone();
         settings.git = settings.git.take().or(current.git.clone());
         settings.hidden_providers = settings
@@ -3253,6 +3265,7 @@ async fn resume_locked(app: &App, s: &Arc<Session>) -> ApiResult {
             ));
         }
         data.lifecycle.suspended = false;
+        data.lifecycle.asleep = false;
         data.status = "resuming".into();
     }
     lifecycle::stop_worker(s).await;
@@ -3279,9 +3292,6 @@ async fn prompt(
     Path(id): Path<String>,
     Json(req): Json<Prompt>,
 ) -> ApiResult {
-    let _run = app.run_lock.lock().await;
-    service_restart::allow_start(&app)?;
-    let s = session(&app, &id)?;
     if req.text.trim().is_empty()
         || req.text.len() > 32768
         || req.request_id.len() > 100
@@ -3292,6 +3302,12 @@ async fn prompt(
             "Enter a message of up to 32 KB and a request ID",
         ));
     }
+    let s = session(&app, &id)?;
+    if idle_sleep::asleep(&s) {
+        idle_sleep::wake_for_prompt(&app, &s).await?;
+    }
+    let _run = app.run_lock.lock().await;
+    service_restart::allow_start(&app)?;
     // L-05: a request ID bound into the explicit queue is never also sent directly.
     match input_queue::check_binding(&s, &req.request_id, &req.text)? {
         input_queue::Bound::Duplicate(_) => {

@@ -111,6 +111,9 @@
         <label for="max-active-sessions">Maximum running harnesses</label>
         <input id="max-active-sessions" type="number" min="1" max="256" step="1">
         <div class="field-note">Sessions on every host count while their harness runs. Suspended, failed and closed sessions don’t count. Lowering this never stops running sessions; it only blocks new ones.</div>
+        <label for="idle-sleep-hours">Sleep idle sessions after (hours)</label>
+        <input id="idle-sleep-hours" type="number" min="0" max="168" step="0.5">
+        <div class="field-note">An idle harness is stopped after this long; its transcript, context, workspace and terminal are kept, and opening the session, a new message or peer mail wakes it. 1–168 hours, or 0 to never sleep. Two hours outlasts the provider prompt cache, so sleeping never discards a warm cache.</div>
       </fieldset>
       </div>
       <div id="settings-panel-providers" role="tabpanel" aria-labelledby="settings-tab-providers" tabindex="0" hidden>

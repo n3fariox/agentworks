@@ -62,12 +62,20 @@ pub struct Settings {
     /// Harnesses allowed to run at once; absent keeps the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_active_sessions: Option<u32>,
+    /// Minutes an idle harness runs before it is put to sleep; 0 never sleeps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_sleep_minutes: Option<u32>,
     /// Harnesses left out of the new-session picker; their sessions still run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden_providers: Option<Vec<String>>,
 }
 pub const DEFAULT_ACTIVE_SESSIONS: u32 = 32;
 pub const MAX_ACTIVE_SESSIONS: u32 = 256;
+/// Longer than the 1-hour extended prompt-cache lifetime, so sleeping never
+/// discards a cache that is still warm.
+pub const DEFAULT_IDLE_SLEEP_MINUTES: u32 = 120;
+pub const MIN_IDLE_SLEEP_MINUTES: u32 = 60;
+pub const MAX_IDLE_SLEEP_MINUTES: u32 = 7 * 24 * 60;
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct CatalogData {
     #[serde(default)]
@@ -642,12 +650,14 @@ mod tests {
                 default_communication_role: None,
                 notifications: Default::default(),
                 max_active_sessions: Some(48),
+                idle_sleep_minutes: Some(0),
                 git: None,
                 hidden_providers: None,
             })
             .unwrap();
         let mut reopened = Catalog::open(path.clone()).unwrap();
         assert_eq!(reopened.data.settings.max_active_sessions, Some(48));
+        assert_eq!(reopened.data.settings.idle_sleep_minutes, Some(0));
         assert_eq!(reopened.data.projects[0].name, "Renamed");
         assert!(reopened.data.projects[0].archived);
         assert_eq!(

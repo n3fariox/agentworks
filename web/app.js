@@ -628,6 +628,7 @@ function selectSession(s) {
   setTitle(s.title);$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;
   $('session-notice').hidden=true;document.body.classList.remove('menu-open');sidebarPin.close();sidebar();updateControls();connect(generation);
   workspace?.sessionSelected(s);sidePanel?.sessionChanged();sessionTerminal?.sessionChanged();promptResize.size();renderComposer();
+  // Opening wakes a sleeping session; a reconnecting tab leaves it asleep.
   if(s.status==='suspended'&&!s.explicitlySuspended&&!s.archived)resumeSession(s.id);
 }
 function connect(gen){
@@ -676,7 +677,7 @@ function connect(gen){
       for(const [id,view] of Object.entries(e.toolProgress||{}))applyToolProgress(tools.get(id),view,view.seq);
       Object.assign(active,e.session);setTitle(active.title);renderUnread();
       active.continuation=e.session.continuation;
-      approvals=new Map(e.approvals.map(a=>[a.id,a]));status=e.session.status;modelConfig=e.models;syncModelLabel();permissionModes=e.permissionModes;sessionConfig=e.sessionConfig;active.providerCapabilities=e.providerCapabilities;attachments.setPolicy(e.attachments);if(status==='suspended'&&!e.session.explicitlySuspended&&!e.session.archived&&!active.providerHistoryDeletion)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();inputQueue.set(e.session.inputQueue);inputQueue.observe(status,{live:false});
+      approvals=new Map(e.approvals.map(a=>[a.id,a]));status=e.session.status;modelConfig=e.models;syncModelLabel();permissionModes=e.permissionModes;sessionConfig=e.sessionConfig;active.providerCapabilities=e.providerCapabilities;attachments.setPolicy(e.attachments);if(status==='suspended'&&!e.session.explicitlySuspended&&!e.session.asleep&&!e.session.archived&&!active.providerHistoryDeletion)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();inputQueue.set(e.session.inputQueue);inputQueue.observe(status,{live:false});
       if(active.providerHistoryDeletion){$('session-notice').textContent=active.providerHistoryDeletion==='deleted'?'Provider history was deleted. This Agentworks transcript remains because local cleanup did not finish; retry Delete everywhere or delete this transcript.':'Provider-history deletion was not confirmed. This transcript is retained and resume is blocked; inspect provider history, then retry Delete everywhere or delete only this transcript.';$('session-notice').hidden=false;}
       if(e.storageError){$('session-notice').textContent=e.storageError;$('session-notice').hidden=false;}
     }else{
@@ -935,7 +936,7 @@ function consume(e,live=false){
   else if(e.kind==='commands'){availableCommands=Array.isArray(d)?d:[];renderCommands();}
   else if(e.kind==='user'){assistant=null;if(d.inboxDelivery)transcript.push({id:itemId(),type:'notice',text:'Automatic inbox turn authorized by you; peer messages are untrusted context.'});else if(d.initiatedBy)transcript.push({id:itemId(),type:'notice',text:d.initiatedBy.startsWith('controller:')?'Turn started by external controller '+(d.initiatorTitle||d.initiatedBy):'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});const message=addMessage('user',d.text);message.seq=e.seq;message.inboxDelivery=!!d.inboxDelivery;if(d.attachments?.length)message.attachments=d.attachments;}
   else if(e.kind==='status'){
-    status=d.status;if(!replaying)inputQueue.observe(status,{live});if(active){active.status=status;if(!['starting','resuming'].includes(status))active.startup=null;if(d.explicitlySuspended!==undefined)active.explicitlySuspended=d.explicitlySuspended;const s=sessions.find(s=>s.id===active.id);if(s)s.status=status;}sidebar();
+    status=d.status;if(!replaying)inputQueue.observe(status,{live});if(active){active.status=status;if(!['starting','resuming'].includes(status))active.startup=null;if(d.explicitlySuspended!==undefined)active.explicitlySuspended=d.explicitlySuspended;if(d.asleep!==undefined)active.asleep=d.asleep;const s=sessions.find(s=>s.id===active.id);if(s)s.status=status;}sidebar();
   }else if(e.kind==='approval'){approvals.set(d.id,d);}
   else if(e.kind==='approval_resolved'){
     const pending=approvals.get(d.id);approvals.delete(d.id);
@@ -1070,13 +1071,14 @@ function updateControls(){
     picker.disabled=!connected||status!=='idle';
   }
   const busy=['running','waiting','cancelling'].includes(status);
-  $('session-state').textContent=status==='waiting'?([...approvals.values()].some(a=>a.kind==='question')?'Needs your answer':'Needs your approval'):status==='idle'?'Ready':status[0]?.toUpperCase()+status.slice(1);
+  $('session-state').textContent=status==='waiting'?([...approvals.values()].some(a=>a.kind==='question')?'Needs your answer':'Needs your approval'):status==='idle'?'Ready':status==='suspended'&&active?.asleep?'Asleep':status[0]?.toUpperCase()+status.slice(1);
   // Busy sessions keep the composer usable so input can be queued without losing the draft.
-  $('prompt').disabled=!connected||!(status==='idle'||busy);$('send').disabled=!connected||status==='cancelling'||!(status==='idle'||busy);
+  const asleep=status==='suspended'&&!!active?.asleep;
+  $('prompt').disabled=!connected||!(status==='idle'||busy||asleep);$('send').disabled=!connected||status==='cancelling'||!(status==='idle'||busy||asleep);
   $('send').setAttribute('aria-label',busy?'Queue message':'Send message');$('send').textContent=busy?'＋':'↑';$('send').title=busy?'Queue to send after this turn ends':'';
   inputQueue.render();inputQueue.renderActivity();$('stop').hidden=!busy&&!['starting','resuming','configuring'].includes(status)&&!active?.continuation?.enabled;$('stop').disabled=!connected||status==='cancelling';
   attachments.render();
-  $('prompt').placeholder=status==='starting'?'Starting your agent…':status==='waiting'?'Respond to the permission request above…':busy?'Your agent is working… type to queue a follow-up':status==='error'?'Session unavailable. Use Resume session to try again.':'What would you like to work on?';
+  $('prompt').placeholder=status==='starting'?'Starting your agent…':status==='waiting'?'Respond to the permission request above…':busy?'Your agent is working… type to queue a follow-up':status==='error'?'Session unavailable. Use Resume session to try again.':asleep?'Asleep. Send a message to wake it.':'What would you like to work on?';
   if(subagents.viewingChild())$('prompt').placeholder=busy?'Queue a message for the main agent…':'Message the main agent…';
   renderComposer();
 }
@@ -1407,7 +1409,9 @@ $('composer').onsubmit=async event=>{
     if(BUSY.includes(status)){toast('Attachments can’t be queued. Send once the agent is idle; your draft is kept.');return;}
   }
   if(!text.trim())return;
-  if(status==='cancelling'||(!BUSY.includes(status)&&status!=='idle'))return;
+  // A sleeping session wakes for the prompt on the server.
+  const asleep=status==='suspended'&&!!active.asleep;
+  if(status==='cancelling'||(!BUSY.includes(status)&&status!=='idle'&&!asleep))return;
   const submission={...pendingFor(sid,mentions.expand(text),attached)};
   promptRecovery.submitted(sid,submission,text);
   $('send').disabled=true;
@@ -1501,6 +1505,7 @@ async function openSettings(){
     gitSettings.populate(settings.git);
     $('default-communication-role').value=settings.defaultCommunicationRole||'participant';
     $('max-active-sessions').value=settings.maxActiveSessions;
+    $('idle-sleep-hours').value=settings.idleSleepMinutes/60;
     const fields=$('default-model-fields');fields.replaceChildren();
     const hidden=new Set(settings.hiddenProviders||[]);
     for(const provider of config.providers){
@@ -1564,7 +1569,7 @@ $('settings-form').onsubmit=async event=>{
     const defaultModels={};for(const input of $('default-model-fields').querySelectorAll('input[data-provider]')){if(input.value.trim())defaultModels[input.dataset.provider]=input.value.trim();}
     const hiddenProviders=[...$('default-model-fields').querySelectorAll('[data-visible]')].filter(power=>power.getAttribute('aria-checked')!=='true').map(power=>power.dataset.visible);
     const timeouts=timeoutControls.pendingDefault();
-    const settings=await api('/api/settings',{method:'PUT',body:JSON.stringify({git:gitSettings.value(),roots:rootValues().filter(Boolean),defaultModels,claudeDefaultPermissionMode:$('claude-default-permission-mode')?.value,codexDefaultPermissionMode:$('codex-default-permission-mode')?.value,hiddenProviders,defaultCommunicationRole:$('default-communication-role').value,maxActiveSessions:Number.isInteger($('max-active-sessions').valueAsNumber)?$('max-active-sessions').valueAsNumber:undefined,...(timeouts?{timeouts}:{})})});
+    const settings=await api('/api/settings',{method:'PUT',body:JSON.stringify({git:gitSettings.value(),roots:rootValues().filter(Boolean),defaultModels,claudeDefaultPermissionMode:$('claude-default-permission-mode')?.value,codexDefaultPermissionMode:$('codex-default-permission-mode')?.value,hiddenProviders,defaultCommunicationRole:$('default-communication-role').value,maxActiveSessions:Number.isInteger($('max-active-sessions').valueAsNumber)?$('max-active-sessions').valueAsNumber:undefined,idleSleepMinutes:Number.isFinite($('idle-sleep-hours').valueAsNumber)?Math.round($('idle-sleep-hours').valueAsNumber*60):undefined,...(timeouts?{timeouts}:{})})});
     if(timeouts)timeoutControls.acceptDefault(timeouts);
     config.roots=settings.roots;config.defaultModels=settings.defaultModels;for(const p of config.providers)p.hidden=settings.hiddenProviders.includes(p.id);config.defaultCommunicationRole=settings.defaultCommunicationRole||'participant';applyRoots();
     $('settings-dialog').close();toast('Settings saved. They apply to new sessions.','success');

@@ -201,7 +201,7 @@ pub fn record_outcome(s: &Session, mut outcome: Outcome) {
 
 /// Dispatches one queued item. Caller holds communication/run/workspace locks and
 /// passed `allow_start`. Returns true when a turn was accepted.
-async fn dispatch_next(app: &App, s: &Session, deliberate: bool) -> bool {
+async fn dispatch_next(app: &App, s: &Arc<Session>, deliberate: bool) -> bool {
     {
         let data = s.data.lock().unwrap();
         if !(deliberate || data.input_queue.ready) {
@@ -219,6 +219,11 @@ async fn dispatch_next(app: &App, s: &Session, deliberate: bool) -> bool {
         return false;
     }
     if s.commands.lock().unwrap().is_none() {
+        // Asleep is not unavailable: wake it, and the item runs once it is idle.
+        if crate::idle_sleep::asleep(s) {
+            let _ = crate::idle_sleep::wake(app, s).await;
+            return false;
+        }
         let _ = transact(s, None, |q| {
             q.block("Native session is unavailable; inspect and resume the session first.");
             Ok(())

@@ -386,6 +386,23 @@ fn reply_waiting(db: &rusqlite::Connection, id: &str) -> Result<bool> {
     )
     .map_err(error)
 }
+/// Mail that dispatch would deliver once the session is running: current-generation
+/// mail under a live policy, or a reply wake.
+fn mail_waiting(app: &App, s: &Session) -> bool {
+    let store = app.store.lock().unwrap();
+    let Ok(p) = load(&store.connection, &s.id) else {
+        return false;
+    };
+    let live = p.enabled && !p.expired(now()) && !p.turns_exhausted();
+    store
+        .connection
+        .query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM inbox_deliveries d WHERE d.recipient=?1 AND d.state='queued' AND ((?2 AND d.generation=?3) OR d.{REPLY_WAKE}))"),
+            params![s.id, live, p.generation as i64],
+            |r| r.get(0),
+        )
+        .unwrap_or(false)
+}
 pub async fn get(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     snapshot(&app, &id)
 }
@@ -921,6 +938,12 @@ pub async fn scheduler(app: App) {
                     continue;
                 }
             }
+            if crate::idle_sleep::asleep(&s) {
+                if mail_waiting(&app, &s) {
+                    let _ = crate::idle_sleep::wake(&app, &s).await;
+                }
+                continue;
+            }
             let _ = dispatch_one(&app, &s, explicit_input_pending(&s));
         }
     }
@@ -1240,6 +1263,37 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+    #[tokio::test]
+    async fn idle_sleep_waits_for_quiet_and_mail_marks_it_for_waking() {
+        let f = Fixture::new();
+        let s = &f.recipient;
+        assert!(crate::idle_sleep::sleepable(s));
+        s.data.lock().unwrap().queued_prompt = Some("pending".into());
+        assert!(!crate::idle_sleep::sleepable(s));
+        s.data.lock().unwrap().queued_prompt = None;
+        s.data.lock().unwrap().async_tasks.tasks =
+            vec![json!({"asyncTaskId":"job","state":"running"})];
+        assert!(!crate::idle_sleep::sleepable(s));
+        s.data.lock().unwrap().async_tasks.tasks =
+            vec![json!({"asyncTaskId":"job","state":"completed"})];
+        assert!(crate::idle_sleep::sleepable(s));
+
+        crate::idle_sleep::sleep(s, 7_200_000).await;
+        assert!(crate::idle_sleep::asleep(s));
+        assert!(!s.data.lock().unwrap().lifecycle.suspended);
+        assert!(!crate::idle_sleep::sleepable(s));
+        // Asleep holds delivery without cancelling it, and queued mail asks for a wake.
+        assert!(!mail_waiting(&f.app, s));
+        f.message("wake");
+        assert!(mail_waiting(&f.app, s));
+        f.dispatch(false);
+        assert_eq!(f.p().attempts, 0);
+        f.policy(|p| p.enabled = false);
+        assert!(!mail_waiting(&f.app, s));
+        // An explicit suspend is not sleep: nothing wakes it.
+        s.data.lock().unwrap().lifecycle.suspended = true;
+        assert!(!crate::idle_sleep::asleep(s));
     }
     #[test]
     fn explicit_human_input_and_quota_win_then_one_batch_claim() {
