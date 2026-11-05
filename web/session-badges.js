@@ -32,12 +32,13 @@ export function setupSessionBadges({api,area=document.getElementById('sessions')
     if(saved&&Date.now()-saved.at<minAge&&(refresh||Date.now()<(saved.data.nextPollAt||Infinity)))return saved.data;
     if(requests.has(id))return requests.get(id);
     const version=epoch;
-    let request;request=(async()=>{
+    let request;const current=()=>version===epoch&&requests.get(id)===request;
+    request=(async()=>{
       try{
         const data=await api(`/api/sessions/${encodeURIComponent(id)}/github${refresh?'?refresh=true':''}`);
-        if(version===epoch){
+        if(current()){
           const previous=cache.get(id)?.data;
-          let display=!Array.isArray(data.badges)&&['unavailable','workspace_unavailable'].includes(data.status)&&previous?{...data,snapshot:previous.snapshot,badges:previous.badges,badgesAt:previous.badgesAt,badgesUnavailable:true}:data;
+          let display=(!Array.isArray(data.badges)||data.badges.length===0)&&['unavailable','workspace_unavailable'].includes(data.status)&&previous?{...data,snapshot:previous.snapshot,badges:previous.badges,badgesAt:previous.badgesAt,badgesUnavailable:true}:data;
           if((previous?.tracking?.observedAt??-1)>(display.tracking?.observedAt??-1))display={...display,...previous};
           if((previous?.badgeRevision??-1)>(display.badgeRevision??-1))display={...display,badges:previous.badges,badgesAt:previous.badgesAt,badgeRevision:previous.badgeRevision,badgesUnavailable:false};
           if(cache.size>=250&&!cache.has(id))cache.delete(cache.keys().next().value);
@@ -45,7 +46,7 @@ export function setupSessionBadges({api,area=document.getElementById('sessions')
         }
         return data;
       }catch(error){
-        if(version===epoch){cache.set(id,{at:Date.now(),data:{...cache.get(id)?.data,status:'unavailable',badgesUnavailable:true}});paint(id);}
+        if(current()){cache.set(id,{at:Date.now(),data:{...cache.get(id)?.data,status:'unavailable',badgesUnavailable:true}});paint(id);}
         throw error;
       }finally{if(requests.get(id)===request)requests.delete(id);}
     })();
@@ -68,7 +69,17 @@ export function setupSessionBadges({api,area=document.getElementById('sessions')
     observer.disconnect();visible.clear();queue.length=0;queued.clear();
     for(const row of rows()){paint(rowId(row));observer.observe(row.closest('.session-item'));}
   }
-  function invalidate(){epoch++;cache.clear();requests.clear();sync();}
+  function invalidate(id){
+    if(typeof id==='string'){
+      // Retain the last display while revalidating this session. Removing its
+      // request also prevents a response from before the edit repainting it.
+      const saved=cache.get(id);if(saved)cache.set(id,{...saved,at:-Infinity});
+      requests.delete(id);paint(id);if(visible.has(id))enqueue(id);
+      return;
+    }
+    // Identity/authorization changes still discard the previous context.
+    epoch++;cache.clear();requests.clear();sync();
+  }
   setInterval(()=>{if(!document.hidden)for(const id of visible)enqueue(id);},5000);
   document.addEventListener('session-badges-changed',invalidate);
   document.addEventListener('visibilitychange',()=>{if(!document.hidden)sync();});

@@ -464,3 +464,42 @@ for(const mobile of [false,true])test(`unsubmitted reviews get loud row reminder
   for(const host of data.hosts)for(const row of host.rows){row.pendingReviews={complete:true,accounts:[],stale:false};row.stale=false;}
   await page.clock.fastForward(300001);await expect(summary).toHaveCount(0);await expect(page.locator('.github-browser-row.has-pending-review')).toHaveCount(0);await expect(page.locator('.github-browser-row')).toHaveCount(3);expect(reads).toBe(2);
 });
+
+for(const mobile of [false,true])test(`attaching a PR preserves all displayed badges until the scoped refresh succeeds ${mobile?'mobile':'desktop'}`,async({page})=>{
+  if(mobile)await page.setViewportSize({width:390,height:844});await trackingSocket(page);
+  const edited=await api('/api/sessions',{provider:'demo',cwd:linked,title:'Attach without flicker'}),other=await api('/api/sessions',{provider:'demo',cwd:linked,title:'Keep other badges'});
+  const badge=number=>({id:`github.pr.${number}`,label:`PR#${number}`,tone:'success',tooltip:`PR ${number}`,source:'@github',url:`https://ghe-a.example.com/team/repo/pull/${number}`});
+  const data={status:'ready',repository:{host:'ghe-a.example.com',owner:'team',name:'repo'},connection:{host:'ghe-a.example.com',login:'work-a'},accounts:[],links:[],snapshot:{fetchedAt:Date.now(),complete:true,resources:[]},badgesAt:Date.now(),badges:[badge(11)]};
+  let attaching=false,release;const blocked=new Promise(resolve=>release=resolve);let otherReads=0;
+  await page.route('**/api/sessions/*/github',async route=>{
+    const request=route.request(),id=new URL(request.url()).pathname.split('/')[3];
+    if(id===edited.id){
+      if(request.method()==='POST'){data.links=request.postDataJSON().links;attaching=true;return route.fulfill({json:{ok:true}});}
+      if(attaching)await blocked;
+      return route.fulfill({json:data});
+    }
+    if(id===other.id){otherReads++;return route.fulfill({json:{...data,links:[],badges:[badge(22)]}});}
+    return route.fulfill({json:{status:'no_origin'}});
+  });
+  await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),edited.id);await page.goto(base);await expect(page.locator('#session-state')).toHaveText('Ready');
+  if(mobile)await page.locator('#session-home').click();
+  const editedRow=page.locator(`.session-item[data-session-id="${edited.id}"]`),otherRow=page.locator(`.session-item[data-session-id="${other.id}"]`);
+  await expect(editedRow.locator('.session-badge')).toHaveText('PR#11');await expect(otherRow.locator('.session-badge')).toHaveText('PR#22');const beforeOtherReads=otherReads;
+  if(mobile){await editedRow.locator('.session-select').click();await page.locator('#session-more').click();}
+  await page.locator('#session-github').click();
+  await page.evaluate(({edited,other})=>{
+    window.badgeBlanks=[];
+    for(const [id,label] of [[edited,'PR#11'],[other,'PR#22']]){
+      const node=document.querySelector(`.session-item[data-session-id="${id}"] .session-badges`);
+      new MutationObserver(()=>{if(!node.textContent.includes(label))window.badgeBlanks.push(label);}).observe(node,{childList:true,subtree:true});
+    }
+  },{edited:edited.id,other:other.id});
+  try{
+    await page.locator('#github-link-kind').selectOption('pullRequest');await page.locator('#github-link-number').fill('12');
+    const refresh=page.waitForRequest(r=>r.method()==='GET'&&r.url()===base+`/api/sessions/${edited.id}/github`);
+    await page.locator('#github-link-add').click();await refresh;
+    await expect(editedRow.locator('.session-badge')).toHaveText('PR#11');await expect(otherRow.locator('.session-badge')).toHaveText('PR#22');expect(otherReads).toBe(beforeOtherReads);expect(await page.evaluate(()=>window.badgeBlanks)).toEqual([]);
+    data.badges=[badge(11),badge(12)];data.badgesAt=Date.now();release();
+    await expect(editedRow.locator('.session-badge')).toHaveText(['PR#11','PR#12']);await expect(otherRow.locator('.session-badge')).toHaveText('PR#22');expect(await page.evaluate(()=>window.badgeBlanks)).toEqual([]);
+  }finally{release();}
+});
