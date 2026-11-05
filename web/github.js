@@ -74,7 +74,7 @@ export function setupGithub({api,getActive}) {
   }
   async function saveLinks(links){
     const active=getActive();if(!active)return;const id=active.id;
-    try{await api(endpoint(),{method:'POST',body:JSON.stringify({links})});browser.invalidate();if(getActive()?.id===id)await load();}
+    try{await api(endpoint(),{method:'POST',body:JSON.stringify({links})});browser.invalidate(id);if(getActive()?.id===id)await load();}
     catch(error){if(getActive()?.id===id)$('github-status').textContent=error.message;}
   }
   button.onclick=()=>{dialog.showModal();if(view)render();else load();};
