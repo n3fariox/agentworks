@@ -69,6 +69,7 @@ pub async fn update(
     let was_archived = s.data.lock().unwrap().lifecycle.archived;
     let mut cleanup = None;
     if req.archived == Some(true) && !was_archived {
+        between_turns(&s)?;
         cleanup = Some(
             crate::worktree_cleanup::cleanup(
                 &app,
@@ -85,7 +86,7 @@ pub async fn update(
         // A failed or occupied restore leaves the session archived.
         restored = crate::worktree_cleanup::restore(&app, &s).await?;
     }
-    let Json(mut meta) = apply(&s, title, req.archived).await?;
+    let Json(mut meta) = apply(&app, &s, title, req.archived).await?;
     if let Some(outcome) = cleanup {
         meta["worktreeCleanup"] = outcome;
     }
@@ -94,14 +95,57 @@ pub async fn update(
     }
     Ok(Json(meta))
 }
+/// Archiving stops the harness, so it never cuts a turn short.
+pub fn between_turns(s: &Session) -> Result<(), (StatusCode, String)> {
+    let data = s.data.lock().unwrap();
+    if data.turn_active || matches!(data.status.as_str(), "running" | "waiting" | "cancelling") {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            format!(
+                "\"{}\" is in a turn; wait for it to finish, or stop it, before archiving",
+                data.lifecycle.title.as_deref().unwrap_or(&s.title)
+            ),
+        ));
+    }
+    Ok(())
+}
+/// Stops the harness and keeps it stopped until a deliberate resume. Callers hold the run lock.
+pub async fn release(app: &App, s: &Session) -> Result<(), (StatusCode, String)> {
+    let stopped = {
+        let data = s.data.lock().unwrap();
+        data.status == "suspended" && data.lifecycle.suspended
+    };
+    if s.commands.lock().unwrap().is_some() || !stopped {
+        let restart = crate::service_restart::stop_requester(app, &s.id).err();
+        let _ = suspend_locked(s).await?;
+        if let Some(error) = restart {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+/// Server start: sessions archived before archive stopped harnesses get the same state.
+pub fn settle_archived(data: &mut crate::SessionData) {
+    if data.lifecycle.archived && !data.lifecycle.suspended {
+        data.lifecycle.suspended = true;
+        data.lifecycle.asleep = false;
+        data.continuation.stop("Session archived");
+    }
+}
 /// Commits title/archive metadata; callers hold the run lock.
-pub async fn apply(s: &Session, title: Option<String>, archived: Option<bool>) -> ApiResult {
+pub async fn apply(
+    app: &App,
+    s: &Session,
+    title: Option<String>,
+    archived: Option<bool>,
+) -> ApiResult {
     if archived == Some(true) {
         // Archived sessions are inactive: drop pending wakes; the authorization stays for unarchive.
         crate::inbox_delivery::stop(s, "Recipient archived")?;
     }
     commit(s, title, archived)?;
     if archived == Some(true) {
+        release(app, s).await?;
         let _ = crate::terminal::archive(s).await?;
     }
     let meta = s.meta();

@@ -3,6 +3,7 @@ import {removeFixture} from '../tests/support/cleanup.mjs';
 // No credentials, real providers, live service, or shared fixtures are used.
 import assert from 'node:assert/strict';
 import {spawn,execFileSync} from 'node:child_process';
+import {DatabaseSync} from 'node:sqlite';
 import {once} from 'node:events';
 import {mkdtemp,mkdir,writeFile,readFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -38,14 +39,18 @@ try{
  await idle(id);await prompt(id,'mcp report_completion {"requestId":"retained-claim","status":"completed","summary":"Fixture claim"}');
  let s=await idle(id);const provider=native(s),claim=await api(path(id)+'/completion');assert(claim.report,'Completion fixture failed');
  await api(path(id),{title:'  Renamed <safe>  ',archived:true},'PATCH');
- s=await snap(id);assert.equal(s.session.title,'Renamed <safe>');assert.equal(s.session.archived,true);assert.equal(s.session.status,'idle');
+ s=await snap(id);assert.equal(s.session.title,'Renamed <safe>');assert.equal(s.session.archived,true);assert.equal(s.session.status,'suspended');assert.equal(s.session.explicitlySuspended,true);
  assert(!(await api('/api/sessions')).some(s=>s.id===id));assert((await api('/api/sessions?archived=true')).some(s=>s.id===id));assert((await api('/api/sessions?archived=all')).some(s=>s.id===id));
  await api(path(id),{title:'   '},'PATCH',400);await api(path(id),{title:'a'.repeat(81)},'PATCH',400);await api(path(id),{title:'bad\nname'},'PATCH',400);
  assert.equal((await snap(id)).session.title,'Renamed <safe>');
  const discovery=await api('/api/external-sessions',{provider:'demo',cwd});assert(discovery.sessions.some(s=>s.agentworksId===id&&s.archived&&s.title==='Renamed <safe>'));
- // Archive does not stop work, and unarchive does not create a new context.
+ // An archived session stays stopped; unarchive leaves it suspended and does not create a new context.
+ assert.match(await api(path(id)+'/resume',{},'POST',409),/unarchive/);
+ await api(path(id),{archived:false},'PATCH');assert.equal((await snap(id)).session.status,'suspended');
+ await api(path(id)+'/resume',{});s=await idle(id);assert.equal(native(s),provider);
+ // Archive never cuts a turn short.
  await prompt(id,'slow');await until(async()=>users(await snap(id))===2);
- await api(path(id),{archived:false},'PATCH');assert(['running','waiting'].includes((await snap(id)).session.status));
+ assert.match(await api(path(id),{archived:true},'PATCH',409),/in a turn/);s=await snap(id);assert.equal(s.session.archived,false);assert(['running','waiting'].includes(s.session.status));
  await api(path(id)+'/stop',{});s=await idle(id);assert.equal(s.approvals.length,0);assert.equal(s.session.continuation.enabled,false);assert.equal(s.session.continuation.dueAt,null);
  // Explicit suspension clears approval and continuation, retains native context/claims.
  await api(path(id)+'/continuation',{enabled:true},'PUT');await prompt(id,'approval');
@@ -57,6 +62,12 @@ try{
  await api(path(id)+'/resume',{});await idle(id);await api(path(id)+'/continuation',{enabled:true},'PUT');await prompt(id,'quota known');s=await idle(id);assert(s.session.continuation.dueAt);
  await api(path(id)+'/suspend',{});await api(path(id),{archived:true},'PATCH');await stop('SIGKILL');await delay(4500);await start();
  s=await snap(id);assert.equal(s.session.explicitlySuspended,true);assert.equal(s.session.archived,true);assert.equal(s.session.title,'Renamed <safe>');assert.equal(s.session.continuation.dueAt,null);assert.equal(users(s),beforeUsers+1);assert.deepEqual(await api(path(id)+'/completion'),claim);
+ // A session archived before archive stopped harnesses stays stopped at server start, even with a quota timer due.
+ const legacy=await api('/api/sessions',{provider:'demo',cwd,title:'Legacy archive',projectId:project.id,resumePolicy:{enabled:true}});await idle(legacy.id);
+ await api(path(legacy.id)+'/continuation',{enabled:true},'PUT');await prompt(legacy.id,'quota known');const quotaDue=(await idle(legacy.id)).session.continuation.dueAt;assert(quotaDue);
+ await stop('SIGKILL');const rows=new DatabaseSync(env.AGENTWORKS_DB_PATH);rows.prepare("UPDATE sessions SET state=json_set(state,'$.lifecycle.archived',json('true')) WHERE id=?").run(legacy.id);rows.close();
+ await delay(Math.max(0,quotaDue-Date.now()+100));await start();await delay(3000);
+ s=await snap(legacy.id);assert.equal(s.session.status,'suspended');assert.equal(s.session.explicitlySuspended,true);assert.equal(s.session.continuation.dueAt,null);assert.equal(users(s),1);
  // Browser opening/reloading an explicitly suspended transcript must not resume.
  browser=await chromium.launch({headless:true});const page=await browser.newPage({colorScheme:'dark'});page.setDefaultTimeout(10000);const errors=[];page.on('pageerror',e=>errors.push(e.message));
  await page.goto(base);await page.evaluate(id=>localStorage.setItem('agentworks-session',id),id);await page.reload();

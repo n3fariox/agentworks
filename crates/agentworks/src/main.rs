@@ -73,6 +73,7 @@ use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet, VecDeque},
     env,
     net::IpAddr,
@@ -313,13 +314,7 @@ impl Session {
                 &event["data"],
             );
         }
-        state.bytes += event.to_string().len();
-        state.events.push_back(event.clone());
-        while state.events.len() > MAX_EVENTS || state.bytes > MAX_EVENT_BYTES {
-            if let Some(old) = state.events.pop_front() {
-                state.bytes -= old.to_string().len();
-            }
-        }
+        retain(&mut state, &event);
         if let Err(error) = self.store.lock().unwrap().event(&self.id, &state, &event) {
             if state.storage_error.is_none() {
                 tracing::error!(
@@ -435,13 +430,56 @@ impl Session {
             .unwrap_or(0);
         let approvals = self.approvals.lock().unwrap();
         let data = self.data.lock().unwrap();
-        let (events, resumed) = events(&data.events, data.seq);
+        let window = self.window(&data);
+        let (events, resumed) = events(&window, data.seq);
         json!({"kind":"snapshot","seq":data.seq,"resumed":resumed,"session":{"id":self.id,"provider":self.provider,
             "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"asleep":data.lifecycle.asleep,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"modelProvider":data.model_provider,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None},"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"]),"unacknowledged":unacknowledged,"startup":data.startup} ,"events":events,
-            "truncated":data.events.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
+            "truncated":window.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
             "asyncTasks":data.async_tasks.snapshot(),"providerCapabilities":data.agent_capabilities["sessionCapabilities"],"sessionConfig":data.session_config,"permissionModes":data.permission_modes,"models":data.models,"attachments":attachments::policy(&self.provider,&data.prompt_capabilities),"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|a.event(id)).collect::<Vec<_>>(),
             "toolProgress":self.progress.views(&self.id)})
+    }
+    fn read_window(&self) -> Result<(VecDeque<Value>, usize), String> {
+        let recent = self.store.lock().unwrap().recent(&self.id);
+        store::window(recent.map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+    }
+    /// The retained event window, read from the store while the session is parked.
+    fn window<'a>(&self, data: &'a SessionData) -> Cow<'a, VecDeque<Value>> {
+        if !data.parked {
+            return Cow::Borrowed(&data.events);
+        }
+        Cow::Owned(self.read_window().map_or_else(
+            |error| {
+                tracing::error!(session = %self.id, "Could not read session history: {error}");
+                VecDeque::new()
+            },
+            |(events, _)| events,
+        ))
+    }
+    /// Drops the event window once no harness is attached. Stored events are the
+    /// source of truth, except while a failed write has left them behind.
+    fn park(&self) {
+        let mut data = self.data.lock().unwrap();
+        let released = self
+            .worker
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_none_or(|worker| worker.is_finished());
+        if released && !data.parked && data.storage_error.is_none() {
+            data.events = VecDeque::new();
+            data.bytes = 0;
+            data.parked = true;
+        }
+    }
+    /// Reloads the event window for a starting harness.
+    fn unpark(&self) -> Result<(), String> {
+        let mut data = self.data.lock().unwrap();
+        if data.parked {
+            (data.events, data.bytes) = self.read_window()?;
+            data.parked = false;
+        }
+        Ok(())
     }
     fn display_title(&self) -> String {
         self.data
@@ -550,13 +588,7 @@ impl Session {
             json!({"seq":next.seq,"kind":"history_imported","data":{"updates":events.len()}}),
         );
         for event in &events {
-            next.bytes += event.to_string().len();
-            next.events.push_back(event.clone());
-            while next.events.len() > MAX_EVENTS || next.bytes > MAX_EVENT_BYTES {
-                if let Some(old) = next.events.pop_front() {
-                    next.bytes -= old.to_string().len();
-                }
-            }
+            retain(&mut next, event);
         }
         self.store
             .lock()
@@ -574,6 +606,20 @@ impl Session {
         for (id, approval) in approvals {
             let _ = approval.answer.send(None);
             self.emit("approval_resolved", json!({"id":id,"cancelled":true}));
+        }
+    }
+}
+
+/// Adds an event to the retained window. Parked sessions only keep it in the store.
+fn retain(state: &mut SessionData, event: &Value) {
+    if state.parked {
+        return;
+    }
+    state.bytes += event.to_string().len();
+    state.events.push_back(event.clone());
+    while state.events.len() > MAX_EVENTS || state.bytes > MAX_EVENT_BYTES {
+        if let Some(old) = state.events.pop_front() {
+            state.bytes -= old.to_string().len();
         }
     }
 }
@@ -729,6 +775,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     for (metadata, mut data) in restored {
         inbox_delivery::restore(&mut data);
         data.continuation.reconcile();
+        lifecycle::settle_archived(&mut data);
         data.input_queue.recover();
         let pending = data.queued_prompt.take().is_some();
         let interrupted = data.turn_active
@@ -743,16 +790,19 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         data.status = "suspended".into();
         data.turn_active = false;
         data.inbox_turn = None;
+        // One window at a time: all of them together would be the server's largest allocation.
+        let recent = app.store.lock().unwrap().recent(&metadata.id);
+        let (window, _) =
+            store::window(recent.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
         // U-05: rebuild derived progress from the retained event window.
-        let replay: Vec<(u64, Value)> = data
-            .events
+        let replay: Vec<(u64, Value)> = window
             .iter()
             .filter(|e| e["kind"] == "acp")
             .filter_map(|e| Some((e["seq"].as_u64()?, e["data"].clone())))
             .collect();
         // Retained reports seed shared account quota with their original receipt times.
         let family = account_quota::family(&metadata.provider, data.model_provider.as_deref());
-        for event in data.events.iter().filter(|e| e["kind"] == "acp") {
+        for event in window.iter().filter(|e| e["kind"] == "acp") {
             if let Some(time) = event["time"].as_u64() {
                 app.account_quota.observe(
                     &metadata.host_id,
@@ -2368,6 +2418,14 @@ async fn archive_project(
         return Err(fail(StatusCode::BAD_REQUEST, "Project not found"));
     }
     let affected = project_sessions(&app, &id);
+    // Refuse before the first session changes, so a project never ends up half archived.
+    if req.archived && req.sessions == ProjectSessions::Cascade {
+        for s in &affected {
+            if !s.data.lock().unwrap().lifecycle.archived {
+                lifecycle::between_turns(s)?;
+            }
+        }
+    }
     if req.archived && req.sessions == ProjectSessions::Ungroup {
         ungroup_sessions(&app, &affected, "Project archived")?;
     } else {
@@ -2385,7 +2443,7 @@ async fn archive_project(
             if !req.archived && was_archived && hooks {
                 worktree_cleanup::restore(&app, s).await?;
             }
-            let _ = lifecycle::apply(s, None, Some(req.archived)).await?;
+            let _ = lifecycle::apply(&app, s, None, Some(req.archived)).await?;
         }
     }
     let project = app
@@ -2994,6 +3052,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
             seq: 0,
             events: VecDeque::new(),
             bytes: 0,
+            parked: false,
             requests: HashSet::new(),
             last_prompt: None,
             models: Value::Null,
@@ -3253,6 +3312,12 @@ async fn restart(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     resume_locked(&app, &s).await
 }
 async fn resume_locked(app: &App, s: &Arc<Session>) -> ApiResult {
+    if s.data.lock().unwrap().lifecycle.archived {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "This session is archived; unarchive it before resuming",
+        ));
+    }
     if let Some(profile) = s.data.lock().unwrap().model_provider.as_deref() {
         agentworks_runtime::model_providers::authorize(profile, &s.host_id)
             .map_err(|e| fail(StatusCode::FORBIDDEN, e))?;
@@ -3482,10 +3547,11 @@ async fn cancel(
     // lock prevents another prompt being accepted while this cancellation queues.
     let stopped_prompt = {
         let data = s.data.lock().unwrap();
+        let window = s.window(&data);
         let user = data
             .last_prompt
             .as_ref()
-            .or_else(|| data.events.iter().rev().find(|e| e["kind"] == "user"));
+            .or_else(|| window.iter().rev().find(|e| e["kind"] == "user"));
         if target.user_seq.is_some() && user.and_then(|e| e["seq"].as_u64()) != target.user_seq {
             return Err(fail(
                 StatusCode::CONFLICT,

@@ -1041,6 +1041,7 @@ function renderSessionConfig(){
 function updateControls(){
   backgroundJobs.render();questions.refresh();
   $('archive-session').textContent=active?.archived?'Unarchive session':'Archive session';
+  $('archive-session').disabled=!active?.archived&&['running','waiting','cancelling'].includes(status);
   $('suspend-session').disabled=!connected||status==='suspended'||status==='closed';
   $('restart-session').disabled=!connected||!['idle','suspended','error'].includes(status)||!!active?.providerHistoryDeletion;
   $('resume-session').hidden=!['suspended','error'].includes(status);

@@ -434,6 +434,7 @@ pub async fn run(
     mut commands: mpsc::Receiver<Command>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let started = Instant::now();
+    s.unpark()?;
     if s.host_id == "local" {
         prepare(&s.provider)?;
     }

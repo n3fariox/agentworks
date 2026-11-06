@@ -166,10 +166,8 @@ pub async fn tool_body(
     // retained event is not its `tool_call`, earlier events may be stored.
     let (low, high) = {
         let data = s.data.lock().unwrap();
-        let mut found = data
-            .events
-            .iter()
-            .filter(|e| is_tool(e) && matches(&e["data"]));
+        let window = s.window(&data);
+        let mut found = window.iter().filter(|e| is_tool(e) && matches(&e["data"]));
         match found.next() {
             Some(first) => {
                 let start = first["data"]["sessionUpdate"] == "tool_call";

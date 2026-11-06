@@ -135,7 +135,7 @@ try{
  const running=await owned('Running owner');
  await api(`/api/sessions/${running.id}/prompt`,'POST',{text:'approval please',requestId:randomUUID()});
  await until(async()=>(await snap(running.id)).approvals.length>0);
- updated=await patch(running.id,{archived:true});assert.match(updated.worktreeCleanup.reason,/running/);assert(await exists(running.cwd));
+ assert.match(await patch(running.id,{archived:true},409),/in a turn/);assert(await exists(running.cwd));
  await api(`/api/sessions/${running.id}/worktree/remove`,'POST',{},409);
  await api(`/api/sessions/${running.id}/stop`,'POST');
  const active=await owned('Not archived');

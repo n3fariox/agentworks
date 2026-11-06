@@ -202,13 +202,7 @@ pub async fn cleanup(
         }
     }
     // A harness cannot keep running inside a removed directory.
-    if s.commands.lock().unwrap().is_some() || s.data.lock().unwrap().status != "suspended" {
-        let restart = crate::service_restart::stop_requester(app, &s.id).err();
-        let _ = crate::lifecycle::suspend_locked(s).await?;
-        if let Some(error) = restart {
-            return Err(error);
-        }
-    }
+    crate::lifecycle::release(app, s).await?;
     let _ = crate::terminal::archive(s).await?;
     let _workspace = app.workspace_lock.lock().await;
     // The harness may have written files before it stopped.
@@ -427,6 +421,7 @@ mod tests {
                 settings: None,
                 pending: None,
             };
+            crate::service_restart::initialize(&f.app).unwrap();
             f.session("owner", Some(owned));
             f.session("early", None);
             f

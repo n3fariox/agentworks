@@ -119,6 +119,9 @@ pub async fn scheduler(app: App) {
         let limit = limit_ms(&app);
         let sessions: Vec<Arc<Session>> = app.sessions.lock().unwrap().values().cloned().collect();
         idle.retain(|id, _| sessions.iter().any(|s| &s.id == id));
+        for s in &sessions {
+            s.park();
+        }
         let now = now_ms();
         let mut due = Vec::new();
         for s in &sessions {

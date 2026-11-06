@@ -28,6 +28,9 @@ pub struct SessionData {
     pub events: VecDeque<Value>,
     #[serde(skip)]
     pub bytes: usize,
+    /// No harness is attached, so `events` stays empty and reads go to the store.
+    #[serde(skip)]
+    pub parked: bool,
     pub requests: HashSet<String>,
     /// Most recent submitted prompt survives the bounded in-memory event window.
     #[serde(default)]

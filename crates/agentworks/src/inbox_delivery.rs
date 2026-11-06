@@ -1656,6 +1656,84 @@ mod tests {
             self.recipient.status("idle");
         }
     }
+    #[tokio::test]
+    async fn archive_waits_for_the_turn_then_keeps_the_harness_stopped() {
+        use axum::extract::{Path, State};
+        let f = Fixture::new();
+        crate::service_restart::initialize(&f.app).unwrap();
+        let s = &f.recipient;
+        let archive = || {
+            crate::lifecycle::update(
+                State(f.app.clone()),
+                Path(s.id.clone()),
+                axum::Json(crate::lifecycle::Update::archive()),
+            )
+        };
+        s.data.lock().unwrap().turn_active = true;
+        assert_eq!(archive().await.unwrap_err().0, StatusCode::CONFLICT);
+        assert!(!s.data.lock().unwrap().lifecycle.archived);
+        assert!(s.commands.lock().unwrap().is_some());
+        s.data.lock().unwrap().turn_active = false;
+        archive().await.unwrap();
+        assert!(s.commands.lock().unwrap().is_none());
+        {
+            let d = s.data.lock().unwrap();
+            assert!(d.lifecycle.archived && d.lifecycle.suspended);
+            assert_eq!(d.status, "suspended");
+        }
+        let refused = crate::resume_locked(&f.app, s).await.unwrap_err();
+        assert_eq!(refused.0, StatusCode::CONFLICT);
+    }
+    #[test]
+    fn parked_session_reads_and_appends_through_the_store() {
+        let f = Fixture::new();
+        let s = &f.recipient;
+        s.emit("user", json!({"text":"one"}));
+        let before = s.snapshot()["events"].clone();
+        s.park();
+        {
+            let d = s.data.lock().unwrap();
+            assert!(d.parked && d.events.is_empty() && d.bytes == 0);
+        }
+        assert_eq!(s.snapshot()["events"], before);
+        s.emit("user", json!({"text":"two"}));
+        assert!(s.data.lock().unwrap().events.is_empty());
+        let events = s.snapshot()["events"].clone();
+        assert_eq!(
+            events.as_array().unwrap().len(),
+            before.as_array().unwrap().len() + 1
+        );
+        s.unpark().unwrap();
+        let d = s.data.lock().unwrap();
+        assert!(!d.parked);
+        assert_eq!(json!(d.events), events);
+        assert_eq!(
+            d.bytes,
+            d.events.iter().map(|e| e.to_string().len()).sum::<usize>()
+        );
+    }
+    #[tokio::test]
+    async fn sessions_with_a_harness_or_unsaved_events_stay_resident() {
+        let f = Fixture::new();
+        let s = &f.recipient;
+        s.emit("user", json!({"text":"one"}));
+        let worker = tokio::spawn(std::future::pending::<()>());
+        *s.worker.lock().unwrap() = Some(worker);
+        s.park();
+        assert!(!s.data.lock().unwrap().parked);
+        s.worker.lock().unwrap().take().unwrap().abort();
+        s.data.lock().unwrap().storage_error = Some("disk full".into());
+        s.park();
+        assert!(!s.data.lock().unwrap().parked);
+        s.data.lock().unwrap().storage_error = None;
+        let finished = tokio::spawn(async {});
+        while !finished.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        *s.worker.lock().unwrap() = Some(finished);
+        s.park();
+        assert!(s.data.lock().unwrap().parked);
+    }
     #[test]
     fn standing_authorization_never_expires_and_keeps_waking() {
         let mut f = Fixture::new();
