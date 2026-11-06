@@ -60,14 +60,15 @@ try{
  // Browser opening/reloading an explicitly suspended transcript must not resume.
  browser=await chromium.launch({headless:true});const page=await browser.newPage({colorScheme:'dark'});page.setDefaultTimeout(10000);const errors=[];page.on('pageerror',e=>errors.push(e.message));
  await page.goto(base);await page.evaluate(id=>localStorage.setItem('agentworks-session',id),id);await page.reload();
+ const openLifecycle=async()=>{if(await page.evaluate(()=>matchMedia('(max-width:650px)').matches)&&!await page.locator('#session-menu').evaluate(n=>n.classList.contains('open')))await page.locator('#session-more').click();if(!await page.locator('#lifecycle-menu').evaluate(n=>n.open))await page.locator('#lifecycle-menu > summary').click();};
  await expect(page.locator('#session-state')).toHaveText('Suspended');await expect(page.locator('#messages')).toContainText('Fixture claim');
  await page.waitForTimeout(800);assert.equal((await snap(id)).session.status,'suspended');
  await page.locator('#session-filter').selectOption('archived');await expect(page.locator(`[data-session-id="${id}"]`)).toBeVisible();
  await page.locator('#lifecycle-menu > summary').click();await page.locator('#rename-session').click();await page.locator('#rename-title').fill('Browser renamed');await page.locator('#rename-form button[type=submit]').click();await expect(page.locator('#header-title')).toHaveText('Browser renamed');
- await page.locator('#archive-session').click();await expect(page.locator(`[data-session-id="${id}"]`)).toHaveCount(0);
+ await openLifecycle();await page.locator('#archive-session').click();await expect(page.locator(`[data-session-id="${id}"]`)).toHaveCount(0);
  await page.locator('#session-filter').selectOption('active');await expect(page.locator(`[data-session-id="${id}"]`)).toBeVisible();
  await page.locator('#resume-session').click();await expect(page.locator('#session-state')).toHaveText('Ready');s=await idle(id);assert.equal(native(s),provider);assert.equal(users(s),beforeUsers+1);
- await page.setViewportSize({width:390,height:844});await page.waitForTimeout(250);
+ await page.setViewportSize({width:390,height:844});await page.waitForTimeout(250);await openLifecycle();
  await page.locator('#suspend-session').click();await expect(page.locator('#session-state')).toHaveText('Suspended');
  assert(await page.locator('.lifecycle-actions').evaluate(n=>{const r=n.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.bottom<=innerHeight;}),'Mobile lifecycle menu must fit the viewport');
  assert(await page.locator('#suspend-session').evaluate(n=>n.getBoundingClientRect().height>=44));

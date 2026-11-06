@@ -144,7 +144,7 @@ try{
  // Browser: dirty archive asks first; Cancel leaves it active, Keep archives without removing.
  await writeFile(join(active.cwd,'notes.txt'),'draft\n');
  browser=await chromium.launch({headless:true});const page=await browser.newPage({colorScheme:'dark'});page.setDefaultTimeout(10000);const errors=[];page.on('pageerror',e=>errors.push(e.message));
- const archiveButton=async()=>{if(!await page.locator('#lifecycle-menu').evaluate(n=>n.open))await page.locator('#lifecycle-menu > summary').click();await page.locator('#archive-session').click();};
+ const archiveButton=async()=>{if(await page.evaluate(()=>matchMedia('(max-width:650px)').matches)&&!await page.locator('#session-menu').evaluate(n=>n.classList.contains('open')))await page.locator('#session-more').click();if(!await page.locator('#lifecycle-menu').evaluate(n=>n.open))await page.locator('#lifecycle-menu > summary').click();await page.locator('#archive-session').click();};
  await page.goto(base);await page.evaluate(id=>localStorage.setItem('agentworks-session',id),active.id);await page.reload();
  await archiveButton();
  await expect(page.locator('#worktree-archive-dialog')).toBeVisible();await expect(page.locator('#worktree-archive-paths')).toContainText('notes.txt');
