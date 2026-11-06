@@ -1674,7 +1674,7 @@ mod tests {
         assert!(!s.data.lock().unwrap().lifecycle.archived);
         assert!(s.commands.lock().unwrap().is_some());
         s.data.lock().unwrap().turn_active = false;
-        archive().await.unwrap();
+        let _ = archive().await.unwrap();
         assert!(s.commands.lock().unwrap().is_none());
         {
             let d = s.data.lock().unwrap();
@@ -1864,7 +1864,7 @@ mod tests {
             f.receiver.try_recv(),
             Ok(crate::session_runtime::Command::InboxPrompt { .. })
         ));
-        let mut f = Fixture::new();
+        let f = Fixture::new();
         let (me, peer) = (f.recipient.clone(), f.sender.clone());
         let request = f.send_as(&me, &peer, "Review please", None, true);
         f.send_as(&peer, &me, "Approved", Some(request), false);
