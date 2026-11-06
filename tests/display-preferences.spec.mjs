@@ -11,6 +11,8 @@ let fixture,server,log='',exited=false,session;
 const rustRaw='fn main() {\n    let greeting = "hi   there";  \n    // keep   spacing\n\tlet tab = 1;\n}\n';
 const prose='This paragraph was placed in a code block by the agent, but it is ordinary prose. It should read as text, not code.';
 const longLine='LONG:'+'abcdefghij'.repeat(40);
+const starlarkRaw='def build(ctx):\n    """Build docs.\n    # still a string\n    """\n    # comment\n    return True if ctx else None\n';
+const starlarkFiles=['sample.star','rules.bzl','BUILD','BUILD.bazel','WORKSPACE','WORKSPACE.bazel','MODULE.bazel'];
 const message=['Display check','','```rust',...rustRaw.slice(0,-1).split('\n'),'```','','```',prose,'```','','```text',longLine,'```','','[sample](sample.rs) and [notes](notes.md)'].join('\n');
 
 async function api(path,body,method){
@@ -40,6 +42,7 @@ const blocks=page=>page.locator('.message.assistant .code-block');
 test.beforeAll(async()=>{
   await mkdir('.cache',{recursive:true});fixture=await mkdtemp(resolve('.cache/display-prefs-'));
   await writeFile(join(fixture,'sample.rs'),'pub fn sample() -> u8 {\n    42 // answer\n}\n');
+  for(const file of starlarkFiles)await writeFile(join(fixture,file),starlarkRaw);
   await writeFile(join(fixture,'binary.rs'),Buffer.from([0,1,2]));
   await writeFile(join(fixture,'large.rs'),'// original\r\n'+'let x = 42;  \t\r\n'.repeat(7000));
   await writeFile(join(fixture,'unknown.txt'),'<img src=x onerror=alert(1)>\n  exact\ttext  \n');
@@ -152,6 +155,30 @@ test('desktop: highlighting, exact raw copy, prose toggle, persisted preferences
   expect(await toolPre.evaluate(n=>getComputedStyle(n).whiteSpace)).toBe('pre');
   await expect(page.locator('.tool-card [class^=tok-]')).toHaveCount(0);
   expect(errors).toEqual([]);
+});
+
+test('Starlark file previews, multiline strings, fenced blocks and highlighting preference',async({page})=>{
+  await openSession(page);
+  await page.locator('#prompt').fill(['```starlark',starlarkRaw,'```','',...starlarkFiles.map(file=>`[${file}](${file})`)].join('\n'));
+  await page.locator('#send').click();
+  await expect(page.locator('#session-state')).toHaveText('Ready');
+  const fence=page.locator('.message.assistant .code-block');
+  await expect(fence.locator('.tok-keyword').first()).toHaveText('def');
+  for(const file of starlarkFiles){
+    await page.locator('.message.assistant').getByRole('link',{name:file,exact:true}).click();
+    const code=page.locator('#workspace-preview pre code');
+    await expect(code).toHaveClass(/highlighted/);
+    expect(await code.textContent()).toBe(starlarkRaw);
+    await expect(code.locator('.tok-keyword')).toHaveText(['def','return','True','if','else','None']);
+    await expect(code.locator('.tok-comment')).toHaveText(['# comment']);
+    await expect(code.locator('.tok-string')).toHaveText(['"""Build docs.\n','    # still a string\n','    """']);
+    await page.locator('#side-close').click();
+  }
+  await setPreference(page,'highlight','off');
+  await expect(fence.locator('[class^=tok-]')).toHaveCount(0);
+  await page.locator('.message.assistant').getByRole('link',{name:'sample.star',exact:true}).click();
+  await expect(page.locator('#workspace-preview [class^=tok-]')).toHaveCount(0);
+  expect(await page.locator('#workspace-preview pre code').textContent()).toBe(starlarkRaw);
 });
 
 test('tokenizer: real categories, exact reconstruction, bounded on pathological input, prose detection',async({page})=>{

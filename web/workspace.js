@@ -1,5 +1,6 @@
 import {setupGithubBrowser} from './github-browser.js';
 import {enhanceMermaid} from './mermaid.js';
+import {languageForPath} from './display-preferences.js';
 import {appUrl, localState as localStorage, sessionState as sessionStorage} from './hosting.js';
 const isModelPath=path=>/\.(3dm|3ds|3mf|amf|bim|brp|brep|dae|fbx|fcstd|gltf|glb|ifc|igs|iges|stp|step|stl|obj|off|ply|wrl)$/i.test(path);
 export function createWorkspace(hooks){
@@ -154,7 +155,7 @@ export function createWorkspace(hooks){
     }
     else if(file.type?.startsWith('text/')){
       if(!file.source&&file.html){body.innerHTML=file.html;decorate(body,file,side);enhanceMermaid(body,file.mermaidClass);}else body.append(el('pre','workspace-source',file.text.slice(0,100000)));
-      hooks.enhanceBlocks?.(body,`workspace:${file.location.id}:${file.path}`,{language:!file.source&&file.html?'':/\.([\w+-]+)$/.exec(file.path)?.[1]||'',lineNumbers:file.source||!file.html,raw:file.source||!file.html?file.text:undefined});
+      hooks.enhanceBlocks?.(body,`workspace:${file.location.id}:${file.path}`,{language:!file.source&&file.html?'':languageForPath(file.path),lineNumbers:file.source||!file.html,raw:file.source||!file.html?file.text:undefined});
       if(file.line&&file.source){
         const code=body.querySelector('pre code');
         if(code){

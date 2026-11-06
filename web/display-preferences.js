@@ -31,6 +31,7 @@ const keywordSets={
   js:'async await break case catch class const continue default delete do else export extends false finally for from function if import in instanceof let new null of return static super switch this throw true try typeof undefined var void while yield interface type enum implements',
   rust:'as async await break const continue crate dyn else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while Some None Ok Err',
   python:'and as assert async await break class continue def del elif else except False finally for from global if import in is lambda None nonlocal not or pass raise return True try while with yield',
+  starlark:'and break continue def elif else False for if in lambda load None not or pass return True',
   sh:'if then else elif fi for while until do done case esac function in return local export set unset echo cd exit',
   go:'break case chan const continue default defer else fallthrough for func go goto if import interface map package range return select struct switch type var nil true false',
   c:'auto break case char class const continue default do double else enum extern false float for goto if int long namespace new nullptr private protected public return short signed sizeof static struct switch template this true typedef union unsigned using virtual void volatile while bool',
@@ -39,24 +40,31 @@ const keywordSets={
 };
 const aliases={javascript:'js',jsx:'js',ts:'js',typescript:'js',tsx:'js',mjs:'js',cjs:'js',rs:'rust',py:'python',bash:'sh',shell:'sh',zsh:'sh',golang:'go',cpp:'c','c++':'c',h:'c',hpp:'c',cc:'c',java:'c',cs:'c',csharp:'c',kotlin:'c',kt:'c',swift:'c',toml:'conf',yaml:'conf',yml:'conf',ini:'conf'};
 export function supportedLanguage(language){
+  if(['star','bzl','bazel'].includes(language?.toLowerCase()))return 'starlark';
   const name=language?.toLowerCase(),id=Object.hasOwn(aliases,name)?aliases[name]:name;
   return Object.hasOwn(keywordSets,id)||id==='conf'?id:null;
+}
+export function languageForPath(path=''){
+  const name=path.replaceAll('\\','/').split('/').at(-1);
+  if(/^(?:BUILD|WORKSPACE)(?:\.bazel)?$/.test(name)||name==='MODULE.bazel')return 'starlark';
+  return /\.([\w+-]+)$/.exec(name)?.[1]||'';
 }
 function grammar(id){
   return {
     keywords:new Set((keywordSets[id]||'').split(' ').filter(Boolean)),caseless:id==='sql',
-    comment:['python','sh','conf'].includes(id)?/#[^\n]*/y:id==='sql'?/--[^\n]*/y:id==='json'?null:/\/\/[^\n]*|\/\*[\s\S]*?(?:\*\/|$)/y,
+    comment:['python','starlark','sh','conf'].includes(id)?/#[^\n]*/y:id==='sql'?/--[^\n]*/y:id==='json'?null:/\/\/[^\n]*|\/\*[\s\S]*?(?:\*\/|$)/y,
     backtick:['js','go','sh'].includes(id),
   };
 }
 const STRING=/"(?:[^"\\\n]|\\.)*"?|'(?:[^'\\\n]|\\.)*'?/y,BACKTICK=/`(?:[^`\\]|\\[\s\S])*`?/y,NUMBER=/\b(?:0x[\da-f_]+|\d[\d_]*(?:\.\d[\d_]*)?(?:e[+-]?\d+)?)\b/iy,WORD=/[A-Za-z_][\w$]*/y;
+const STARLARK_STRING=/(?:[rR])?(?:"""(?:[^"\\]|\\[\s\S]|"(?!""))*(?:"""|$)|'''(?:[^'\\]|\\[\s\S]|'(?!''))*(?:'''|$)|"(?:[^"\\\n]|\\[\s\S])*"?|'(?:[^'\\\n]|\\[\s\S])*'?)/y;
 export function tokenize(text,id){
   const g=grammar(id),out=[];let plain='',i=0;
   const flush=()=>{if(plain){out.push(['',plain]);plain='';}};
   const take=(regex,kind)=>{if(!regex)return false;regex.lastIndex=i;const m=regex.exec(text);if(!m||!m[0])return false;flush();out.push([kind,m[0]]);i+=m[0].length;return true;};
   while(i<text.length){
     if(out.length>TOKEN_LIMIT){plain+=text.slice(i);break;}
-    if(take(g.comment,'comment')||take(STRING,'string')||(g.backtick&&take(BACKTICK,'string'))||take(NUMBER,'number'))continue;
+    if(take(g.comment,'comment')||take(id==='starlark'?STARLARK_STRING:STRING,'string')||(g.backtick&&take(BACKTICK,'string'))||take(NUMBER,'number'))continue;
     WORD.lastIndex=i;const word=WORD.exec(text);
     if(word){i+=word[0].length;if(g.keywords.has(g.caseless?word[0].toLowerCase():word[0])){flush();out.push(['keyword',word[0]]);}else plain+=word[0];continue;}
     plain+=text[i++];
