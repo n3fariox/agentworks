@@ -185,6 +185,9 @@ test('browser merges older pages with live events and keeps them across a reconn
   await expect(page.locator('#messages .message.user .message-body').last()).toHaveText('hello');
   await expect.poll(otherReplies).toBeGreaterThan(repliesBefore);
   await idle();await expect(page.locator('#session-state')).toHaveText('Ready');
+  // Session status can reach the browser just before the final assistant chunk. Capture the
+  // pre-reconnect transcript only after the live reply has reached its persisted final text.
+  await expect.poll(async()=>(await facts(page)).replies.filter(r=>!/^Reply \d+/.test(r)).at(-1)).toContain('hello');
   const liveReplies=await otherReplies();
   release();
   await expect.poll(async()=>checkSeeded(await facts(page)).prompts[0]).toBeLessThan(initial.prompts[0]);

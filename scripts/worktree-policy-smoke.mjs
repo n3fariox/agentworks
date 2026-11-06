@@ -45,6 +45,7 @@ const treeCount=()=>git(repo,'worktree','list','--porcelain').split('\n').filter
 async function external(cwd){const id=randomUUID();await mkdir(env.AGENTWORKS_DEMO_STATE_DIR,{recursive:true});await writeFile(join(env.AGENTWORKS_DEMO_STATE_DIR,id+'.json'),JSON.stringify({cwd,turn:1,model:'demo/steady',history:[]}));return {provider:'demo',providerSessionId:id,cwd};}
 try{
  await start();
+ const originalSettings=await api('/api/settings');
  const p=await api('/api/projects','POST',{name:'Policy fixture'}),policy='/api/projects/'+p.id+'/workspace-policy';
  assert.deepEqual(await api(policy),{defaultMode:'directory',requireWorktree:false});
  // Paused Git proves activity observes preparation before a session exists.
@@ -65,12 +66,14 @@ try{
  await writeFile(gate+'.overflow','large');await api('/api/worktrees/list','POST',{cwd:repo},409);await unlink(gate+'.overflow');
  const ordinary=await create({cwd:plain});await idle(ordinary.id);assert.equal(ordinary.cwd,plain);await remove(ordinary);
  // Capacity rejection is mutation-free: retain payload binding, permit unchanged retry.
+ await api('/api/settings','PUT',{...originalSettings,maxActiveSessions:12});
  const fillers=[];for(let i=0;i<12;i++)fillers.push(await create({cwd:plain}));
  await Promise.all(fillers.map(s=>idle(s.id)));
  const capacityRequest={provider:'demo',cwd:plain,requestId:'capacity-retry'};
  await api('/api/sessions','POST',capacityRequest,409);
  await api('/api/sessions','POST',{...capacityRequest,title:'different payload'},409);
  await remove(fillers.shift());const recovered=await api('/api/sessions','POST',capacityRequest);await idle(recovered.id);await remove(recovered);for(const s of fillers)await remove(s);
+ await api('/api/settings','PUT',originalSettings);
  const actor=await create({projectId:p.id,title:'Isolated test coordinator',agentAccess:{startSessions:true,runAutomations:true}});await idle(actor.id);
  const oldImportRequest={...await external(repo),projectId:p.id};const oldImport=await api('/api/sessions/import','POST',oldImportRequest);await idle(oldImport.id);
  const input={provider:'demo',cwd:repo,projectId:p.id,requestId:'tree-once',workspace:{mode:'newWorktree'}};

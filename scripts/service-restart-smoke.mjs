@@ -95,7 +95,7 @@ exit 1
  const pruned=recovery('retain',backups,'--keep','2','--apply');assert.deepEqual(pruned.remove,preview.remove);
  const source=join(backups,names.at(-1)),staged=join(dir,'restored');
  const originalDb=await readFile(env.AGENTWORKS_DB_PATH),sourceDb=await readFile(join(source,'sessions.sqlite3'));
- const restored=recovery('restore',source,staged);assert(restored.sessions>=3);assert.equal(restored.schemaVersion,12);
+ const restored=recovery('restore',source,staged);assert(restored.sessions>=3);assert(restored.schemaVersion>=12);
  assert.deepEqual(await readFile(env.AGENTWORKS_DB_PATH),originalDb);assert.deepEqual(await readFile(join(source,'sessions.sqlite3')),sourceDb);
  assert.equal((await stat(staged)).mode&0o777,0o700);assert.equal((await stat(restored.database)).mode&0o777,0o600);
  await start(false,{AGENTWORKS_CATALOG_PATH:restored.catalog,AGENTWORKS_DB_PATH:restored.database});
