@@ -268,7 +268,10 @@ async fn dispatch_next(app: &App, s: &Arc<Session>, deliberate: bool) -> bool {
     };
     broadcast(s);
     match crate::accept_prompt(s, text, id, Some("queue".into()), None, Vec::new()) {
-        Ok(_) => true,
+        Ok(_) => {
+            broadcast(s);
+            true
+        }
         Err((_, message)) => {
             {
                 let mut data = s.data.lock().unwrap();

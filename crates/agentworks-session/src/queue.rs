@@ -210,11 +210,17 @@ impl Queue {
         })
     }
     /// Called at every turn acceptance (direct, automation or queued).
-    pub fn begin_turn(&mut self, text: &str) {
+    pub fn begin_turn(&mut self, text: &str, request_id: &str) {
         self.ready = false;
         self.diagnostic = is_diagnostic(text);
+        for item in &mut self.items {
+            if item.state == ItemState::Sending && item.dispatch_id() == request_id {
+                item.state = ItemState::Sent;
+            }
+        }
     }
-    /// Records the finished turn's outcome for the item in flight.
+    /// Records the turn outcome. Accepted inputs stay sent regardless of outcome;
+    /// a claim that failed before acceptance is still unresolved.
     pub fn finish_turn(&mut self, outcome: &Outcome) {
         let diagnostic = std::mem::take(&mut self.diagnostic);
         self.ready = false;
@@ -354,13 +360,52 @@ mod tests {
     }
 
     #[test]
+    fn accepted_input_is_sent_before_the_turn_finishes() {
+        for outcome in [
+            Outcome::Success,
+            Outcome::Cancelled,
+            Outcome::Error,
+            Outcome::Quota,
+        ] {
+            let mut q = q();
+            q.enqueue("r1", "first", 1).unwrap();
+            q.enqueue("r2", "second", 2).unwrap();
+            let (text, id) = q.claim().unwrap();
+            q.begin_turn(&text, "unrelated-request");
+            assert_eq!(q.items[0].state, ItemState::Sending);
+            q.begin_turn(&text, &id);
+            assert_eq!(q.items[0].state, ItemState::Sent);
+            assert!(!q.ready, "acceptance must not dispatch the next input");
+            assert!(q.edit("q1", 0, "retry").is_err());
+            q.finish_turn(&outcome);
+            assert_eq!(q.items[0].state, ItemState::Sent);
+            assert_eq!(q.ready, outcome == Outcome::Success);
+            assert_eq!(q.paused.is_some(), outcome != Outcome::Success);
+        }
+    }
+
+    #[test]
+    fn restart_preserves_accepted_delivery() {
+        let mut q = q();
+        q.enqueue("r1", "first", 1).unwrap();
+        q.enqueue("r2", "second", 2).unwrap();
+        let (text, id) = q.claim().unwrap();
+        q.begin_turn(&text, &id);
+        let mut restored: Queue = serde_json::from_value(serde_json::to_value(q).unwrap()).unwrap();
+        restored.recover();
+        assert_eq!(restored.items[0].state, ItemState::Sent);
+        assert_eq!(restored.items[1].state, ItemState::Paused);
+        assert!(!restored.ready);
+    }
+
+    #[test]
     fn diagnostic_probe_turn_never_makes_queue_ready() {
         let mut q = q();
         q.enqueue("r1", "substantive", 1).unwrap();
-        q.begin_turn("/usage");
+        q.begin_turn("/usage", "probe");
         q.finish_turn(&Outcome::Success);
         assert!(!q.ready, "status probe must not trigger queued work");
-        q.begin_turn("real work");
+        q.begin_turn("real work", "direct");
         q.finish_turn(&Outcome::Success);
         assert!(q.ready);
     }

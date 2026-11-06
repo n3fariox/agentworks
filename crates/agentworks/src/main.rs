@@ -553,7 +553,7 @@ impl Session {
                 origin.outcome = None;
             }
             data.inbox_turn = None;
-            data.input_queue.begin_turn(&text);
+            data.input_queue.begin_turn(&text, &id);
             data.requests.insert(id.clone());
             data.status = "running".into();
             data.turn_active = true;
@@ -3503,7 +3503,7 @@ fn accept_prompt(
         data.inbox_turn = None;
         let commands = data.available_commands.clone();
         data.continuation.begin_turn(&s.provider, &commands, &text);
-        data.input_queue.begin_turn(&text);
+        data.input_queue.begin_turn(&text, &request_id);
         data.status = "running".into();
         data.turn_active = true;
         data.native_rename = rename.is_some();

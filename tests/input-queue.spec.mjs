@@ -78,7 +78,7 @@ test('queue during a turn: FIFO order, edit/remove, activity label, dispatch onl
   await expect(items).toHaveCount(2);
   // After the first turn ends normally, the edited head item is sent with its revisioned request ID.
   await expect(page.locator('#messages')).toContainText('queued alpha edited',{timeout:20000});
-  await expect(items.nth(0).locator('.queue-state')).toHaveText(/Sending|Sent/);
+  expect((await api(`/api/sessions/${session.id}/queue`)).queue.items[0].state).toBe('sent');
   await until(async()=>(await api(`/api/sessions/${session.id}/queue`)).queue.items.every(i=>i.state==='sent'));
   const q=(await api(`/api/sessions/${session.id}/queue`)).queue;
   expect(q.items.map(i=>i.text)).toEqual(['queued alpha edited','queued beta']);
@@ -129,6 +129,7 @@ test('the queue panel disappears when no pending inputs remain',async({page})=>{
   await type(page,'already sent');
   await expect(page.locator('#messages')).toContainText('already sent',{timeout:15000});
   await until(async()=>(await api(`/api/sessions/${session.id}/queue`)).queue.items[0].state==='sent');
+  await expect(page.locator('#session-state')).toHaveText('Ready');
 
   await type(page,'slow turn to cancel');
   await expect(page.locator('#activity-indicator')).toBeVisible();
@@ -146,6 +147,22 @@ test('the queue panel disappears when no pending inputs remain',async({page})=>{
   await expect(page.locator('.queue-history')).toHaveCount(0);
   await expect(page.locator('#input-queue [data-queue-resume]')).toHaveCount(0);
   expect((await api(`/api/sessions/${session.id}/queue`)).queue.paused).toContain('Cancelled');
+});
+
+test('queued input becomes sent as its turn starts and disappears from pending inputs',async({page})=>{
+  await openSession(page);
+  const path=`/api/sessions/${session.id}/queue`;
+  await api(path,{text:'slow queued turn',requestId:'slow-queued'});
+  await expect(page.locator('#input-queue .queue-state')).toHaveText('Queued');
+  await page.getByRole('button',{name:'Send next now'}).click();
+  await expect(page.locator('#messages')).toContainText('slow queued turn');
+  await expect(page.locator('#activity-indicator')).toBeVisible();
+  expect(await state()).toBe('running');
+  expect((await api(path)).queue.items[0].state).toBe('sent');
+  await expect(page.locator('#input-queue')).toBeHidden();
+  await api(`/api/sessions/${session.id}/stop`,{});
+  await until(async()=>await state()==='idle');
+  expect((await api(path)).queue.items[0].state).toBe('sent');
 });
 
 test('approval wait label, queued input dispatches after approval completes the turn',async({page})=>{
@@ -196,7 +213,7 @@ test('mobile, keyboard and reduced motion',async({browser})=>{
   }finally{await context.close();}
 });
 
-test('restart during queued dispatch pauses as ambiguous and never replays',async()=>{
+test('restart during an accepted queued turn preserves sent status and pauses later inputs',async()=>{
   const dir=await mkdtemp(resolve('.cache/input-queue-restart-'));const url='http://127.0.0.1:4512';
   let proc;
   try{
@@ -206,12 +223,11 @@ test('restart during queued dispatch pauses as ambiguous and never replays',asyn
   await api(`/api/sessions/${s.id}/prompt`,{text:'quick',requestId:'first'},undefined,url);
   await api(`/api/sessions/${s.id}/queue`,{text:'slow mutating queued work',requestId:'qa'},undefined,url);
   await api(`/api/sessions/${s.id}/queue`,{text:'later',requestId:'qb'},undefined,url);
-  await until(async()=>(await api(`/api/sessions/${s.id}/queue`,undefined,undefined,url)).queue.items[0].state==='sending');
+  await until(async()=>(await api(`/api/sessions/${s.id}/queue`,undefined,undefined,url)).queue.items[0].state==='sent');
   proc.child.kill('SIGKILL');await until(()=>proc.exited);
   proc=launch(4512,dir);await ready(proc,url);
     const q=(await api(`/api/sessions/${s.id}/queue`,undefined,undefined,url)).queue;
-    expect(q.items[0].state).toBe('error');
-    expect(q.items[0].note).toContain('delivery unknown');
+    expect(q.items[0].state).toBe('sent');
     expect(q.items[1].state).toBe('paused');
     expect(q.paused).toContain('restarted');
     await new Promise(r=>setTimeout(r,500));
@@ -253,7 +269,7 @@ test('quota failure of a queued item pauses the queue and never sends later item
   await api(path,{text:'after quota',requestId:'aq'});
   await until(async()=>(await api(path)).queue.paused!=null,25000);
   const q=(await api(path)).queue;
-  expect(q.items[0].state).toBe('error');
+  expect(q.items[0].state).toBe('sent');
   expect(q.items[1].state).toBe('paused');
   await new Promise(r=>setTimeout(r,800));
   const users=(await api(`/api/sessions/${session.id}`)).events.filter(e=>e.kind==='user').map(e=>e.data.text);
