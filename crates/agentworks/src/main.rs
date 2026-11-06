@@ -74,8 +74,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    env,
     net::IpAddr,
-    path::PathBuf,
+    path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -86,6 +87,55 @@ use uuid::Uuid;
 const MAX_EVENTS: usize = 3000;
 const MAX_EVENT_BYTES: usize = 4 * 1024 * 1024;
 type ApiResult = Result<Json<Value>, (StatusCode, String)>;
+
+fn add_mise_shims_to_path() {
+    let Some(home) = env::var_os("HOME").map(PathBuf::from) else {
+        return;
+    };
+    let mise = home.join(".local/bin/mise");
+    if !is_executable(&mise) {
+        return;
+    }
+
+    let data_dir = env::var_os("MISE_DATA_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(".local/share/mise"));
+    let shims = data_dir.join("shims");
+    if !shims.is_dir() {
+        return;
+    }
+
+    let current = env::var_os("PATH").unwrap_or_default();
+    if env::split_paths(&current).any(|path| path == shims) {
+        return;
+    }
+    let Ok(path) = env::join_paths(std::iter::once(shims).chain(env::split_paths(&current))) else {
+        return;
+    };
+
+    // This runs in the synchronous entry point before constructing Tokio or
+    // spawning any application threads; children inherit the augmented PATH.
+    unsafe { env::set_var("PATH", path) };
+}
+
+fn is_executable(path: &FsPath) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
 
 #[derive(Clone)]
 struct App {
@@ -552,8 +602,15 @@ fn session(app: &App, id: &str) -> Result<Arc<Session>, (StatusCode, String)> {
         .cloned()
         .ok_or_else(|| fail(StatusCode::NOT_FOUND, "Session not found"))
 }
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    add_mise_shims_to_path();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).is_some_and(|arg| arg == "recovery") {
         return recovery::run(&args[2..]).map_err(|e| e.to_string().into());
@@ -3128,10 +3185,17 @@ fn start_worker(app: &App, s: &Arc<Session>) {
                     .unwrap()
                     .input_queue
                     .block("Remote host disconnected; inspect, then resume the queue.");
-                let _ = inbox_delivery::interrupt_inflight(
-                    &worker_s,
-                    "Remote host disconnected; queued wakes are held until it reconnects",
-                );
+                let _ = if was_active {
+                    inbox_delivery::cancel(
+                        &worker_s,
+                        "Remote host disconnected during a turn; inspect before resuming",
+                    )
+                } else {
+                    inbox_delivery::interrupt_inflight(
+                        &worker_s,
+                        "Remote host disconnected; queued wakes are held until it reconnects",
+                    )
+                };
                 worker_s.emit("interrupted",json!({"message":if was_active {"The connection to this session's host dropped during a turn. It was not retried. Resume once the host reconnects, and check the last tool result before continuing."} else {"The connection to this session's host dropped. Resume once the host reconnects."}}));
                 worker_s.status("suspended");
                 return;

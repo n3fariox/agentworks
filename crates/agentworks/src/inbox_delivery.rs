@@ -934,7 +934,14 @@ pub async fn scheduler(app: App) {
                     continue;
                 }
                 // An unreachable host or missing remote directory holds delivery.
-                if crate::hosts::validate_session(&app, &s).await.is_err() {
+                if let Err((status, _)) = crate::hosts::validate_session(&app, &s).await {
+                    // A disconnected host or temporarily missing directory holds delivery.
+                    // Losing the configured root is different: revoke the human's standing
+                    // authorization so restoring the root cannot silently reactivate it.
+                    if status == StatusCode::FORBIDDEN {
+                        let _ =
+                            cancel(&s, "Remote session directory left the host's allowed roots");
+                    }
                     continue;
                 }
             }
