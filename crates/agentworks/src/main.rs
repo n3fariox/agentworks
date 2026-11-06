@@ -513,10 +513,13 @@ impl Session {
                 "Session could not be saved to disk",
             ));
         }
-        self.commands
-            .lock()
-            .unwrap()
-            .as_ref()
+        Self::handoff_command(self.commands.lock().unwrap().as_ref(), command)
+    }
+    fn handoff_command(
+        commands: Option<&mpsc::Sender<session_runtime::Command>>,
+        command: session_runtime::Command,
+    ) -> Result<(), (StatusCode, String)> {
+        commands
             .ok_or_else(|| fail(StatusCode::GONE, "Agent process unavailable"))?
             .try_send(command)
             .map_err(|_| {
@@ -525,6 +528,47 @@ impl Session {
                     "Agent is unavailable or a command is pending",
                 )
             })
+    }
+    fn send_prompt_command(
+        &self,
+        command: session_runtime::Command,
+        request_id: &str,
+    ) -> Result<(), (StatusCode, String)> {
+        // Release the commands lock before taking data. Keep data locked through
+        // handoff and persistence so a fast runtime outcome cannot overtake them.
+        let commands = self.commands.lock().unwrap().clone();
+        let mut data = self.data.lock().unwrap();
+        if data.storage_error.is_some() {
+            return Err(fail(
+                StatusCode::INSUFFICIENT_STORAGE,
+                "Session could not be saved to disk",
+            ));
+        }
+        Self::handoff_command(commands.as_ref(), command)?;
+        let before = data.input_queue.clone();
+        data.input_queue.command_handed_off(request_id);
+        if data.input_queue != before
+            && self
+                .store
+                .lock()
+                .unwrap()
+                .save_state(&self.id, &data)
+                .is_err()
+        {
+            // The command may already be executing. Preserve an inspectable
+            // state, never report delivery as durable or dispatch the next item.
+            data.input_queue = before;
+            data.input_queue
+                .finish_turn(&input_queue::Outcome::StorageFailure);
+            data.storage_error = Some(
+                "Could not save command handoff; inspect queued inputs before resuming".into(),
+            );
+            return Err(fail(
+                StatusCode::INSUFFICIENT_STORAGE,
+                "Command handoff could not be saved; delivery is uncertain",
+            ));
+        }
+        Ok(())
     }
     fn set_commands(&self, commands: Value) {
         self.data.lock().unwrap().available_commands = commands.clone();
@@ -553,7 +597,7 @@ impl Session {
                 origin.outcome = None;
             }
             data.inbox_turn = None;
-            data.input_queue.begin_turn(&text, &id);
+            data.input_queue.begin_turn(&text);
             data.requests.insert(id.clone());
             data.status = "running".into();
             data.turn_active = true;
@@ -3503,7 +3547,7 @@ fn accept_prompt(
         data.inbox_turn = None;
         let commands = data.available_commands.clone();
         data.continuation.begin_turn(&s.provider, &commands, &text);
-        data.input_queue.begin_turn(&text, &request_id);
+        data.input_queue.begin_turn(&text);
         data.status = "running".into();
         data.turn_active = true;
         data.native_rename = rename.is_some();
@@ -3525,7 +3569,7 @@ fn accept_prompt(
     };
     s.emit("user", user);
     s.emit("status", json!({"status":"running"}));
-    if let Err(error) = s.send_command(command) {
+    if let Err(error) = s.send_prompt_command(command, &request_id) {
         s.status("error");
         return Err(error);
     }

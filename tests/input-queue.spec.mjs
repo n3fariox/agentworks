@@ -33,9 +33,9 @@ async function call(path,body,method,url=base){
 async function api(path,body,method,url=base){const r=await call(path,body,method,url);expect(r.status,JSON.stringify(r.body)).toBeLessThan(300);return r.body;}
 async function until(fn,ms=20000){const end=Date.now()+ms;while(Date.now()<end){if(await fn())return;await new Promise(r=>setTimeout(r,100));}throw new Error('Condition timed out');}
 const state=async(url=base,id=session.id)=>(await api(`/api/sessions/${id}`,undefined,undefined,url)).session.status;
-async function openSession(page,id=session.id){
+async function openSession(page,id=session.id,url='/'){
   await page.addInitScript(id=>{if(!sessionStorage.getItem('queue-init')){localStorage.setItem('agentworks-session',id);sessionStorage.setItem('queue-init','1');}},id);
-  await page.goto('/');
+  await page.goto(url);
   await expect(page.locator('#session-state')).toHaveText('Ready');
 }
 async function type(page,text){await page.locator('#prompt-editor .cm-content').fill(text);await page.locator('#send').click();}
@@ -163,6 +163,34 @@ test('queued input becomes sent as its turn starts and disappears from pending i
   await api(`/api/sessions/${session.id}/stop`,{});
   await until(async()=>await state()==='idle');
   expect((await api(path)).queue.items[0].state).toBe('sent');
+});
+
+test('uncertain command handoff stays visible for inspection and pauses later inputs',async({page})=>{
+  const {DatabaseSync}=await import('node:sqlite');
+  const dir=await mkdtemp(resolve('.cache/input-queue-handoff-')),url='http://127.0.0.1:4513';
+  let proc,db;
+  try{
+    proc=launch(4513,dir);await ready(proc,url);
+    const s=await api('/api/sessions',{provider:'demo',cwd:dir,title:'Uncertain handoff'},undefined,url);
+    await until(async()=>await state(url,s.id)==='idle');
+    const path=`/api/sessions/${s.id}/queue`;
+    await api(path,{text:'slow uncertain handoff',requestId:'uncertain'},undefined,url);
+    await api(path,{text:'must stay paused',requestId:'later'},undefined,url);
+    db=new DatabaseSync(join(dir,'sessions.sqlite3'));
+    // Fail only the post-handoff Sent save, after the command channel accepted it.
+    db.exec(`CREATE TRIGGER reject_sent BEFORE UPDATE ON sessions WHEN NEW.state LIKE '%"sent"%' BEGIN SELECT RAISE(ABORT,'injected handoff persistence failure'); END;`);
+    await openSession(page,s.id,url);
+    await page.getByRole('button',{name:'Send next now'}).click();
+    await expect(page.locator('#input-queue')).toBeVisible();
+    await expect(page.locator('#input-queue [data-id="q1"] .queue-state')).toHaveText('Needs inspection');
+    await expect(page.locator('#input-queue [data-id="q2"] .queue-state')).toHaveText('Paused');
+    await expect(page.locator('#input-queue [data-id="q1"] .queue-note')).toContainText('handoff unconfirmed');
+    const queue=(await api(path,undefined,undefined,url)).queue;
+    expect(queue.items.map(i=>i.state)).toEqual(['error','paused']);
+    expect(queue.ready).toBe(false);
+    const users=(await api(`/api/sessions/${s.id}`,undefined,undefined,url)).events.filter(e=>e.kind==='user').map(e=>e.data.text);
+    expect(users).toEqual(['slow uncertain handoff']);
+  }finally{try{db?.close();}finally{await stopChild(proc?.child);await rm(dir,{recursive:true,force:true});}}
 });
 
 test('approval wait label, queued input dispatches after approval completes the turn',async({page})=>{

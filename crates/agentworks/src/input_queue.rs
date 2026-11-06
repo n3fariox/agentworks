@@ -267,6 +267,10 @@ async fn dispatch_next(app: &App, s: &Arc<Session>, deliberate: bool) -> bool {
         claimed
     };
     broadcast(s);
+    dispatch_claimed(s, text, id)
+}
+
+fn dispatch_claimed(s: &Session, text: String, id: String) -> bool {
     match crate::accept_prompt(s, text, id, Some("queue".into()), None, Vec::new()) {
         Ok(_) => {
             broadcast(s);
@@ -433,4 +437,199 @@ pub async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult
     })?;
     let dispatched = dispatch_next(&app, &s, true).await;
     reply(&s, json!({ "dispatched": dispatched }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentworks_session::queue::ItemState;
+    use std::sync::Mutex;
+
+    struct Fixture {
+        session: Session,
+        receiver: tokio::sync::mpsc::Receiver<crate::session_runtime::Command>,
+        root: std::path::PathBuf,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!("queue-unit-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root).unwrap();
+            let store = Arc::new(Mutex::new(
+                crate::store::Store::open(&root.join("db.sqlite3")).unwrap(),
+            ));
+            let catalog = Arc::new(Mutex::new(
+                crate::Catalog::open(root.join("catalog.json")).unwrap(),
+            ));
+            let data = serde_json::from_value(json!({"status":"idle","seq":0,"requests":[],"models":null,"available_commands":[],"turn_active":false,"provider_session_id":"native-queue"})).unwrap();
+            let meta = crate::store::Metadata {
+                id: "queue-test".into(),
+                provider: "demo".into(),
+                cwd: root.clone(),
+                title: "Queue test".into(),
+                initial_model: None,
+                created: 1,
+                host_id: "local".into(),
+                location_id: "fixture".into(),
+            };
+            store
+                .lock()
+                .unwrap()
+                .insert(&meta, &data, None, None)
+                .unwrap();
+            let (commands, receiver) = tokio::sync::mpsc::channel(1);
+            let session = Session {
+                id: meta.id,
+                provider: meta.provider,
+                cwd: root.clone(),
+                title: meta.title,
+                initial_model: None,
+                created: 1,
+                host_id: meta.host_id,
+                location_id: meta.location_id,
+                data: Mutex::new(data),
+                tx: tokio::sync::broadcast::channel(128).0,
+                commands: Mutex::new(Some(commands)),
+                store,
+                approvals: Default::default(),
+                worker: Default::default(),
+                mcp_endpoint: "127.0.0.1:4505".parse().unwrap(),
+                mcp_token: Mutex::new("fixture-only".into()),
+                mcp_refresh_pending: Default::default(),
+                fresh_environment: Default::default(),
+                notifications: crate::notifications::Hub::new(catalog),
+                progress: crate::tool_progress::Hub::empty(),
+                account_quota: Arc::default(),
+            };
+            Self {
+                session,
+                receiver,
+                root,
+            }
+        }
+        fn claim(&self) -> (String, String) {
+            let mut data = self.session.data.lock().unwrap();
+            data.input_queue
+                .enqueue("first", "first queued input", 1)
+                .unwrap();
+            data.input_queue
+                .enqueue("later", "later queued input", 2)
+                .unwrap();
+            let claimed = data.input_queue.claim().unwrap();
+            self.session
+                .store
+                .lock()
+                .unwrap()
+                .save_state(&self.session.id, &data)
+                .unwrap();
+            claimed
+        }
+        fn saved_queue(&self) -> Queue {
+            self.session
+                .store
+                .lock()
+                .unwrap()
+                .load()
+                .unwrap()
+                .remove(0)
+                .1
+                .input_queue
+        }
+        fn assert_inspectable(queue: &Queue) {
+            assert_eq!(queue.items[0].state, ItemState::Error);
+            assert_eq!(queue.items[1].state, ItemState::Paused);
+            assert!(
+                queue.items[0]
+                    .note
+                    .as_deref()
+                    .unwrap()
+                    .contains("unconfirmed")
+            );
+            assert!(queue.paused.is_some());
+            assert!(!queue.ready);
+            assert!(queue.has_pending());
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn failed_command_handoff_never_marks_input_sent() {
+        for closed in [false, true] {
+            let mut f = Fixture::new();
+            let (text, id) = f.claim();
+            if closed {
+                f.receiver.close();
+            } else {
+                f.session
+                    .send_command(crate::session_runtime::Command::Prompt(
+                        "occupy channel".into(),
+                    ))
+                    .unwrap();
+            }
+            let mut events = f.session.tx.subscribe();
+            assert!(!dispatch_claimed(&f.session, text, id));
+            Fixture::assert_inspectable(&f.session.data.lock().unwrap().input_queue);
+            Fixture::assert_inspectable(&f.saved_queue());
+            while let Ok(event) = events.try_recv() {
+                if event["kind"] == "input_queue" {
+                    assert!(
+                        event["data"]["items"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .all(|i| i["state"] != "sent")
+                    );
+                }
+            }
+            // A late successful outcome cannot turn the rejected dispatch into Sent
+            // or release later inputs.
+            record_outcome(&f.session, Outcome::Success);
+            Fixture::assert_inspectable(&f.saved_queue());
+            if !closed {
+                f.receiver.try_recv().unwrap();
+            }
+            assert!(f.receiver.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn successful_command_handoff_persists_sent_before_turn_outcome() {
+        let mut f = Fixture::new();
+        let (text, id) = f.claim();
+        assert!(dispatch_claimed(&f.session, text, id));
+        assert!(matches!(
+            f.receiver.try_recv(),
+            Ok(crate::session_runtime::Command::Prompt(_))
+        ));
+        let saved = f.saved_queue();
+        assert_eq!(saved.items[0].state, ItemState::Sent);
+        assert_eq!(saved.items[1].state, ItemState::Queued);
+        assert!(!saved.ready);
+        record_outcome(&f.session, Outcome::Error);
+        let saved = f.saved_queue();
+        assert_eq!(saved.items[0].state, ItemState::Sent);
+        assert_eq!(saved.items[1].state, ItemState::Paused);
+    }
+
+    #[test]
+    fn failed_handoff_persistence_keeps_delivery_uncertain() {
+        let mut f = Fixture::new();
+        let (text, id) = f.claim();
+        f.session.store.lock().unwrap().connection.execute_batch(
+            "CREATE TRIGGER reject_sent BEFORE UPDATE ON sessions WHEN NEW.state LIKE '%\"sent\"%' BEGIN SELECT RAISE(ABORT,'injected handoff persistence failure'); END;"
+        ).unwrap();
+        assert!(!dispatch_claimed(&f.session, text, id));
+        // The command really was handed off, but no durable delivery claim was saved.
+        assert!(matches!(
+            f.receiver.try_recv(),
+            Ok(crate::session_runtime::Command::Prompt(_))
+        ));
+        Fixture::assert_inspectable(&f.session.data.lock().unwrap().input_queue);
+        Fixture::assert_inspectable(&f.saved_queue());
+        record_outcome(&f.session, Outcome::Success);
+        Fixture::assert_inspectable(&f.saved_queue());
+    }
 }

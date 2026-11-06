@@ -210,9 +210,12 @@ impl Queue {
         })
     }
     /// Called at every turn acceptance (direct, automation or queued).
-    pub fn begin_turn(&mut self, text: &str, request_id: &str) {
+    pub fn begin_turn(&mut self, text: &str) {
         self.ready = false;
         self.diagnostic = is_diagnostic(text);
+    }
+    /// Called only after the command channel accepts this dispatch.
+    pub fn command_handed_off(&mut self, request_id: &str) {
         for item in &mut self.items {
             if item.state == ItemState::Sending && item.dispatch_id() == request_id {
                 item.state = ItemState::Sent;
@@ -224,17 +227,19 @@ impl Queue {
     pub fn finish_turn(&mut self, outcome: &Outcome) {
         let diagnostic = std::mem::take(&mut self.diagnostic);
         self.ready = false;
+        let mut unconfirmed = false;
         for item in &mut self.items {
             if item.state == ItemState::Sending {
-                if *outcome == Outcome::Success {
-                    item.state = ItemState::Sent;
-                } else {
-                    item.state = ItemState::Error;
-                    item.note = Some(format!("Turn ended: {outcome:?}; not resent"));
-                }
+                item.state = ItemState::Error;
+                item.note = Some(format!(
+                    "Command handoff unconfirmed; turn ended: {outcome:?}; not resent"
+                ));
+                unconfirmed = true;
             }
         }
-        if *outcome != Outcome::Success {
+        if unconfirmed {
+            self.block("Command handoff unconfirmed. Inspect queued inputs, then resume.");
+        } else if *outcome != Outcome::Success {
             self.pause(&format!(
                 "Previous turn ended: {outcome:?}. Inspect, then resume."
             ));
@@ -315,6 +320,7 @@ mod tests {
         let (text, id) = q.claim().unwrap();
         assert_eq!((text.as_str(), id.as_str()), ("one!", "queue:q1:r1"));
         assert!(q.claim().is_none(), "only one in flight");
+        q.command_handed_off(&id);
         q.finish_turn(&Outcome::Success);
         assert!(q.ready);
         assert_eq!(q.claim().unwrap().0, "three");
@@ -348,11 +354,9 @@ mod tests {
             assert!(q.claim().is_none(), "{outcome:?} blocks dispatch");
             assert_eq!(q.items[0].state, ItemState::Error);
             q.resume();
-            assert_eq!(
-                q.claim().unwrap().0,
-                "second",
-                "errored item is not replayed"
-            );
+            let (text, id) = q.claim().unwrap();
+            assert_eq!(text, "second", "errored item is not replayed");
+            q.command_handed_off(&id);
             q.finish_turn(&Outcome::Success);
             q.edit(&a, 0, "first again").unwrap();
             assert_eq!(q.claim().unwrap().1, "queue:q1:r1");
@@ -371,9 +375,11 @@ mod tests {
             q.enqueue("r1", "first", 1).unwrap();
             q.enqueue("r2", "second", 2).unwrap();
             let (text, id) = q.claim().unwrap();
-            q.begin_turn(&text, "unrelated-request");
+            q.begin_turn(&text);
             assert_eq!(q.items[0].state, ItemState::Sending);
-            q.begin_turn(&text, &id);
+            q.command_handed_off("unrelated-request");
+            assert_eq!(q.items[0].state, ItemState::Sending);
+            q.command_handed_off(&id);
             assert_eq!(q.items[0].state, ItemState::Sent);
             assert!(!q.ready, "acceptance must not dispatch the next input");
             assert!(q.edit("q1", 0, "retry").is_err());
@@ -385,12 +391,27 @@ mod tests {
     }
 
     #[test]
+    fn successful_outcome_cannot_confirm_an_ambiguous_handoff() {
+        let mut q = q();
+        q.enqueue("r1", "first", 1).unwrap();
+        q.enqueue("r2", "second", 2).unwrap();
+        let (text, _) = q.claim().unwrap();
+        q.begin_turn(&text);
+        q.finish_turn(&Outcome::Success);
+        assert_eq!(q.items[0].state, ItemState::Error);
+        assert_eq!(q.items[1].state, ItemState::Paused);
+        assert!(!q.ready);
+        assert!(q.has_pending());
+    }
+
+    #[test]
     fn restart_preserves_accepted_delivery() {
         let mut q = q();
         q.enqueue("r1", "first", 1).unwrap();
         q.enqueue("r2", "second", 2).unwrap();
         let (text, id) = q.claim().unwrap();
-        q.begin_turn(&text, &id);
+        q.begin_turn(&text);
+        q.command_handed_off(&id);
         let mut restored: Queue = serde_json::from_value(serde_json::to_value(q).unwrap()).unwrap();
         restored.recover();
         assert_eq!(restored.items[0].state, ItemState::Sent);
@@ -402,10 +423,10 @@ mod tests {
     fn diagnostic_probe_turn_never_makes_queue_ready() {
         let mut q = q();
         q.enqueue("r1", "substantive", 1).unwrap();
-        q.begin_turn("/usage", "probe");
+        q.begin_turn("/usage");
         q.finish_turn(&Outcome::Success);
         assert!(!q.ready, "status probe must not trigger queued work");
-        q.begin_turn("real work", "direct");
+        q.begin_turn("real work");
         q.finish_turn(&Outcome::Success);
         assert!(q.ready);
     }
