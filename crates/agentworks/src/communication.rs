@@ -590,7 +590,10 @@ pub async fn set_access(
     let attached = s.commands.lock().unwrap().is_some();
     if idle
         && crate::service_restart::allow_start(&app).is_ok()
-        && !s.data.lock().unwrap().lifecycle.suspended
+        && !{
+            let data = s.data.lock().unwrap();
+            data.lifecycle.suspended || data.lifecycle.archived
+        }
         && (attached || req.enabled())
     {
         s.status("suspended");

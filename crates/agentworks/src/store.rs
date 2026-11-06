@@ -27,6 +27,20 @@ pub struct Metadata {
     pub location_id: String,
 }
 /// Holds an exclusive lock on `path` for as long as the returned file is open.
+/// The retained event window for `Store::recent` rows, with its serialized size.
+pub fn window(recent: Vec<String>) -> Result<(VecDeque<Value>, usize)> {
+    let mut events = recent
+        .into_iter()
+        .rev()
+        .map(|s| serde_json::from_str(&s))
+        .collect::<serde_json::Result<VecDeque<Value>>>()?;
+    let mut bytes = events.iter().map(|e| e.to_string().len()).sum();
+    while bytes > MAX_EVENT_BYTES && events.len() > 1 {
+        bytes -= events.pop_front().unwrap().to_string().len();
+    }
+    Ok((events, bytes))
+}
+
 pub fn exclusive(path: &Path, busy: &str) -> Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
@@ -469,37 +483,28 @@ impl Store {
     pub fn load(&self) -> Result<Vec<(Metadata, SessionData)>> {
         let mut query = self
             .connection
-            .prepare("SELECT id,metadata,state FROM sessions ORDER BY rowid")?;
-        let rows = query.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })?;
+            .prepare("SELECT metadata,state FROM sessions ORDER BY rowid")?;
+        let rows = query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         let mut sessions = Vec::new();
         for row in rows {
-            let (id, metadata, state) = row?;
+            let (metadata, state) = row?;
             let metadata: Metadata = serde_json::from_str(&metadata)?;
             let mut state: SessionData = serde_json::from_str(&state)?;
-            let mut events = self.connection.prepare(
-                "SELECT payload FROM events WHERE session_id=?1 ORDER BY seq DESC LIMIT ?2",
-            )?;
-            let recent = events
-                .query_map(params![id, MAX_EVENTS as i64], |r| r.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            state.events = recent
-                .into_iter()
-                .rev()
-                .map(|s| serde_json::from_str(&s))
-                .collect::<serde_json::Result<VecDeque<_>>>()?;
-            state.bytes = state.events.iter().map(|e| e.to_string().len()).sum();
-            while state.bytes > MAX_EVENT_BYTES && state.events.len() > 1 {
-                state.bytes -= state.events.pop_front().unwrap().to_string().len();
-            }
+            state.parked = true;
             sessions.push((metadata, state));
         }
         Ok(sessions)
+    }
+    /// Stored payloads of a session's newest events, newest first. Parse them with
+    /// `window` after releasing the store, so other sessions can keep writing.
+    pub fn recent(&self, id: &str) -> Result<Vec<String>> {
+        let mut events = self
+            .connection
+            .prepare("SELECT payload FROM events WHERE session_id=?1 ORDER BY seq DESC LIMIT ?2")?;
+        let recent = events
+            .query_map(params![id, MAX_EVENTS as i64], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(recent)
     }
     /// Stored events with seq strictly below `before`, oldest first: the newest `limit`
     /// such events, cut at `max_bytes` (at least one event is always returned). The flag
@@ -574,6 +579,7 @@ impl Store {
                 seq: snapshot["seq"].as_u64().unwrap_or(0),
                 events: VecDeque::new(),
                 bytes: 0,
+                parked: false,
                 requests: events
                     .iter()
                     .filter(|e| e["kind"] == "user")
@@ -878,7 +884,8 @@ mod tests {
             loaded[0].1.provider_session_id.as_deref(),
             Some("native-id")
         );
-        assert_eq!(loaded[0].1.events.len(), 2);
+        assert!(loaded[0].1.parked && loaded[0].1.events.is_empty());
+        assert_eq!(store.recent("old-id").unwrap().len(), 2);
         assert!(loaded[0].1.requests.contains("request"));
         assert_eq!(loaded[0].1.project_id.as_deref(), Some("project"));
         assert!(!legacy.exists());
@@ -909,6 +916,7 @@ mod tests {
             seq: 0,
             events: VecDeque::new(),
             bytes: 0,
+            parked: false,
             requests: Default::default(),
             last_prompt: Some(
                 json!({"seq":0,"kind":"user","data":{"text":"  exact prompt\n\n  ","requestId":"original"}}),
@@ -965,7 +973,7 @@ mod tests {
             let loaded = store.load().unwrap();
             assert_eq!(loaded.len(), 1);
             assert_eq!(loaded[0].1.status, "idle");
-            assert_eq!(loaded[0].1.events.len(), 1);
+            assert_eq!(store.recent("test").unwrap().len(), 1);
             // The recovery source persists independently of the visible event
             // window, which may no longer include a long-running turn's user event.
             assert_eq!(loaded[0].1.last_prompt, state.last_prompt);

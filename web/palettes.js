@@ -167,7 +167,8 @@ export function actionItems(state={},handlers={}){
     // The Session actions and Session options menus, entry for entry.
     if(handlers.rename)add('session-rename','Rename session','Current session','Change the name shown for this session',handlers.rename);
     if(handlers.sessionSettings)add('session-settings','Session settings','Current session','Timeouts for this session’s turns',handlers.sessionSettings);
-    if(handlers.archive)add('session-archive',active.archived?'Unarchive session':'Archive session','Current session','Stop the terminal and save its scrollback; harness work continues',handlers.archive);
+    if(handlers.archive)add('session-archive',active.archived?'Unarchive session':'Archive session','Current session',active.archived?'Restore the session; resume it to start the harness':'Stop the harness and terminal; history and scrollback remain',handlers.archive,
+      !active.archived&&['running','waiting','cancelling'].includes(status)?{disabled:true,reason:'Wait for this turn to finish'}:{});
     if(handlers.suspend)add('session-suspend','Suspend harness','Current session','Release the harness; history and workspace remain',handlers.suspend,
       !connected?{disabled:true,reason:'Not connected to this session yet'}:['suspended','closed'].includes(status)?{disabled:true,reason:'Already suspended'}:{});
     if(handlers.restart)add('session-restart','Restart harness','Current session','Fresh harness process with the current shell environment; the conversation continues',handlers.restart,

@@ -578,6 +578,7 @@ async fn tick(app: &App) -> Result<(), (StatusCode, String)> {
                     let d = s.data.lock().unwrap();
                     d.provider_session_id.is_some()
                         && !d.lifecycle.suspended
+                        && !d.lifecycle.archived
                         && !d.turn_active
                         && d.storage_error.is_none()
                 }

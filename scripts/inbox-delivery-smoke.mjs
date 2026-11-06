@@ -68,7 +68,7 @@ try{
    if(action==='disable')await api(path(id)+'/inbox-delivery',{enabled:false,requestId:crypto.randomUUID()},'PUT');
    if(action==='stop')await api(path(id)+'/stop',{});
    if(action==='suspend'){await api(path(id)+'/suspend',{});await api(path(id)+'/resume',{});await idle(id);}
-   if(action==='archive'){await api(path(id),{archived:true},'PATCH');await api(path(id),{archived:false},'PATCH');}
+   if(action==='archive'){await api(path(id),{archived:true},'PATCH');await api(path(id),{archived:false},'PATCH');await api(path(id)+'/resume',{});await idle(id);}
    if(action==='project'){await api(path(id)+'/project',{projectId:other.id});await api(path(id)+'/project',{projectId:p.id});}
    // Only the human disables; Stop and archive drop the queued batch, others hold or follow the session.
    assert.equal((await policy(id)).policy.enabled,action!=='disable',action);
