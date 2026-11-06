@@ -28,6 +28,10 @@ pub async fn index() -> Html<String> {
 
 pub async fn asset(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
     let (mime, body): (&str, &[u8]) = match name.as_str() {
+        "favicon.svg" => (
+            "image/svg+xml",
+            include_bytes!("../../../web/favicon.svg"),
+        ),
         "dashboard" => {
             let page = include_str!("../../../web/dashboard.html");
             return Html(page.replace("<!-- PWA_METADATA -->", metadata())).into_response();

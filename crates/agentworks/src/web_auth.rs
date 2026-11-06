@@ -30,6 +30,7 @@ const PUBLIC: &[&str] = &[
     "/api/auth/login",
     "/login.js",
     "/shell.css",
+    "/favicon.svg",
     "/manifest.webmanifest",
     "/service-worker.js",
     "/icon-192.png",
