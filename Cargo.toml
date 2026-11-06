@@ -22,6 +22,12 @@ edition = "2024"
 rust-version = "1.97.1"
 publish = false
 
+# Keep full debug info for this workspace, but limit dependency debug info to
+# file/line tables. This preserves useful backtraces without embedding the
+# full symbols for the large harness dependency trees in dev builds.
+[profile.dev.package."*"]
+debug = "line-tables-only"
+
 [workspace.dependencies]
 agent-client-protocol = { path = "vendor/agent-client-protocol-3.4.0", version = "=3.4.0", features = ["process", "unstable_session_fork", "unstable_subagents", "unstable_session_system_prompt"] }
 http = "1"
