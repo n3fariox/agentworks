@@ -266,7 +266,7 @@ pub async fn restore_in(
     match std::fs::symlink_metadata(&o.path) {
         Ok(_) => {
             // Adopt only the same repository's checkout of the recorded branch.
-            if verify(app, &o).await.is_ok() {
+            if verify(app, o).await.is_ok() {
                 return Ok(Some(
                     json!({"outcome":"adopted","path":o.path,"branch":o.branch,"population":"unknown (adopted)"}),
                 ));
@@ -334,7 +334,7 @@ pub async fn restore_in(
                 return Err(conflict(format!("Could not recreate worktree: {message}")));
             }
         };
-    verify(app, &o).await.map_err(conflict)?;
+    verify(app, o).await.map_err(conflict)?;
     Ok(Some(
         json!({"outcome":"restored","path":o.path,"branch":o.branch,"population":population}),
     ))
