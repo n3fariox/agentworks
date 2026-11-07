@@ -12,7 +12,8 @@ use std::{
 // v12 adds the manageAutomations grant and agent automation request ledger.
 // Recovery adds no tables and preserves every v10 schedule/slot ledger row.
 // v13 adds browser-independent PR tracking and its durable event journal.
-pub const SCHEMA_VERSION: i64 = 13;
+// v14 adds GitHub review ledgers. v15 separates script kinds and adds per-trigger baselines.
+pub const SCHEMA_VERSION: i64 = 15;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 #[derive(Serialize, Deserialize)]
@@ -350,11 +351,65 @@ impl Store {
         arm: Option<i64>,
         ledger: Option<&crate::automations::Ledger>,
     ) -> Result<()> {
+        self.save_automation_source(definition, arm, ledger, None)
+    }
+    pub fn save_automation_source(
+        &mut self,
+        definition: &crate::automations::Definition,
+        arm: Option<i64>,
+        ledger: Option<&crate::automations::Ledger>,
+        source: Option<&str>,
+    ) -> Result<()> {
         let tx = self.connection.transaction()?;
         if let Some(ledger) = ledger {
             record_automation_request(&tx, ledger)?;
         }
+        if let Some(source) = source {
+            let Some(crate::automations::Trigger::Script(binding)) =
+                definition.workflow.as_ref().map(|w| &w.trigger)
+            else {
+                return Err("Source requires a script automation".into());
+            };
+            let hook_exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM scripts WHERE name=?1 AND capability<>'automation')",
+                [&binding.script],
+                |r| r.get(0),
+            )?;
+            if hook_exists {
+                return Err("A hook script already uses this filename".into());
+            }
+            tx.execute("INSERT INTO scripts(name,capability,source,hash,enabled,builtin,updated) VALUES (?1,'automation',?2,?3,?5,0,?4) ON CONFLICT(name) DO UPDATE SET source=excluded.source,hash=excluded.hash,enabled=excluded.enabled,capability='automation',builtin=0,updated=excluded.updated",params![binding.script,source,agentworks_starlark::engine::content_hash(source),definition.updated as i64,definition.enabled])?;
+        }
+        if let Some(crate::automations::Trigger::Script(binding)) =
+            definition.workflow.as_ref().map(|w| &w.trigger)
+        {
+            tx.execute(
+                "UPDATE scripts SET enabled=?2 WHERE name=?1 AND capability='automation'",
+                params![binding.script, definition.enabled],
+            )?;
+        }
         tx.execute("INSERT INTO automations(id,definition) VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET definition=excluded.definition",params![definition.id,serde_json::to_string(definition)?])?;
+        // Edits cannot replay an old occurrence with new instructions/settings.
+        tx.execute("UPDATE automation_events SET status='skipped',detail='Definition changed or paused before dispatch' WHERE automation_id=?1 AND status='pending' AND (?2=0 OR revision<>?3)", params![definition.id,definition.enabled,definition.revision as i64])?;
+        if !definition.enabled
+            || !matches!(
+                definition.workflow.as_ref().map(|w| &w.trigger),
+                Some(crate::automations::Trigger::Script(_))
+            )
+        {
+            tx.execute(
+                "DELETE FROM automation_github_polls WHERE automation_id=?1",
+                [&definition.id],
+            )?;
+            tx.execute(
+                "DELETE FROM automation_trigger_baselines WHERE automation_id=?1",
+                [&definition.id],
+            )?;
+            tx.execute(
+                "DELETE FROM automation_github_baselines WHERE automation_id=?1",
+                [&definition.id],
+            )?;
+        }
         if definition.timed().is_none() {
             tx.execute(
                 "DELETE FROM automation_schedules WHERE automation_id=?1",
@@ -423,7 +478,18 @@ impl Store {
         Ok(())
     }
     pub fn detach_automation_project(&mut self, id: &str) -> Result<()> {
-        self.connection.execute("UPDATE automations SET definition=json_set(definition,'$.projectId',NULL) WHERE json_extract(definition,'$.projectId')=?1",[id])?;
+        // A review subscription must never fall back to projectless routing
+        // when its project is deleted. Timed/manual definitions keep their
+        // existing detachment behavior.
+        let tx = self.connection.transaction()?;
+        tx.execute("UPDATE automation_events SET status='skipped',detail='Review project deleted before dispatch' WHERE status='pending' AND automation_id IN (SELECT id FROM automations WHERE json_extract(definition,'$.projectId')=?1)",[id])?;
+        tx.execute("DELETE FROM automation_trigger_baselines WHERE automation_id IN (SELECT id FROM automations WHERE json_extract(definition,'$.projectId')=?1)",[id])?;
+        tx.execute("DELETE FROM automation_github_baselines WHERE automation_id IN (SELECT id FROM automations WHERE json_extract(definition,'$.projectId')=?1)",[id])?;
+        tx.execute("DELETE FROM automation_github_polls WHERE automation_id IN (SELECT id FROM automations WHERE json_extract(definition,'$.projectId')=?1)",[id])?;
+        tx.execute("UPDATE scripts SET enabled=0 WHERE capability='automation' AND name IN (SELECT json_extract(definition,'$.workflow.trigger.script') FROM automations WHERE json_extract(definition,'$.projectId')=?1)",[id])?;
+        tx.execute("UPDATE automations SET definition=json_set(definition,'$.enabled',json('false'),'$.revision',COALESCE(json_extract(definition,'$.revision'),0)+1) WHERE json_extract(definition,'$.projectId')=?1 AND json_extract(definition,'$.workflow.trigger.kind')='script'",[id])?;
+        tx.execute("UPDATE automations SET definition=json_set(definition,'$.projectId',NULL) WHERE json_extract(definition,'$.projectId')=?1",[id])?;
+        tx.commit()?;
         Ok(())
     }
     pub fn delete_automation(
@@ -435,7 +501,23 @@ impl Store {
         if let Some(ledger) = ledger {
             record_automation_request(&tx, ledger)?;
         }
+        tx.execute("DELETE FROM script_order WHERE name IN (SELECT json_extract(definition,'$.workflow.trigger.script') FROM automations WHERE id=?1)",[id])?;
+        tx.execute("DELETE FROM scripts WHERE capability='automation' AND name IN (SELECT json_extract(definition,'$.workflow.trigger.script') FROM automations WHERE id=?1)",[id])?;
         tx.execute("DELETE FROM automations WHERE id=?1", [id])?;
+        tx.execute(
+            "DELETE FROM automation_trigger_baselines WHERE automation_id=?1",
+            [id],
+        )?;
+        tx.execute(
+            "DELETE FROM automation_github_baselines WHERE automation_id=?1",
+            [id],
+        )?;
+        tx.execute(
+            "DELETE FROM automation_github_polls WHERE automation_id=?1",
+            [id],
+        )?;
+        tx.execute("UPDATE automation_event_actions SET status='skipped',detail='Automation deleted before dispatch' WHERE status='pending' AND event_id IN (SELECT id FROM automation_events WHERE automation_id=?1)",[id])?;
+        tx.execute("UPDATE automation_events SET status='skipped',detail='Definition deleted before dispatch' WHERE automation_id=?1 AND status='pending'", [id])?;
         tx.execute(
             "DELETE FROM automation_schedules WHERE automation_id=?1",
             [id],
@@ -447,8 +529,9 @@ impl Store {
     /// (`missed` or `skipped`, with a `detail`). Scheduled runs carry
     /// `scheduledFor`.
     pub fn automation_runs(&self, id: &str) -> Result<Vec<Value>> {
-        let mut stmt=self.connection.prepare("SELECT r.id,r.session_id,r.name,r.provider,r.created,r.status,s.slot,s.detail FROM automation_runs r LEFT JOIN automation_slots s ON s.automation_id=r.automation_id AND s.request_id=r.request_id WHERE r.automation_id=?1
+        let mut stmt=self.connection.prepare("SELECT r.id,r.session_id,r.name,r.provider,r.created,r.status,s.slot,s.detail FROM automation_runs r LEFT JOIN automation_slots s ON s.automation_id=r.automation_id AND s.request_id=r.request_id WHERE r.automation_id=?1 AND NOT EXISTS(SELECT 1 FROM automation_events e WHERE e.automation_id=r.automation_id AND r.request_id LIKE 'github:'||e.id||':%')
           UNION ALL SELECT 'slot:'||slot,NULL,NULL,NULL,created,outcome,slot,detail FROM automation_slots WHERE automation_id=?1 AND outcome<>'started'
+          UNION ALL SELECT 'event:'||id,target,NULL,NULL,created,status,NULL,'PR#'||json_extract(payload,'$.number')||': '||COALESCE(detail,'Awaiting dispatch') FROM automation_events WHERE automation_id=?1
           ORDER BY 5 DESC LIMIT 100")?;
         Ok(stmt.query_map([id],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"sessionId":r.get::<_,Option<String>>(1)?,"name":r.get::<_,Option<String>>(2)?,"provider":r.get::<_,Option<String>>(3)?,"created":r.get::<_,i64>(4)?,"status":r.get::<_,String>(5)?,"scheduledFor":r.get::<_,Option<i64>>(6)?,"detail":r.get::<_,Option<String>>(7)?})))?.collect::<rusqlite::Result<Vec<_>>>()?)
     }

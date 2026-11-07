@@ -5,13 +5,20 @@ use super::*;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionQuery {
-    host: String,
-    owner: String,
-    repo: String,
-    number: u64,
+    pub(crate) host: String,
+    pub(crate) owner: String,
+    pub(crate) repo: String,
+    pub(crate) number: u64,
 }
 
 pub async fn sessions(State(app): State<App>, Query(query): Query<SessionQuery>) -> ApiResult {
+    Ok(Json(json!({"sessions":matching_sessions(&app, &query)?})))
+}
+
+pub(crate) fn matching_sessions(
+    app: &App,
+    query: &SessionQuery,
+) -> Result<Vec<Value>, (StatusCode, String)> {
     if !valid_host(&query.host)
         || !valid_name(&query.owner)
         || !valid_name(&query.repo)
@@ -90,7 +97,7 @@ pub async fn sessions(State(app): State<App>, Query(query): Query<SessionQuery>)
                     .cmp(&b["session"]["id"].as_str())
             })
     });
-    Ok(Json(json!({"sessions":matches})))
+    Ok(matches)
 }
 
 #[cfg(test)]

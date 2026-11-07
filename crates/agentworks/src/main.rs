@@ -1326,6 +1326,15 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/automations/{id}",
             axum::routing::put(automations::update).delete(automations::delete),
         )
+        .route(
+            "/api/automations/preview-script",
+            post(automations::preview_script),
+        )
+        .route("/api/automations/{id}/script", get(automations::get_script))
+        .route(
+            "/api/automations/inspect-script",
+            post(automations::inspect_script),
+        )
         .route("/api/automations/{id}/run", post(automations::run))
         .route("/api/automations/{id}/runs", get(automations::runs))
         .route("/api/status", get(status))
