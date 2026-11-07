@@ -84,8 +84,8 @@ const TEMPLATES={progress:TEMPLATE,formatter:FORMATTER_TEMPLATE,chat:CHAT_TEMPLA
 
 export function setupParserScripts({$,api,el}){
   const root=$('parser-script-controls');
-  root.innerHTML=`<legend>Starlark scripts</legend>
-    <p class="field-note">Scripts register tool-progress, tool-header, inbox, chat-line and GitHub PR observation hooks. These hooks can call agent.set_badge / agent.clear_badge to update stored session badges. Enabled handlers run by priority (higher first, default 0), then filename, then registration order; the first matching handler for each hook wins, except chat line formatters and GitHub hooks, which all apply in that order. The list is shown in that order. Each script can register several kinds. Changes apply to future output and inbox deliveries; tool headers are recomputed for open sessions and visible session badges refresh.</p>
+  root.innerHTML=`<legend>Starlark hooks</legend>
+    <p class="field-note">Automation files are managed in the Automations tab. Hook scripts register tool-progress, tool-header, inbox, chat-line and GitHub PR observation hooks. These hooks can call agent.set_badge / agent.clear_badge to update stored session badges. Enabled handlers run by priority (higher first, default 0), then filename, then registration order; the first matching handler for each hook wins, except chat line formatters and GitHub hooks, which all apply in that order. The list is shown in that order. Each script can register several kinds. Changes apply to future output and inbox deliveries; tool headers are recomputed for open sessions and visible session badges refresh.</p>
     <div class="parser-script-list" role="list" data-list></div>
     <button type="button" class="text-button parser-script-new" data-new>＋ New script</button>
     <div class="field-note" role="status" data-note></div>
@@ -135,7 +135,8 @@ export function setupParserScripts({$,api,el}){
         for(const hook of script.hooks){
           const item=el('li');
           // A formatter without text_pattern runs no regex and sees everything.
-          if(hook.hook==='github')item.textContent=hook.events?'GitHub · '+hook.events.join(', '):'GitHub · all observations';
+          if(hook.hook==='github_trigger')item.textContent='Automation trigger · '+hook.trigger.name+' · '+hook.trigger.events.join(', ');
+          else if(hook.hook==='github')item.textContent=hook.events?'GitHub · '+hook.events.join(', '):'GitHub · all observations';
           else if(hook.pattern==null)item.textContent='Formatter · '+hook.message_type+' · '+(hook.message_type.startsWith('chat.')?'every line':'every message');
           else item.append(document.createTextNode(hook.hook==='progress'?'Tool progress · command: ':hook.hook==='tool_header'?'Tool header · title: ':'Formatter · '+hook.message_type+' · text: '),el('code','',hook.pattern));
           hooks.append(item);

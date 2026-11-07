@@ -7,6 +7,7 @@
 .recipe-step{display:grid;grid-template-columns:22px minmax(0,1fr) auto;gap:8px;align-items:start}
 .recipe-step-number{font-size:11px;color:var(--muted);text-align:right;padding-top:9px}
 .recipe-step textarea{width:100%;resize:vertical;min-height:64px;background:#15171c;border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px;font:12px/1.6 inherit}
+#automation-source-code{display:block;width:100%;min-height:280px;resize:vertical;background:#15171c;border:1px solid var(--border);color:var(--text);border-radius:8px;padding:10px;font:12px/1.6 ui-monospace,SFMono-Regular,monospace}
 .recipe-step-tools{display:flex;flex-direction:column;gap:2px}
 .recipe-step-tools .icon-button{width:28px;height:24px;font-size:13px}
 .recipe-step-tools .icon-button:disabled{opacity:.35;cursor:default}

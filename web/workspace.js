@@ -253,15 +253,18 @@ export function createWorkspace(hooks){
   const DAYS=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
   const triggerOf=def=>def?.workflow?.trigger||{kind:'manual'};
   const localZone=()=>{try{return Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';}catch{return 'UTC';}};
-  function describeTrigger(trigger){
+  function describeTrigger(trigger,registrations=[]){
+    if(trigger.kind==='script')return registrations.length?registrations.map(r=>`${r.host}/${r.repo} · ${r.events.map(event=>event==='pr.review_requested'?'review requested':'assigned to me').join(' or ')}`).join('; '):trigger.script;
     if(trigger.kind==='once')return `Once on ${trigger.at.replace('T',' at ')} (${trigger.timeZone})${trigger.afterRun==='delete'?', then delete it':''}`;
     if(trigger.kind!=='schedule')return 'I click Run now';
     const days=trigger.days.length===7?'Every day':trigger.days.join()==='1,2,3,4,5'?'Weekdays':trigger.days.map(d=>DAYS[d-1]).join(', ');
     return `${days} at ${trigger.at} (${trigger.timeZone})`;
   }
-  function triggerKindChanged(){const kind=$('automation-trigger').value;$('automation-schedule').hidden=kind==='manual';$('automation-days').hidden=kind!=='schedule';$('automation-date-field').hidden=$('automation-after-run-field').hidden=kind!=='once';}
+  function triggerKindChanged(){const kind=$('automation-trigger').value;$('automation-dialog').querySelector('.dialog-description').textContent=kind==='githubReview'?'Fill in the form to generate your automation’s .star file. You can preview and edit it before saving.':'When it starts, an agent session does each step in order.';$('automation-step-note').textContent=kind==='githubReview'?'These instructions and run settings are written into the generated script.':'Every step goes to one agent session as an ordered checklist and runs in a single turn, with the harness’s normal permissions. Steps get no separate status, retries or approval gates.';$('automation-schedule').hidden=!['schedule','once'].includes(kind);$('automation-review-fields').hidden=kind!=='githubReview';$('automation-days').hidden=kind!=='schedule';$('automation-date-field').hidden=$('automation-after-run-field').hidden=kind!=='once';}
   function scheduleFields(trigger){
     const scheduled=trigger.kind==='schedule',once=trigger.kind==='once',timed=scheduled||once;$('automation-trigger').value=trigger.kind;
+    if(trigger.kind==='script')$('automation-trigger').value='githubReview';
+    $('automation-review-host').value='github.com';$('automation-review-repo').value='';$('automation-review-account').value='';$('automation-review-assigned').checked=$('automation-review-requested').checked=true;$('automation-review-existing').checked=false;
     const tomorrow=new Date(Date.now()+86400000),pad=n=>String(n).padStart(2,'0');
     $('automation-date').value=once?trigger.at.slice(0,10):`${tomorrow.getFullYear()}-${pad(tomorrow.getMonth()+1)}-${pad(tomorrow.getDate())}`;$('automation-after-run').value=once?trigger.afterRun||'complete':'complete';
     $('automation-at').value=scheduled?trigger.at:once?trigger.at.slice(11):'09:00';$('automation-time-zone').value=timed?trigger.timeZone:localZone();$('automation-missed').value=timed?trigger.missed||'skip':'skip';triggerKindChanged();
@@ -270,21 +273,50 @@ export function createWorkspace(hooks){
   }
   function triggerInput(){
     const kind=$('automation-trigger').value;if(kind==='manual')return {kind};
+    if(kind==='githubReview')return null;
     if(kind==='once')return {kind,at:`${$('automation-date').value}T${$('automation-at').value}`,timeZone:$('automation-time-zone').value,missed:$('automation-missed').value,afterRun:$('automation-after-run').value};
     return {kind:'schedule',at:$('automation-at').value,timeZone:$('automation-time-zone').value,days:[...$('automation-days').querySelectorAll('input:checked')].map(box=>Number(box.value)),missed:$('automation-missed').value};
   }
   function recipeView(def){
     const box=el('div','automation-recipe-view'),when=el('p','recipe-row'),then=el('p','recipe-row'),list=el('ol','recipe-steps'),texts=stepsOf(def);
-    when.append(el('span','recipe-word','When'),el('span','recipe-trigger',describeTrigger(triggerOf(def))));
-    then.append(el('span','recipe-word','Do'),el('span','field-note',texts.length>1?`${texts.length} steps in order, in one agent turn`:'1 step'));
+    when.append(el('span','recipe-word','When'),el('span','recipe-trigger',describeTrigger(triggerOf(def),def.registrations||[])));
+    then.append(el('span','recipe-word','Do'),el('span','field-note',triggerOf(def).kind==='script'?'instructions supplied to the script':texts.length>1?`${texts.length} steps in order, in one agent turn`:'1 step'));
     for(const text of texts)list.append(el('li','automation-instructions',text));
     box.append(when,then,list);return box;
   }
-  function automationEditor(def=null){
-    editorGeneration++;editing=def?.id||null;automationOptions(def?.provider);automationHosts(def?.hostId||hooks.getActive()?.hostId||'local');$('automation-dialog-title').textContent=def?'Edit automation':'New automation';
+  let scriptCustomized=false,scriptFilename=null,scriptLoading=false,scriptEditorToken=0,scriptSettings=null,scriptFormName='',importFilename=null;
+  function reviewForm(){return {host:$('automation-review-host').value.trim(),repo:$('automation-review-repo').value.trim(),account:$('automation-review-account').value.trim(),assigned:$('automation-review-assigned').checked,reviewRequested:$('automation-review-requested').checked,includeExisting:$('automation-review-existing').checked,settings:{...(scriptSettings||{}),provider:$('automation-provider').value,model:$('automation-model').value||null,modelProvider:automationProfile()||null,projectId:$('automation-project').value,hostId:$('automation-host').value,cwd:$('automation-directory').value,title:scriptSettings&&$('automation-name').value===scriptFormName?scriptSettings.title:$('automation-name').value},steps:steps.map(text=>({kind:'agent',text}))};}
+  function scriptNote(){ $('automation-source-name').textContent=scriptFilename||'A new automation .star file will be created on save.';$('automation-source-note').textContent=scriptCustomized?'Custom script: saved as written. Form changes will not replace it.':'Generated from this form. Saving regenerates this preview from the current values.';$('automation-regenerate-script').hidden=!scriptCustomized; }
+  async function generateScript(){const form=JSON.stringify(reviewForm()),token=scriptEditorToken,before=$('automation-source-code').value;const result=await api('/api/automations/preview-script',{method:'POST',body:form});if(token!==scriptEditorToken||form!==JSON.stringify(reviewForm())||before!==$('automation-source-code').value)throw new Error('The form or script changed while generating; preview again.');$('automation-source-code').value=result.source;scriptCustomized=false;scriptNote();return result.source;}
+  function applyScriptFile(result,def,showSource){
+    scriptFilename=result.name;scriptCustomized=!result.generated;$('automation-source-code').value=result.source;
+    if(result.form){const form=result.form,settings=form.settings;scriptSettings=settings;scriptFormName=$('automation-name').value;
+      $('automation-review-host').value=form.host;$('automation-review-repo').value=form.repo;$('automation-review-account').value=form.account;$('automation-review-assigned').checked=form.assigned;$('automation-review-requested').checked=form.reviewRequested;$('automation-review-existing').checked=form.includeExisting;
+      steps=form.steps.map(step=>step.text);renderSteps();automationOptions(settings.provider);automationHosts(settings.hostId);$('automation-project').value=settings.projectId;$('automation-directory').value=settings.cwd;$('automation-model').value=settings.model||'';automationProfiles(settings.modelProvider||'');
+    }
+    scriptNote();$('automation-source-panel').hidden=!(showSource||scriptCustomized);
+    if(result.error)$('automation-error').textContent=result.error;
+  }
+  async function loadAutomationScript(def,generation,showSource){scriptLoading=true;$('save-automation').disabled=true;
+    try{const result=await api(`/api/automations/${def.id}/script`);if(generation!==scriptEditorToken)return;applyScriptFile(result,def,showSource);}
+    catch(error){if(generation===scriptEditorToken)$('automation-error').textContent=error.message;}finally{if(generation===scriptEditorToken){scriptLoading=false;$('save-automation').disabled=false;}}
+  }
+  $('import-automation').onclick=()=>$('import-automation-file').click();
+  $('import-automation-file').onchange=async()=>{const file=$('import-automation-file').files[0];if(!file)return;$('import-automation-file').value='';
+    try{const source=await file.text(),result=await api('/api/automations/inspect-script',{method:'POST',body:JSON.stringify({name:file.name,source})});
+      automationEditor();$('automation-trigger').value='githubReview';triggerKindChanged();$('automation-name').value=result.form.settings.title||file.name.replace(/\.star$/,'');$('automation-enabled').checked=false;importFilename=file.name;applyScriptFile(result,null,true);
+    }catch(error){hooks.toast(error.message);}
+  };
+  $('automation-source-code').oninput=()=>{scriptCustomized=true;scriptNote();};
+  $('automation-preview-script').onclick=async()=>{try{if(!scriptCustomized)await generateScript();$('automation-source-panel').hidden=false;$('automation-source-code').scrollIntoView({block:'nearest'});}catch(error){$('automation-error').textContent=error.message;}};
+  $('automation-regenerate-script').onclick=async()=>{try{await generateScript();}catch(error){$('automation-error').textContent=error.message;}};
+  $('automation-download-script').onclick=async()=>{try{if(!scriptCustomized)await generateScript();const blob=new Blob([$('automation-source-code').value],{type:'text/plain;charset=utf-8'}),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=scriptFilename||'github_review.star';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(error){$('automation-error').textContent=error.message;}};
+  function automationEditor(def=null,showSource=false){
+    editorGeneration++;const generation=++scriptEditorToken;scriptLoading=false;scriptCustomized=false;scriptSettings=null;scriptFormName='';importFilename=null;scriptFilename=null;$('automation-source-code').value='';$('automation-source-panel').hidden=true;editing=def?.id||null;automationOptions(def?.provider);automationHosts(def?.hostId||hooks.getActive()?.hostId||'local');$('automation-dialog-title').textContent=def?'Edit automation':'New automation';
     $('automation-name').value=def?.name||'';$('automation-model').value=def?.model||'';
     $('automation-project').value=def?.projectId||state.projectId||'';$('automation-directory').value=def?.cwd||(hooks.getActive()?.hostId===$('automation-host').value?hooks.getActive().cwd:$('automation-host').value==='local'?directory():catalog.hosts.find(h=>h.id===$('automation-host').value)?.roots?.[0]||'');steps=stepsOf(def);renderSteps();scheduleFields(triggerOf(def));$('automation-enabled').checked=def?.enabled??true;automationProfiles(def?.modelProvider||'');
     $('delete-automation').hidden=!def;$('automation-error').textContent='';$('automation-models').replaceChildren();$('automation-load-models').disabled=false;$('automation-dialog').showModal();
+    if(triggerOf(def).kind==='script')loadAutomationScript(def,generation,showSource);
   }
   async function loadAutomations(){
     const gen=++automationGeneration;
@@ -295,25 +327,25 @@ export function createWorkspace(hooks){
   function renderAutomations(){
     const list=$('automation-list');list.replaceChildren();const visible=visibleDefinitions();
     if(!visible.some(d=>d.id===state.automationId))state.automationId=visible[0]?.id||null;
-    for(const def of visible){const button=el('button','automation-item'+(def.id===state.automationId?' selected':''));button.append(el('strong','',def.name),el('small','',`${hooks.labels[def.provider]} · ${def.completed?'Completed':def.enabled?{schedule:'Scheduled',once:'Once'}[triggerOf(def).kind]||'Manual':'Paused'} · ${stepsOf(def).length===1?'1 step':stepsOf(def).length+' steps'}`));button.onclick=()=>{state.automationId=def.id;save();renderAutomations();};list.append(button);}
+    for(const def of visible){const button=el('button','automation-item'+(def.id===state.automationId?' selected':''));button.append(el('strong','',def.name),el('small','',`${hooks.labels[def.provider]||'Script'} · ${def.completed?'Completed':def.enabled?{schedule:'Scheduled',once:'Once',script:'Script trigger'}[triggerOf(def).kind]||'Manual':'Paused'} · ${triggerOf(def).kind==='script'?(def.registrations?.length||1)+' trigger(s)':stepsOf(def).length===1?'1 step':stepsOf(def).length+' steps'}`));button.onclick=()=>{state.automationId=def.id;save();renderAutomations();};list.append(button);}
     if(!visible.length)list.append(el('p','field-note','No automations in this project yet.'));
     const def=visible.find(d=>d.id===state.automationId);renderAutomation(def);if(def)loadRuns(def.id);
   }
   function renderAutomation(def){
     const area=$('automation-detail');area.replaceChildren();if(!def){area.append(el('div','workspace-empty','Save repeatable instructions, then start a manual run.'));return;}
-    const header=el('div','automation-detail-header'),titles=el('div');const kind=triggerOf(def).kind,scheduled=kind!=='manual';titles.append(el('div','workspace-eyebrow',{schedule:'SCHEDULED AUTOMATION',once:'ONE-TIME AUTOMATION'}[kind]||'MANUAL AUTOMATION'),el('h1','',def.name));
-    const actions=el('div','workspace-action-row'),edit=el('button','text-button','Edit'),run=el('button','primary','Run now ↗');edit.onclick=()=>automationEditor(def);run.id='run-automation';run.disabled=!def.enabled||runStarting;run.onclick=()=>runAutomation(def);actions.append(edit,run);header.append(titles,actions);area.append(header);
-    const details=el('div','automation-execution');details.append(el('p','',`${hooks.labels[def.provider]} · ${def.model||'Host default'} · ${catalog.hosts.find(h=>h.id===def.hostId)?.name||def.hostId||'Local'}`));
+    const header=el('div','automation-detail-header'),titles=el('div');const kind=triggerOf(def).kind,scheduled=kind!=='manual';titles.append(el('div','workspace-eyebrow',{schedule:'SCHEDULED AUTOMATION',once:'ONE-TIME AUTOMATION',script:'SCRIPT AUTOMATION'}[kind]||'MANUAL AUTOMATION'),el('h1','',def.name));
+    const actions=el('div','workspace-action-row'),edit=el('button','text-button','Edit'),run=el('button','primary','Run now ↗');edit.onclick=()=>automationEditor(def);run.id='run-automation';run.hidden=kind==='script';run.disabled=!def.enabled||runStarting;run.onclick=()=>runAutomation(def);actions.append(edit,run);if(kind==='script'){const source=el('button','text-button','View .star');source.onclick=()=>automationEditor(def,true);actions.append(source);}header.append(titles,actions);area.append(header);
+    const details=el('div','automation-execution');details.append(el('p','',`${hooks.labels[def.provider]||'Script'} · ${def.model||'Host default'} · ${catalog.hosts.find(h=>h.id===def.hostId)?.name||def.hostId||'Local'}`));
     if(def.modelProvider){const status=def.modelProviderStatus||{};details.append(status.available?el('p','field-note',`Model provider: ${status.name} · ${status.keyConfigured?'API key stored (checked when a run contacts the provider)':'No API key stored'}`):el('p','error-text',`Model provider unavailable: ${status.detail||'unknown profile'}. Runs will not start until you choose another.`));}
-    if(def.createdBy)details.append(el('p','field-note',`Created by agent: ${def.createdBy.title}. Scheduled runs need its current Manage automations and Start sessions grants.`));details.append(el('p','field-note',def.cwd),el('span','automation-badge',def.completed?'Completed '+new Date(def.completed).toLocaleString():!def.enabled?'Paused':!scheduled?'Manual trigger':def.nextRun?'Next run '+new Date(def.nextRun).toLocaleString():'No upcoming run'));area.append(details);
+    if(def.createdBy)details.append(el('p','field-note',`Created by agent: ${def.createdBy.title}. Unattended runs need its current Manage automations and Start sessions grants; GitHub review triggers also need Prompt sessions.`));details.append(el('p','field-note',def.cwd),el('span','automation-badge',def.completed?'Completed '+new Date(def.completed).toLocaleString():!def.enabled?'Paused':!scheduled?'Manual trigger':kind==='script'?'Watching script trigger':def.nextRun?'Next run '+new Date(def.nextRun).toLocaleString():'No upcoming run'));if(def.scriptError)details.append(el('p','error-text',def.scriptError));if(kind==='script'&&def.githubPolling?.error)details.append(el('p','error-text',def.githubPolling.error));area.append(details);
     area.append(el('h2','','Recipe'),recipeView(def),el('h2','','Recent runs'));
     const rows=el('div');rows.id='automation-runs';rows.append(el('p','field-note','Loading runs…'));area.append(rows);
   }
   async function loadRuns(id){
     try{const result=await api(`/api/automations/${id}/runs`);if(state.automationId!==id||!$('automation-runs'))return;runs=result;
       const area=$('automation-runs');area.replaceChildren();
-      for(const run of runs){const row=el('button','automation-run');row.disabled=!run.sessionId;const title=el('span');title.append(el('strong','',run.scheduledFor?'Scheduled run':'Manual run'),el('small','',new Date(run.scheduledFor||run.created).toLocaleString()));if(run.detail)title.append(el('small','',run.detail));row.append(title,el('span','run-status '+run.status,run.status==='waiting'?'Needs approval':run.status));row.onclick=async()=>{try{const snapshot=await api('/api/sessions/'+run.sessionId);hooks.selectSession(snapshot.session);}catch(error){hooks.toast(error.message);}};area.append(row);}
-      if(!runs.length)area.append(el('p','field-note','No runs yet. Run now starts a new agent session.'));
+      for(const run of runs){const row=el('button','automation-run');row.disabled=!run.sessionId;const title=el('span');title.append(el('strong','',run.id?.startsWith('event:')?'GitHub review request':run.scheduledFor?'Scheduled run':'Manual run'),el('small','',new Date(run.scheduledFor||run.created).toLocaleString()));if(run.detail)title.append(el('small','',run.detail));row.append(title,el('span','run-status '+run.status,run.status==='waiting'?'Needs approval':run.status));row.onclick=async()=>{try{const snapshot=await api('/api/sessions/'+run.sessionId);hooks.selectSession(snapshot.session);}catch(error){hooks.toast(error.message);}};area.append(row);}
+      if(!runs.length)area.append(el('p','field-note',triggerOf(definitions.find(d=>d.id===id)).kind==='script'?'No script events observed yet.':'No runs yet. Run now starts a new agent session.'));
       const button=$('run-automation');if(button)button.disabled=runStarting||!definitions.find(d=>d.id===id)?.enabled||runs.some(r=>['starting','resuming','running','waiting','cancelling','configuring'].includes(r.status));
     }catch(error){if(state.automationId===id&&$('automation-runs'))$('automation-runs').textContent=error.message;}
   }
@@ -366,10 +398,10 @@ export function createWorkspace(hooks){
     catch(error){if(token===editorGeneration)$('automation-error').textContent=error.message;}finally{button.disabled=false;}
   };
   $('automation-form').onsubmit=async event=>{event.preventDefault();$('save-automation').disabled=true;$('automation-error').textContent='';
-    try{const def=await api(editing?'/api/automations/'+editing:'/api/automations',{method:editing?'PUT':'POST',body:JSON.stringify({name:$('automation-name').value,provider:$('automation-provider').value,model:$('automation-model').value||null,...(automationProfile()?{modelProvider:automationProfile()}:{}),projectId:$('automation-project').value||null,...($('automation-host').value!=='local'?{hostId:$('automation-host').value}:{}),cwd:$('automation-directory').value,workflow:{version:1,trigger:triggerInput(),steps:steps.map(text=>({kind:'agent',text}))},enabled:$('automation-enabled').checked})});state.projectId=def.projectId;state.locationKey=def.locationId;state.automationId=def.id;await hooks.refreshSessions();$('automation-dialog').close();showView('automations');}
+    try{if(scriptLoading)throw new Error('The saved script is still loading');const source=$('automation-trigger').value==='githubReview'?(scriptCustomized?$('automation-source-code').value:await generateScript()):null;const body=source!==null?{name:$('automation-name').value,enabled:$('automation-enabled').checked,source,...(importFilename?{scriptName:importFilename}:{})}:{name:$('automation-name').value,provider:$('automation-provider').value,model:$('automation-model').value||null,...(automationProfile()?{modelProvider:automationProfile()}:{}),projectId:$('automation-project').value||null,...($('automation-host').value!=='local'?{hostId:$('automation-host').value}:{}),cwd:$('automation-directory').value,workflow:{version:1,trigger:triggerInput(),steps:steps.map(text=>({kind:'agent',text}))},enabled:$('automation-enabled').checked};const def=await api(editing?'/api/automations/'+editing:'/api/automations',{method:editing?'PUT':'POST',body:JSON.stringify(body)});state.projectId=def.projectId;state.locationKey=def.locationId;state.automationId=def.id;await hooks.refreshSessions();$('automation-dialog').close();showView('automations');}
     catch(error){$('automation-error').textContent=error.message;}finally{$('save-automation').disabled=false;}
   };
-  $('delete-automation').onclick=async()=>{if(!editing||!confirm('Delete this automation definition? Its run sessions and history will remain.'))return;try{await api('/api/automations/'+editing,{method:'DELETE'});$('automation-dialog').close();loadAutomations();}catch(error){$('automation-error').textContent=error.message;}};
+  $('delete-automation').onclick=async()=>{if(!editing||!confirm('Delete this automation and its script? Existing sessions and run history will remain.'))return;try{await api('/api/automations/'+editing,{method:'DELETE'});$('automation-dialog').close();loadAutomations();}catch(error){$('automation-error').textContent=error.message;}};
   return {
     sync(next,list){catalog=next;sessions=list;contextControls();if(state.view==='automations')loadAutomations();},
     sessionSelected,showView,sideFiles,githubContext:githubBrowser.context,

@@ -422,6 +422,7 @@ pub struct Compiled {
     pub message_type: Option<String>,
     /// Exact event names routed before evaluation; None means all GitHub events.
     pub github_events: Option<Vec<String>>,
+    pub automation_trigger: Option<Json>,
     pub compile_time: Duration,
 }
 
@@ -685,6 +686,7 @@ impl Engine {
             text_pattern: None,
             message_type: None,
             github_events: None,
+            automation_trigger: None,
             compile_time: started.elapsed(),
         });
         self.cache

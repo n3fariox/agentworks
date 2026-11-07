@@ -1,6 +1,6 @@
 import {test,expect} from '@playwright/test';
 import {spawn} from 'node:child_process';
-import {mkdtemp,mkdir,rm} from 'node:fs/promises';
+import {mkdtemp,mkdir,rm,readFile,writeFile} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 import {DatabaseSync} from 'node:sqlite';
 
@@ -17,7 +17,7 @@ async function api(path,body,method){const result=await call(path,body,method);e
 async function startServer(){
   exited=false;log='';
   server=spawn(process.env.AGENTWORKS_BIN||resolve('target/debug/agentworks'),[],{env:{...process.env,
-    AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:port,AGENTWORKS_ROOTS:fixture,
+    PATH:join(fixture,'bin')+':'+process.env.PATH,AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:port,AGENTWORKS_ROOTS:fixture,
     AGENTWORKS_CATALOG_PATH:join(fixture,'catalog.json'),AGENTWORKS_DB_PATH:join(fixture,'sessions.sqlite3'),AGENTWORKS_DEMO_STATE_DIR:join(fixture,'demo')},stdio:['ignore','pipe','pipe']});
   server.on('error',e=>{log+=e.message;exited=true;});server.on('exit',()=>exited=true);
   for(const stream of [server.stdout,server.stderr])stream.on('data',s=>{log+=s.toString();});
@@ -34,6 +34,7 @@ async function stopServer(){
 const recipe=steps=>({version:1,trigger:{kind:'manual'},steps:steps.map(text=>({kind:'agent',text}))});
 test.beforeAll(async()=>{
   await mkdir('.cache',{recursive:true});fixture=await mkdtemp(resolve('.cache/workflow-'));
+  await mkdir(join(fixture,'bin'));await writeFile(join(fixture,'bin/gh'),'#!/bin/sh\nexit 1\n',{mode:0o755});
   await startServer();
 });
 test.afterAll(async()=>{
@@ -281,4 +282,78 @@ test('a one-time occurrence is handled once, then completes or deletes the defin
   expect(again.enabled).toBe(true);expect(again.completed).toBeUndefined();expect(again.nextRun).toBeGreaterThan(Date.now());
   await api('/api/automations/'+keep.id,undefined,'DELETE');
   await api('/api/sessions/'+late.sessionId,undefined,'DELETE');
+});
+
+
+test('GitHub form generates the saved star file and preserves custom source until explicit regeneration',async({page})=>{
+  const project=await api('/api/projects',{name:'Generated review tests'});
+  await stopServer();const path=join(fixture,'catalog.json'),catalog=JSON.parse(await readFile(path,'utf8'));
+  catalog.github={...(catalog.github||{}),connections:[{host:'ghe.example.com',login:'reviewer',enabled:true}]};
+  await writeFile(path,JSON.stringify(catalog));await startServer();
+  await page.setViewportSize({width:1280,height:1100});await page.goto('/?view=automations');await page.locator('#nav-automations').click();await page.locator('#new-automation').click();
+  await page.locator('#automation-name').fill('Review incoming PRs');await page.locator('#automation-provider').selectOption('demo');await page.locator('#automation-directory').fill(fixture);await page.locator('#automation-project').selectOption(project.id);
+  await page.getByLabel('Step 1 instructions').fill('Review correctness; leave draft comments.');await page.locator('#add-automation-step').click();await page.getByLabel('Step 2 instructions').fill('Report the findings.');
+  await page.locator('#automation-trigger').selectOption('githubReview');
+  await page.locator('#automation-review-host').fill('ghe.example.com');await page.locator('#automation-review-repo').fill('team/service');await page.locator('#automation-review-account').fill('reviewer');await page.locator('#automation-review-assigned').uncheck();await page.locator('#automation-enabled').uncheck();
+  await page.locator('#automation-dialog').evaluate(n=>n.scrollTop=0);await page.screenshot({path:'.cache/automation-form-generates-star-20261105.png'});
+  await page.locator('#automation-preview-script').click();await expect(page.locator('#automation-source-panel')).toBeVisible();
+  const generated=await page.locator('#automation-source-code').inputValue();
+  await writeFile(resolve('.cache/github-review-generated-20261105.star'),generated);
+  expect(generated).toContain('agent.register_github_trigger(');expect(generated).toContain('settings = SETTINGS');expect(generated).toContain('"ghe.example.com"');expect(generated).toContain('events = ["pr.review_requested"]');expect(generated).not.toContain('parameter(');
+  await page.locator('#save-automation').click();await expect(page.locator('#automation-dialog')).toBeHidden();
+  let def=(await api('/api/automations')).find(d=>d.name==='Review incoming PRs');
+  expect(def.workflow.trigger.script).toBe(`automation_${def.id}.star`);expect(def.workflow.trigger.parameters).toEqual({});expect(def.enabled).toBe(false);
+  let file=await api(`/api/automations/${def.id}/script`);expect(file.source).toBe(generated);expect(file.generated).toBe(true);expect(file.form.steps).toHaveLength(2);
+  await expect(page.locator('#automation-detail h1')).toHaveText('Review incoming PRs');
+  await page.screenshot({path:'.cache/github-automation-added-desktop-20261106.png'});
+  expect((await api('/api/scripts')).scripts.some(script=>script.name===file.name)).toBe(false);
+  await page.locator('#nav-settings').click();await page.locator('#settings-tab-parsers').click();
+  await expect(page.locator(`[data-script-entry="${file.name}"]`)).toHaveCount(0);await page.screenshot({path:'.cache/github-automation-separated-hooks-20261106.png'});await page.locator('#dismiss-settings').click();
+  await expect(page.locator('#run-automation')).toBeHidden();await page.locator('#automation-detail').getByRole('button',{name:'View .star',exact:true}).click();await expect(page.locator('#automation-source-code')).toHaveValue(generated);
+  const downloadEvent=page.waitForEvent('download');await page.locator('#automation-download-script').click();const download=await downloadEvent;expect(download.suggestedFilename()).toBe(`automation_${def.id}.star`);expect(await readFile(await download.path(),'utf8')).toBe(generated);
+  const custom=generated+'\n# Custom routing policy: preserve this edit.\n';await page.locator('#automation-source-code').fill(custom);await expect(page.locator('#automation-source-note')).toContainText('Custom script');
+  await page.locator('#automation-review-repo').fill('team/form-change-must-not-win');await page.locator('#save-automation').click();await expect(page.locator('#automation-dialog')).toBeHidden();
+  file=await api(`/api/automations/${def.id}/script`);expect(file.source).toBe(custom);expect(file.generated).toBe(false);expect(file.form.repo).toBe('team/service');
+  await page.locator('#automation-detail').getByRole('button',{name:'Edit',exact:true}).click();await expect(page.locator('#automation-source-code')).toHaveValue(custom);await expect(page.getByLabel('Step 2 instructions')).toHaveValue('Report the findings.');
+  await page.locator('#automation-review-repo').fill('team/regenerated');await page.locator('#automation-review-existing').check();await page.locator('#automation-regenerate-script').click();await expect(page.locator('#automation-source-note')).toContainText('Generated from this form');
+  expect(await page.locator('#automation-source-code').inputValue()).not.toContain('# Custom routing policy');
+  await page.locator('#save-automation').click();await expect(page.locator('#automation-dialog')).toBeHidden();
+  file=await api(`/api/automations/${def.id}/script`);expect(file.form.repo).toBe('team/regenerated');expect(file.form.includeExisting).toBe(true);expect(file.generated).toBe(true);
+  await page.locator('#automation-detail').getByRole('button',{name:'View .star',exact:true}).click();await expect(page.locator('#automation-source-code')).toHaveValue(file.source);await page.locator('#automation-source-code').fill(file.source+'\ndef broken syntax\n');await page.locator('#save-automation').click();await expect(page.locator('#automation-error')).not.toBeEmpty();expect((await api(`/api/automations/${def.id}/script`)).source).toBe(file.source);
+  await page.locator('#dismiss-automation').click();
+  const extended=file.source.replace('"role": None','"role": "review-role"').replace('"title": "Review incoming PRs"','"title": None');
+  await api('/api/automations/'+def.id,{name:def.name,enabled:false,source:extended},'PUT');
+  expect((await api(`/api/automations/${def.id}/script`)).generated).toBe(true);
+  await page.locator('#automation-detail').getByRole('button',{name:'Edit',exact:true}).click();await expect(page.getByLabel('Step 2 instructions')).toHaveValue('Report the findings.');await expect(page.locator('#save-automation')).toBeEnabled();await page.locator('#save-automation').click();await expect(page.locator('#automation-dialog')).toBeHidden();
+  expect((await api(`/api/automations/${def.id}/script`)).source).toBe(extended);
+  await api('/api/automations/'+def.id,undefined,'DELETE');
+});
+
+
+test('automation imports and source edits own entries while hook settings cannot manage automation files',async({page})=>{
+  const project=await api('/api/projects',{name:'Imported automation tests'});
+  const form={host:'ghe.example.com',repo:'team/service',account:'reviewer',settings:{provider:'demo',model:null,cwd:fixture,projectId:project.id,hostId:'local',title:'Handwritten review'},steps:[{kind:'agent',text:'Instructions from the source file.'}]};
+  const source=(await api('/api/automations/preview-script',form)).source;
+  await page.goto('/?view=automations');await page.locator('#nav-automations').click();await expect(page.locator('#import-automation')).toBeVisible();
+  await page.locator('#import-automation-file').setInputFiles({name:'handwritten_review.star',mimeType:'text/plain',buffer:Buffer.from(source)});
+  await expect(page.locator('#automation-dialog')).toBeVisible();await expect(page.locator('#automation-source-code')).toHaveValue(source);await expect(page.locator('#automation-enabled')).not.toBeChecked();
+  await page.locator('#save-automation').click();await expect(page.locator('#automation-dialog')).toBeHidden();
+  let def=(await api('/api/automations')).find(d=>d.workflow?.trigger?.script==='handwritten_review.star');expect(def.name).toBe('Handwritten review');expect(def.enabled).toBe(false);
+  await expect(page.locator('#automation-detail h1')).toHaveText('Handwritten review');await expect(page.locator('#automation-detail .recipe-trigger')).toContainText('ghe.example.com/team/service');
+  await page.screenshot({path:'.cache/automation-imported-and-owned-20261106.png'});
+  expect((await api('/api/scripts')).scripts.some(s=>s.name==='handwritten_review.star')).toBe(false);
+  const hook='load("@agentworks//github.star", "GithubContext")\ndef hook(ctx: GithubContext, event: dict[str, typing.Any]) -> None:\n    return None\nagent.register_github(hook)\n';
+  for(const [suffix,body,method] of [['',{source:hook},'PUT'],['/enabled',{enabled:true},'PUT'],['/priority',{priority:1},'PUT'],['',undefined,'DELETE']])expect((await call('/api/scripts/handwritten_review.star'+suffix,body,method)).status).toBe(409);
+  expect((await call('/api/scripts/sneaky.star',{source},'PUT')).status).toBe(400);
+  expect((await call('/api/automations/inspect-script',{name:'mixed.star',source:source+'\n'+hook})).status).toBe(400);
+  expect((await call('/api/automations',{source:hook,enabled:false,scriptName:'wrong_kind.star'})).status).toBe(400);
+  const edited=source.replace('Handwritten review','Renamed from source').replace('Instructions from the source file.','Updated file instructions.');
+  await api('/api/automations/'+def.id,{source:edited,enabled:false},'PUT');await page.reload();await page.locator('#nav-automations').click();
+  await expect(page.locator('#automation-detail h1')).toHaveText('Renamed from source');await expect(page.locator('#automation-detail')).toContainText('Updated file instructions.');
+  const multi=edited+'\nagent.register_github_trigger(review_requested, name="also", host="ghe.example.com", repo="team/service", account="reviewer", events=["pr.review_requested"], settings=SETTINGS, instructions=instruction_steps(STEPS), steps=STEPS)\n';
+  await api('/api/automations/'+def.id,{source:multi,enabled:false},'PUT');await page.reload();await page.locator('#nav-automations').click();
+  def=(await api('/api/automations')).find(d=>d.id===def.id);expect(def.registrations).toHaveLength(2);await expect(page.locator('.automation-item')).toHaveCount(1);await expect(page.locator('.automation-item small')).toContainText('2 trigger(s)');
+  await page.locator('#automation-detail').getByRole('button',{name:'Edit',exact:true}).click();await expect(page.locator('#automation-source-code')).toHaveValue(multi);
+  page.once('dialog',dialog=>dialog.accept());await page.locator('#delete-automation').click();await expect(page.locator('#automation-dialog')).toBeHidden();await expect(page.locator('.automation-item')).toHaveCount(0);
+  expect((await api('/api/automations')).some(d=>d.id===def.id)).toBe(false);expect((await call(`/api/automations/${def.id}/script`)).status).toBe(404);expect(await api(`/api/automations/${def.id}/runs`)).toEqual([]);
 });

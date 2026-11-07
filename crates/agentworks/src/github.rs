@@ -1,6 +1,7 @@
 //! GitHub context. Git metadata may come from workers; credentials and API
 //! traffic always belong to this server's OS user. No agent write tools here.
 mod browser;
+mod review_requests;
 mod session_pivot;
 use crate::{ApiResult, App, fail, session};
 use axum::{
@@ -9,9 +10,11 @@ use axum::{
     http::StatusCode,
 };
 pub use browser::{pulls, save_polling};
+pub(crate) use review_requests::review_requests;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 pub use session_pivot::sessions;
+pub(crate) use session_pivot::{SessionQuery, matching_sessions};
 use std::{
     collections::HashMap,
     process::Stdio,
@@ -73,6 +76,7 @@ pub struct Hub {
 }
 #[derive(Default)]
 struct HubState {
+    review_requests: HashMap<String, (Instant, Value)>,
     discovery: Option<(Instant, Result<Vec<Account>, String>)>,
     snapshots: HashMap<String, (Instant, Value)>,
     failures: HashMap<String, (u64, String)>,
@@ -387,6 +391,7 @@ pub async fn save_connection(
     hub.snapshots.clear();
     hub.prs.clear();
     hub.browser.clear();
+    hub.review_requests.clear();
     hub.failures.clear();
     Ok(Json(json!({"ok":true})))
 }

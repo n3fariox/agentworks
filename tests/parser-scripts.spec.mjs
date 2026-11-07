@@ -135,7 +135,7 @@ test('one arbitrarily named script exposes progress and formatter registrations'
   await row(panel,'a_handlers.star').getByRole('button',{name:'Edit a_handlers.star'}).click();
   await panel.locator('[data-source]').fill(saved.source.replace(/^agent\.register.*$/gm,''));
   await panel.getByRole('button',{name:'Save and check'}).click();
-  await expect(panel.locator('[data-error]')).toContainText('no hooks registered');
+  await expect(panel.locator('[data-error]')).toContainText('no handlers registered');
   expect((await script('a_handlers.star')).source).toBe(saved.source);
   await panel.getByRole('button',{name:'Cancel'}).click();
   await api('/api/scripts/a_handlers.star',undefined,'DELETE');

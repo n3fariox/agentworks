@@ -333,6 +333,23 @@ pub async fn enqueue(
     Json(req): Json<Enqueue>,
 ) -> ApiResult {
     let _run = app.run_lock.lock().await;
+    enqueue_locked(&app, &id, &req.text, &req.request_id, false)
+}
+
+/// Called under run_lock. Automated inputs use the same durable bindings,
+/// bounds and pause gates as queued human inputs. An idle session may consume
+/// the new item without a separate click; existing pauses are never cleared.
+pub(crate) fn enqueue_locked(
+    app: &App,
+    id: &str,
+    text: &str,
+    request_id: &str,
+    automated: bool,
+) -> ApiResult {
+    let req = Enqueue {
+        text: text.into(),
+        request_id: request_id.into(),
+    };
     let s = session(&app, &id)?;
     validate(&req.text)?;
     if req.request_id.is_empty() || req.request_id.len() > MAX_REQUEST_ID {
@@ -367,8 +384,20 @@ pub async fn enqueue(
             "This session's queued-input history is full; send directly or continue in a new session",
         ));
     }
+    let idle = {
+        let d = s.data.lock().unwrap();
+        d.status == "idle"
+            && !d.turn_active
+            && !d.lifecycle.suspended
+            && !d.lifecycle.archived
+            && d.queued_prompt.is_none()
+    };
     let (item, _) = transact(&s, Some((&req.request_id, &req.text)), |q| {
-        q.enqueue(&req.request_id, &req.text, crate::timeouts::now_ms())
+        let item = q.enqueue(&req.request_id, &req.text, crate::timeouts::now_ms())?;
+        if automated && idle && q.paused.is_none() {
+            q.ready = true;
+        }
+        Ok(item)
     })?;
     reply(&s, json!({"id":item,"duplicate":false}))
 }
