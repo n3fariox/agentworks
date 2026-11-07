@@ -471,3 +471,4 @@ dialog.image-viewer{width:96vw;max-width:96vw;height:92dvh;max-height:92dvh;padd
 
 .model-provider-auth-status[data-signed-in="true"]{color:var(--green)}
 .model-provider-auth-status[data-signed-in="false"]{color:#ddb878}
+.session-secret-list{display:flex;flex-direction:column;gap:10px;margin:10px 0}.session-secret{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;padding:8px 0;border-bottom:1px solid var(--border)}.session-secret-heading{grid-column:1/-1;display:flex;align-items:center;gap:6px;flex-wrap:wrap}.session-secret-heading .text-button{margin-left:auto;min-height:44px}.session-secret .workspace-check{grid-column:1/-1}.secret-name{font:12px ui-monospace,SFMono-Regular,monospace}@media(max-width:650px){.session-secret{grid-template-columns:1fr}}

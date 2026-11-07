@@ -25,7 +25,7 @@ import {setupSidePanel} from './side-panel.js';
 import {setupContextMenu} from './context-menu.js';
 import {setupTimeoutControls} from './timeout-controls.js';
 import {setupParserScripts} from './parser-scripts.js';
-import {setupSecrets} from './secrets.js';
+import {setupSecrets,setupSessionSecrets} from './secrets.js';
 import {setupInputQueue,setupPromptRecovery,BUSY} from './input-queue.js';
 import {setupNotifications} from './notifications.js';
 import {setupQuestions} from './questions.js';
@@ -59,7 +59,7 @@ const promptRecovery=setupPromptRecovery({area:$('prompt'),storage:sessionStorag
 let currentUserSeq=null;
 let sidePanel=null;
 setInterval(()=>usageStatus.render(),60000);
-let timeoutControls=null,parserScripts=null,secrets=null;
+let timeoutControls=null,parserScripts=null,secrets=null,sessionSecrets=null;
 let transcript=[], tools=new Map(), approvals=new Map(), assistant=null, status='starting';
 const backgroundJobs=createBackgroundJobs({root:$('background-jobs'),api,getActive:()=>active,isConnected:()=>connected,onChange:()=>scheduleDraw()});
 const subagents=createSubagents({jobResult:job=>[`${job.name||'Background job'} · ${backgroundJobs.label(job.state)}`,...jobResultLines(job)].join('\n'),append:()=>{},tabs:$('session-tabs'),panel:$('subagent-view'),messages:$('messages'),onSelect:view=>{sessionTerminal.select(view);scheduleDraw();},uuid,applyToolUpdate,renderToolActivity,renderMessage:(body,item)=>{if(item.role==='Agent')updateMarkdown(item,body);else body.textContent=item.text;},el});
@@ -840,7 +840,7 @@ function consume(e,live=false){
   backgroundJobs.consume(e);
   if(subagents.consume(e,{live:live&&!replaying}))return;
   if(d?.continuationState&&active&&!rebuilding)active.continuation=d.continuationState;
-  {const t=timeoutControls?.notice(e.kind,d);if(t){transcript.push({id:itemId(),type:'notice',text:t});assistant=null;}}
+  {const t=timeoutControls?.notice(e.kind,d)??sessionSecrets?.notice(e.kind,d);if(t){transcript.push({id:itemId(),type:'notice',text:t});assistant=null;}}
   if(rebuilding&&['session_updated','continuation','models','permission_modes','attachment_policy','commands','status','storage_error'].includes(e.kind)){}
   else if(e.kind==='session_updated'){
     Object.assign(active,d);sessionTerminal?.sessionUpdated();setTitle(active.title);const row=sessions.find(s=>s.id===active.id);if(row)Object.assign(row,d);sidebar();
@@ -1384,7 +1384,8 @@ $('settings-form').onsubmit=async event=>{
 };
 document.addEventListener('keydown',event=>{if(event.key==='n'&&!event.ctrlKey&&!event.metaKey&&!event.altKey&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)&&!document.querySelector('dialog[open]')){event.preventDefault();openCreate();}});
 const diffView=setupDiff({api,root:$('side-diff'),enhanceBlocks:display.enhance});
-timeoutControls=setupTimeoutControls({$,api,getActive:()=>active});
+sessionSecrets=setupSessionSecrets({$,api,el,getActive:()=>active});
+timeoutControls=setupTimeoutControls({$,api,getActive:()=>active,sections:[sessionSecrets]});
 parserScripts=setupParserScripts({$,api,el});
 secrets=setupSecrets({$,api,el,toast});
 $('settings-dialog').addEventListener('close',()=>secrets.close());

@@ -11,7 +11,8 @@ export function describe(p){
   const total=p.totalSeconds?`${p.totalSeconds}s total (${p.totalIncludesHumanWait?'includes':'excludes'} approval waits)`:'no total limit';
   return `${total} · ${p.inactivityWarningSeconds?`warn after ${p.inactivityWarningSeconds}s quiet`:'no inactivity warning'} · ${p.inactivityTimeoutSeconds?`stop after ${p.inactivityTimeoutSeconds}s quiet`:'quiet tools not stopped'} · ${p.cancelGraceSeconds}s cancel grace`;
 }
-export function setupTimeoutControls({$,api,getActive}){
+// sections: other Session settings parts, each {load(), save()}, loaded and saved with timeouts.
+export function setupTimeoutControls({$,api,getActive,sections=[]}){
   const root=$('timeout-controls');
   const scopeRoot=scope=>scope==='default'?root:$('session-timeout-controls');
   for(const scope of ['default','session'])scopeRoot(scope).innerHTML=`<legend>${scope==='default'?'Execution timeouts · global default':'Execution timeouts'}</legend><div data-timeout-scope="${scope}">${scope==='default'?'<p class="field-note">Applies to every session without its own override, starting with its next turn.</p>':'<label class="workspace-check"><input type="checkbox" data-field="override"> Override the global default for this session</label>'}${scope==='session'?'<div class="field-note" role="status" data-note></div>':''}${fields.map(([k,l,n])=>`<label>${l}<input type="number" min="0" data-field="${k}" inputmode="numeric"></label><div class="field-note">${n}</div>`).join('')}<label class="workspace-check"><input type="checkbox" data-field="totalIncludesHumanWait"> Total limit counts time waiting for approvals</label>${scope==='default'?'<button type="button" class="text-button" data-save>Save default</button>':''}${scope==='default'?'<div class="field-note" role="status" data-note></div>':''}</div>`;
@@ -76,12 +77,12 @@ export function setupTimeoutControls({$,api,getActive}){
     const active=getActive();if(!active)return;
     $('session-settings-scope').textContent='Applies only to “'+active.title+'”.';
     $('session-settings-error').textContent='';
-    await load();$('session-settings-dialog').showModal();
+    await Promise.all([load(),...sections.map(section=>section.load())]);$('session-settings-dialog').showModal();
   };
   $('dismiss-session-settings').onclick=()=>$('session-settings-dialog').close();
   $('session-settings-form').onsubmit=async event=>{
     event.preventDefault();$('save-session-settings').disabled=true;$('session-settings-error').textContent='';
-    try{await saveSession();$('session-settings-dialog').close();}
+    try{await saveSession();for(const section of sections)await section.save();$('session-settings-dialog').close();}
     catch(e){$('session-settings-error').textContent='Session settings were not saved: '+e.message;}
     finally{$('save-session-settings').disabled=false;}
   };

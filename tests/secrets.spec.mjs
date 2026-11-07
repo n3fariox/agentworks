@@ -106,6 +106,62 @@ test('rejects invalid, managed and duplicate names',async({page})=>{
   expect((await (await api('/api/secrets')).json()).secrets.map(s=>s.name)).toEqual(['GITHUB_TOKEN']);
 });
 
+test('assigns secrets to a session; deleting a secret or the session removes assignments',async({page})=>{
+  const npm=await (await api('/api/secrets',{name:'NPM_TOKEN',description:'Registry',value:'npm-fixture-value'})).json();
+  const github=(await (await api('/api/secrets')).json()).secrets.find(s=>s.name==='GITHUB_TOKEN');
+  const session=await (await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Secrets test'})).json();
+  const path=`/api/sessions/${session.id}/secrets`;
+  await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),session.id);
+  await page.goto('/');
+  await expect(page.locator('#session-state')).toHaveText('Ready');
+  const openSettings=async()=>{
+    if(await page.locator('#session-more').isVisible())await page.locator('#session-more').click();
+    await page.locator('#session-settings').click();
+    await expect(page.locator('#session-settings-dialog')).toBeVisible();
+    return page.locator('#session-secret-controls');
+  };
+  let section=await openSettings();
+  await expect(section).toContainText('No secrets assigned.');
+  await section.getByLabel('Secret to add').selectOption(github.id);
+  await section.getByRole('button',{name:'Add',exact:true}).click();
+  await section.getByLabel('Secret to add').selectOption(npm.id);
+  await section.getByRole('button',{name:'Add',exact:true}).click();
+  await expect(section.getByLabel('Secret to add')).toBeDisabled();
+  await expect(section.getByLabel('GITHUB_TOKEN delivery')).toHaveValue('tool');
+  await expect(section.getByLabel('GITHUB_TOKEN delegation')).toHaveValue('restricted');
+  await section.getByLabel('GITHUB_TOKEN delivery').selectOption('environment');
+  await section.getByLabel('GITHUB_TOKEN delegation').selectOption('passable');
+  await section.locator('.session-secret',{hasText:'NPM_TOKEN'}).getByLabel('Ask me before each tool use').check();
+  await page.locator('#save-session-settings').click();
+  await expect(page.locator('#session-settings-dialog')).toBeHidden();
+  await expect(page.locator('#conversation')).toContainText('Session secrets: GITHUB_TOKEN (environment, passable), NPM_TOKEN (tool, ask each use)');
+
+  const saved=await (await api(path)).json();
+  expect(saved.assignments).toEqual([
+    {secretId:github.id,name:'GITHUB_TOKEN',delivery:'environment',delegation:'passable',approval:'none',origin:'human'},
+    {secretId:npm.id,name:'NPM_TOKEN',delivery:'tool',delegation:'restricted',approval:'eachUse',origin:'human'},
+  ]);
+  expect(JSON.stringify(saved)).not.toContain('npm-fixture-value');
+  const used=(await (await api('/api/secrets')).json()).secrets;
+  expect(used.map(s=>[s.name,s.sessions])).toEqual([['GITHUB_TOKEN',1],['NPM_TOKEN',1]]);
+
+  section=await openSettings();
+  await expect(section.getByLabel('GITHUB_TOKEN delivery')).toHaveValue('environment');
+  await expect(section.locator('.session-secret',{hasText:'NPM_TOKEN'}).getByLabel('Ask me before each tool use')).toBeChecked();
+  await page.locator('#dismiss-session-settings').click();
+
+  expect((await api(path,{assignments:[{secretId:npm.id},{secretId:npm.id}]},'PUT')).status).toBe(400);
+  expect((await api(path,{assignments:[{secretId:'missing'}]},'PUT')).status).toBe(404);
+  expect((await api(path,{assignments:[{secretId:npm.id,delivery:'shell'}]},'PUT')).status).toBe(422);
+  expect((await api(path,{assignments:[{secretId:npm.id,value:'x'}]},'PUT')).status).toBe(422);
+  expect((await (await api(path)).json()).assignments).toHaveLength(2);
+
+  expect((await api(`/api/secrets/${npm.id}`,undefined,'DELETE')).ok).toBe(true);
+  expect((await (await api(path)).json()).assignments.map(a=>a.name)).toEqual(['GITHUB_TOKEN']);
+  expect((await api(`/api/sessions/${session.id}`,undefined,'DELETE')).ok).toBe(true);
+  expect((await (await api('/api/secrets')).json()).secrets.map(s=>[s.name,s.sessions])).toEqual([['GITHUB_TOKEN',0]]);
+});
+
 test('values stored with a lost key file need re-entry after restart',async({page})=>{
   await stop();
   await rm(join(fixture,'sessions.secrets.key'));

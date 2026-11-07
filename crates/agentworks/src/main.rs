@@ -1226,6 +1226,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .delete(delete_session),
         )
         .route(
+            "/api/sessions/{id}/secrets",
+            get(secrets::get_assignments).put(secrets::set_assignments),
+        )
+        .route(
             "/api/sessions/{id}/agent-access",
             get(communication::get_access).put(communication::set_access),
         )

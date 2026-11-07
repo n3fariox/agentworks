@@ -25,12 +25,15 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-pub const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS secrets(id TEXT PRIMARY KEY,name TEXT NOT NULL UNIQUE,description TEXT NOT NULL,nonce BLOB NOT NULL,value BLOB NOT NULL,length INTEGER NOT NULL,created INTEGER NOT NULL,updated INTEGER NOT NULL);";
+pub const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS secrets(id TEXT PRIMARY KEY,name TEXT NOT NULL UNIQUE,description TEXT NOT NULL,nonce BLOB NOT NULL,value BLOB NOT NULL,length INTEGER NOT NULL,created INTEGER NOT NULL,updated INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS session_secrets(session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,secret_id TEXT NOT NULL REFERENCES secrets(id) ON DELETE CASCADE,delivery TEXT NOT NULL,delegation TEXT NOT NULL,approval TEXT NOT NULL,origin TEXT NOT NULL,created INTEGER NOT NULL,PRIMARY KEY(session_id,secret_id));
+  CREATE INDEX IF NOT EXISTS session_secrets_by_secret ON session_secrets(secret_id);";
 
 const KEY_LEN: usize = 32;
 const SALT_LEN: usize = 16;
 const MAX_VALUE_BYTES: usize = 64 * 1024;
 const MAX_DESCRIPTION: usize = 200;
+const MAX_ASSIGNMENTS: usize = 64;
 const WRAP_AAD: &[u8] = b"agentworks-secrets-key:v1";
 /// Variables Agentworks or the harnesses set themselves; a secret must never replace them.
 const RESERVED: &[&str] = &[
@@ -384,6 +387,22 @@ pub async fn list(State(app): State<App>) -> ApiResult {
         .map(|r| r.map(|r| view(&r, vault)))
         .collect::<rusqlite::Result<_>>()
         .map_err(db_error)?;
+    let mut counts = store
+        .connection
+        .prepare("SELECT secret_id,count(*) FROM session_secrets GROUP BY secret_id")
+        .map_err(db_error)?;
+    let counts: std::collections::HashMap<String, i64> = counts
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(db_error)?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(db_error)?;
+    let secrets: Vec<Value> = secrets
+        .into_iter()
+        .map(|mut s| {
+            s["sessions"] = json!(counts.get(s["id"].as_str().unwrap()).unwrap_or(&0));
+            s
+        })
+        .collect();
     Ok(Json(json!({
         "available": vault.is_some(),
         "error": storage.and_then(|s| s.vault.as_ref().err()),
@@ -493,6 +512,186 @@ pub async fn delete(State(app): State<App>, Path(id): Path<String>) -> ApiResult
     audit(&tx, "secret.delete", &current.name).map_err(db_error)?;
     tx.commit().map_err(db_error)?;
     Ok(Json(json!({"deleted": id})))
+}
+
+/// How an assigned secret reaches the session.
+#[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub enum Delivery {
+    /// Harness environment variable, also usable by the tool.
+    Environment,
+    #[default]
+    Tool,
+}
+/// Whether the session may pass the secret to sessions it creates.
+#[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub enum Delegation {
+    #[default]
+    Restricted,
+    Passable,
+}
+/// Whether each tool use asks the human first.
+#[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub enum Approval {
+    #[default]
+    None,
+    EachUse,
+}
+fn text<T: Serialize>(value: T) -> String {
+    serde_json::to_value(value)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+fn parse<T: serde::de::DeserializeOwned>(text: &str) -> rusqlite::Result<T> {
+    serde_json::from_value(json!(text))
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))
+}
+
+/// One secret granted to one session. `origin` is `human` or the delegating session's ID.
+#[derive(Clone, Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Assignment {
+    pub secret_id: String,
+    pub name: String,
+    pub delivery: Delivery,
+    pub delegation: Delegation,
+    pub approval: Approval,
+    pub origin: String,
+}
+pub fn assignments(db: &rusqlite::Connection, session: &str) -> rusqlite::Result<Vec<Assignment>> {
+    let mut query = db.prepare("SELECT a.secret_id,s.name,a.delivery,a.delegation,a.approval,a.origin FROM session_secrets a JOIN secrets s ON s.id=a.secret_id WHERE a.session_id=?1 ORDER BY s.name")?;
+    query
+        .query_map([session], |r| {
+            Ok(Assignment {
+                secret_id: r.get(0)?,
+                name: r.get(1)?,
+                delivery: parse(&r.get::<_, String>(2)?)?,
+                delegation: parse(&r.get::<_, String>(3)?)?,
+                approval: parse(&r.get::<_, String>(4)?)?,
+                origin: r.get(5)?,
+            })
+        })?
+        .collect()
+}
+fn describe(a: &Assignment) -> String {
+    let mut parts = vec![if a.delivery == Delivery::Environment {
+        "environment"
+    } else {
+        "tool"
+    }];
+    if a.delegation == Delegation::Passable {
+        parts.push("passable");
+    }
+    if a.approval == Approval::EachUse {
+        parts.push("ask each use");
+    }
+    format!("{} ({})", a.name, parts.join(", "))
+}
+
+pub async fn get_assignments(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
+    crate::session(&app, &id)?;
+    let vault = STORAGE.get().and_then(|s| s.vault.as_ref().ok());
+    let store = app.store.lock().unwrap();
+    let assigned = assignments(&store.connection, &id).map_err(db_error)?;
+    let mut query = store
+        .connection
+        .prepare(&format!("SELECT {COLUMNS} FROM secrets ORDER BY name"))
+        .map_err(db_error)?;
+    let secrets: Vec<Value> = query
+        .query_map([], row)
+        .map_err(db_error)?
+        .map(|r| {
+            r.map(|r| {
+                let v = view(&r, vault);
+                json!({"id":v["id"],"name":v["name"],"description":v["description"],"readable":v["readable"]})
+            })
+        })
+        .collect::<rusqlite::Result<_>>()
+        .map_err(db_error)?;
+    Ok(Json(json!({"assignments": assigned, "secrets": secrets})))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssignmentInput {
+    secret_id: String,
+    #[serde(default)]
+    delivery: Delivery,
+    #[serde(default)]
+    delegation: Delegation,
+    #[serde(default)]
+    approval: Approval,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssignmentsInput {
+    assignments: Vec<AssignmentInput>,
+}
+
+/// Replaces a session's assignments. Only humans reach this route; retained secrets
+/// keep their origin, new ones are recorded as granted by a human.
+pub async fn set_assignments(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(input): Json<AssignmentsInput>,
+) -> ApiResult {
+    let s = crate::session(&app, &id)?;
+    if input.assignments.len() > MAX_ASSIGNMENTS {
+        return Err(bad("A session can have at most 64 secrets"));
+    }
+    let mut seen = std::collections::HashSet::new();
+    if !input
+        .assignments
+        .iter()
+        .all(|a| seen.insert(a.secret_id.as_str()))
+    {
+        return Err(bad("Each secret can be assigned once"));
+    }
+    let (before, after) = {
+        let mut store = app.store.lock().unwrap();
+        let tx = store.connection.transaction().map_err(db_error)?;
+        let before = assignments(&tx, &id).map_err(db_error)?;
+        let created = now();
+        tx.execute("DELETE FROM session_secrets WHERE session_id=?1", [&id])
+            .map_err(db_error)?;
+        for a in &input.assignments {
+            find(&tx, &a.secret_id).map_err(|(code, _)| {
+                fail(
+                    code,
+                    "A selected secret no longer exists. Reopen session settings",
+                )
+            })?;
+            let origin = before
+                .iter()
+                .find(|b| b.secret_id == a.secret_id)
+                .map_or("human", |b| b.origin.as_str());
+            tx.execute(
+                "INSERT INTO session_secrets(session_id,secret_id,delivery,delegation,approval,origin,created) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![id, a.secret_id, text(a.delivery), text(a.delegation), text(a.approval), origin, created],
+            )
+            .map_err(db_error)?;
+        }
+        let after = assignments(&tx, &id).map_err(db_error)?;
+        let summary = |list: &[Assignment]| list.iter().map(describe).collect::<Vec<_>>();
+        if summary(&before) != summary(&after) {
+            tx.execute(
+                "INSERT INTO agent_audit(actor,action,target,outcome,created) VALUES ('human','secrets',?1,?2,?3)",
+                params![id, summary(&after).join(", "), created],
+            )
+            .map_err(db_error)?;
+        }
+        tx.commit().map_err(db_error)?;
+        (before, after)
+    };
+    let names = |list: &[Assignment]| list.iter().map(describe).collect::<Vec<_>>();
+    if names(&before) != names(&after) {
+        s.emit("secret_assignments", json!({"secrets": names(&after)}));
+    }
+    Ok(Json(json!({"assignments": after})))
 }
 
 #[cfg(test)]

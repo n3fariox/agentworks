@@ -1,6 +1,6 @@
 # Session secrets (proposal)
 
-Status: storage and Settings → Secrets are implemented; assignment, delivery and delegation are not.
+Status: storage, Settings → Secrets and per-session assignment (Session settings → Secrets) are implemented. Project default assignments, delivery and delegation are not; assigned secrets do not yet reach the harness.
 
 Users keep credentials that agents and tools need (API tokens, registry tokens) without leaving them exported in their shell. Agentworks stores these secrets encrypted on the server host and makes them available only to the sessions a human assigns them to, either as harness environment variables or through a templated MCP tool.
 
@@ -143,7 +143,7 @@ Values delivered to a session are registered with that session's scrubber. Text 
 ## API (sketch)
 
 - `GET/POST /api/secrets`, `PUT/DELETE /api/secrets/{id}`: definitions. `PUT` takes `description` and/or `value`. Responses never contain values.
-- `GET/PUT /api/sessions/{id}/secrets`: assignments, each with its origin (human or parent session ID).
+- `GET/PUT /api/sessions/{id}/secrets`: assignments, each with its origin (human or parent session ID). `PUT` replaces the whole list; retained secrets keep their origin. Changes are audited against the session and shown in its transcript by name and settings, never value.
 - `POST /api/sessions/{id}/secrets/restart`: restart with current assignments.
 - Later: `POST /api/secrets/unlock`, `POST /api/secrets/lock`, `PUT /api/secrets/password`.
 - MCP: `list_session_secrets`, `run_with_secrets` (executed by the facade on the session's host), and a `secrets` argument on `start_session`.
