@@ -824,6 +824,27 @@ impl Live {
         host_profile: bool,
         model_provider: Option<&crate::model_providers::Connection>,
     ) -> Result<(RemoteLines, Spawned), String> {
+        self.spawn_session(
+            provider,
+            cwd,
+            host_profile,
+            model_provider,
+            &Default::default(),
+        )
+    }
+    /// Like `spawn_profile`, adding session secrets to the adapter's environment.
+    /// The spawn frame carrying them is never logged on either end.
+    pub fn spawn_session(
+        self: &Arc<Self>,
+        provider: &str,
+        cwd: &str,
+        host_profile: bool,
+        model_provider: Option<&crate::model_providers::Connection>,
+        environment: &std::collections::BTreeMap<&str, &str>,
+    ) -> Result<(RemoteLines, Spawned), String> {
+        if !environment.is_empty() && self.worker["secretEnvironment"] != true {
+            return Err("Update this host's worker to use session secrets".into());
+        }
         if model_provider.is_some_and(|p| p.profile.kind == "chatgpt_codex")
             && self.worker["managedCodexAuth"] != true
         {
@@ -841,7 +862,10 @@ impl Live {
             }
             channels.insert(channel, incoming_tx);
         }
-        let spawn = json!({"type":"spawn","channel":channel,"provider":provider,"cwd":cwd,"hostProfile":host_profile,"modelConnection":model_provider});
+        let mut spawn = json!({"type":"spawn","channel":channel,"provider":provider,"cwd":cwd,"hostProfile":host_profile,"modelConnection":model_provider});
+        if !environment.is_empty() {
+            spawn["environment"] = json!(environment);
+        }
         if self.out.try_send(Message::text(spawn.to_string())).is_err() {
             self.channels.lock().unwrap().remove(&channel);
             return Err("The host disconnected.".into());
@@ -1133,6 +1157,42 @@ mod tests {
         live.close("disconnected");
         guard.bind_mcp("127.0.0.1:1".parse().unwrap(), "stale".into());
         assert!(live.mcp.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_secrets_need_a_capable_worker_and_ride_only_their_spawn_frame() {
+        let environment = std::collections::BTreeMap::from([("GITHUB_TOKEN", "fixture-value")]);
+        let (out, mut frames) = mpsc::channel(16);
+        let old = Arc::new(Live::new(out, json!({"providers":["demo"]})));
+        let error = old
+            .spawn_session("demo", "/remote", false, None, &environment)
+            .err()
+            .unwrap();
+        assert!(error.contains("Update this host's worker"));
+        assert!(
+            frames.try_recv().is_err(),
+            "nothing is sent to an old worker"
+        );
+        let (_lines, _guard) = old.spawn("demo", "/remote", false).unwrap();
+        let frame: Value =
+            serde_json::from_str(frames.recv().await.unwrap().to_text().unwrap()).unwrap();
+        assert!(frame.get("environment").is_none());
+
+        let (out, mut frames) = mpsc::channel(16);
+        let live = Arc::new(Live::new(
+            out,
+            json!({"providers":["demo"],"secretEnvironment":true}),
+        ));
+        let (_lines, _guard) = live
+            .spawn_session("demo", "/remote", false, None, &environment)
+            .unwrap();
+        let frame: Value =
+            serde_json::from_str(frames.recv().await.unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(frame["type"], "spawn");
+        assert_eq!(
+            frame["environment"],
+            json!({"GITHUB_TOKEN":"fixture-value"})
+        );
     }
 
     #[tokio::test]

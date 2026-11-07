@@ -77,6 +77,13 @@ fn profile_agent(
     host_profile: bool,
     profile: Option<&str>,
 ) -> Result<AcpAgent, String> {
+    profile_config(provider, host_profile, profile).map(AcpAgent::new)
+}
+fn profile_config(
+    provider: &str,
+    host_profile: bool,
+    profile: Option<&str>,
+) -> Result<agent_client_protocol::AcpAgentConfig, String> {
     let config = agent_config(provider, use_api_key(), host_profile);
     let config = if let Some(id) = profile {
         if provider != "goose" {
@@ -86,7 +93,7 @@ fn profile_agent(
     } else {
         config
     };
-    Ok(AcpAgent::new(config))
+    Ok(config)
 }
 
 /// The session's role as an ACP system prompt. Do not rely on harness persistence:
@@ -389,15 +396,25 @@ pub async fn run(
     let saved_config = s.data.lock().unwrap().session_config.clone();
     let import_pending = s.data.lock().unwrap().import_pending;
     let host_profile = s.data.lock().unwrap().opencode_host;
+    let secrets = crate::secrets::environment(&s.store.lock().unwrap().connection, &s.id)
+        .map_err(|_| "Could not read session secrets")?;
+    crate::secrets::register(&s.id, &secrets.vars);
+    if !secrets.unavailable.is_empty() {
+        s.emit(
+            "secrets_unavailable",
+            json!({"secrets": secrets.unavailable}),
+        );
+    }
     let (transport, _spawn_guard): (DynConnectTo<Client>, _) = if s.host_id == "local" {
-        (
-            DynConnectTo::new(profile_agent(
-                &s.provider,
-                host_profile,
-                s.data.lock().unwrap().model_provider.as_deref(),
-            )?),
-            None,
-        )
+        let mut config = profile_config(
+            &s.provider,
+            host_profile,
+            s.data.lock().unwrap().model_provider.as_deref(),
+        )?;
+        for (name, value) in &secrets.vars {
+            config = config.env(name.as_str(), value.as_str());
+        }
+        (DynConnectTo::new(AcpAgent::new(config)), None)
     } else {
         let live = crate::hosts::registry()
             .and_then(|hosts| hosts.live(&s.host_id))
@@ -407,11 +424,17 @@ pub async fn run(
             .as_deref()
             .map(|id| agentworks_runtime::model_providers::connection(id, &s.host_id))
             .transpose()?;
-        let (lines, guard) = live.spawn_profile(
+        let environment: std::collections::BTreeMap<&str, &str> = secrets
+            .vars
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        let (lines, guard) = live.spawn_session(
             &s.provider,
             &s.cwd.to_string_lossy(),
             host_profile,
             connection.as_ref(),
+            &environment,
         )?;
         guard.bind_mcp(s.mcp_endpoint, s.mcp_token.lock().unwrap().clone());
         // Keep the worker process alive until this runtime returns or is cancelled.

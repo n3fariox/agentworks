@@ -1,6 +1,6 @@
 # Session secrets (proposal)
 
-Status: storage, Settings → Secrets and per-session assignment (Session settings → Secrets) are implemented. Project default assignments, delivery and delegation are not; assigned secrets do not yet reach the harness.
+Status: storage, Settings → Secrets, per-session assignment, `environment` delivery (local and remote, with automatic restart) and transcript scrubbing are implemented. Discovery (`list_session_secrets`), `run_with_secrets`, delegation and project default assignments are not.
 
 Users keep credentials that agents and tools need (API tokens, registry tokens) without leaving them exported in their shell. Agentworks stores these secrets encrypted on the server host and makes them available only to the sessions a human assigns them to, either as harness environment variables or through a templated MCP tool.
 
@@ -66,7 +66,7 @@ Session settings list the session's secrets. Each assignment has:
 | `delegation` | `restricted` or `passable` | `restricted` |
 | `approval` | `none` or `eachUse` (tool calls only) | `none` |
 
-Assignment is the authorization: a session can never name, use or discover a secret it is not assigned. `list_session_secrets` shows only assigned names and their delivery, never values.
+Assignment is the authorization: a session can never name, use or discover a secret it is not assigned. `list_session_secrets` shows only assigned secrets, never values (see [Discovery](#discovery)).
 
 Only humans create or widen assignments. Project settings may hold a default assignment set applied to new human-created sessions in that project.
 
@@ -89,17 +89,32 @@ start_session { ..., secrets: ["GITHUB_TOKEN"] }
 
 Harness subagents (Claude tasks, Codex subagents) share the harness process. They see `environment` secrets and can call the tool; delegation rules cannot restrict them. This is another reason `tool` is the default.
 
+## Discovery
+
+Agents learn about secrets lazily, so the system prompt and tool list never depend on assignments:
+
+- The shared Agentworks system prompt carries one fixed sentence for every session: if a task needs credentials such as API tokens, call `list_session_secrets` to see what this session may use and how, rather than asking the user to paste one into the chat.
+- `list_session_secrets` and `run_with_secrets` are listed in every session. With no assignments, `list_session_secrets` returns an empty list and `run_with_secrets` refuses.
+- `list_session_secrets` returns, for each assigned secret: its name, its description (written for agents, so Settings labels it **Description for agents** and warns that assigned agents can read it), and usage instructions generated from the assignment:
+  - `environment`: available as `$NAME` in commands the agent runs, or, if the harness started before the assignment, not yet present and usable through `run_with_secrets` until the session restarts.
+  - `tool`: use `run_with_secrets` with `{{secret:NAME}}` in `argv`, `env`, `stdin` or `files`.
+  - `approval: eachUse`: the user is asked before each use.
+  - `passable`: may be passed to sessions it starts with `start_session { secrets: [...] }`.
+  - Always: do not print, log, commit or send the value anywhere it is not needed.
+
+Because nothing in the prompt or tool list changes, assigning or editing a `tool` secret takes effect on the next tool call. Only `environment` changes need the harness restarted.
+
 ## Delivery 1: environment, with restart
 
-At harness start, `environment` assignments are decrypted and added to the harness process environment after the mise environment and before the provider configuration, so provider-managed variables always win. Local sessions add them where the server spawns the harness; remote sessions receive them in the worker start request and apply them through the same `.envs()` path in `crates/agentworks-runtime/src/worker.rs`. Start requests carrying values are never logged or persisted, on either side.
+At harness start, `environment` assignments are decrypted and added to the harness process environment after the mise environment and before the provider configuration, so provider-managed variables always win. Values that cannot be decrypted are left out and the transcript notes which (**Not available to this harness**); the harness still starts. Remote workers advertise `secretEnvironment`; a session with environment secrets refuses to start on an older worker rather than starting without them. Replacing a stored value reaches a session at its next harness start. Local sessions add them where the server spawns the harness; remote sessions receive them in the worker start request and apply them through the same `.envs()` path in `crates/agentworks-runtime/src/worker.rs`. Start requests carrying values are never logged or persisted, on either side.
 
-Changing a session's `environment` assignments offers **Restart with secrets** once the session is idle. It stops the harness process and starts a new one with the current assignments, resuming the native conversation through the existing resume/load path in `session_runtime.rs`. Harnesses that support neither cannot use this; the UI offers a new session instead. Once passwords exist, the same action applies to sessions that started while secrets were locked.
+Changing a session's `environment` assignments restarts an idle harness automatically, as changing its Agentworks access already does; a busy one restarts when its turn ends. The UI also offers **Restart with secrets**. It stops the harness process and starts a new one with the current assignments, resuming the native conversation through the existing resume/load path in `session_runtime.rs`. Harnesses that support neither cannot use this; the UI offers a new session instead. Once passwords exist, the same action applies to sessions that started while secrets were locked.
 
-Codex removes variables whose names contain `KEY`, `SECRET` or `TOKEN` from tool subprocesses by default. For `codex-rust` sessions, Agentworks adds the assigned names to the session's `shell_environment_policy.include` override so they survive.
+Codex passes the harness environment to its commands by default (checked with Codex 0.165 via `codex sandbox`). If a user's Codex configuration sets `shell_environment_policy.ignore_default_excludes = false`, Codex drops variables whose names contain `KEY`, `SECRET` or `TOKEN`, including assigned secrets; use `tool` delivery for those. Agentworks does not override the policy: `include_only` would remove every other variable, and `set` would put values on the command line.
 
 ## Delivery 2: templated tool
 
-A new Agentworks MCP tool, listed only for sessions with at least one assignment:
+A new Agentworks MCP tool, listed for every session (see [Discovery](#discovery)):
 
 ```
 run_with_secrets {
@@ -138,7 +153,7 @@ Relay changes for remote sessions:
 
 ## Transcript protection
 
-Values delivered to a session are registered with that session's scrubber. Text from the harness (messages, tool calls, tool output, terminal output) is scrubbed with the same forms as the tool's output before it is stored or sent to browsers. Scrubbing also applies to completion reports and messages sent through Agentworks MCP.
+Values delivered to a session are registered with that session's scrubber when its harness starts. Every session event (messages, tool calls, tool output, prompts) has each value and its unpadded base64, base64url, percent-encoded and JSON-escaped forms replaced by `[redacted:NAME]` before it is stored or sent to browsers, the same path that already redacts the session's MCP credential. Completion reports and messages the session sends through Agentworks MCP are scrubbed the same way. Values shorter than 4 bytes are not replaced. The session's interactive terminal is the user's own shell and receives no secrets. Events stored before a value was delivered, and other sessions' events, are not rewritten.
 
 ## API (sketch)
 

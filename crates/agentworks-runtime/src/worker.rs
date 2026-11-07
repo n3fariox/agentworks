@@ -69,6 +69,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         "hostMetrics": if crate::metrics::supported() { 1 } else { 0 },
         "providerAuthTerminal": true,
         "managedCodexAuth": true,
+        "secretEnvironment": true,
         "home": home(),
     });
     ws.send(Message::text(hello.to_string()))
@@ -470,6 +471,7 @@ async fn run_process(
         .args(config.arguments())
         .current_dir(&cwd)
         .envs(&env)
+        .envs(secret_environment(&request))
         .envs(config.environment())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -732,6 +734,24 @@ fn available_providers(env: &HashMap<String, String>) -> Vec<&'static str> {
         .collect()
 }
 
+/// Session secrets from the spawn request. Names are validated by the server; this
+/// only keeps well-formed environment names and string values.
+fn secret_environment(request: &Value) -> Vec<(String, String)> {
+    request["environment"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(name, _)| {
+            !name.is_empty()
+                && !name.starts_with(|c: char| c.is_ascii_digit())
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        })
+        .filter_map(|(name, value)| Some((name.clone(), value.as_str()?.to_owned())))
+        .collect()
+}
+
 /// `mise env` for a directory, falling back to the global configuration when
 /// the directory's own configuration cannot be used (for example, an
 /// untrusted project config). Without mise, the inherited environment stands.
@@ -822,6 +842,20 @@ fn hostname() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn secret_environment_keeps_only_well_formed_string_variables() {
+        let request = json!({"environment":{"GITHUB_TOKEN":"a","_X1":"b","lower":"c","2FA":"d","A-B":"e","": "f","NUM":1}});
+        let mut vars = secret_environment(&request);
+        vars.sort();
+        assert_eq!(
+            vars,
+            [
+                ("GITHUB_TOKEN".into(), "a".into()),
+                ("_X1".into(), "b".into())
+            ]
+        );
+        assert!(secret_environment(&json!({})).is_empty());
+    }
     #[test]
     fn native_codex_is_available_without_a_node_interpreter() {
         let env = HashMap::from([

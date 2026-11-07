@@ -159,6 +159,7 @@ impl Session {
             }
         }
         redact(&mut data, &self.mcp_token.lock().unwrap());
+        secrets::scrub(&self.id, &mut data);
         let mut state = self.data.lock().unwrap();
         if kind == "status" {
             // A concurrent worker may have advanced state before this event acquired
@@ -3225,6 +3226,7 @@ async fn delete_session_locked(app: &App, s: &Session) -> Result<(), (StatusCode
     })?;
     terminal::stop(&s.id, true).await;
     attachments::delete_session(&s.id);
+    secrets::forget(&s.id);
     app.sessions.lock().unwrap().remove(&s.id);
     app.progress.forget(&s.id);
     s.status("closed");

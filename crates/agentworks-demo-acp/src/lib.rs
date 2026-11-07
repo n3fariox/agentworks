@@ -670,6 +670,27 @@ impl Demo {
             self.reply(id, json!({"stopReason":"end_turn"}));
             return Ok(());
         }
+        // Scrubbing fixture: `env! NAME` deliberately prints the raw value and its base64.
+        if let Some(name) = text.strip_prefix("env! ") {
+            use base64::Engine;
+            let value = env(name.trim()).unwrap_or_default();
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&value);
+            self.chunk(sid, &format!("{} = {value} ({encoded})", name.trim()));
+            self.save(sid);
+            self.reply(id, json!({"stopReason":"end_turn"}));
+            return Ok(());
+        }
+        // Secrets fixture: `env? NAME` reports whether the harness environment has NAME, never its value.
+        if let Some(name) = text.strip_prefix("env? ") {
+            let report = match env(name.trim()) {
+                Some(value) => format!("{} is set ({} bytes).", name.trim(), value.len()),
+                None => format!("{} is not set.", name.trim()),
+            };
+            self.chunk(sid, &report);
+            self.save(sid);
+            self.reply(id, json!({"stopReason":"end_turn"}));
+            return Ok(());
+        }
         // Keys starting with `^` match prompts by prefix, for prompts composed by Agentworks such as inbox delivery.
         if let Some(steps) = self.script.find(&text) {
             self.scripted(sid, steps).await;

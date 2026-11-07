@@ -10,7 +10,10 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use base64::{Engine, engine::general_purpose::STANDARD};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE_NO_PAD},
+};
 use ring::{
     aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey},
     rand::{SecureRandom, SystemRandom},
@@ -19,9 +22,10 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
+    collections::HashMap,
     io::Write,
     path::{Path as FsPath, PathBuf},
-    sync::OnceLock,
+    sync::{Mutex, OnceLock},
 };
 use zeroize::Zeroizing;
 
@@ -577,6 +581,123 @@ pub fn assignments(db: &rusqlite::Connection, session: &str) -> rusqlite::Result
         })?
         .collect()
 }
+/// A session's `environment` secrets, decrypted for one harness start.
+#[derive(Default)]
+pub struct Environment {
+    pub vars: Vec<(String, Zeroizing<String>)>,
+    /// Names that could not be decrypted (storage unavailable or value needs re-entry).
+    pub unavailable: Vec<String>,
+}
+pub fn environment(db: &rusqlite::Connection, session: &str) -> rusqlite::Result<Environment> {
+    let mut out = Environment::default();
+    let vault = STORAGE.get().and_then(|s| s.vault.as_ref().ok());
+    for a in assignments(db, session)? {
+        if a.delivery != Delivery::Environment {
+            continue;
+        }
+        let plain = match vault {
+            Some(vault) => {
+                let row = db.query_row(
+                    &format!("SELECT {COLUMNS} FROM secrets WHERE id=?1"),
+                    [&a.secret_id],
+                    row,
+                )?;
+                open(&vault.key, &value_aad(&row.id, &row.name), &row.sealed)
+                    .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok())
+            }
+            None => None,
+        };
+        match plain {
+            Some(value) => out.vars.push((a.name, Zeroizing::new(value))),
+            None => out.unavailable.push(a.name),
+        }
+    }
+    Ok(out)
+}
+/// Forms of each value delivered to a session, replaced in everything the session
+/// stores or publishes. Literal matching only: a deliberately transformed value is
+/// not caught.
+type Forms = Vec<(Zeroizing<String>, String)>;
+static SCRUBBERS: OnceLock<Mutex<HashMap<String, Forms>>> = OnceLock::new();
+fn scrubbers() -> std::sync::MutexGuard<'static, HashMap<String, Forms>> {
+    SCRUBBERS.get_or_init(Default::default).lock().unwrap()
+}
+/// Values this short are too likely to occur by chance to replace.
+const MIN_SCRUB_BYTES: usize = 4;
+fn forms(name: &str, value: &str) -> Forms {
+    if value.len() < MIN_SCRUB_BYTES {
+        return Vec::new();
+    }
+    let percent: String = value
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect();
+    let json = serde_json::to_string(value).unwrap();
+    let mut out = vec![
+        value.to_owned(),
+        STANDARD_NO_PAD.encode(value),
+        URL_SAFE_NO_PAD.encode(value),
+        percent,
+        json[1..json.len() - 1].to_owned(),
+    ];
+    out.sort();
+    out.dedup();
+    let label = format!("[redacted:{name}]");
+    out.into_iter()
+        .map(|form| (Zeroizing::new(form), label.clone()))
+        .collect()
+}
+/// Registers the values delivered to a session's harness, replacing earlier ones.
+pub fn register(session: &str, vars: &[(String, Zeroizing<String>)]) {
+    let mut all: Forms = vars.iter().flat_map(|(n, v)| forms(n, v)).collect();
+    // Longest first, so a value is never partly replaced by a shorter one it contains.
+    all.sort_by_key(|(form, _)| std::cmp::Reverse(form.len()));
+    let mut scrubbers = scrubbers();
+    if all.is_empty() {
+        scrubbers.remove(session);
+    } else {
+        scrubbers.insert(session.to_owned(), all);
+    }
+}
+pub fn forget(session: &str) {
+    scrubbers().remove(session);
+}
+pub fn scrub_text(session: &str, text: &str) -> String {
+    let scrubbers = scrubbers();
+    let Some(forms) = scrubbers.get(session) else {
+        return text.to_owned();
+    };
+    replace(forms, text)
+}
+fn replace(forms: &Forms, text: &str) -> String {
+    let mut out = text.to_owned();
+    for (form, label) in forms {
+        if out.contains(form.as_str()) {
+            out = out.replace(form.as_str(), label);
+        }
+    }
+    out
+}
+/// Replaces delivered values in every string of `value`.
+pub fn scrub(session: &str, value: &mut Value) {
+    fn walk(forms: &Forms, value: &mut Value) {
+        match value {
+            Value::String(s) => *s = replace(forms, s),
+            Value::Array(a) => a.iter_mut().for_each(|v| walk(forms, v)),
+            Value::Object(o) => o.values_mut().for_each(|v| walk(forms, v)),
+            _ => {}
+        }
+    }
+    if let Some(forms) = scrubbers().get(session) {
+        walk(forms, value);
+    }
+}
+
 fn describe(a: &Assignment) -> String {
     let mut parts = vec![if a.delivery == Delivery::Environment {
         "environment"
@@ -691,7 +812,29 @@ pub async fn set_assignments(
     if names(&before) != names(&after) {
         s.emit("secret_assignments", json!({"secrets": names(&after)}));
     }
-    Ok(Json(json!({"assignments": after})))
+    // The process environment is fixed at start: restart an idle harness now, a busy one
+    // after its turn. A harness that is not running picks the change up when it starts.
+    let environment = |list: &[Assignment]| {
+        list.iter()
+            .filter(|a| a.delivery == Delivery::Environment)
+            .map(|a| a.secret_id.clone())
+            .collect::<Vec<_>>()
+    };
+    let restart = environment(&before) != environment(&after);
+    if restart {
+        let _gate = app.communication_lock.lock().await;
+        crate::communication::refresh_harness(&app, &s, false)
+            .await
+            .map_err(|(code, error)| {
+                fail(
+                    code,
+                    format!("Secrets were saved, but the harness could not restart: {error}"),
+                )
+            })?;
+    }
+    Ok(Json(
+        json!({"assignments": after, "environmentChanged": restart}),
+    ))
 }
 
 #[cfg(test)]
@@ -787,6 +930,51 @@ mod tests {
                 .contains("password")
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn delivered_values_and_their_encodings_are_scrubbed_per_session() {
+        let value = "tok/en+value=1&x";
+        register(
+            "scrub-a",
+            &[
+                ("TOKEN".into(), Zeroizing::new(value.into())),
+                ("SHORT".into(), Zeroizing::new("abc".into())),
+            ],
+        );
+        let label = "[redacted:TOKEN]";
+        let mut event = json!({"text": format!("a {value} b"), "nested": [{
+            "b64": STANDARD.encode(value), "url": URL_SAFE_NO_PAD.encode(value),
+            "pct": "tok%2Fen%2Bvalue%3D1%26x", "json": serde_json::to_string(&json!({"v": value})).unwrap()}],
+            "short": "abc", "n": 1});
+        scrub("scrub-a", &mut event);
+        assert_eq!(event["text"], format!("a {label} b"));
+        let nested = &event["nested"][0];
+        assert!(nested["b64"].as_str().unwrap().starts_with(label));
+        assert_eq!(nested["url"], label);
+        assert_eq!(nested["pct"], label);
+        assert!(nested["json"].as_str().unwrap().contains(label));
+        assert_eq!(event["short"], "abc", "short values are not replaced");
+        assert!(!event.to_string().contains(value));
+        assert_eq!(
+            scrub_text("scrub-b", value),
+            value,
+            "other sessions are untouched"
+        );
+        // A longer value containing a shorter one is replaced whole.
+        register(
+            "scrub-c",
+            &[
+                ("INNER".into(), Zeroizing::new("secret".into())),
+                ("OUTER".into(), Zeroizing::new("my-secret-value".into())),
+            ],
+        );
+        assert_eq!(
+            scrub_text("scrub-c", "my-secret-value secret"),
+            "[redacted:OUTER] [redacted:INNER]"
+        );
+        forget("scrub-a");
+        assert_eq!(scrub_text("scrub-a", value), value);
     }
 
     #[test]

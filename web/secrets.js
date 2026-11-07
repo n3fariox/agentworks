@@ -120,7 +120,7 @@ export function setupSessionSecrets({$,api,el,getActive}){
     try{
       const result=await api(`/api/sessions/${encodeURIComponent(session.id)}/secrets`);
       secrets=result.secrets;rows=result.assignments.map(a=>({...a}));
-      note.textContent='Secrets are not yet delivered to the harness; delivery is in progress.';
+      note.textContent='Environment variables are set when the harness starts. Changing them restarts an idle session, or a busy one after its turn. Tool-only delivery is not available yet.';
     }catch(e){note.textContent='Cannot load secrets: '+e.message;}
     render();
   }
@@ -133,6 +133,7 @@ export function setupSessionSecrets({$,api,el,getActive}){
     }catch(e){note.textContent='Secrets not saved: '+e.message;throw e;}
   }
   function notice(kind,d){
+    if(kind==='secrets_unavailable')return 'Not available to this harness: '+d.secrets.join(', ')+'. Enter the values again in Settings → Secrets, then restart the session.';
     if(kind!=='secret_assignments')return null;
     return d.secrets.length?'Session secrets: '+d.secrets.join(', '):'Session secrets removed';
   }

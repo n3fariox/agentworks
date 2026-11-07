@@ -345,7 +345,8 @@ pub fn peers_as(app: &App, a: &Actor) -> Result<Value> {
         json!({"self":a.id,"selfUri":actor_uri(&a.id),"projectId":scope,"sessions":values,"controllers":controllers}),
     )
 }
-pub fn send(app: &App, s: &Arc<Session>, req: SendMessage) -> Result<Value> {
+pub fn send(app: &App, s: &Arc<Session>, mut req: SendMessage) -> Result<Value> {
+    req.text = crate::secrets::scrub_text(&s.id, &req.text);
     send_as(app, &Actor::of(s), req)
 }
 pub fn send_as(app: &App, s: &Actor, req: SendMessage) -> Result<Value> {
@@ -472,37 +473,26 @@ pub async fn get_access(State(app): State<App>, Path(id): Path<String>) -> ApiRe
     let s = session(&app, &id)?;
     Ok(Json(serde_json::to_value(access(&app, &s)?).unwrap()))
 }
-pub async fn set_access(
-    State(app): State<App>,
-    Path(id): Path<String>,
-    Json(req): Json<Access>,
-) -> ApiResult {
-    let _gate = app.communication_lock.lock().await;
-    let s = session(&app, &id)?;
-    let req = imply_coordinator_archive(req);
-    if !req.communicate {
-        crate::inbox_delivery::revoke_related(&app, &s, "Communication grant revoked")?;
-    }
-    app.store.lock().unwrap().save_access(&id, &req)?;
-    s.emit("agent_access", serde_json::to_value(&req).unwrap());
-    // Grants apply immediately. Refresh cached tool catalogs after the active turn ends.
+/// Restarts a session's harness so it picks up changed tools, grants or environment:
+/// now when idle, otherwise once the current turn ends. A harness that is not running
+/// is started only when `start_detached` is set. Callers hold the communication lock.
+pub(crate) async fn refresh_harness(
+    app: &App,
+    s: &std::sync::Arc<crate::Session>,
+    start_detached: bool,
+) -> Result<()> {
     let idle = matches!(
         s.data.lock().unwrap().status.as_str(),
         "idle" | "suspended" | "error"
     );
     let attached = s.commands.lock().unwrap().is_some();
     if idle
-        && crate::service_restart::allow_start(&app).is_ok()
+        && crate::service_restart::allow_start(app).is_ok()
         && !s.data.lock().unwrap().lifecycle.suspended
-        && (attached || req.enabled())
+        && (attached || start_detached)
     {
         s.status("suspended");
-        if let Err((code, error)) = crate::resume(State(app.clone()), Path(id.clone())).await {
-            return Err(fail(
-                code,
-                format!("Access was saved, but tools could not reconnect: {error}"),
-            ));
-        }
+        let _ = crate::resume(State(app.clone()), Path(s.id.clone())).await?;
     } else if !idle
         && !s
             .mcp_refresh_pending
@@ -532,6 +522,28 @@ pub async fn set_access(
             s.mcp_refresh_pending
                 .store(false, std::sync::atomic::Ordering::SeqCst);
         });
+    }
+    Ok(())
+}
+pub async fn set_access(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(req): Json<Access>,
+) -> ApiResult {
+    let _gate = app.communication_lock.lock().await;
+    let s = session(&app, &id)?;
+    let req = imply_coordinator_archive(req);
+    if !req.communicate {
+        crate::inbox_delivery::revoke_related(&app, &s, "Communication grant revoked")?;
+    }
+    app.store.lock().unwrap().save_access(&id, &req)?;
+    s.emit("agent_access", serde_json::to_value(&req).unwrap());
+    // Grants apply immediately. Refresh cached tool catalogs after the active turn ends.
+    if let Err((code, error)) = refresh_harness(&app, &s, req.enabled()).await {
+        return Err(fail(
+            code,
+            format!("Access was saved, but tools could not reconnect: {error}"),
+        ));
     }
     Ok(Json(serde_json::to_value(req).unwrap()))
 }

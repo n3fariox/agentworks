@@ -162,10 +162,58 @@ test('assigns secrets to a session; deleting a secret or the session removes ass
   expect((await (await api('/api/secrets')).json()).secrets.map(s=>[s.name,s.sessions])).toEqual([['GITHUB_TOKEN',0]]);
 });
 
+test('environment secrets reach the harness; changing them restarts an idle session',async({page})=>{
+  const github=(await (await api('/api/secrets')).json()).secrets.find(s=>s.name==='GITHUB_TOKEN');
+  const session=await (await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Secret environment'})).json();
+  const path=`/api/sessions/${session.id}/secrets`;
+  const ask=async(expected)=>{
+    await expect(page.locator('#session-state')).toHaveText('Ready');
+    await page.locator('#prompt').fill('env? GITHUB_TOKEN');await page.locator('#prompt').press('Enter');
+    await expect(page.locator('#conversation')).toContainText(expected);
+  };
+  try{
+    // Tool-only secrets stay out of the harness environment.
+    expect((await api(path,{assignments:[{secretId:github.id}]},'PUT')).ok).toBe(true);
+    await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),session.id);
+    await page.goto('/');
+    await ask('GITHUB_TOKEN is not set.');
+
+    const changed=await (await api(path,{assignments:[{secretId:github.id,delivery:'environment'}]},'PUT')).json();
+    expect(changed.environmentChanged).toBe(true);
+    await ask(`GITHUB_TOKEN is set (${github.length} bytes).`);
+
+    // A harness that prints the value has it replaced before storage or display.
+    await page.locator('#prompt').fill('env! GITHUB_TOKEN');await page.locator('#prompt').press('Enter');
+    await expect(page.locator('#conversation')).toContainText('GITHUB_TOKEN = [redacted:GITHUB_TOKEN] ([redacted:GITHUB_TOKEN]');
+    await expect(page.locator('#conversation')).not.toContainText(REPLACED);
+    expect((await stored()).includes(Buffer.from(REPLACED))).toBe(false);
+    expect((await stored()).includes(Buffer.from(Buffer.from(REPLACED).toString('base64').replace(/=+$/,'')))).toBe(false);
+
+    // Editing other settings does not restart the harness.
+    expect((await (await api(path,{assignments:[{secretId:github.id,delivery:'environment',delegation:'passable'}]},'PUT')).json()).environmentChanged).toBe(false);
+
+    expect((await api(path,{assignments:[]},'PUT')).ok).toBe(true);
+    await expect(page.locator('#conversation')).toContainText('Session secrets removed');
+    await page.locator('#prompt').fill('env? GITHUB_TOKEN');await page.locator('#prompt').press('Enter');
+    await expect(page.locator('#conversation .message').last()).toContainText('GITHUB_TOKEN is not set.');
+    expect((await stored()).includes(Buffer.from(REPLACED))).toBe(false);
+  }finally{await api(`/api/sessions/${session.id}`,undefined,'DELETE');}
+});
+
 test('values stored with a lost key file need re-entry after restart',async({page})=>{
   await stop();
   await rm(join(fixture,'sessions.secrets.key'));
   await start();
+  // A session whose environment secret cannot be decrypted still starts, without it.
+  const github=(await (await api('/api/secrets')).json()).secrets.find(s=>s.name==='GITHUB_TOKEN');
+  const session=await (await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Unreadable secret'})).json();
+  expect((await api(`/api/sessions/${session.id}/secrets`,{assignments:[{secretId:github.id,delivery:'environment'}]},'PUT')).ok).toBe(true);
+  await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),session.id);
+  await page.goto('/');
+  await page.locator('#prompt').fill('env? GITHUB_TOKEN');await page.locator('#prompt').press('Enter');
+  await expect(page.locator('#conversation')).toContainText('Not available to this harness: GITHUB_TOKEN');
+  await expect(page.locator('#conversation')).toContainText('GITHUB_TOKEN is not set.');
+  await api(`/api/sessions/${session.id}`,undefined,'DELETE');
   const panel=await openPanel(page);
   const card=panel.locator('.model-provider-card',{hasText:'GITHUB_TOKEN'});
   await expect(card).toContainText('Needs re-entry');

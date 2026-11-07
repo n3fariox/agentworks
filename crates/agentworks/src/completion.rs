@@ -82,6 +82,11 @@ impl crate::store::Store {
 }
 pub fn report(app: &App, s: &Session, req: Report) -> mail::Result<Value> {
     mail::require(app, s, "communicate")?;
+    let req: Report = {
+        let mut value = serde_json::to_value(&req).map_err(error)?;
+        crate::secrets::scrub(&s.id, &mut value);
+        serde_json::from_value(value).map_err(error)?
+    };
     req.validate()?;
     let payload = serde_json::to_string(&req).map_err(error)?;
     let project = mail::project(s);
