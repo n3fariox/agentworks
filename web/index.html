@@ -60,6 +60,7 @@
         <button id="settings-tab-directories" type="button" role="tab" aria-selected="true" aria-controls="settings-panel-directories" data-settings-category="directories">Directories</button>
         <button id="settings-tab-models" type="button" role="tab" aria-selected="false" aria-controls="settings-panel-models" data-settings-category="models" tabindex="-1">Models &amp; permissions</button>
         <button id="settings-tab-providers" type="button" role="tab" aria-selected="false" aria-controls="settings-panel-providers" data-settings-category="providers" tabindex="-1">Model providers</button>
+        <button id="settings-tab-secrets" type="button" role="tab" aria-selected="false" aria-controls="settings-panel-secrets" data-settings-category="secrets" tabindex="-1">Secrets</button>
         <button id="settings-tab-communication" type="button" role="tab" aria-selected="false" aria-controls="settings-panel-communication" data-settings-category="communication" tabindex="-1">Communication</button>
         <button id="settings-tab-display" type="button" role="tab" aria-selected="false" aria-controls="settings-panel-display" data-settings-category="display" tabindex="-1">Display</button>
         <button id="settings-tab-notifications" type="button" role="tab" aria-selected="false" aria-controls="settings-panel-notifications" data-settings-category="notifications" tabindex="-1">Notifications</button>
@@ -117,6 +118,9 @@
           </section>
           <p id="model-provider-message" class="field-note" role="status" aria-live="polite"></p>
         </fieldset>
+      </div>
+      <div id="settings-panel-secrets" role="tabpanel" aria-labelledby="settings-tab-secrets" tabindex="0" hidden>
+      <fieldset id="secret-controls" class="settings-section"></fieldset>
       </div>
       <div id="settings-panel-communication" role="tabpanel" aria-labelledby="settings-tab-communication" tabindex="0" hidden>
         <fieldset class="settings-section"><legend>Communication defaults</legend>

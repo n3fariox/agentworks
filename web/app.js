@@ -25,6 +25,7 @@ import {setupSidePanel} from './side-panel.js';
 import {setupContextMenu} from './context-menu.js';
 import {setupTimeoutControls} from './timeout-controls.js';
 import {setupParserScripts} from './parser-scripts.js';
+import {setupSecrets} from './secrets.js';
 import {setupInputQueue,setupPromptRecovery,BUSY} from './input-queue.js';
 import {setupNotifications} from './notifications.js';
 import {setupQuestions} from './questions.js';
@@ -58,7 +59,7 @@ const promptRecovery=setupPromptRecovery({area:$('prompt'),storage:sessionStorag
 let currentUserSeq=null;
 let sidePanel=null;
 setInterval(()=>usageStatus.render(),60000);
-let timeoutControls=null,parserScripts=null;
+let timeoutControls=null,parserScripts=null,secrets=null;
 let transcript=[], tools=new Map(), approvals=new Map(), assistant=null, status='starting';
 const backgroundJobs=createBackgroundJobs({root:$('background-jobs'),api,getActive:()=>active,isConnected:()=>connected,onChange:()=>scheduleDraw()});
 const subagents=createSubagents({jobResult:job=>[`${job.name||'Background job'} · ${backgroundJobs.label(job.state)}`,...jobResultLines(job)].join('\n'),append:()=>{},tabs:$('session-tabs'),panel:$('subagent-view'),messages:$('messages'),onSelect:view=>{sessionTerminal.select(view);scheduleDraw();},uuid,applyToolUpdate,renderToolActivity,renderMessage:(body,item)=>{if(item.role==='Agent')updateMarkdown(item,body);else body.textContent=item.text;},el});
@@ -1317,10 +1318,11 @@ $('add-root').onclick=()=>addRoot().focus();
 async function openSettings(){
   const timeoutsReady=timeoutControls.load();
   parserScripts.load();
+  secrets.close();secrets.refresh();
   notifications.load().then(()=>notifications.mount($('notification-controls'))).catch(error=>notifications.mount($('notification-controls'),error));
   try{
     modelProviders.loadSettings();
-    const settings=await api('/api/settings');$('settings-roots').replaceChildren();for(const root of settings.roots)addRoot(root);$('settings-error').textContent='';$('settings-saved').textContent='Save applies global defaults and host settings. Display, notifications, model providers and parsers save immediately.';
+    const settings=await api('/api/settings');$('settings-roots').replaceChildren();for(const root of settings.roots)addRoot(root);$('settings-error').textContent='';$('settings-saved').textContent='Save applies global defaults and host settings. Display, notifications, model providers, secrets and parsers save immediately.';
     $('default-communication-role').value=settings.defaultCommunicationRole||'participant';
     const fields=$('default-model-fields');fields.replaceChildren();
     // Node and Rust harnesses for one CLI share its permission default; show the picker once per CLI.
@@ -1384,6 +1386,8 @@ document.addEventListener('keydown',event=>{if(event.key==='n'&&!event.ctrlKey&&
 const diffView=setupDiff({api,root:$('side-diff'),enhanceBlocks:display.enhance});
 timeoutControls=setupTimeoutControls({$,api,getActive:()=>active});
 parserScripts=setupParserScripts({$,api,el});
+secrets=setupSecrets({$,api,el,toast});
+$('settings-dialog').addEventListener('close',()=>secrets.close());
 workspace=createWorkspace({api,toast,labels,uuid,
   viewChanged(view){
     if(view==='host-terminal'){

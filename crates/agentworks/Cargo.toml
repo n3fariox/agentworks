@@ -39,3 +39,6 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 
 rig-core = { version = "=0.45.0", default-features = false }
 rig-reqwest = { version = "=0.45.0", default-features = false }
+argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
+ring = "0.17"
+zeroize = { version = "1", features = ["serde"] }

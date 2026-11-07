@@ -19,6 +19,8 @@ Sidebar view and collapse state are remembered per browser. Switching views pres
 
 Projects, settings, and host-local location IDs are saved in `.agentworks/catalog.json`; session metadata and transcripts are saved in `.agentworks/catalog.sessions.sqlite3`. `AGENTWORKS_CATALOG_PATH` can point to another catalog file. This catalog provides organization; file access still follows the server's allowed roots.
 
+[Secrets](SECRETS.md) are stored encrypted in the session database. Their key file sits beside it (`catalog.sessions.secrets.key` by default, or `AGENTWORKS_SECRETS_KEY_PATH`) and is not part of recovery backups, so back it up separately if you want stored values to survive losing this machine.
+
 ### Remote hosts
 
 See [the implementation and protocol guide](REMOTE-HOSTS.md) for Mermaid diagrams, wire messages, ownership and recovery, timers, and compatibility rules.

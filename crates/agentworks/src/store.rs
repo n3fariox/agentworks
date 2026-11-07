@@ -10,7 +10,8 @@ use std::{
 
 // v10 introduced A-01 schedules; v11 is the combined A-01/R-02 release marker.
 // Recovery adds no tables and preserves every v10 schedule/slot ledger row.
-pub const SCHEMA_VERSION: i64 = 11;
+// v12 adds encrypted session secrets.
+pub const SCHEMA_VERSION: i64 = 12;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 #[derive(Serialize, Deserialize)]
@@ -75,15 +76,16 @@ impl Store {
           CREATE INDEX IF NOT EXISTS agent_completions_latest ON agent_completions(author,id DESC);
           CREATE TABLE IF NOT EXISTS session_creations(request_key TEXT PRIMARY KEY,payload TEXT NOT NULL,session_id TEXT,error TEXT,mutation_started INTEGER NOT NULL DEFAULT 0);
           COMMIT;")?;
-        // C-01 controllers, C-05 review records, U-05 parser scripts, roles and A-01 schedules are additive schema migrations.
+        // C-01 controllers, C-05 review records, U-05 parser scripts, roles, A-01 schedules and secrets are additive schema migrations.
         connection.execute_batch(&format!(
-            "BEGIN; {} {} {} {} {} {} PRAGMA user_version={SCHEMA_VERSION}; COMMIT;",
+            "BEGIN; {} {} {} {} {} {} {} PRAGMA user_version={SCHEMA_VERSION}; COMMIT;",
             crate::inbox_delivery::SCHEMA,
             crate::review_queue::SCHEMA,
             crate::controllers::SCHEMA,
             crate::tool_progress::SCHEMA,
             crate::roles::SCHEMA,
-            crate::automations::SCHEMA
+            crate::automations::SCHEMA,
+            crate::secrets::SCHEMA
         ))?;
         Ok(Self {
             connection,

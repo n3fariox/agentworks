@@ -522,7 +522,10 @@ mod tests {
         assert_eq!(retain(&f.0, 1, false).unwrap()["remove"], json!([]));
         let before = hash(&source.join("sessions.sqlite3")).unwrap();
         let dest = f.0.join("v11");
-        assert_eq!(restore(&source, &dest).unwrap()["schemaVersion"], 11);
+        assert_eq!(
+            restore(&source, &dest).unwrap()["schemaVersion"],
+            crate::store::SCHEMA_VERSION
+        );
         let source_conn = source_db(&source).unwrap();
         let store = Store::open(&dest.join("sessions.sqlite3")).unwrap();
         assert_eq!(
@@ -536,7 +539,7 @@ mod tests {
                 .connection
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            11
+            crate::store::SCHEMA_VERSION
         );
         compare(&source_conn, &store.connection).unwrap();
         assert_eq!(store.schedule_cursor("weekly").unwrap(), Some(3000));
@@ -595,7 +598,10 @@ mod tests {
         }
         let before = hash(&source.join("sessions.sqlite3")).unwrap();
         let dest = f.0.join("from-v9");
-        assert_eq!(restore(&source, &dest).unwrap()["schemaVersion"], 11);
+        assert_eq!(
+            restore(&source, &dest).unwrap()["schemaVersion"],
+            crate::store::SCHEMA_VERSION
+        );
         let store = Store::open(&dest.join("sessions.sqlite3")).unwrap();
         assert_eq!(store.load().unwrap()[0].0.title, "Retain me");
         assert_eq!(store.load().unwrap()[0].1.events.len(), 1);

@@ -28,6 +28,7 @@ mod permission_modes;
 mod recovery;
 mod review_queue;
 mod roles;
+mod secrets;
 mod service_restart;
 mod session_config;
 mod session_runtime;
@@ -640,6 +641,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &restored.iter().map(|(m, _)| m.id.clone()).collect(),
     );
     attachments::init(attachment_root);
+    // Kept beside the database but outside recovery snapshots, which copy only named files.
+    secrets::init(
+        std::env::var_os("AGENTWORKS_SECRETS_KEY_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| db_path.with_extension("secrets.key")),
+    );
     let mcp_listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let mcp_endpoint = mcp_listener.local_addr()?;
     // C-01: external stdio bridges discover this process's loopback endpoint here.
@@ -959,6 +966,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route(
+            "/secrets.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/secrets.js"),
+                )
+            }),
+        )
+        .route(
             "/timeout-controls.js",
             get(|| async {
                 (
@@ -1105,6 +1121,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             axum::routing::put(tool_progress::put_priority),
         )
         .route("/api/timeouts", get(get_timeouts).put(save_timeouts))
+        .route("/api/secrets", get(secrets::list).post(secrets::create))
+        .route(
+            "/api/secrets/{id}",
+            axum::routing::put(secrets::update).delete(secrets::delete),
+        )
         .route(
             "/api/notifications",
             get(get_notifications).put(save_notifications),
