@@ -32,6 +32,8 @@ import {setupInputQueue,setupPromptRecovery,BUSY} from './input-queue.js';
 import {setupNotifications} from './notifications.js';
 import {setupQuestions} from './questions.js';
 import {setupMentions} from './mentions.js';
+import {setupTaskMentions} from './task-mentions.js';
+import {setupTasks} from './tasks.js';
 import {setupAttachments} from './attachments.js';
 import {setupModelProviders} from './model-providers.js';
 import {setupDirectoryPicker,setupProjectDirectory} from './directory-picker.js';
@@ -93,6 +95,10 @@ const questions=setupQuestions({api,uuid:()=>uuid(),storage:localStorage,getActi
 const inputQueue=setupInputQueue({$,api,uuid:()=>uuid(),getActive:()=>active,getStatus:()=>status,toolActive:()=>[...tools.values()].some(t=>['pending','in_progress'].includes(t.status))});
 let permissionModes=null,sessionConfig=null;
 const mentions=setupMentions({prompt:$('prompt'),list:$('mention-list'),getActive:()=>active,getSessions:()=>sessions});
+const taskMentions=setupTaskMentions({prompt:$('prompt'),list:$('mention-list'),api,getActive:()=>active});
+const projectTasks=setupTasks({api,uuid,getProject:id=>projects.find(p=>p.id===id),decorate:node=>decorateMarkdown(node),onWrite:()=>taskMentions.refresh()});
+$('project-tasks').onclick=()=>{if(editingProject)projectTasks.open(editingProject);};
+$('session-tasks').onclick=()=>{if(active?.projectId){sessionMenu.close();projectTasks.open(active.projectId);}else toast('Assign this session to a project to view tickets.');};
 let replaying=false,workLogs=null,turnEnds=new Map();
 // Older transcript pages. `storedEvents` holds the stored events behind the current transcript
 // (older pages + snapshot window + live events, unique and ascending by seq) so prepending a
@@ -586,12 +592,12 @@ async function refreshSessions(){
   sessions=list;projects=catalog.projects;locations=catalog.locations||[];hosts=catalog.hosts;
   if(terminalHost&&!hosts.some(host=>host.id===terminalHost.id)){terminalHost=null;if(document.body.dataset.workspaceView==='host-terminal')workspace.showView('sessions');}
   if(active){const current=sessions.find(s=>s.id===active.id);if(current){active.projectId=current.projectId;active.hostId=current.hostId;active.automation=current.automation;active.archived=current.archived;}}
-  sidebar();workspace?.sync(catalog,sessions);
+  sidebar();workspace?.sync(catalog,sessions);taskMentions.refresh();
 }
 function openProjectDialog(project=null){
   if(savingProject)return;
   editingProject=project?.id||null;$('project-dialog-title').textContent=project?'Project settings':'New project';
-  $('project-name').value=project?.name||'';$('project-communication-role').value=project?.defaultCommunicationRole||'';
+  $('project-name').value=project?.name||'';$('project-slug').value=project?.slug||'';$('project-tasks').hidden=!project;$('project-communication-role').value=project?.defaultCommunicationRole||'';
   $('project-communication-role').querySelector('option[value=""]').textContent='Use global default · '+communicationLabels[config.defaultCommunicationRole||'participant'];
   $('project-error').textContent='';$('delete-project').hidden=!project;$('archive-project').hidden=!project;$('open-controllers').hidden=!project;
   $('archive-project').textContent=project?.archived?'Unarchive project':'Archive project';
@@ -622,7 +628,7 @@ function selectSession(s) {
   if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));scrollPositions.set(active.id,$('messages').scrollTop);}
   $('prompt').value=drafts[s.id]||'';restoreScroll=scrollPositions.get(s.id)??null;
   clearTimeout(retryTimer);generation++;socket?.close();socket=null;connected=false;
-  active=s;storedEvents=[];older={mode:'none',loading:false,error:''};currentUserSeq=null;promptRecovery.render();status=s.status;modelConfig=null;permissionModes=null;sessionConfig=null;availableCommands=[];commandsOpen=false;renderCommands();mentions.close();composerMenu.close();sessionMenu.close();resetTranscript();usageStatus.reset();inputQueue.reset();
+  active=s;storedEvents=[];older={mode:'none',loading:false,error:''};currentUserSeq=null;promptRecovery.render();status=s.status;modelConfig=null;permissionModes=null;sessionConfig=null;availableCommands=[];commandsOpen=false;renderCommands();mentions.close();taskMentions.close();taskMentions.refresh();composerMenu.close();sessionMenu.close();resetTranscript();usageStatus.reset();inputQueue.reset();
   localStorage.setItem('agentworks-session',s.id);$('welcome').hidden=true;$('conversation').hidden=false;
   github.sessionChanged();
   setTitle(s.title);$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;
@@ -1090,7 +1096,7 @@ const attachments=setupAttachments({appUrl,el,toast,uuid,getSession:()=>active,c
 const decorateMarkdown=setupChatReferences({getSession:()=>active,getSessions:()=>sessions,openSession:async id=>{
   try{const target=sessions.find(s=>s.id===id)||(await api('/api/sessions/'+encodeURIComponent(id))).session;selectSession(target);}
   catch(e){toast('Cannot open session: '+e.message);}
-},openFile:(session,path,line)=>workspace?.openSideFile(session,path,line),fileUrl,imageViewer});
+},openTask:(projectId,number)=>projectTasks.open(projectId,number),openFile:(session,path,line)=>workspace?.openSideFile(session,path,line),fileUrl,imageViewer});
 // chat.user formatting is known per session after its first reply: off skips
 // further requests for this page load, and on asks once per user message.
 const userFormatting=new Map();
@@ -1278,16 +1284,16 @@ $('project-dialog').addEventListener('cancel',event=>{if(savingProject)event.pre
 $('create-project').onchange=()=>{const host=createHost(),projectId=$('create-project').value||null;$('directory').value=projectRoot(host?.id||'local',projectId)||(host?host.roots||[]:config.roots)[0]||'';$('directory').dispatchEvent(new Event('input'));worktrees.projectChanged();updateCommunicationDefault();};
 $('project-form').onsubmit=async event=>{
   event.preventDefault();if(savingProject)return;savingProject=true;
-  for(const id of ['save-project','project-name','project-directory','project-directory-host','project-directory-browse','project-directory-clear','project-default-mode','project-require-worktree','project-communication-role','archive-project','delete-project','dismiss-project'])$(id).disabled=true;
+  for(const id of ['save-project','project-name','project-slug','project-directory','project-directory-host','project-directory-browse','project-directory-clear','project-default-mode','project-require-worktree','project-communication-role','archive-project','delete-project','dismiss-project'])$(id).disabled=true;
   $('project-error').textContent='';
   try{
     const policy=policyEditor.value(),directory=projectDirectory.value();
-    const project=await api(editingProject?`/api/projects/${editingProject}`:'/api/projects',{method:editingProject?'PATCH':'POST',body:JSON.stringify({name:$('project-name').value,defaultCommunicationRole:$('project-communication-role').value||null,...(directory!==undefined?{defaultLocation:directory}:{})})});
+    const project=await api(editingProject?`/api/projects/${editingProject}`:'/api/projects',{method:editingProject?'PATCH':'POST',body:JSON.stringify({name:$('project-name').value,...($('project-slug').value?{slug:$('project-slug').value}:{}),defaultCommunicationRole:$('project-communication-role').value||null,...(directory!==undefined?{defaultLocation:directory}:{})})});
     editingProject=project.id;projectDirectory.commit();$('delete-project').hidden=false;$('archive-project').hidden=false;
     try{await api(`/api/projects/${project.id}/workspace-policy`,{method:'PUT',body:JSON.stringify(policy)});}
     catch(error){throw new Error(`Project name saved. Workspace policy was not saved: ${error.message}. Retry Save project.`);}
     await refreshSessions();if($('create-dialog').open){$('create-project').value=project.id;const start=projectDirectoryOn($('create-host').value||'local',project.id);if(start){$('directory').value=start;$('directory').dispatchEvent(new Event('input'));$('directory').dispatchEvent(new Event('change'));}worktrees.projectChanged();updateCommunicationDefault();}$('project-dialog').close();
-  }catch(error){$('project-error').textContent=error.message;}finally{savingProject=false;for(const id of ['save-project','project-name','project-directory','project-directory-host','project-directory-browse','project-directory-clear','project-default-mode','project-require-worktree','project-communication-role','archive-project','delete-project','dismiss-project'])$(id).disabled=false;}
+  }catch(error){$('project-error').textContent=error.message;}finally{savingProject=false;for(const id of ['save-project','project-name','project-slug','project-directory','project-directory-host','project-directory-browse','project-directory-clear','project-default-mode','project-require-worktree','project-communication-role','archive-project','delete-project','dismiss-project'])$(id).disabled=false;}
 };
 // Archive and delete apply to the project's sessions too unless the user keeps them in Ungrouped.
 let removingProject=null;
@@ -1306,6 +1312,7 @@ function describeProjectRemove(){
     ?`${verb} the project. Its ${count} ${plural} move to Ungrouped and keep running.`
     :action==='delete'?`Deletes the project and the saved history of its ${count} ${plural}, stopping any running work. Workspace files and branches remain. This cannot be undone.`
     :`Hides the project and archives its ${count} ${plural}. Archiving stops session terminals and keeps their saved history.`;
+  if(action==='delete')$('project-remove-description').textContent+=' All project tickets will be permanently deleted.';
 }
 $('project-remove-ungroup').onchange=describeProjectRemove;
 async function archiveProject(project){
@@ -1413,7 +1420,7 @@ $('composer').onsubmit=async event=>{
   // A sleeping session wakes for the prompt on the server.
   const asleep=status==='suspended'&&!!active.asleep;
   if(status==='cancelling'||(!BUSY.includes(status)&&status!=='idle'&&!asleep))return;
-  const submission={...pendingFor(sid,mentions.expand(text),attached)};
+  const submission={...pendingFor(sid,taskMentions.expand(mentions.expand(text)),attached)};
   promptRecovery.submitted(sid,submission,text);
   $('send').disabled=true;
   try{
@@ -1429,10 +1436,12 @@ $('composer').onsubmit=async event=>{
     if(attached.length)attachments.clear(sid,attached);
   }catch(e){toast(e.message);}finally{updateControls();}
 };
-$('prompt').oninput=()=>{renderComposer();mentions.update();updateCommands();if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));}};
+function updateReferencePicker(){if(taskMentions.wants()){mentions.close();taskMentions.update();}else{taskMentions.close();mentions.update();}}
+$('prompt').addEventListener('click',updateReferencePicker);
+$('prompt').oninput=()=>{renderComposer();updateReferencePicker();updateCommands();if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));}};
 $('prompt').addEventListener('click',updateCommands);
 $('prompt').addEventListener('keyup',event=>{if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End'].includes(event.key))updateCommands();});
-$('prompt').onkeydown=event=>{if(mentions.keydown(event))return;if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing&&!composerKeyboard.matches){event.preventDefault();$('composer').requestSubmit();}};
+$('prompt').onkeydown=event=>{if(taskMentions.keydown(event)||mentions.keydown(event))return;if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing&&!composerKeyboard.matches){event.preventDefault();$('composer').requestSubmit();}};
 $('resume-session').onclick=()=>{if(active)resumeSession(active.id);};
 $('stop').onclick=async()=>{if(!active)return;const sid=active.id,seq=currentUserSeq;$('stop').disabled=true;try{await api(`/api/sessions/${sid}/cancel${seq!=null?'?userSeq='+seq:''}`,{method:'POST',body:'{}'});}catch(e){toast(e.message);}finally{updateControls();}};
 async function deleteSession(session,providerHistory=false){
@@ -1750,6 +1759,7 @@ setupContextMenu({onError:message=>toast(message),resolve(target){
     const project=projects.find(p=>p.id===heading.dataset.projectId);if(!project)return null;
     return {origin:heading,label:`Actions for ${project.name}`,actions:[
       {label:'Edit project…',run:()=>openProjectDialog(project)},
+      {label:'Tasks…',run:()=>projectTasks.open(project.id)},
       {label:project.archived?'Unarchive project':'Archive project…',run:()=>archiveProject(project)},
       {label:'Delete project…',danger:true,run:()=>openProjectRemove('delete',project)},
     ]};

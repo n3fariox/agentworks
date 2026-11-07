@@ -68,6 +68,26 @@ fn tools(a: &mail::Access, session: bool) -> Value {
     if a.communicate || mail::coordinator(a) {
         tools.push(tool("get_completion", "Read the latest agent claim for yourself or a permitted same-project session. Claims are not proof of review or success.", json!({"sessionId":{"type":"string","description":"Session ID or agentworks://sessions/<id> URI, passed exactly as given in list_sessions or a prompt."}}), &[]));
     }
+    let task_id = json!({"oneOf":[{"type":"integer","minimum":1},{"type":"string","pattern":"^agentworks://projects/[^/]+/tasks/[1-9][0-9]*$"}]});
+    if a.communicate || mail::coordinator(a) {
+        tools.push(tool(
+            "list_tasks",
+            "List tickets in your current project, with display keys and stable URIs.",
+            json!({}),
+            &[],
+        ));
+        tools.push(tool(
+            "get_task",
+            "Read a project ticket. Copy its numeric id or canonical URI, not its display key.",
+            json!({"taskId":task_id}),
+            &["taskId"],
+        ));
+    }
+    if session && mail::coordinator(a) {
+        tools.push(tool("create_task", "Create a project ticket with a Markdown body. Coordinator communication access required. Reuse requestId only for identical input.", json!({"title":{"type":"string","maxLength":160},"body":{"type":"string","maxLength":16384},"status":{"type":"string","enum":["open","done"]},"requestId":{"type":"string","maxLength":100}}), &["title","requestId"]));
+        tools.push(tool("update_task", "Edit a ticket using its current revision. Markdown body. Refresh after a revision conflict; reuse requestId only for identical input.", json!({"taskId":task_id,"revision":{"type":"integer","minimum":1},"title":{"type":"string","maxLength":160},"body":{"type":"string","maxLength":16384},"status":{"type":"string","enum":["open","done"]},"requestId":{"type":"string","maxLength":100}}), &["taskId","revision","requestId"]));
+        tools.push(tool("delete_task", "Permanently delete a project ticket using its current revision. Reuse requestId only for identical input.", json!({"taskId":task_id,"revision":{"type":"integer","minimum":1},"requestId":{"type":"string","maxLength":100}}), &["taskId","revision","requestId"]));
+    }
     if a.restart_service && session {
         tools.push(tool("get_service_status", "Read global service activity and durable restart/handoff outcomes. Requires live restartService grant.",json!({}), &[]));
         tools.push(tool(
@@ -171,6 +191,9 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
     let grants = mail::actor_access(app, a)?;
     match operation {
         "tools/list" => Ok(tools(&grants, a.session.is_some())),
+        "list_tasks" | "get_task" | "create_task" | "update_task" | "delete_task" => {
+            crate::tasks::agent(app, a, args, operation)
+        }
         "get_service_status" => {
             mail::require(app, session_only(a)?, "restart_service")?;
             crate::service_restart::status(State(app.clone()))
@@ -474,7 +497,7 @@ pub async fn serve_bridge(app: App, listener: TcpListener) {
                 };
                 let response=if let Some(s)=actor {
                     let operation=v["operation"].as_str().unwrap_or("");
-                    let mutation=!matches!(operation,"tools/list"|"read_inbox"|"list_sessions"|"list_automations"|"get_automation"|"list_automation_runs"|"get_completion"|"get_service_status");
+                    let mutation=!matches!(operation,"tools/list"|"read_inbox"|"list_sessions"|"list_automations"|"get_automation"|"list_automation_runs"|"get_completion"|"get_service_status"|"list_tasks"|"get_task");
                     let action=operation.chars().take(80).collect::<String>();
                     let argument_target=v["arguments"]["sessionId"].as_str().or(v["arguments"]["recipient"].as_str()).or(v["arguments"]["automationId"].as_str()).unwrap_or("").chars().take(128).collect::<String>();
                     let request=v["arguments"]["requestId"].as_str().unwrap_or("").chars().take(100).collect::<String>();

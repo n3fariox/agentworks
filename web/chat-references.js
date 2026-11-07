@@ -24,24 +24,31 @@ export function sessionReference(href){
       ?url.pathname.slice(1).toLowerCase():null;
   }catch{return null;}
 }
+// Strict canonical project ticket identity; display keys are deliberately not identity.
+export function taskReference(href){
+  if(typeof href!=='string')return null;
+  const match=/^agentworks:\/\/projects\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/tasks\/([1-9]\d*)$/.exec(href);
+  return match&&Number.isSafeInteger(Number(match[2]))?{projectId:match[1],number:Number(match[2])}:null;
+}
 // User prompts keep their literal formatting, except for session links inserted
 // by the mention picker. Build DOM nodes so prompt text never becomes HTML.
 export function renderUserReferences(node,text){
   node.replaceChildren();
   let start=0;
-  for(const match of text.matchAll(/\[([^\]\n]+)\]\((agentworks:\/\/sessions\/[^\s)]+)\)/gi)){
-    if(!sessionReference(match[2]))continue;
+  for(const match of text.matchAll(/\[([^\]\n]+)\]\((agentworks:\/\/(?:sessions|projects)\/[^\s)]+)\)/gi)){
+    if(!sessionReference(match[2])&&!taskReference(match[2]))continue;
     node.append(document.createTextNode(text.slice(start,match.index)));
     const link=document.createElement('a');link.textContent=match[1];link.setAttribute('href',match[2]);node.append(link);
     start=match.index+match[0].length;
   }
   node.append(document.createTextNode(text.slice(start)));
 }
-export function setupChatReferences({getSession,getSessions,openSession,openFile,fileUrl,imageViewer}){
+export function setupChatReferences({getSession,getSessions,openSession,openTask,openFile,fileUrl,imageViewer}){
   return (node,base='')=>{
     const session=getSession();
     for(const link of node.querySelectorAll('a')){
-      const href=link.getAttribute('href'),sessionId=sessionReference(href);
+      const href=link.getAttribute('href'),sessionId=sessionReference(href),task=taskReference(href);
+      if(task){link.onclick=event=>{event.preventDefault();openTask?.(task.projectId,task.number);};continue;}
       if(sessionId){
         const target=getSessions?.().find(s=>s.id===sessionId);
         if(target)link.textContent='@'+slug(target.title);
