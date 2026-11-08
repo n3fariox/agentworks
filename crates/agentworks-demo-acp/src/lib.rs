@@ -485,6 +485,16 @@ impl Demo {
                 );
             }
             "session/new" => {
+                // Test hook: startup waits while this file exists; the content "fail" refuses it.
+                if let Some(gate) = env("AGENTWORKS_DEMO_START_GATE") {
+                    while let Ok(content) = std::fs::read_to_string(&gate) {
+                        if content.trim() == "fail" {
+                            self.error(&id, -32603, "Demo startup failed", None);
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                }
                 let session = uuid::Uuid::new_v4().to_string();
                 self.mcp_configs
                     .lock()

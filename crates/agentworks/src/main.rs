@@ -357,6 +357,7 @@ impl Session {
         let _ = self.tx.send(json!({"kind":"startup","data":{"step":step}}));
     }
     fn status(&self, status: &str) {
+        let mut startup_failed = false;
         {
             let mut data = self.data.lock().unwrap();
             data.status = if data.storage_error.is_some() {
@@ -372,8 +373,27 @@ impl Session {
                 data.inbox_turn = None;
                 data.native_rename = false;
             }
+            // Under this lock, so input queued during startup always sees the outcome.
+            if data.input_queue.after_startup {
+                match data.status.as_str() {
+                    "idle" => {
+                        let limited =
+                            data.continuation.limited || data.continuation.due_at.is_some();
+                        data.input_queue.startup_finished(limited);
+                    }
+                    "error" | "closed" | "suspended" => {
+                        data.input_queue
+                            .block("The session did not start; inspect, then resume the queue.");
+                        startup_failed = true;
+                    }
+                    _ => {}
+                }
+            }
         }
         self.emit("status", json!({"status":status}));
+        if startup_failed {
+            input_queue::broadcast(self);
+        }
     }
     fn meta(&self) -> Value {
         let data = self.data.lock().unwrap();
