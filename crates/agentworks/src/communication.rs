@@ -522,7 +522,7 @@ pub fn send_as(app: &App, s: &Actor, req: SendMessage) -> Result<Value> {
         )
         .map_err(db_error)?;
     }
-    // Only session peers can feed opt-in wake delivery; controllers need an explicit prompt grant.
+    // Only session peers can feed wake delivery; controllers need an explicit prompt grant.
     if target.is_some() && s.session.is_some() {
         crate::inbox_delivery::enqueue(&tx, &target_id, id, req.reply_to)?;
     }

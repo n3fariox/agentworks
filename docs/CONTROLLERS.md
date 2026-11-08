@@ -32,7 +32,7 @@ For session-based MCP callers, coordinator grants also enable `archive_session`;
 
 Project boundaries are enforced in every handler, including for known IDs, retries and reply targets.
 
-Sessions with `communicate` see live messaging controllers in a `controllers` array of `list_sessions` and can reply with `recipient: "agentworks://controllers/<id>"`. Messages from controllers are persisted and visible but **never feed opt-in inbox wake delivery**; starting work requires an explicit `promptSessions` grant. Controller-started turns and sessions are labelled in the browser with the controller's name (`initiatedBy`/`initiatorTitle` on the `user` event, `initiatedBy.actorTitle` on sessions). Agents & inbox activity shows the controller by name.
+Sessions with `communicate` see live messaging controllers in a `controllers` array of `list_sessions` and can reply with `recipient: "agentworks://controllers/<id>"`. Messages from controllers are persisted and visible but **never feed inbox wake delivery**; starting work requires an explicit `promptSessions` grant. Controller-started turns and sessions are labelled in the browser with the controller's name (`initiatedBy`/`initiatorTitle` on the `user` event, `initiatedBy.actorTitle` on sessions). Agents & inbox activity shows the controller by name.
 
 ## Credentials and revocation
 
