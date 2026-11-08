@@ -822,13 +822,17 @@ fn dispatch_inner(app: &App, s: &Session, human_pending: bool) -> Result<()> {
     if hold_reason(app, s).is_some() {
         return Ok(());
     }
+    // Event publication locks session state before the store. Snapshot and
+    // release state first so rebinding never takes those locks in reverse.
+    let (project, native) = {
+        let d = s.data.lock().unwrap();
+        (d.project_id.clone(), d.provider_session_id.clone())
+    };
+    // Reply wakes have no bound policy, so the turn is owned by the live context.
+    let Some(owner_native) = native.clone() else {
+        return Ok(());
+    };
     if p.enabled {
-        // Event publication locks session state before the store. Snapshot and
-        // release state first so rebinding never takes those locks in reverse.
-        let (project, native) = {
-            let d = s.data.lock().unwrap();
-            (d.project_id.clone(), d.provider_session_id.clone())
-        };
         rebind(
             &app.store.lock().unwrap().connection,
             s,
@@ -910,10 +914,7 @@ fn dispatch_inner(app: &App, s: &Session, human_pending: bool) -> Result<()> {
     let owner = Turn {
         request_id: request.clone(),
         generation: p.generation,
-        native: p
-            .native
-            .clone()
-            .ok_or_else(|| fail(StatusCode::CONFLICT, "Missing saved native identity"))?,
+        native: owner_native,
     };
     {
         let mut d = s.data.lock().unwrap();
@@ -1894,7 +1895,11 @@ mod tests {
     #[test]
     fn a_reply_wakes_the_requester_once_without_a_standing_policy() {
         let mut f = Fixture::new();
-        f.policy(|p| p.enabled = false);
+        // A session that never had a standing policy has no bound native identity.
+        f.policy(|p| {
+            p.enabled = false;
+            p.native = None;
+        });
         let (me, peer) = (f.recipient.clone(), f.sender.clone());
         let request = f.send_as(&me, &peer, "Please review abc123", None, true);
         // Unrelated mail and replies to messages that asked for nothing do not wake.
