@@ -1,19 +1,19 @@
 import {serverReady,stopChild} from './support/cleanup.mjs';
 import {test,expect} from '@playwright/test';
 import {spawn} from 'node:child_process';
-import {mkdtemp,mkdir,rm} from 'node:fs/promises';
+import {mkdtemp,mkdir,rm,writeFile} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 
 // L-05: isolated servers/databases on assigned ports 4511-4512; demo agent only, no paid inference.
 const base='http://127.0.0.1:4511';
 test.use({baseURL:base});
-let fixture,server,session;
+let fixture,server,session,gate;
 
 function launch(port,dir){
   const proc={log:'',exited:false};
   proc.child=spawn(resolve('target/debug/agentworks'),[],{env:{...process.env,
     AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:String(port),AGENTWORKS_ROOTS:dir,
-    AGENTWORKS_CATALOG_PATH:join(dir,'catalog.json'),AGENTWORKS_DB_PATH:join(dir,'sessions.sqlite3'),AGENTWORKS_DEMO_STATE_DIR:join(dir,'demo')},stdio:['ignore','pipe','pipe']});
+    AGENTWORKS_CATALOG_PATH:join(dir,'catalog.json'),AGENTWORKS_DB_PATH:join(dir,'sessions.sqlite3'),AGENTWORKS_DEMO_STATE_DIR:join(dir,'demo'),AGENTWORKS_DEMO_START_GATE:join(dir,'start-gate')},stdio:['ignore','pipe','pipe']});
   proc.child.on('error',e=>{proc.log+=e.message;proc.exited=true;});proc.child.on('exit',()=>proc.exited=true);
   for(const stream of [proc.child.stdout,proc.child.stderr])stream.on('data',s=>{proc.log+=s.toString();});
   return proc;
@@ -42,7 +42,7 @@ async function type(page,text){await page.locator('#prompt-editor .cm-content').
 
 test.beforeAll(async()=>{
   await mkdir('.cache',{recursive:true});fixture=await mkdtemp(resolve('.cache/input-queue-'));
-  server=launch(4511,fixture);await ready(server,base);
+  gate=join(fixture,'start-gate');server=launch(4511,fixture);await ready(server,base);
 });
 test.afterAll(async()=>{await stopChild(server?.child);if(fixture)await rm(fixture,{recursive:true,force:true});});
 test.beforeEach(async()=>{session=null;session=await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Queue test'});await until(async()=>await state()==='idle');});
@@ -104,6 +104,44 @@ test('duplicate request IDs, changed payloads, stale revisions and bounds',async
   expect((await call(path,{text:'   ',requestId:'blank'})).status).toBe(400);
   expect((await api(path)).queue.items.length).toBe(1);
   await api(`/api/sessions/${session.id}/stop`,{});
+});
+
+test('input typed during startup is queued and sent once the session is ready',async({page})=>{
+  await writeFile(gate,'hold');
+  const held=await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Startup queue'});
+  try{
+    await until(async()=>await state(base,held.id)==='starting');
+    await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),held.id);
+    await page.goto('/');
+    await expect(page.locator('#session-state')).toHaveText('Starting');
+    await expect(page.locator('#send')).toHaveAttribute('aria-label','Queue message');
+    await type(page,'typed while starting');
+    await expect(page.locator('#input-queue .queue-state')).toHaveText('Queued');
+    expect((await api(`/api/sessions/${held.id}`)).events.filter(e=>e.kind==='user').length).toBe(0);
+    await rm(gate);
+    await expect(page.locator('#messages')).toContainText('typed while starting',{timeout:15000});
+    await until(async()=>(await api(`/api/sessions/${held.id}/queue`)).queue.items[0].state==='sent');
+  }finally{await rm(gate,{force:true});await api(`/api/sessions/${held.id}`,undefined,'DELETE');}
+});
+
+test('input typed during a startup that fails is paused and never sent',async({page})=>{
+  await writeFile(gate,'hold');
+  const held=await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Failed startup'});
+  try{
+    await until(async()=>await state(base,held.id)==='starting');
+    await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),held.id);
+    await page.goto('/');
+    await expect(page.locator('#session-state')).toHaveText('Starting');
+    await type(page,'kept for inspection');
+    await expect(page.locator('#input-queue .queue-state')).toHaveText('Queued');
+    await writeFile(gate,'fail');
+    await expect(page.locator('#input-queue .queue-state')).toHaveText('Paused',{timeout:15000});
+    await expect(page.locator('.queue-paused')).toContainText('did not start');
+    await expect(page.locator('#input-queue .queue-text')).toHaveText('kept for inspection');
+    const after=await api(`/api/sessions/${held.id}`);
+    expect(after.session.status).toBe('error');
+    expect(after.events.filter(e=>e.kind==='user').length).toBe(0);
+  }finally{await rm(gate,{force:true});await api(`/api/sessions/${held.id}`,undefined,'DELETE');}
 });
 
 test('Stop pauses the queue; nothing sends until a deliberate resume',async({page})=>{

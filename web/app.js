@@ -28,7 +28,7 @@ import {setupSidePanel} from './side-panel.js';
 import {setupContextMenu} from './context-menu.js';
 import {setupTimeoutControls} from './timeout-controls.js';
 import {setupParserScripts} from './parser-scripts.js';
-import {setupInputQueue,setupPromptRecovery,BUSY} from './input-queue.js';
+import {setupInputQueue,setupPromptRecovery,BUSY,STARTING} from './input-queue.js';
 import {setupNotifications} from './notifications.js';
 import {setupQuestions} from './questions.js';
 import {setupMentions} from './mentions.js';
@@ -1073,20 +1073,20 @@ function updateControls(){
   }
   const busy=['running','waiting','cancelling'].includes(status);
   $('session-state').textContent=status==='waiting'?([...approvals.values()].some(a=>a.kind==='question')?'Needs your answer':'Needs your approval'):status==='idle'?'Ready':status==='suspended'&&active?.asleep?'Asleep':status[0]?.toUpperCase()+status.slice(1);
-  // Busy sessions keep the composer usable so input can be queued without losing the draft.
-  const asleep=status==='suspended'&&!!active?.asleep;
-  $('prompt').disabled=!connected||!(status==='idle'||busy||asleep);$('send').disabled=!connected||status==='cancelling'||!(status==='idle'||busy||asleep);
-  $('send').setAttribute('aria-label',busy?'Queue message':'Send message');$('send').textContent=busy?'＋':'↑';$('send').title=busy?'Queue to send after this turn ends':'';
+  // Busy and starting sessions keep the composer usable so input can be queued without losing the draft.
+  const asleep=status==='suspended'&&!!active?.asleep,starting=STARTING.includes(status),queues=busy||starting;
+  $('prompt').disabled=!connected||!(status==='idle'||queues||asleep);$('send').disabled=!connected||status==='cancelling'||!(status==='idle'||queues||asleep);
+  $('send').setAttribute('aria-label',queues?'Queue message':'Send message');$('send').textContent=queues?'＋':'↑';$('send').title=starting?'Queue to send once the session is ready':busy?'Queue to send after this turn ends':'';
   inputQueue.render();inputQueue.renderActivity();$('stop').hidden=!busy&&!['starting','resuming','configuring'].includes(status)&&!active?.continuation?.enabled;$('stop').disabled=!connected||status==='cancelling';
   attachments.render();
-  $('prompt').placeholder=status==='starting'?'Starting your agent…':status==='waiting'?'Respond to the permission request above…':busy?'Your agent is working… type to queue a follow-up':status==='error'?'Session unavailable. Use Resume session to try again.':asleep?'Asleep. Send a message to wake it.':'What would you like to work on?';
+  $('prompt').placeholder=starting?`${status==='starting'?'Starting':'Resuming'} your agent… type to queue a message`:status==='waiting'?'Respond to the permission request above…':busy?'Your agent is working… type to queue a follow-up':status==='error'?'Session unavailable. Use Resume session to try again.':asleep?'Asleep. Send a message to wake it.':'What would you like to work on?';
   if(subagents.viewingChild())$('prompt').placeholder=busy?'Queue a message for the main agent…':'Message the main agent…';
   renderComposer();
 }
 function scheduleDraw(){if(!drawTimer)drawTimer=setTimeout(()=>{drawTimer=null;draw();},70);}
 function fileUrl(path,download=false){return appUrl(`/api/sessions/${active.id}/file?path=${encodeURIComponent(path)}${download?'&download=true':''}`);}
 const imageViewer=setupImageViewer($('messages'));
-const attachments=setupAttachments({appUrl,el,toast,uuid,getSession:()=>active,canAttach:()=>!!active&&!$('prompt').disabled,button:$('attach'),input:$('attach-input'),list:$('attachment-list'),dropTarget:$('composer')});
+const attachments=setupAttachments({appUrl,el,toast,uuid,getSession:()=>active,canAttach:()=>!!active&&!$('prompt').disabled&&!STARTING.includes(status),button:$('attach'),input:$('attach-input'),list:$('attachment-list'),dropTarget:$('composer')});
 const decorateMarkdown=setupChatReferences({getSession:()=>active,getSessions:()=>sessions,openSession:async id=>{
   try{const target=sessions.find(s=>s.id===id)||(await api('/api/sessions/'+encodeURIComponent(id))).session;selectSession(target);}
   catch(e){toast('Cannot open session: '+e.message);}
@@ -1407,17 +1407,17 @@ $('composer').onsubmit=async event=>{
     if(attachments.failed(sid)){toast('Remove attachments that failed to upload');return;}
     if(!text.trim()){toast('Add a message to send with the attachments');return;}
     // Queued inputs are text-only; attachments are never held for a later turn.
-    if(BUSY.includes(status)){toast('Attachments can’t be queued. Send once the agent is idle; your draft is kept.');return;}
+    if(BUSY.includes(status)||STARTING.includes(status)){toast('Attachments can’t be queued. Send once the agent is idle; your draft is kept.');return;}
   }
   if(!text.trim())return;
   // A sleeping session wakes for the prompt on the server.
-  const asleep=status==='suspended'&&!!active.asleep;
-  if(status==='cancelling'||(!BUSY.includes(status)&&status!=='idle'&&!asleep))return;
+  const asleep=status==='suspended'&&!!active.asleep,queues=BUSY.includes(status)||STARTING.includes(status);
+  if(status==='cancelling'||(!queues&&status!=='idle'&&!asleep))return;
   const submission={...pendingFor(sid,mentions.expand(text),attached)};
   promptRecovery.submitted(sid,submission,text);
   $('send').disabled=true;
   try{
-    if(BUSY.includes(status))await inputQueue.enqueue(sid,submission);
+    if(queues)await inputQueue.enqueue(sid,submission);
     else try{await api(`/api/sessions/${sid}/prompt`,{method:'POST',body:JSON.stringify(submission)});}
     catch(e){
       // Send→Enter race: the session became busy first. Queue the same intended input.
