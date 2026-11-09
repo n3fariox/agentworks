@@ -11,7 +11,8 @@ export function setupSecrets({$,api,el,toast}){
       <h3 data-title>Add secret</h3>
       <label for="secret-name">Name</label><input id="secret-name" maxlength="128" autocomplete="off" spellcheck="false" autocapitalize="characters" placeholder="GITHUB_TOKEN">
       <p class="field-note" data-name-note>Environment variable name: A–Z, 0–9 and _.</p>
-      <label for="secret-description">Description <span class="optional">optional</span></label><input id="secret-description" maxlength="200" autocomplete="off">
+      <label for="secret-description">Description for agents <span class="optional">optional</span></label><input id="secret-description" maxlength="200" autocomplete="off" placeholder="Read-only token for the acme GitHub org">
+      <p class="field-note">What it's for and what it can access. Agents assigned this secret can read this text.</p>
       <label for="secret-value">Value</label><input id="secret-value" type="password" autocomplete="new-password" spellcheck="false">
       <p class="field-note" data-value-note></p>
       <div class="model-provider-actions"><button type="button" class="text-button" data-cancel>Cancel</button><button type="button" class="primary" data-save>Save secret</button></div>
@@ -120,7 +121,7 @@ export function setupSessionSecrets({$,api,el,getActive}){
     try{
       const result=await api(`/api/sessions/${encodeURIComponent(session.id)}/secrets`);
       secrets=result.secrets;rows=result.assignments.map(a=>({...a}));
-      note.textContent='Environment variables are set when the harness starts. Changing them restarts an idle session, or a busy one after its turn. Tool-only delivery is not available yet.';
+      note.textContent='Environment variables are set when the harness starts. Changing them restarts an idle session, or a busy one after its turn. Tool-only changes apply to the next call.';
     }catch(e){note.textContent='Cannot load secrets: '+e.message;}
     render();
   }

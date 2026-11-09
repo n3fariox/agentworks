@@ -3,7 +3,7 @@
 //! database holds that data key wrapped by `argon2id(password, salt)`, never the key
 //! itself. The password is empty until password unlock exists, so a password can be
 //! added later by re-wrapping the data key without touching stored values.
-use crate::{ApiResult, App, fail};
+use crate::{ApiResult, App, Session, communication as mail, fail};
 use argon2::{Algorithm, Argon2, Params, Version};
 use axum::{
     Json,
@@ -22,11 +22,12 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::Write,
     path::{Path as FsPath, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
+use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
 pub const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS secrets(id TEXT PRIMARY KEY,name TEXT NOT NULL UNIQUE,description TEXT NOT NULL,nonce BLOB NOT NULL,value BLOB NOT NULL,length INTEGER NOT NULL,created INTEGER NOT NULL,updated INTEGER NOT NULL);
@@ -617,7 +618,7 @@ pub fn environment(db: &rusqlite::Connection, session: &str) -> rusqlite::Result
 /// Forms of each value delivered to a session, replaced in everything the session
 /// stores or publishes. Literal matching only: a deliberately transformed value is
 /// not caught.
-type Forms = Vec<(Zeroizing<String>, String)>;
+pub(crate) type Forms = Vec<(Zeroizing<String>, String)>;
 static SCRUBBERS: OnceLock<Mutex<HashMap<String, Forms>>> = OnceLock::new();
 fn scrubbers() -> std::sync::MutexGuard<'static, HashMap<String, Forms>> {
     SCRUBBERS.get_or_init(Default::default).lock().unwrap()
@@ -652,20 +653,35 @@ fn forms(name: &str, value: &str) -> Forms {
         .map(|form| (Zeroizing::new(form), label.clone()))
         .collect()
 }
-/// Registers the values delivered to a session's harness, replacing earlier ones.
+/// Adds values delivered to a session to its scrubber. Earlier values stay registered,
+/// since they may still appear in later output.
 pub fn register(session: &str, vars: &[(String, Zeroizing<String>)]) {
-    let mut all: Forms = vars.iter().flat_map(|(n, v)| forms(n, v)).collect();
-    // Longest first, so a value is never partly replaced by a shorter one it contains.
-    all.sort_by_key(|(form, _)| std::cmp::Reverse(form.len()));
-    let mut scrubbers = scrubbers();
-    if all.is_empty() {
-        scrubbers.remove(session);
-    } else {
-        scrubbers.insert(session.to_owned(), all);
+    if vars.is_empty() {
+        return;
     }
+    let mut scrubbers = scrubbers();
+    let all = scrubbers.entry(session.to_owned()).or_default();
+    for form in vars.iter().flat_map(|(name, value)| forms(name, value)) {
+        if !all.iter().any(|(known, _)| **known == *form.0) {
+            all.push(form);
+        }
+    }
+    sort_forms(all);
+}
+fn sort_forms(forms: &mut Forms) {
+    // Longest first, so a value is never partly replaced by a shorter one it contains.
+    forms.sort_by_key(|(form, _)| std::cmp::Reverse(form.len()));
 }
 pub fn forget(session: &str) {
     scrubbers().remove(session);
+    delivered().remove(session);
+    allowed_uses().remove(session);
+}
+/// Scrubber forms for one call's values, for the facade that runs the command.
+pub(crate) fn forms_for<'a>(vars: impl Iterator<Item = (&'a str, &'a str)>) -> Forms {
+    let mut all: Forms = vars.flat_map(|(name, value)| forms(name, value)).collect();
+    sort_forms(&mut all);
+    all
 }
 pub fn scrub_text(session: &str, text: &str) -> String {
     let scrubbers = scrubbers();
@@ -674,7 +690,7 @@ pub fn scrub_text(session: &str, text: &str) -> String {
     };
     replace(forms, text)
 }
-fn replace(forms: &Forms, text: &str) -> String {
+pub(crate) fn replace(forms: &Forms, text: &str) -> String {
     let mut out = text.to_owned();
     for (form, label) in forms {
         if out.contains(form.as_str()) {
@@ -696,6 +712,278 @@ pub fn scrub(session: &str, value: &mut Value) {
     if let Some(forms) = scrubbers().get(session) {
         walk(forms, value);
     }
+}
+
+static DELIVERED: OnceLock<Mutex<HashMap<String, HashSet<String>>>> = OnceLock::new();
+fn delivered() -> std::sync::MutexGuard<'static, HashMap<String, HashSet<String>>> {
+    DELIVERED.get_or_init(Default::default).lock().unwrap()
+}
+/// Records which names the running harness has in its environment.
+pub fn mark_delivered(session: &str, vars: &[(String, Zeroizing<String>)]) {
+    delivered().insert(
+        session.to_owned(),
+        vars.iter().map(|(name, _)| name.clone()).collect(),
+    );
+}
+/// Per-session "allow for this session" answers, by secret name.
+static ALLOWED_USES: OnceLock<Mutex<HashMap<String, HashSet<String>>>> = OnceLock::new();
+fn allowed_uses() -> std::sync::MutexGuard<'static, HashMap<String, HashSet<String>>> {
+    ALLOWED_USES.get_or_init(Default::default).lock().unwrap()
+}
+
+fn usage(a: &Assignment, in_environment: bool) -> String {
+    let tool = format!(
+        "Use run_with_secrets with {{{{secret:{}}}}} in argv, env, stdin or files.",
+        a.name
+    );
+    let mut usage = match a.delivery {
+        Delivery::Environment if in_environment => format!(
+            "Available as ${} in commands you run. run_with_secrets also works.",
+            a.name
+        ),
+        Delivery::Environment => format!(
+            "Assigned as ${} but not in your environment until the harness restarts. {tool}",
+            a.name
+        ),
+        Delivery::Tool => tool,
+    };
+    if a.approval == Approval::EachUse {
+        usage.push_str(" The user is asked before each run_with_secrets call.");
+    }
+    usage
+}
+/// `list_session_secrets`: assigned secrets with instructions. Never values.
+pub fn agent_list(app: &App, session: &str) -> mail::Result<Value> {
+    let store = app.store.lock().unwrap();
+    let assigned = assignments(&store.connection, session).map_err(db_error)?;
+    let environment = delivered().get(session).cloned().unwrap_or_default();
+    let mut out = Vec::new();
+    for a in &assigned {
+        let description: String = store
+            .connection
+            .query_row(
+                "SELECT description FROM secrets WHERE id=?1",
+                [&a.secret_id],
+                |r| r.get(0),
+            )
+            .map_err(db_error)?;
+        out.push(
+            json!({"name":a.name,"description":description,"delivery":a.delivery,
+            "approval":a.approval,"usage":usage(a, environment.contains(&a.name))}),
+        );
+    }
+    Ok(json!({"secrets":out,
+        "rules":"Use a secret only for the task it was assigned for. Do not print, log, commit or send a value anywhere it is not needed."}))
+}
+
+/// How long a use waits for the human before the approval is withdrawn.
+const APPROVAL_WAIT: std::time::Duration = std::time::Duration::from_secs(600);
+const MAX_NAMES_PER_USE: usize = 16;
+struct PendingUse {
+    session: String,
+    names: Vec<String>,
+    answer: oneshot::Receiver<Option<Value>>,
+}
+static PENDING_USES: OnceLock<Mutex<HashMap<String, PendingUse>>> = OnceLock::new();
+fn pending_uses() -> std::sync::MutexGuard<'static, HashMap<String, PendingUse>> {
+    PENDING_USES.get_or_init(Default::default).lock().unwrap()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UseRequest {
+    #[serde(default)]
+    names: Vec<String>,
+    #[serde(default)]
+    argv: Vec<String>,
+    #[serde(default)]
+    env_keys: Vec<String>,
+    #[serde(default)]
+    file_keys: Vec<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    /// Polls an earlier request that is waiting for the human.
+    #[serde(default)]
+    approval: Option<String>,
+}
+
+/// Bridge side of `run_with_secrets`: authorizes one call and returns its values to the
+/// facade, which runs the command on the session's host. Each request is short because
+/// the bridge holds the communication lock; waiting for a human is done by polling.
+pub fn resolve_use(app: &App, s: &Arc<Session>, arguments: Value) -> mail::Result<Value> {
+    let request: UseRequest =
+        serde_json::from_value(arguments).map_err(|_| bad("Invalid run_with_secrets request"))?;
+    if let Some(id) = &request.approval {
+        return poll_use(app, s, id);
+    }
+    let mut names = request.names.clone();
+    names.sort();
+    names.dedup();
+    if names.is_empty() || names.len() > MAX_NAMES_PER_USE {
+        return Err(bad("Use between 1 and 16 secrets in one call"));
+    }
+    let assigned = checked(app, s, &names)?;
+    let asked = {
+        let allowed = allowed_uses();
+        let allowed = allowed.get(&s.id);
+        assigned.iter().any(|a| {
+            a.approval == Approval::EachUse && !allowed.is_some_and(|set| set.contains(&a.name))
+        })
+    };
+    if asked {
+        return ask(s, names, &request);
+    }
+    release(app, s, &names)
+}
+/// Every name must be assigned to this session; unassigned and missing look the same.
+fn checked(app: &App, s: &Session, names: &[String]) -> mail::Result<Vec<Assignment>> {
+    let assigned = assignments(&app.store.lock().unwrap().connection, &s.id).map_err(db_error)?;
+    names
+        .iter()
+        .map(|name| {
+            assigned
+                .iter()
+                .find(|a| &a.name == name)
+                .cloned()
+                .ok_or_else(|| {
+                    fail(
+                        StatusCode::FORBIDDEN,
+                        format!("{name} is not assigned to this session"),
+                    )
+                })
+        })
+        .collect()
+}
+fn ask(s: &Arc<Session>, names: Vec<String>, request: &UseRequest) -> mail::Result<Value> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let (answer, receiver) = oneshot::channel();
+    let approval = crate::Approval {
+        request: json!({
+            "toolCall":{"toolCallId":id,"title":format!("Run a command with {}", names.join(", ")),
+                "rawInput":{"argv":request.argv,"envKeys":request.env_keys,"fileKeys":request.file_keys,"cwd":request.cwd}},
+            "options":[
+                {"optionId":"allow-once","name":"Allow once","kind":"allow_once"},
+                {"optionId":"allow-session","name":"Allow for this session","kind":"allow_always"},
+                {"optionId":"deny","name":"Deny","kind":"reject_once"}]}),
+        kind: "permission",
+        unsupported: None,
+        answer,
+    };
+    {
+        let mut approvals = s.approvals.lock().unwrap();
+        let mut data = s.data.lock().unwrap();
+        if data.lifecycle.suspended || !data.turn_active || data.status == "cancelling" {
+            return Err(fail(
+                StatusCode::CONFLICT,
+                "Secrets that need approval can only be used during a turn",
+            ));
+        }
+        let event = approval.event(&id);
+        approvals.insert(id.clone(), approval);
+        data.status = "waiting".into();
+        drop(data);
+        // Register before publishing: the human can answer as soon as the card appears.
+        pending_uses().insert(
+            id.clone(),
+            PendingUse {
+                session: s.id.clone(),
+                names,
+                answer: receiver,
+            },
+        );
+        s.emit("approval", event);
+        s.emit("status", json!({"status":"waiting"}));
+    }
+    let (session, expiring) = (s.clone(), id.clone());
+    tokio::spawn(async move {
+        tokio::time::sleep(APPROVAL_WAIT).await;
+        crate::elicitation::withdraw(&session, &expiring);
+        // Leave time for a last poll to see the outcome.
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        pending_uses().remove(&expiring);
+    });
+    Ok(json!({"pending": id}))
+}
+fn poll_use(app: &App, s: &Session, id: &str) -> mail::Result<Value> {
+    let (answer, names) = {
+        let mut pending = pending_uses();
+        let Some(entry) = pending.get_mut(id).filter(|p| p.session == s.id) else {
+            return Err(fail(
+                StatusCode::NOT_FOUND,
+                "This approval is no longer pending",
+            ));
+        };
+        match entry.answer.try_recv() {
+            Err(oneshot::error::TryRecvError::Empty) => return Ok(json!({"pending": id})),
+            result => (result, pending.remove(id).unwrap().names),
+        }
+    };
+    let record = |outcome: &str| {
+        app.store
+            .lock()
+            .unwrap()
+            .audit(&s.id, "secret.use", &names.join(","), outcome)
+    };
+    match answer {
+        Ok(Some(Value::String(option))) if option == "allow-once" || option == "allow-session" => {
+            // Assignments may have changed while the human was deciding.
+            checked(app, s, &names)?;
+            if option == "allow-session" {
+                allowed_uses()
+                    .entry(s.id.clone())
+                    .or_default()
+                    .extend(names.iter().cloned());
+            }
+            release(app, s, &names)
+        }
+        Ok(Some(_)) => {
+            record("denied")?;
+            Err(fail(StatusCode::FORBIDDEN, "The user denied this use"))
+        }
+        _ => {
+            record("withdrawn")?;
+            Err(fail(
+                StatusCode::CONFLICT,
+                "The approval was withdrawn before the user answered",
+            ))
+        }
+    }
+}
+fn release(app: &App, s: &Session, names: &[String]) -> mail::Result<Value> {
+    let vault = vault()?;
+    let mut values = Vec::new();
+    {
+        let store = app.store.lock().unwrap();
+        for name in names {
+            let row = store
+                .connection
+                .query_row(
+                    &format!("SELECT {COLUMNS} FROM secrets WHERE name=?1"),
+                    [name],
+                    row,
+                )
+                .map_err(db_error)?;
+            let plain = open(&vault.key, &value_aad(&row.id, &row.name), &row.sealed)
+                .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok())
+                .ok_or_else(|| {
+                    fail(
+                        StatusCode::CONFLICT,
+                        format!("{name} must be entered again in Settings → Secrets"),
+                    )
+                })?;
+            values.push((name.clone(), Zeroizing::new(plain)));
+        }
+    }
+    register(&s.id, &values);
+    app.store
+        .lock()
+        .unwrap()
+        .audit(&s.id, "secret.use", &names.join(","), "released")?;
+    let map: serde_json::Map<String, Value> = values
+        .iter()
+        .map(|(name, value)| (name.clone(), json!(value.as_str())))
+        .collect();
+    Ok(json!({"values":map,"cwd":s.cwd}))
 }
 
 fn describe(a: &Assignment) -> String {
@@ -810,6 +1098,7 @@ pub async fn set_assignments(
     };
     let names = |list: &[Assignment]| list.iter().map(describe).collect::<Vec<_>>();
     if names(&before) != names(&after) {
+        allowed_uses().remove(&id);
         s.emit("secret_assignments", json!({"secrets": names(&after)}));
     }
     // The process environment is fixed at start: restart an idle harness now, a busy one

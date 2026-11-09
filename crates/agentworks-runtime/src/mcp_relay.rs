@@ -1,4 +1,4 @@
-//! Bounded bridge for the native MCP facade. Only messaging crosses a worker link.
+//! Bounded bridge for the native MCP facade. Only messaging and secret requests cross a worker link.
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -19,7 +19,13 @@ use tokio_tungstenite::tungstenite::Message;
 pub fn allowed(operation: &str) -> bool {
     matches!(
         operation,
-        "tools/list" | "list_sessions" | "read_inbox" | "send_message" | "acknowledge_message"
+        "tools/list"
+            | "list_sessions"
+            | "read_inbox"
+            | "send_message"
+            | "acknowledge_message"
+            | "list_session_secrets"
+            | "resolve_secrets"
     )
 }
 pub fn valid_call(call: &Value) -> bool {
@@ -78,7 +84,12 @@ pub async fn forward(
     }
     if operation == "tools/list" {
         if let Some(tools) = value["tools"].as_array_mut() {
-            tools.retain(|tool| tool["name"].as_str().is_some_and(allowed));
+            // run_with_secrets executes in the facade on this host, so its call never crosses.
+            tools.retain(|tool| {
+                tool["name"]
+                    .as_str()
+                    .is_some_and(|name| allowed(name) || name == "run_with_secrets")
+            });
         }
     }
     value
@@ -183,10 +194,16 @@ mod tests {
             let call = read(&mut socket, 65536).await.unwrap();
             assert_eq!(call["token"], "bound-session");
             assert_eq!(call["operation"], "tools/list");
-            socket.write_all(b"{\"tools\":[{\"name\":\"send_message\"},{\"name\":\"restart_service\"},{\"name\":\"unknown\"}]}\n").await.unwrap();
+            socket.write_all(b"{\"tools\":[{\"name\":\"send_message\"},{\"name\":\"list_session_secrets\"},{\"name\":\"run_with_secrets\"},{\"name\":\"restart_service\"},{\"name\":\"unknown\"}]}\n").await.unwrap();
         });
         let value = forward(address, "bound-session", "tools/list", json!({})).await;
-        assert_eq!(value, json!({"tools":[{"name":"send_message"}]}));
+        assert_eq!(
+            value,
+            json!({"tools":[{"name":"send_message"},{"name":"list_session_secrets"},{"name":"run_with_secrets"}]})
+        );
+        // Listed for the facade to serve, but the call itself never crosses the link.
+        assert!(!allowed("run_with_secrets"));
+        assert!(allowed("resolve_secrets"));
         service.await.unwrap();
         assert_eq!(
             forward(address, "t", "read_inbox", json!({})).await["error"]["status"],

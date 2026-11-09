@@ -176,7 +176,9 @@ pub fn shared_context(session_id: &str) -> String {
         "# Agentworks\n\nYour session is agentworks://sessions/{session_id}. \
          Use the Agentworks MCP tools when available to discover peers, read your inbox at useful checkpoints, \
          send updates and report completion. Follow the MCP server instructions and tool descriptions; \
-         available tools reflect your current access. Reuse the same requestId when retrying an identical operation."
+         available tools reflect your current access. Reuse the same requestId when retrying an identical operation. \
+         If a task needs credentials such as API tokens, call list_session_secrets to see what this session may use and how, \
+         rather than asking the user to paste one into the chat."
     )
 }
 

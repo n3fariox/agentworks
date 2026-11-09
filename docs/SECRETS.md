@@ -1,6 +1,6 @@
 # Session secrets (proposal)
 
-Status: storage, Settings → Secrets, per-session assignment, `environment` delivery (local and remote, with automatic restart) and transcript scrubbing are implemented. Discovery (`list_session_secrets`), `run_with_secrets`, delegation and project default assignments are not.
+Status: storage, Settings → Secrets, per-session assignment, `environment` delivery (local and remote, with automatic restart), transcript scrubbing, discovery (`list_session_secrets`) and `run_with_secrets` are implemented. Delegation and project default assignments are not.
 
 Users keep credentials that agents and tools need (API tokens, registry tokens) without leaving them exported in their shell. Agentworks stores these secrets encrypted on the server host and makes them available only to the sessions a human assigns them to, either as harness environment variables or through a templated MCP tool.
 
@@ -94,12 +94,11 @@ Harness subagents (Claude tasks, Codex subagents) share the harness process. The
 Agents learn about secrets lazily, so the system prompt and tool list never depend on assignments:
 
 - The shared Agentworks system prompt carries one fixed sentence for every session: if a task needs credentials such as API tokens, call `list_session_secrets` to see what this session may use and how, rather than asking the user to paste one into the chat.
-- `list_session_secrets` and `run_with_secrets` are listed in every session. With no assignments, `list_session_secrets` returns an empty list and `run_with_secrets` refuses.
+- `list_session_secrets` and `run_with_secrets` are listed in every session, and never for external controllers. With no assignments, `list_session_secrets` returns an empty list and `run_with_secrets` refuses.
 - `list_session_secrets` returns, for each assigned secret: its name, its description (written for agents, so Settings labels it **Description for agents** and warns that assigned agents can read it), and usage instructions generated from the assignment:
   - `environment`: available as `$NAME` in commands the agent runs, or, if the harness started before the assignment, not yet present and usable through `run_with_secrets` until the session restarts.
   - `tool`: use `run_with_secrets` with `{{secret:NAME}}` in `argv`, `env`, `stdin` or `files`.
   - `approval: eachUse`: the user is asked before each use.
-  - `passable`: may be passed to sessions it starts with `start_session { secrets: [...] }`.
   - Always: do not print, log, commit or send the value anywhere it is not needed.
 
 Because nothing in the prompt or tool list changes, assigning or editing a `tool` secret takes effect on the next tool call. Only `environment` changes need the harness restarted.
@@ -130,8 +129,8 @@ run_with_secrets {
 - The command runs without a shell. The agent can call `sh -c` itself; placeholders are still replaced only after the command is fixed, so the model never sees the value.
 - The command always runs on the session's host, never on the server for a remote session. See [Where the tool runs](#where-the-tool-runs).
 - Output (stdout and stderr, 1 MiB cap each) is returned with every value used replaced by `[REDACTED:NAME]`, along with its base64, base64url, URL-encoded and JSON-escaped forms. This prevents accidental disclosure; it is not a boundary against a command that deliberately transforms the value.
-- `approval: eachUse` assignments raise a question through the existing [elicitation](QUESTIONS.md) flow, showing the templated command (never values). Answers: allow once, allow for the rest of this session, or deny.
-- Once passwords exist, a call while secrets are locked shows the **Unlock secrets** banner and waits up to the call's timeout instead of failing.
+- `approval: eachUse` assignments raise a normal approval card during the turn, showing the templated command (never values). Answers: allow once, allow for this session, or deny. "Allow for this session" lasts until the session's assignments change or the server restarts. An unanswered approval is withdrawn after 10 minutes.
+- Once passwords exist, a call while secrets are locked shows the **Unlock secrets** banner and waits instead of failing.
 - The tool runs outside the harness's own sandbox and permission system. Assignments and `approval` are its only controls, which is why assignment is human-only.
 
 ### Where the tool runs
@@ -139,17 +138,18 @@ run_with_secrets {
 Every other Agentworks MCP tool executes on the server: the `agentworks mcp` facade runs next to the harness and translates each call into a bridge operation, relayed over the worker link for remote sessions (see [the relay contract](REMOTE-HOSTS.md#agentworks-mcp-messaging-relay)). `run_with_secrets` splits instead:
 
 1. The facade parses the call and extracts the referenced names. It sends one bridge operation, `resolve_secrets {names, argv, envKeys, fileKeys, cwd}`, containing the templated request but no values.
-2. The server authenticates the session credential, checks every name against the session's assignments, raises any `eachUse` approval, audits the call, and returns the decrypted values. Nothing runs on the server.
-3. The facade substitutes the values, runs the command on its own host with the session's working directory, redacts the output, zeroizes the values and returns the result to the harness.
+2. The server authenticates the session credential, checks every name against the session's assignments and audits the release. If approval is needed it publishes the approval card and returns `{pending: id}` at once; the facade polls with `{approval: id}`. Every bridge request stays short because the bridge holds the communication lock and has a 15-second limit. Assignments are checked again when the human answers. Nothing runs on the server.
+3. The facade substitutes the values, runs the command on its own host in the session directory, redacts the output, and returns the result to the harness. The bridge credentials are removed from the command's environment.
 
 The same path serves local sessions (facade on the server host) and remote ones (facade on the remote host), so the command always runs where the harness and its workspace are.
 
-Relay changes for remote sessions:
+Relay and facade rules:
 
-- `resolve_secrets` joins the allowlist in `crates/agentworks-runtime/src/mcp_relay.rs` on both ends. `run_with_secrets` itself never crosses the link.
-- The relay's fixed 15-second forward timeout cannot cover a human approval. `resolve_secrets` uses the call's `timeoutSeconds`, bounded by the server, for the approval wait; the command's own run time is not part of it.
-- Responses carrying values are relayed opaquely: the worker does not parse, log or retain them. The response is valid only for the call that requested it; a lost or late response is discarded, and the facade reports the call as failed rather than retrying.
+- `resolve_secrets` and `list_session_secrets` are allowed through `crates/agentworks-runtime/src/mcp_relay.rs` on both ends. `run_with_secrets` is listed but its call never crosses the link.
+- The facade refuses `resolve_secrets` as an MCP tool call, so a value can never be returned to the model as a tool result.
+- Responses carrying values are relayed opaquely: the worker does not parse, log or retain them. A lost response fails the call; it is not retried.
 - If the link drops after the server returns values, the call may or may not have run. The audit records the release of values, not the command outcome.
+- This keeps values out of the conversation; it is not isolation from a process running as the same user, which could read the facade's bridge credential and request a value itself. Output redaction likewise stops accidental disclosure only.
 
 ## Transcript protection
 

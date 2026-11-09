@@ -47,7 +47,7 @@ pub fn configuration(s: &Session) -> Vec<McpServer> {
     vec![McpServer::Stdio(server)]
 }
 #[derive(Clone)]
-struct Proxy {
+pub(crate) struct Proxy {
     endpoint: Endpoint,
     token: String,
 }
@@ -71,7 +71,7 @@ impl Endpoint {
     }
 }
 impl Proxy {
-    async fn request(
+    pub(crate) async fn request(
         &self,
         operation: &str,
         arguments: Value,
@@ -124,6 +124,21 @@ impl ServerHandler for Proxy {
         request: CallToolRequestParams,
         _: RequestContext<rmcp::RoleServer>,
     ) -> std::result::Result<CallToolResponse, ErrorData> {
+        // Runs here, on the session's host. Raw values must never reach the agent as a tool result.
+        match request.name.as_ref() {
+            "run_with_secrets" => {
+                return crate::secret_exec::call(self, request.arguments.unwrap_or_default())
+                    .await
+                    .map(Into::into);
+            }
+            "resolve_secrets" => {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
+                    "Use run_with_secrets; values are not available to agents directly.",
+                )])
+                .into());
+            }
+            _ => {}
+        }
         let value = self
             .request(
                 request.name.as_ref(),
@@ -166,6 +181,10 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
 /// for external controllers, regardless of stored grants.
 fn tools(a: &mail::Access, session: bool) -> Value {
     let mut tools = Vec::new();
+    if session {
+        tools.push(tool("list_session_secrets","List the credentials assigned to this session, what each is for and how to use it. Never returns values.",json!({}),&[]));
+        tools.push(tool("run_with_secrets","Run a command with assigned secrets. Write {{secret:NAME}} in argv, env values, stdin or files, and {{file:KEY}} in argv or env for the path of a private temporary file from files. Runs without a shell, on the session's host, inside the session directory and outside the harness sandbox. Secret values are redacted from the output. Some secrets ask the user first.",json!({"argv":{"type":"array","items":{"type":"string"},"minItems":1},"env":{"type":"object","additionalProperties":{"type":"string"}},"files":{"type":"object","additionalProperties":{"type":"string"}},"stdin":{"type":"string"},"cwd":{"type":"string"},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":3600}}),&["argv"]));
+    }
     if a.enabled() {
         tools.push(tool("list_sessions","List participating peers and their status in this project. Each has an id and an agentworks://sessions/<id> uri; tools accept either. Coordinators and archive controllers also see project sessions without messaging access.",json!({}),&[]));
     }
@@ -278,6 +297,8 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
             crate::service_restart::request(app, &s.id, req).await
         }
         "list_sessions" => mail::peers_as(app, a),
+        "list_session_secrets" => crate::secrets::agent_list(app, &session_only(a)?.id),
+        "resolve_secrets" => crate::secrets::resolve_use(app, session_only(a)?, args),
         "read_inbox" => {
             mail::require_actor(app, a, "communicate")?;
             let after = args
@@ -530,7 +551,7 @@ pub async fn serve_bridge(app: App, listener: TcpListener) {
                 };
                 let response=if let Some(s)=actor {
                     let operation=v["operation"].as_str().unwrap_or("");
-                    let mutation=!matches!(operation,"tools/list"|"read_inbox"|"list_sessions"|"list_automations"|"get_completion"|"get_service_status"|"get_review_queue");
+                    let mutation=!matches!(operation,"tools/list"|"read_inbox"|"list_sessions"|"list_automations"|"get_completion"|"get_service_status"|"get_review_queue"|"list_session_secrets"|"resolve_secrets");
                     let action=operation.chars().take(80).collect::<String>();
                     let argument_target=v["arguments"]["sessionId"].as_str().or(v["arguments"]["recipient"].as_str()).or(v["arguments"]["automationId"].as_str()).unwrap_or("").chars().take(128).collect::<String>();
                     let request=v["arguments"]["requestId"].as_str().unwrap_or("").chars().take(100).collect::<String>();
@@ -597,6 +618,9 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(names(false), vec!["list_sessions", "archive_session"]);
-        assert_eq!(names(true), vec!["list_sessions"]);
+        assert_eq!(
+            names(true),
+            vec!["list_session_secrets", "run_with_secrets", "list_sessions"]
+        );
     }
 }

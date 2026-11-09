@@ -208,9 +208,11 @@ public registration route, server filesystem path, or arbitrary network destinat
 is exposed. The worker loopback port is separate from the stdio worker link.
 
 This slice permits exactly `tools/list`, `list_sessions`, `read_inbox`,
-`send_message`, and `acknowledge_message`. Both relay ends reject other operations;
-the server filters discovery to the intersection of this list and the caller's
-current grants. Coordinator operations and completion tools remain unavailable
+`send_message`, `acknowledge_message`, `list_session_secrets`, and
+`resolve_secrets` ([session secrets](SECRETS.md#where-the-tool-runs)). Both relay
+ends reject other operations; the server filters discovery to the intersection of
+this list and the caller's current grants, plus `run_with_secrets`, which the facade
+runs on the host. Coordinator operations and completion tools remain unavailable
 through this relay even when granted locally. The bridge format is the boundary:
 adding worker-native inbox/send commands would duplicate the server's durable mail,
 project scoping, permission and audit logic, and would not configure an MCP client

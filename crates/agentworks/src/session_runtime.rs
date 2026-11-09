@@ -399,6 +399,7 @@ pub async fn run(
     let secrets = crate::secrets::environment(&s.store.lock().unwrap().connection, &s.id)
         .map_err(|_| "Could not read session secrets")?;
     crate::secrets::register(&s.id, &secrets.vars);
+    crate::secrets::mark_delivered(&s.id, &secrets.vars);
     if !secrets.unavailable.is_empty() {
         s.emit(
             "secrets_unavailable",

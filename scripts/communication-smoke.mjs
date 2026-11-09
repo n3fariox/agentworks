@@ -21,7 +21,7 @@ try{
  await start();const settings=await api('/api/settings');await api('/api/settings',{...settings,defaultCommunicationRole:'off'},'PUT');const {roots}=await api('/api/status');const project=await api('/api/projects',{name:'Communication tests',defaultCommunicationRole:'participant'});const other=await api('/api/projects',{name:'Other project'});
  const create=(title,projectId=project.id)=>api('/api/sessions',{provider:'demo',cwd:roots[0],title,projectId,agentAccess:{}});
  const a=await create('Sender'),b=await create('Recipient'),c=await create('Outside',other.id);await Promise.all([idle(a.id),idle(b.id),idle(c.id)]);
- assert.deepEqual((await call(a.id,'tools/list')).tools,[]);denied(await call(a.id,'read_inbox'));
+ assert.deepEqual((await call(a.id,'tools/list')).tools.map(t=>t.name),['list_session_secrets','run_with_secrets']);denied(await call(a.id,'read_inbox'));
  await enable(a.id);await enable(b.id);await enable(c.id);
  const peers=value(await call(a.id,'list_sessions'));assert.deepEqual(peers.sessions.map(s=>s.id),[b.id]);assert.equal(peers.sessions[0].uri,'agentworks://sessions/'+b.id);assert.equal(peers.selfUri,'agentworks://sessions/'+a.id);
  denied(await call(a.id,'send_message',{sender:c.id,recipient:b.id,text:'Forged sender',requestId:'spoof'}),400);
@@ -57,7 +57,7 @@ try{
  await api(`/api/sessions/${b.id}/prompt`,{text:'slow approval',requestId:'grant-during-turn'});
  for(let i=0;i<50;i++){if((await api(`/api/sessions/${b.id}`)).session.status==='waiting')break;await delay(100);}
  await api(`/api/sessions/${b.id}/agent-access`,{},'PUT');await api(`/api/sessions/${b.id}/cancel`,{});await idle(b.id);await delay(800);await idle(b.id);
- assert.deepEqual((await call(b.id,'tools/list')).tools,[]);await enable(b.id);
+ assert.deepEqual((await call(b.id,'tools/list')).tools.map(t=>t.name),['list_session_secrets','run_with_secrets']);await enable(b.id);
 
  const automation=await api('/api/automations',{name:'MCP run',provider:'demo',cwd:roots[0],projectId:project.id,prompt:'An automated hello',enabled:true});
  assert(value(await call(a.id,'list_automations')).automations.some(d=>d.id===automation.id));

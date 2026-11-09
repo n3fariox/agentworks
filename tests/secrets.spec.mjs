@@ -200,6 +200,75 @@ test('environment secrets reach the harness; changing them restarts an idle sess
   }finally{await api(`/api/sessions/${session.id}`,undefined,'DELETE');}
 });
 
+test('agents discover secrets and use them through the facade without seeing values',async({page})=>{
+  const value='tool-only-fixture-value';
+  const secret=await (await api('/api/secrets',{name:'API_TOKEN',description:'Fixture API token',value})).json();
+  const session=await (await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Secret tool'})).json();
+  const path=`/api/sessions/${session.id}/secrets`;
+  const conversation=page.locator('#conversation');
+  const send=async text=>{await page.locator('#prompt').fill(text);await page.locator('#prompt').press('Enter');};
+  const run=argv=>'mcp run_with_secrets '+JSON.stringify({argv});
+  const measure=['sh','-c','printf "%s" "$1" | wc -c; echo "$1"','sh','{{secret:API_TOKEN}}'];
+  try{
+    await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),session.id);
+    await page.goto('/');
+    await send('mcp list_session_secrets {}');
+    await expect(conversation).toContainText('secrets\\":[]');
+    await expect(page.locator('#session-state')).toHaveText('Ready');
+
+    // Assigning a tool-only secret needs no restart: the same harness sees it next call.
+    expect((await (await api(path,{assignments:[{secretId:secret.id}]},'PUT')).json()).environmentChanged).toBe(false);
+    await send('mcp list_session_secrets {}');
+    await expect(conversation).toContainText('Fixture API token');
+    await expect(conversation).toContainText('Use run_with_secrets with {{secret:API_TOKEN}}');
+    await expect(page.locator('#session-state')).toHaveText('Ready');
+
+    await send(run(measure));
+    await expect(conversation).toContainText(new RegExp(`${value.length}\\\\+n\\[redacted:API_TOKEN\\]`));
+    await expect(conversation).not.toContainText(value);
+    await expect(page.locator('#session-state')).toHaveText('Ready');
+
+    // The internal release operation and unassigned names are refused.
+    await send('mcp resolve_secrets {"names":["API_TOKEN"]}');
+    await expect(conversation).toContainText('values are not available to agents directly');
+    await expect(page.locator('#session-state')).toHaveText('Ready');
+    await send(run(['echo','{{secret:GITHUB_TOKEN}}']));
+    await expect(conversation).toContainText('GITHUB_TOKEN is not assigned to this session');
+    await expect(page.locator('#session-state')).toHaveText('Ready');
+
+    // Ask each use: deny, allow once (asks again), then allow for this session (stops asking).
+    expect((await api(path,{assignments:[{secretId:secret.id,approval:'eachUse'}]},'PUT')).ok).toBe(true);
+    const card=page.locator('#approval-area .approval');
+    const answer=async name=>{await expect(card).toContainText('Run a command with API_TOKEN');await expect(card).toContainText('{{secret:API_TOKEN}}');await expect(card).not.toContainText(value);await card.getByRole('button',{name}).click();await expect(card).toHaveCount(0);};
+    await send(run(['echo','denied-run','{{secret:API_TOKEN}}']));
+    await answer('Deny');
+    await expect(conversation).toContainText('The user denied this use');
+    await expect(page.locator('#session-state')).toHaveText('Ready');
+    await send(run(['echo','once-run','{{secret:API_TOKEN}}']));
+    await answer('Allow once');
+    await expect(conversation).toContainText('once-run [redacted:API_TOKEN]');
+    await expect(page.locator('#session-state')).toHaveText('Ready');
+    await send(run(['echo','session-run','{{secret:API_TOKEN}}']));
+    await answer('Allow for this session');
+    await expect(conversation).toContainText('session-run [redacted:API_TOKEN]');
+    await expect(page.locator('#session-state')).toHaveText('Ready');
+    await send(run(['echo','no-prompt-run','{{secret:API_TOKEN}}']));
+    await expect(conversation).toContainText('no-prompt-run [redacted:API_TOKEN]');
+    await expect(card).toHaveCount(0);
+
+    const db=await stored();
+    expect(db.includes(Buffer.from(value))).toBe(false);
+    const audit=await (await api(`/api/sessions/${session.id}/agent-audit`)).text();
+    expect(audit).toContain('secret.use');
+    expect(audit).toContain('denied');
+    expect(audit).toContain('released');
+    expect(audit).not.toContain(value);
+  }finally{
+    await api(`/api/sessions/${session.id}`,undefined,'DELETE');
+    await api(`/api/secrets/${secret.id}`,undefined,'DELETE');
+  }
+});
+
 test('values stored with a lost key file need re-entry after restart',async({page})=>{
   await stop();
   await rm(join(fixture,'sessions.secrets.key'));

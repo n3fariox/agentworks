@@ -28,6 +28,7 @@ mod permission_modes;
 mod recovery;
 mod review_queue;
 mod roles;
+mod secret_exec;
 mod secrets;
 mod service_restart;
 mod session_config;
