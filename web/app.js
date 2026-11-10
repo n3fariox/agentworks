@@ -1440,7 +1440,7 @@ function updateReferencePicker(){if(taskMentions.wants()){mentions.close();taskM
 $('prompt').addEventListener('click',updateReferencePicker);
 $('prompt').oninput=()=>{renderComposer();updateReferencePicker();updateCommands();if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));}};
 $('prompt').addEventListener('click',updateCommands);
-$('prompt').addEventListener('keyup',event=>{if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End'].includes(event.key))updateCommands();});
+$('prompt').addEventListener('keyup',event=>{if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End'].includes(event.key)){updateCommands();if(!['ArrowUp','ArrowDown'].includes(event.key))updateReferencePicker();}});
 $('prompt').onkeydown=event=>{if(taskMentions.keydown(event)||mentions.keydown(event))return;if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing&&!composerKeyboard.matches){event.preventDefault();$('composer').requestSubmit();}};
 $('resume-session').onclick=()=>{if(active)resumeSession(active.id);};
 $('stop').onclick=async()=>{if(!active)return;const sid=active.id,seq=currentUserSeq;$('stop').disabled=true;try{await api(`/api/sessions/${sid}/cancel${seq!=null?'?userSeq='+seq:''}`,{method:'POST',body:'{}'});}catch(e){toast(e.message);}finally{updateControls();}};

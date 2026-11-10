@@ -50,7 +50,7 @@
     "test:supervisor": "python3 scripts/service/supervisor-test.py",
     "prepare:coordinator": "node scripts/prepare-self-improvement.mjs",
     "test:codex-quota": "playwright test tests/codex-subscription.spec.mjs",
-    "test:tasks": "node scripts/tasks-smoke.mjs && playwright test tests/tasks.spec.mjs",
+    "test:tasks": "node --test tests/task-mentions.test.mjs && node scripts/tasks-smoke.mjs && playwright test tests/tasks.spec.mjs",
     "test:questions": "node tests/questions.test.mjs && playwright test tests/questions.spec.mjs",
     "test:host-enrollment": "node scripts/host-enrollment-smoke.mjs",
     "test:terminal": "playwright test tests/terminal.spec.mjs tests/terminal-links.spec.mjs",
