@@ -27,6 +27,7 @@ use std::sync::Arc;
 pub const MAX_BINDINGS: i64 = 1000;
 pub const MAX_BINDING_BYTES: i64 = 4 * 1024 * 1024;
 
+use agentworks_session::SessionData;
 use agentworks_session::queue::{MAX_REQUEST_ID, validate};
 pub use agentworks_session::queue::{Outcome, Queue};
 type Res<T> = Result<T, (StatusCode, String)>;
@@ -101,6 +102,15 @@ fn transact<T>(
     bind: Option<(&str, &str)>,
     change: impl FnOnce(&mut Queue) -> Res<T>,
 ) -> Res<T> {
+    transact_session(s, bind, |data| change(&mut data.input_queue))
+}
+
+/// `transact` for changes that must see session status under the same lock.
+fn transact_session<T>(
+    s: &Session,
+    bind: Option<(&str, &str)>,
+    change: impl FnOnce(&mut SessionData) -> Res<T>,
+) -> Res<T> {
     let result = {
         let mut data = s.data.lock().unwrap();
         if data.storage_error.is_some() {
@@ -110,7 +120,7 @@ fn transact<T>(
             ));
         }
         let before = data.input_queue.clone();
-        let value = change(&mut data.input_queue)?;
+        let value = change(&mut data)?;
         if data.input_queue != before {
             let item = data
                 .input_queue
@@ -170,7 +180,7 @@ fn transact<T>(
 }
 
 /// Queue state is broadcast unsequenced so it does not consume transcript history.
-fn broadcast(s: &Session) {
+pub(crate) fn broadcast(s: &Session) {
     let queue = s.data.lock().unwrap().input_queue.clone();
     let _ = s.tx.send(json!({"kind":"input_queue","data":queue}));
 }
@@ -396,16 +406,21 @@ pub(crate) fn enqueue_locked(
             "This session's queued-input history is full; send directly or continue in a new session",
         ));
     }
-    let idle = {
-        let d = s.data.lock().unwrap();
-        d.status == "idle"
+    let (item, _) = transact_session(&s, Some((&req.request_id, &req.text)), |d| {
+        let now = crate::timeouts::now_ms();
+        // Read with the enqueue so startup cannot finish in between and strand the item.
+        if !automated && matches!(d.status.as_str(), "starting" | "resuming") {
+            return d
+                .input_queue
+                .enqueue_during_startup(&req.request_id, &req.text, now);
+        }
+        let idle = d.status == "idle"
             && !d.turn_active
             && !d.lifecycle.suspended
             && !d.lifecycle.archived
-            && d.queued_prompt.is_none()
-    };
-    let (item, _) = transact(&s, Some((&req.request_id, &req.text)), |q| {
-        let item = q.enqueue(&req.request_id, &req.text, crate::timeouts::now_ms())?;
+            && d.queued_prompt.is_none();
+        let q = &mut d.input_queue;
+        let item = q.enqueue(&req.request_id, &req.text, now)?;
         if automated && idle && q.paused.is_none() {
             q.ready = true;
         }
@@ -582,6 +597,39 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+
+    fn hold_for_startup(f: &Fixture) {
+        let mut data = f.session.data.lock().unwrap();
+        data.status = "starting".into();
+        data.input_queue
+            .enqueue_during_startup("held", "typed during startup", 1)
+            .unwrap();
+    }
+
+    #[test]
+    fn startup_success_releases_held_input() {
+        let f = Fixture::new();
+        hold_for_startup(&f);
+        f.session.status("idle");
+        assert!(f.saved_queue().ready);
+    }
+
+    #[test]
+    fn startup_failure_pauses_held_input_durably() {
+        let f = Fixture::new();
+        hold_for_startup(&f);
+        let mut events = f.session.tx.subscribe();
+        f.session.status("error");
+        let saved = f.saved_queue();
+        assert!(!saved.ready);
+        assert_eq!(saved.items[0].state, ItemState::Paused);
+        assert!(saved.paused.unwrap().contains("did not start"));
+        let mut broadcast = false;
+        while let Ok(event) = events.try_recv() {
+            broadcast |= event["kind"] == "input_queue" && event["data"]["paused"].is_string();
+        }
+        assert!(broadcast, "the composer must learn about the pause");
     }
 
     #[test]
