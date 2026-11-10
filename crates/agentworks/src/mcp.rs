@@ -72,8 +72,8 @@ fn tools(a: &mail::Access, session: bool) -> Value {
     if a.communicate || mail::coordinator(a) {
         tools.push(tool(
             "list_tasks",
-            "List tickets in your current project, with display keys and stable URIs.",
-            json!({}),
+            "List open tickets in your current project, with display keys and stable URIs. Set includeDone to also read completed tickets.",
+            json!({"includeDone":{"type":"boolean","default":false}}),
             &[],
         ));
         tools.push(tool(

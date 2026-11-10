@@ -28,8 +28,12 @@ test('task CRUD, sanitized Markdown, # picker, durable URI links and rename',asy
  await page.click('#task-save');await expect(page.locator('#task-heading')).toHaveText('BROW-1');
  await expect(page.locator('#tasks-list')).toContainText(malicious);await expect(page.locator('#tasks-list img')).toHaveCount(0);
  await page.fill('#task-title','Picker ticket');await page.selectOption('#task-status','done');await page.click('#task-save');await expect(page.locator('#task-meta')).toContainText('Revision 2');
+ await expect(page.locator('#tasks-list')).toContainText('No open tickets.');
+ await page.check('#tasks-show-done');await expect(page.locator('#tasks-list')).toContainText('BROW-1');
+ await page.locator('#tasks-list button').first().click();await page.selectOption('#task-status','open');await page.click('#task-save');await expect(page.locator('#task-meta')).toContainText('Revision 3');
  await page.click('#dismiss-tasks');
- const prompt=page.locator('#prompt'),list=page.locator('#mention-list');await prompt.pressSequentially('Review #');
+ await api(`/api/projects/${project.id}/tasks`,{title:'Completed ticket excluded from picker',status:'done',requestId:randomUUID()});
+ const prompt=page.locator('#prompt'),list=page.locator('#mention-list');await page.reload();await expect(page.locator('#session-state')).toHaveText('Ready');await prompt.pressSequentially('Review #');
  await expect(list.getByRole('option')).toHaveCount(1);await expect(list).not.toContainText('Hidden outsider');await expect(list).toContainText('#BROW-1');
  await prompt.press('Enter');await expect(prompt).toHaveValue('Review #BROW-1 ');await expect(list).toBeHidden();await prompt.press('Enter');
  const uri=`agentworks://projects/${project.id}/tasks/1`,message=page.locator('.message.user .message-body').last();
@@ -39,10 +43,10 @@ test('task CRUD, sanitized Markdown, # picker, durable URI links and rename',asy
  await page.locator('.message.user .message-body').last().getByRole('link',{name:'#BROW-1'}).click();await expect(page.locator('#task-heading')).toHaveText('REN-1');await expect(page.locator('#task-title')).toHaveValue('Picker ticket');
  await page.setViewportSize({width:390,height:844});expect(await page.locator('#tasks-dialog').evaluate(n=>n.scrollWidth<=n.clientWidth)).toBe(true);
  // A competing edit is never silently overwritten by the stale browser revision.
- await api(`/api/projects/${project.id}/tasks/1`,{revision:2,title:'Concurrent edit',requestId:randomUUID()},'PUT');
+ await api(`/api/projects/${project.id}/tasks/1`,{revision:3,title:'Concurrent edit',requestId:randomUUID()},'PUT');
  await page.fill('#task-title','Stale browser edit');await page.click('#task-save');await expect(page.locator('#task-error')).toContainText('Conflict');
- await page.click('#tasks-refresh');await expect(page.locator('#task-title')).toHaveValue('Concurrent edit');await page.click('#task-delete');await expect(page.locator('#tasks-list')).toContainText('No tickets yet.');
- await page.click('#task-new');await page.fill('#task-title','Read only later');await page.click('#task-save');await expect(page.locator('#task-heading')).toHaveText('REN-2');
+ await page.click('#tasks-refresh');await expect(page.locator('#task-title')).toHaveValue('Concurrent edit');await page.click('#task-delete');await expect(page.locator('#tasks-list')).toContainText('No open tickets.');
+ await page.click('#task-new');await page.fill('#task-title','Read only later');await page.click('#task-save');await expect(page.locator('#task-heading')).toHaveText('REN-3');
  await api(`/api/projects/${project.id}/archive`,{archived:true,sessions:'ungroup'});await page.click('#tasks-refresh');await expect(page.locator('#task-title')).toBeDisabled();await expect(page.locator('#task-delete')).toBeDisabled();await expect(page.locator('#tasks-note')).toContainText('read-only');
  expect(errors).toEqual([]);
 });

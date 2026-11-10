@@ -41,7 +41,10 @@ try{
  const create=(title,projectId,agentAccess)=>api('/api/sessions',{provider:'demo',cwd:dir,title,projectId,agentAccess});
  const participant=await create('Participant',p.id,{communicate:true}),coordinator=await create('Coordinator',p.id,{communicate:true,startSessions:true}),outsider=await create('Other coordinator',q.id,{startSessions:true}),off=await create('Off',p.id,{}),ungrouped=await create('Ungrouped',null,{communicate:true,startSessions:true});
  assert.equal(value(await call(participant.id,'get_task',{taskId:first.task.uri})).task.id,1);
- assert.equal(value(await call(participant.id,'list_tasks')).tasks.length,1);
+ assert.equal(value(await call(participant.id,'list_tasks')).tasks.length,0);
+ assert.equal(value(await call(participant.id,'list_tasks',{includeDone:true})).tasks.length,1);
+ assert.equal((await api(path)).tasks.length,0);
+ assert.equal((await api(path+'?includeDone=true')).tasks.length,1);
  denied(await call(participant.id,'create_task',{title:'Forbidden',requestId:'forbidden'}));denied(await call(off.id,'list_tasks'));denied(await call(ungrouped.id,'list_tasks'));
  denied(await call(outsider.id,'get_task',{taskId:first.task.uri}),400);
  for(const taskId of ['NEW-1','1',first.task.uri.replace('/1','/01'),0,-1])denied(await call(coordinator.id,'get_task',{taskId}),400);
@@ -63,7 +66,7 @@ try{
  const del={taskId:2,revision:2,requestId:'native-delete'};assert.deepEqual(value(await call(coordinator.id,'delete_task',del)),{ok:true});assert.deepEqual(value(await call(coordinator.id,'delete_task',del)),{ok:true});await api(path+'/2',undefined,'GET',404);
  await stopChild(server);await start();
  assert.deepEqual(await api(path,req),first,'Create receipt survives rename and restart');assert.deepEqual(await api(path+'/1',update,'PUT'),updated);
- assert.equal((await api(path)).tasks.length,1);assert.equal((await api(path+'/1')).task.uri,first.task.uri);
+ assert.equal((await api(path+'?includeDone=true')).tasks.length,1);assert.equal((await api(path+'/1')).task.uri,first.task.uri);
  await api(`/api/sessions/${coordinator.id}/resume`,{});assert.deepEqual(value(await call(coordinator.id,'delete_task',del)),{ok:true});
  assert.equal((await api(path,{title:'Never reuse deleted numbers',requestId:'next'})).task.id,3);
  await api(path+'/1',{revision:1,requestId:'delete-stale'},'DELETE',409);const humanDel={revision:2,requestId:'human-delete'};assert.deepEqual(await api(path+'/1',humanDel,'DELETE'),{ok:true});assert.deepEqual(await api(path+'/1',humanDel,'DELETE'),{ok:true});

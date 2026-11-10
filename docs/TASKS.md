@@ -1,6 +1,6 @@
 # Project tasks
 
-Tasks are small, persistent project tickets, separate from sessions, completion claims and the review queue. Open **Tasks…** from a project's editor or a project session's options. Create a ticket with a title, optional Markdown body and Open/Done status. Select an existing ticket to edit or delete it; **Refresh tickets** discards unsaved edits and loads the current revision. Archived projects allow reads only.
+Tasks are small, persistent project tickets, separate from sessions, completion claims and the review queue. Open **Tasks…** from a project's editor or a project session's options. Create a ticket with a title, optional Markdown body and Open/Done status. Select an existing ticket to edit or delete it; **Refresh tickets** discards unsaved edits and loads the current revision. Archived projects allow reads only. Lists and the `#` picker show open tickets by default. Enable **Show done** in the task dialog to include completed tickets; direct links still open done tickets.
 
 Each project has a unique ticket prefix (slug): 2–20 uppercase ASCII letters/digits, starting with a letter. Set it when creating/editing a project or leave it blank on creation for a generated prefix. Renaming a project does not change its generated prefix. Explicitly changing the prefix changes displayed keys, not ticket identity.
 
@@ -24,11 +24,13 @@ Human requests use the normal same-origin API protections. All successful operat
 | PUT | `/api/projects/{projectId}/tasks/{number}` | `{revision, title?, body?, status?, requestId}` | `{task: {...}}` |
 | DELETE | `/api/projects/{projectId}/tasks/{number}` | `{revision, requestId}` | `{ok: true}` |
 
+The list endpoint accepts `?includeDone=true` to include done tickets. Single-ticket reads are never filtered by status.
+
 Use the number in the URL, not a `taskId` body field. Project creation (`POST /api/projects`) and editing (`PATCH /api/projects/{id}`) accept optional `slug`.
 
 ## Native MCP tools and permissions
 
-- `list_tasks {}` returns the caller's project tasks and project metadata.
+- `list_tasks {includeDone?: boolean}` returns open tasks by default and project metadata. Set `includeDone: true` to include done tasks.
 - `get_task {taskId}` reads one task.
 - `create_task {title, body?, status?, requestId}` creates a task.
 - `update_task {taskId, revision, title?, body?, status?, requestId}` updates a task.

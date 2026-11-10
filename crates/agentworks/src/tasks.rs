@@ -2,7 +2,7 @@
 use crate::{ApiResult, App, catalog, communication as mail, fail};
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
@@ -86,9 +86,12 @@ struct Delete {
 struct Get {
     task_id: Value,
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct List {}
+#[derive(Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct List {
+    #[serde(default)]
+    include_done: bool,
+}
 fn bad(s: &str) -> (StatusCode, String) {
     fail(StatusCode::BAD_REQUEST, s)
 }
@@ -179,13 +182,14 @@ fn execute(
         .cloned()
         .ok_or_else(|| fail(StatusCode::NOT_FOUND, "Project not found"))?;
     if operation == "list_tasks" {
-        let _: List = decode(args)?;
+        let filter: List = decode(args)?;
         let tasks: Vec<_> = c
             .data
             .tasks
             .get(project)
             .into_iter()
             .flat_map(|s| &s.tasks)
+            .filter(|t| filter.include_done || matches!(t.status, Status::Open))
             .map(|t| view(&p, t))
             .collect();
         return Ok(json!({"tasks":tasks,"project":p}));
@@ -347,12 +351,16 @@ pub fn agent(app: &App, a: &mail::Actor, args: Value, operation: &str) -> mail::
         operation,
     )
 }
-pub async fn list(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
+pub async fn list(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Query(filter): Query<List>,
+) -> ApiResult {
     Ok(Json(execute(
         &mut app.catalog.lock().unwrap(),
         &id,
         "human",
-        json!({}),
+        json!(filter),
         "list_tasks",
     )?))
 }
