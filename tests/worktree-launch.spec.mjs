@@ -114,7 +114,7 @@ test('ordinary directory creation stays compatible',async({page})=>{
   const s=await fixture(page,{success:true});await page.locator('#directory').fill('/repo/subdir');await page.locator('#create-submit').click();
   await expect(page.locator('#create-dialog')).toBeHidden();await expect(page.locator('#project-path')).toHaveText('/repo/subdir');
   expect(s.creates[0]).toMatchObject({cwd:'/repo/subdir',projectId:null,workspace:{mode:'directory'}});
-  await page.locator('#prompt').fill('Keep my draft');await page.locator('#new-session').click();await page.locator('#workspace-mode').selectOption('newWorktree');await page.locator('#dismiss-create').click();
+  await page.locator('#prompt-editor .cm-content').fill('Keep my draft');await page.locator('#new-session').click();await page.locator('#workspace-mode').selectOption('newWorktree');await page.locator('#dismiss-create').click();
   await expect(page.locator('#prompt')).toHaveValue('Keep my draft');
   let wording='';page.on('dialog',async d=>{wording=d.message();await d.dismiss();});await page.locator('#lifecycle-menu > summary').click();await page.locator('#close-session').click();expect(wording).toContain('Worktree files and branches remain');
 });

@@ -77,7 +77,8 @@ test('restart resolves old jobs as unknown in the work log and stale or foreign 
  const panel=page.locator('#background-jobs'),root=jobCard(page,'Root build');
  await expect(root).toHaveCount(1);await expect(panel).toBeHidden();
  await expect(page.locator('#messages .work-log-counts').last()).toHaveText('2 background jobs ended · 2 with unknown status');
- await openLogs(page);await expect(root.locator('.tool-state')).toHaveText('Background · Status unknown');
+ // Resuming keeps the latest work log open; once idle it folds on the next draw. Open logs after that.
+ await expect(page.locator('#messages details.work-log[open]')).toHaveCount(0);await openLogs(page);await expect(root.locator('.tool-state')).toHaveText('Background · Status unknown');
  await root.locator('summary').first().click();await expect(root).toContainText('The agent process ended before this job reported an outcome');
  const tasks=(await snapshot(s.id)).asyncTasks.tasks;const owner=tasks.find(t=>t.asyncTaskId==='root-job').acpSessionId;
  for(const acpSessionId of [owner,'foreign']){const r=await fetch(`${base}/api/sessions/${s.id}/async-tasks/stop`,{method:'POST',headers:{Origin:base,'Content-Type':'application/json'},body:JSON.stringify({asyncTaskId:'root-job',acpSessionId})});expect(r.status).toBe(409);}

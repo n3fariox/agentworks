@@ -74,6 +74,8 @@ test.beforeAll(async () => {
       return;
     }
     const backend = forward(req);
+    // A browser-side close must release the backend connection, or graceful shutdown waits on it.
+    res.on('close', () => backend.destroy());
     backend.on('response', response => {res.writeHead(response.statusCode, response.headers); response.pipe(res);});
     backend.on('error', () => {res.writeHead(502); res.end();}); req.pipe(backend);
   });
@@ -84,6 +86,7 @@ test.beforeAll(async () => {
       socket.write('HTTP/1.1 101 Switching Protocols\r\n' + Object.entries(response.headers).map(([key,value]) => `${key}: ${value}\r\n`).join('') + '\r\n');
       if (head.length) stream.write(head); if (backendHead.length) socket.write(backendHead);
       stream.on('error', () => socket.destroy()); socket.on('error', () => stream.destroy());
+      stream.on('close', () => socket.destroy()); socket.on('close', () => stream.destroy());
       stream.pipe(socket); socket.pipe(stream);
     });
     backend.on('response', response => {socket.end(`HTTP/1.1 ${response.statusCode} Rejected\r\nConnection: close\r\n\r\n`); response.resume();});
@@ -233,7 +236,7 @@ test('network loss recovers without replaying mutations or caching private data'
   await page.addInitScript(id => localStorage.setItem('agentworks-session@' + '/a1b918dd-2b91-4fc2-8822-e6a559503040/', id), session.id);
   await page.goto(origin + mounts[0]);
   await expect(page.locator('#session-state')).toHaveText('Ready');
-  await page.locator('#prompt').fill('Keep this draft across reconnect.');
+  await page.locator('#prompt-editor .cm-content').fill('Keep this draft across reconnect.');
   const mutations = [];
   page.on('request', req => {if (!['GET','HEAD'].includes(req.method())) mutations.push(req.url());});
   await context.setOffline(true);
@@ -253,7 +256,7 @@ test('worker updates wait for explicit refresh and preserve draft and request ID
   await page.evaluate(() => navigator.serviceWorker.ready);
   await page.reload();
   await expect(page.locator('#session-state')).toHaveText('Ready');
-  await page.locator('#prompt').fill('Draft survives worker upgrade');
+  await page.locator('#prompt-editor .cm-content').fill('Draft survives worker upgrade');
   await page.evaluate(async () => (await import('./hosting.js')).sessionState.setItem('agentworks-pending-sends', JSON.stringify({sentinel:{requestId:'keep-id'}})));
   let navigations = 0;
   page.on('framenavigated', frame => {if (frame === page.mainFrame()) navigations++;});

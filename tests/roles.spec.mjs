@@ -41,7 +41,7 @@ test('new session applies a chosen role; unsupported agents disable the picker',
   await expect(page.locator('#create-dialog')).toBeHidden();
   const [created]=await api('/api/sessions');
   expect(created.role.name).toBe('Release captain');
-  await page.locator('#prompt').fill('role?');await page.locator('#prompt').press('Enter');
+  await page.locator('#prompt-editor .cm-content').fill('role?');await page.locator('#prompt-editor .cm-content').press('Enter');
   await expect(page.locator('#messages')).toContainText('Always tag the release.');
 
   // A fork keeps its parent's snapshot and cannot select an unsupported agent.

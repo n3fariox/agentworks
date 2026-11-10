@@ -51,7 +51,15 @@ pub fn exclusive(path: &Path, busy: &str) -> Result<std::fs::File> {
         options.mode(0o600);
     }
     let lock = options.open(path)?;
-    lock.try_lock().map_err(|_| busy.to_string())?;
+    // A child forked by another thread shares a lock this process just released until it
+    // execs, so a momentary conflict is retried; only a lasting one is another process.
+    for attempt in 0.. {
+        match lock.try_lock() {
+            Ok(()) => break,
+            Err(_) if attempt < 20 => std::thread::sleep(std::time::Duration::from_millis(25)),
+            Err(_) => return Err(busy.to_string().into()),
+        }
+    }
     Ok(lock)
 }
 pub struct Store {

@@ -262,8 +262,9 @@ test('a one-time occurrence is handled once, then completes or deletes the defin
   }
   db.close();
   await startServer();
-  await expect.poll(async()=>(await occurrences(keep.id)).length,{timeout:15000}).toBe(1);
-  const [late]=await occurrences(keep.id);
+  // The run is listed once its session starts; its slot (and the completion) commit just after.
+  await expect.poll(async()=>(await occurrences(keep.id))[0]?.scheduledFor,{timeout:15000}).toBe(slot);
+  const runs=await occurrences(keep.id);expect(runs.length).toBe(1);const [late]=runs;
   expect(late.scheduledFor).toBe(slot);expect(late.sessionId).toBeTruthy();
   const done=(await api('/api/automations')).find(d=>d.id===keep.id);
   expect(done).toMatchObject({enabled:false,nextRun:null,revision:2});expect(done.completed).toBeGreaterThan(slot);

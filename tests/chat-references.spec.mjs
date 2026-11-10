@@ -2,7 +2,7 @@ import {test,expect} from '@playwright/test';
 import {spawn} from 'node:child_process';
 import {mkdtemp,mkdir,writeFile,rm,symlink} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
-const base='http://127.0.0.1:4498';
+const base='http://127.0.0.1:4503';
 test.use({baseURL:base});
 let fixture,server,log='',exited=false,session;
 async function api(path,body,method='POST'){
@@ -24,7 +24,7 @@ test.beforeAll(async()=>{
   await writeFile(join(fixture,'file with spaces.rs'),Array.from({length:90},(_,i)=>`// line ${i+1}`).join('\n'));
   await symlink('/etc/passwd',join(fixture,'escape.txt'));
   server=spawn(process.env.AGENTWORKS_TEST_BINARY||resolve('target/debug/agentworks'),[],{env:{...process.env,
-    AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:'4498',AGENTWORKS_ROOTS:fixture,
+    AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:'4503',AGENTWORKS_ROOTS:fixture,
     AGENTWORKS_CATALOG_PATH:join(fixture,'catalog.json'),AGENTWORKS_DB_PATH:join(fixture,'sessions.sqlite3'),AGENTWORKS_DEMO_STATE_DIR:join(fixture,'demo')},stdio:['ignore','pipe','pipe']});
   server.on('error',e=>{log+=e.message;exited=true;});server.on('exit',()=>exited=true);
   for(const stream of [server.stdout,server.stderr])stream.on('data',s=>{log+=s.toString();});

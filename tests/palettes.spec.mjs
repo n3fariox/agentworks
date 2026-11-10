@@ -264,10 +264,10 @@ test('desktop: shortcuts, fuzzy session switching, drafts, running turns and com
   // Escape closes without running anything and returns focus to the composer it interrupted.
   await page.keyboard.press('Escape');
   await expect(page.locator('#palette-dialog')).toBeHidden();
-  await expect(page.locator('#prompt')).toBeFocused();
+  await expect(page.locator('#prompt-editor .cm-content')).toBeFocused();
 
   // Vertical keys move the active option; horizontal keys stay with the text caret.
-  await page.locator('#palette-search').click();
+  await page.locator('#palette-open').click();
   await page.locator('#palette-input').fill('se');
   const narrowed=page.locator('#palette-list [role=option]');
   expect(await narrowed.count()).toBeGreaterThan(1);
@@ -300,7 +300,7 @@ test('desktop: shortcuts, fuzzy session switching, drafts, running turns and com
   await page.keyboard.press('Enter');
   await expect(page.locator('#palette-dialog')).toBeHidden();
   await expect(page.locator('#prompt')).toHaveValue('$demo-skill ');
-  await expect(page.locator('#prompt')).toBeFocused();
+  await expect(page.locator('#prompt-editor .cm-content')).toBeFocused();
   expect(prompts).toEqual([]);
 
   // Ctrl+P is a separate session palette that matches title, project, host and directory.
@@ -321,13 +321,13 @@ test('desktop: shortcuts, fuzzy session switching, drafts, running turns and com
   await expect(page.locator('#palette-dialog')).toBeHidden();
   await expect(page.locator('#header-title')).toHaveText('Beta chat');
   // A draft survives a round trip through the palette, per session.
-  await page.locator('#prompt').fill('draft for omega');
+  await page.locator('#prompt-editor .cm-content').fill('draft for omega');
   await page.keyboard.press('Control+p');
   await page.locator('#palette-input').fill('alpha');
   await page.keyboard.press('Enter');
   await expect(page.locator('#header-title')).toHaveText('Alpha chat');
   await expect(page.locator('#prompt')).toHaveValue('$demo-skill ');
-  await page.locator('#prompt').fill('');
+  await page.locator('#prompt-editor .cm-content').fill('');
   await page.keyboard.press('Control+p');
   await page.locator('#palette-input').fill('omega');
   await page.keyboard.press('Enter');
@@ -335,8 +335,8 @@ test('desktop: shortcuts, fuzzy session switching, drafts, running turns and com
   await expect(page.locator('#prompt')).toHaveValue('draft for omega');
 
   // A turn started before switching keeps running in its own session.
-  await page.locator('#prompt').fill('');
-  await page.locator('#prompt').fill('slow');
+  await page.locator('#prompt-editor .cm-content').fill('');
+  await page.locator('#prompt-editor .cm-content').fill('slow');
   await page.locator('#send').click();
   await expect(page.locator('#stop')).toBeVisible();
   const streamed=(await page.locator('#messages').textContent()).length;

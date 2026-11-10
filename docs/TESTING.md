@@ -68,7 +68,7 @@ npm run test:persistence
 AGENTWORKS_KEEP_TEST_FIXTURES=1 AGENTWORKS_TEST_HARNESS_RESUME=1 npm run test:persistence
 ```
 
-Isolated smoke fixtures (catalogs, databases, demo state and Git worktrees) are removed after server shutdown, including on assertion failures. Set `AGENTWORKS_KEEP_TEST_FIXTURES=1` to retain them for inspection; remove the printed fixture directory when finished. Verification also uses a fresh fixture root on every run. Browser screenshots and failure reports remain in `.cache`. Run full verification serially: several suites use fixed ports. Cleanup cannot run if the test runner is killed with SIGKILL.
+Isolated smoke fixtures (catalogs, databases, demo state and Git worktrees) are removed after server shutdown, including on assertion failures. Set `AGENTWORKS_KEEP_TEST_FIXTURES=1` to retain them for inspection; remove the printed fixture directory when finished. Verification also uses a fresh fixture root on every run. Browser screenshots and failure reports remain in `.cache`. `npm run verify` runs smoke scripts in concurrent lanes that keep fixed ports apart, but do not start two verification runs at once. Cleanup cannot run if the test runner is killed with SIGKILL.
 
 To check native history import without new inference, reuse the populated test fixtures from a prior native persistence run:
 

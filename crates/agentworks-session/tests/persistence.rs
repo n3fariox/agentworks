@@ -29,7 +29,7 @@ fn old_database_payloads_load_without_enabling_new_execution_policies() {
 fn persisted_identities_and_uncertain_dispatch_survive_the_crate_boundary() {
     let mut saved = legacy();
     saved["inbox_turn"] = json!({"requestId":"inbox-r", "generation":3, "native":"native-saved"});
-    saved["lifecycle"] = json!({"title":"Stored title", "archived":true, "suspended":true});
+    saved["lifecycle"] = json!({"title":"Stored title", "archived":true, "suspended":true, "asleep":false});
     saved["initial_codex_permission_mode"] = json!("workspace-write");
     saved["permission_modes"] = json!({"configId":"mode","currentValue":"read-only","options":[{"value":"read-only"},{"value":"agent-full-access"}]});
     saved["initial_claude_permission_mode"] = json!("acceptEdits");
@@ -38,7 +38,7 @@ fn persisted_identities_and_uncertain_dispatch_survive_the_crate_boundary() {
     saved["continuation"] = json!({"enabled":true, "generation":4, "authorization":2, "maxAttempts":3, "attempts":1, "limited":true, "phase":"claimed", "requestId":"limit-r", "dueAt":12345, "deadline":99999});
     saved["input_queue"] = json!({"items":[{"id":"q1", "requestId":"queued-r", "text":"inspect", "revision":2, "state":"sending", "created":123}], "nextId":1, "ready":true});
     saved["lineage"] = json!({"parentId":"parent", "parentHostId":"host-a", "context":"auto", "boundarySeq":42, "nativeAttempted":true, "nativeUsed":false});
-    saved["worktree"] = json!({"path":"/repo/.worktrees/child", "branch":"child", "commonDir":"/repo/.git", "mainTop":"/repo", "baseCommit":"abc123", "removed":null});
+    saved["worktree"] = json!({"path":"/repo/.worktrees/child", "branch":"child", "commonDir":"/repo/.git", "mainTop":"/repo", "baseCommit":"abc123", "removed":null, "hooks":null, "population":null, "settings":null});
 
     let mut state: SessionData = serde_json::from_value(saved.clone()).unwrap();
     state.events.push_back(json!({"transient":true}));

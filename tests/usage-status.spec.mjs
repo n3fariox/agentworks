@@ -19,7 +19,7 @@ async function open(page,id){
   await expect(page.locator('#session-state')).toHaveText('Ready');
 }
 async function inject(page,update){
-  await page.locator('#prompt').fill('usage-status '+JSON.stringify(update));await page.locator('#send').click();
+  await page.locator('#prompt-editor .cm-content').fill('usage-status '+JSON.stringify(update));await page.locator('#send').click();
   await expect(page.locator('.message.assistant').last()).toContainText('usage reported');
   await expect(page.locator('#session-state')).toHaveText('Ready');
 }

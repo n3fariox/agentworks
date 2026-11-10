@@ -112,7 +112,7 @@ for(const mobile of [false,true])test(`diff browser ${mobile?'mobile':'desktop'}
   if(mobile)await page.setViewportSize({width:390,height:844});
   const errors=[];page.on('pageerror',e=>errors.push(e.message));let sockets=0;page.on('websocket',()=>sockets++);
   await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),session.id);await page.goto(base);
-  await expect(page.locator('#session-state')).toHaveText('Ready');await page.locator('#prompt').fill('Keep diff draft');const before=sockets;
+  await expect(page.locator('#session-state')).toHaveText('Ready');await page.locator('#prompt-editor .cm-content').fill('Keep diff draft');const before=sockets;
   if(mobile)await page.locator('#session-more').click();
   await page.getByRole('button',{name:'Diff',exact:true}).click();await expect(page.locator('#diff-status')).toContainText('changed file');
   await expect(page.locator('#diff-context')).toContainText(nested);await page.locator('#diff-files button').filter({hasText:/^both.txt$/}).click();

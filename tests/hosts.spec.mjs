@@ -165,7 +165,7 @@ for(const mobile of [false,true])test(`guided enrollment terminal ${mobile?'mobi
   const state=await fixture(page);let typed='';
   await page.routeWebSocket('**/api/hosts/enroll/events',ws=>{ws.onMessage(data=>{
     const value=JSON.parse(data);
-    if(value.destination){expect(value).toEqual({name:'New box',destination:'dev@box'});ws.send(JSON.stringify({type:'stage',message:'Enter your SSH password in the terminal'}));ws.send(new TextEncoder().encode('Password: '));}
+    if(value.destination){expect(value).toEqual({name:'New box',destination:'dev@box',os:'unix'});ws.send(JSON.stringify({type:'stage',message:'Enter your SSH password in the terminal'}));ws.send(new TextEncoder().encode('Password: '));}
     if(value.type==='input')typed+=value.data;
     if(typed==='test-password'){
       const host=remote('enrolled','New box','connected',{managed:true});state.hosts.push(host);
@@ -206,7 +206,7 @@ test('enrollment error allows retry and close cancels the terminal',async({page}
   await page.locator('[data-group="host:r1"]').getByRole('button',{name:'New session in build-box'}).click();
   await page.locator('#load-models').click();
   await expect(page.locator('#create-model option[value="remote/model"]')).toHaveCount(1);
-  expect(modelRequest).toEqual({provider:'demo',cwd:'/remote/project',hostId:'r1'});
+  expect(modelRequest).toEqual({provider:'demo',cwd:'/remote/project',hostId:'r1',modelProvider:null});
   await page.locator('#workspace-mode').selectOption('existingWorktree');
   await page.locator('#discover-worktrees').click();
   await expect(page.locator('#existing-worktree option')).toHaveCount(2);

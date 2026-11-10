@@ -15,6 +15,30 @@ const server=spawn(resolve('target/debug/agentworks'),[],{env,stdio:['ignore','i
 let exited=false;server.on('exit',()=>{exited=true;});
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 async function run(command,args,overrides={}){const child=spawn(command,args,{env:{...env,...overrides},stdio:'inherit'});const [code]=await once(child,'exit');assert.equal(code,0,`${command} ${args.join(' ')} failed`);}
+// Scripts sharing this server or a fixed port stay in one lane; lanes run concurrently.
+const gitRemote={AGENTWORKS_GIT_REMOTE:'1'},cleanupRemote={AGENTWORKS_CLEANUP_REMOTE:'1'};
+const smokeLanes=[
+  [['smoke'],['progress-smoke'],['tool-bodies-smoke'],['projects-smoke'],['settings-smoke'],['import-smoke'],['workspace-smoke']],
+  [['mcp-wire-smoke'],['remote-host-smoke'],['remote-plumbing-smoke'],['remote-mcp-smoke']],
+  [['remote-partition-smoke'],['completion-smoke'],['directories-smoke']],
+  [['worktree-policy-smoke'],['roles-smoke']],
+  [['git-settings-smoke'],['git-settings-smoke',gitRemote]],
+  [['worktree-cleanup-smoke'],['worktree-cleanup-smoke',cleanupRemote]],
+  [['limit-resume-smoke'],['lifecycle-smoke']],
+  [['project-lifecycle-smoke'],['service-restart-smoke']],
+];
+// Output is held until a script exits so concurrent lanes stay readable.
+async function runScript(name,overrides={}){
+  const child=spawn('node',[`scripts/${name}.mjs`],{env:{...env,...overrides},stdio:['ignore','pipe','pipe']});
+  let output='';child.stdout.on('data',d=>output+=d);child.stderr.on('data',d=>output+=d);
+  const [code]=await once(child,'close');process.stdout.write(output);
+  assert.equal(code,0,`scripts/${name}.mjs failed`);
+}
+// Every lane finishes before the shared server is torn down, even after a failure.
+async function runLanes(lanes){
+  const results=await Promise.allSettled(lanes.map(async lane=>{for(const [name,overrides] of lane)await runScript(name,overrides);}));
+  const failed=results.find(r=>r.status==='rejected');if(failed)throw failed.reason;
+}
 let socket;
 try{
   let ready=false;
@@ -28,30 +52,7 @@ try{
   await run('cargo',['test','--locked','-p','agentworks-starlark']);
   await run('node',['--test','tests/bazel-progress.test.mjs']);
   await run('node',['--test','tests/fixture-cleanup.test.mjs']);
-  await run('node',['scripts/mcp-wire-smoke.mjs']);
-  await run('node',['scripts/remote-host-smoke.mjs']);
-  await run('node',['scripts/remote-plumbing-smoke.mjs']);
-  await run('node',['scripts/remote-mcp-smoke.mjs']);
-  await run('node',['scripts/remote-partition-smoke.mjs']);
-  await run('node',['scripts/smoke.mjs']);
-  await run('node',['scripts/progress-smoke.mjs']);
-  await run('node',['scripts/tool-bodies-smoke.mjs']);
-  await run('node',['scripts/projects-smoke.mjs']);
-  await run('node',['scripts/directories-smoke.mjs']);
-  await run('node',['scripts/settings-smoke.mjs']);
-  await run('node',['scripts/import-smoke.mjs']);
-  await run('node',['scripts/workspace-smoke.mjs']);
-  await run('node',['scripts/completion-smoke.mjs']);
-  await run('node',['scripts/worktree-policy-smoke.mjs']);
-  await run('node',['scripts/git-settings-smoke.mjs']);
-  await run('node',['scripts/git-settings-smoke.mjs'],{AGENTWORKS_GIT_REMOTE:'1'});
-  await run('node',['scripts/worktree-cleanup-smoke.mjs']);
-  await run('node',['scripts/worktree-cleanup-smoke.mjs'],{AGENTWORKS_CLEANUP_REMOTE:'1'});
-  await run('node',['scripts/limit-resume-smoke.mjs']);
-  await run('node',['scripts/roles-smoke.mjs']);
-  await run('node',['scripts/lifecycle-smoke.mjs']);
-  await run('node',['scripts/project-lifecycle-smoke.mjs']);
-  await run('node',['scripts/service-restart-smoke.mjs']);
+  await runLanes(smokeLanes);
   await run('node',['node_modules/@playwright/test/cli.js','test']);
   const config=await (await fetch(base+'/api/status')).json();
   const s=await (await fetch(base+'/api/sessions',{method:'POST',headers:{'Content-Type':'application/json',Origin:base},body:JSON.stringify({provider:'demo',cwd:config.roots[0],title:'Shutdown test'})})).json();

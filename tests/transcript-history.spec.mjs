@@ -116,11 +116,14 @@ async function open(page){
 }
 // Transcript facts read in one pass: user prompts in order, reply texts, tool outputs.
 const facts=page=>page.evaluate(()=>({
-  prompts:[...document.querySelectorAll('#messages .message.user .message-body')].map(n=>n.textContent),
+  prompts:[...document.querySelectorAll('#messages .message.user .message-body')].map(n=>n.textContent.trim()),
   replies:[...document.querySelectorAll('#messages .message.assistant .message-body')].map(n=>n.textContent.trim()),
   tools:[...document.querySelectorAll('#messages .tool-card')].map(n=>({title:n.querySelector('.tool-title')?.textContent,text:n.querySelector('pre').textContent,load:n.querySelector('.tool-output-load')!==null})),
   first:document.querySelector('#messages').firstElementChild?.className,
 }));
+// Replies that are not seeded. A seeded reply streams as "Reply N " then "done", so when a page
+// boundary splits one, the loaded transcript legitimately opens with the "done" fragment.
+const unseeded=replies=>replies.filter((r,i)=>!/^Reply \d+/.test(r)&&!(i===0&&r==='done'));
 function checkSeeded(f){
   const seededPrompts=f.prompts.filter(p=>/^Prompt \d+$/.test(p)).map(p=>+p.slice(7));
   // Unique and consecutive up to the last seeded turn: no duplicates, no gaps.
@@ -142,7 +145,8 @@ test('browser loads multiple older pages, keeps the reading position and ends at
   await messages.evaluate(n=>n.scrollTo({top:0,behavior:'instant'}));
   // Anchor on a fully rendered prompt near the top and remember where the reader sees it.
   const anchorText=`Prompt ${initial.prompts[1]}`;
-  const anchor=page.locator('#messages .message.user .message-body',{hasText:new RegExp(`^${anchorText}$`)});
+  // Formatted user Markdown renders as a paragraph, so its text ends with a newline.
+  const anchor=page.locator('#messages .message.user .message-body',{hasText:new RegExp(`^${anchorText}\\s*$`)});
   const offset=async()=>{const [a,m]=await Promise.all([anchor.boundingBox(),messages.boundingBox()]);return a.y-m.y;};
   const seen=await offset();
   await page.locator('.history-more').click();
@@ -179,15 +183,15 @@ test('browser merges older pages with live events and keeps them across a reconn
   // A live turn completes while the older page request is in flight.
   await page.locator('.history-more').click();
   await expect(page.locator('.history-more')).toBeDisabled();
-  const otherReplies=async()=>(await facts(page)).replies.filter(r=>!/^Reply \d+/.test(r)).length;
+  const otherReplies=async()=>unseeded((await facts(page)).replies).length;
   const repliesBefore=await otherReplies();
-  await page.fill('#prompt','hello');await page.click('#send');
+  await page.fill('#prompt-editor .cm-content','hello');await page.click('#send');
   await expect(page.locator('#messages .message.user .message-body').last()).toHaveText('hello');
   await expect.poll(otherReplies).toBeGreaterThan(repliesBefore);
   await idle();await expect(page.locator('#session-state')).toHaveText('Ready');
   // Session status can reach the browser just before the final assistant chunk. Capture the
   // pre-reconnect transcript only after the live reply has reached its persisted final text.
-  await expect.poll(async()=>(await facts(page)).replies.filter(r=>!/^Reply \d+/.test(r)).at(-1)).toContain('hello');
+  await expect.poll(async()=>unseeded((await facts(page)).replies).at(-1)).toContain('hello');
   const liveReplies=await otherReplies();
   release();
   await expect.poll(async()=>checkSeeded(await facts(page)).prompts[0]).toBeLessThan(initial.prompts[0]);
@@ -196,7 +200,7 @@ test('browser merges older pages with live events and keeps them across a reconn
   expect(seededMerged.prompts[0]).toBeLessThan(initial.prompts[0]);
   expect(merged.prompts.at(-1)).toBe('hello');
   expect(merged.prompts.filter(p=>p==='hello').length).toBe(2);// one from the API test, one live
-  expect(merged.replies.filter(r=>!/^Reply \d+/.test(r)).length).toBe(liveReplies);
+  expect(unseeded(merged.replies).length).toBe(liveReplies);
   // Drop the socket: the reconnect snapshot overlaps what is loaded and must not duplicate or lose it.
   await page.unroute(/\/history\?/);
   expect(sockets.length).toBe(1);

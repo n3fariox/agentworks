@@ -93,8 +93,8 @@ test('message menu copies source text and quotes while preserving a draft and na
   const message=page.locator('article.message.assistant');
   await message.click({button:'right'});await menu(page).getByRole('menuitem',{name:'Copy message'}).click();
   expect(await page.evaluate(()=>navigator.clipboard.readText())).toBe('A useful answer');
-  await page.locator('#prompt').fill('Existing draft');await message.click({button:'right'});await menu(page).getByRole('menuitem',{name:'Quote in reply'}).click();
-  await expect(page.locator('#prompt')).toHaveValue('Existing draft\n\n> A useful answer\n\n');await expect(page.locator('#prompt')).toBeFocused();
+  await page.locator('#prompt-editor .cm-content').fill('Existing draft');await message.click({button:'right'});await menu(page).getByRole('menuitem',{name:'Quote in reply'}).click();
+  await expect(page.locator('#prompt')).toHaveValue('Existing draft\n\n> A useful answer\n\n');await expect(page.locator('#prompt-editor .cm-content')).toBeFocused();
   await message.evaluate(node=>{const range=document.createRange();range.selectNodeContents(node.querySelector('.message-body'));getSelection().removeAllRanges();getSelection().addRange(range);});
   const intercepted=await message.evaluate(node=>{const event=new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:100,clientY:100});node.dispatchEvent(event);return event.defaultPrevented;});
   expect(intercepted).toBe(false);await expect(menu(page)).toBeHidden();
@@ -106,7 +106,7 @@ test('touch messages offer quoting, links retain native context menus, and outsi
   await message.dispatchEvent('pointerdown',{pointerType:'touch',isPrimary:true,button:0,pointerId:2,clientX:350,clientY:300});
   await expect(menu(page).getByRole('menuitem',{name:'Quote in reply'})).toBeVisible();
   await message.dispatchEvent('pointerup',{pointerType:'touch',pointerId:2});
-  await page.locator('#prompt').click();await expect(menu(page)).toBeHidden();
+  await page.locator('#prompt-editor .cm-content').click();await expect(menu(page)).toBeHidden();
   const intercepted=await message.evaluate(node=>{
     const link=document.createElement('a');link.href='https://example.com';link.textContent='Example';node.querySelector('.message-body').append(link);
     const event=new MouseEvent('contextmenu',{bubbles:true,cancelable:true});link.dispatchEvent(event);return event.defaultPrevented;
