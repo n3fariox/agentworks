@@ -117,6 +117,16 @@ try{
  assert.equal(await readlink(shortcut),join(releases,release,'launch'));
  const updated=await api(`/api/hosts/${host.id}/update-worker`,{});
  assert.equal(updated.status,'connected');assert(updated.worker.providers.includes('demo'));
+ // Both ends report the same build, so the host is current.
+ const {build}=await api('/api/status',undefined,'GET');
+ assert.match(build,/^\d+\.\d+\.\d+\+[0-9a-f]{12}$|\+unknown$/);assert.equal(updated.worker.build,build);assert.equal(updated.outdated,build.endsWith('+unknown')?null:false);
+ // Choosing roots browses the host's home directory through the real worker.
+ const home_=await api(`/api/directories?hostId=${host.id}&scope=home`,undefined,'GET');
+ assert.equal(home_.path,home);
+ const made=await api('/api/directories',{hostId:host.id,scope:'home',parent:home,name:'picked'});assert.equal(made.path,join(home,'picked'));
+ // Renaming keeps the link; the managed launch command cannot be replaced.
+ const renamed=await api(`/api/hosts/${host.id}`,{name:'Renamed',destination,command:'evil'},'PATCH');
+ assert.equal(renamed.name,'Renamed');assert.equal(renamed.command,updated.command);assert.equal(renamed.status,'connected');
  const [next,...extra]=await readdir(releases);assert.deepEqual(extra,[]);assert.notEqual(next,release);
  assert.equal(updated.command,`"$HOME/.local/share/agentworks/releases/${next}"/launch`);
  assert.equal(JSON.parse(await readFile(catalog)).hosts[0].command,updated.command);

@@ -332,9 +332,10 @@ validated; the frame limit does not imply a total memory bound.
 ## Compatibility and upgrade contract
 
 The wire protocol number is an exact compatibility epoch, independent of the
-application `version` reported in `hello`. Both ends require `protocol == 3`;
+application `version` and `build` (`<version>+<git commit>`) reported in `hello`. Both ends require `protocol == 3`;
 the server sends an update diagnostic on a mismatch. The application version is
-informational and does not select a protocol. Native ACP initialization has its
+informational and does not select a protocol; a differing `build` only marks the
+host `outdated` in the host view (`null` when either commit is unknown). Native ACP initialization has its
 own protocol/capability exchange inside each relayed channel.
 
 Extra JSON fields are generally ignored. Unknown text message types and malformed

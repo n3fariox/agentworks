@@ -61,6 +61,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         "type": "hello",
         "protocol": PROTOCOL,
         "version": env!("CARGO_PKG_VERSION"),
+        "build": crate::remote::BUILD,
         "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         "hostname": hostname().unwrap_or_default(),
         "providers": providers,

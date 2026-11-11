@@ -22,6 +22,9 @@ pub fn view(hosts: &Hosts, host: &Host) -> Value {
         "status": link.status,
         "detail": link.detail,
         "since": link.since,
+        "outdated": link.worker.as_ref().and_then(|w| {
+            agentworks_runtime::remote::outdated(w["build"].as_str())
+        }),
         "worker": link.worker,
     })
 }
@@ -145,13 +148,18 @@ pub(crate) async fn remote_directory(
         "That directory is outside this host's working directories.",
     ))
 }
-/// Browse or create directories on a host; the worker enforces the host's roots.
+/// Browse or create directories on a host; the worker enforces the host's roots,
+/// or `roots` when given (the home directory, for choosing roots).
 pub(crate) async fn directories(
     app: &App,
     host_id: &str,
     mut request: Value,
+    roots: Option<Vec<String>>,
 ) -> Result<Value, (StatusCode, String)> {
-    let roots = host_roots(app, host_id)?;
+    let roots = match roots {
+        Some(roots) => roots,
+        None => host_roots(app, host_id)?,
+    };
     let live = connected(app, host_id)?;
     if live.worker()["directories"] != true {
         return Err(fail(
@@ -467,6 +475,38 @@ pub async fn set_roots(
         .unwrap()
         .set_host_roots(&id, req.roots)
         .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(view(&app.hosts, &host)))
+}
+#[derive(Deserialize)]
+pub struct HostEdit {
+    name: String,
+    destination: String,
+    command: Option<String>,
+}
+/// Renames a host or changes how it is reached; sessions keep their host. A
+/// changed destination or command reconnects, which interrupts running turns.
+pub async fn update(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(req): Json<HostEdit>,
+) -> ApiResult {
+    let (before, host) = {
+        let mut catalog = app.catalog.lock().unwrap();
+        let before = catalog
+            .data
+            .hosts
+            .iter()
+            .find(|h| h.id == id)
+            .cloned()
+            .ok_or_else(|| fail(StatusCode::NOT_FOUND, "Host not found"))?;
+        let host = catalog
+            .update_host(&id, &req.name, &req.destination, req.command.as_deref())
+            .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+        (before, host)
+    };
+    if before.destination != host.destination || before.command != host.command {
+        app.hosts.start(host.clone());
+    }
     Ok(Json(view(&app.hosts, &host)))
 }
 /// Drops the current link, if any, and connects again immediately.

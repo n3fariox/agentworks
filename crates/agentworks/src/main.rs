@@ -1500,7 +1500,10 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 )
             }),
         )
-        .route("/api/hosts/{id}", axum::routing::delete(hosts::remove))
+        .route(
+            "/api/hosts/{id}",
+            axum::routing::delete(hosts::remove).patch(hosts::update),
+        )
         .route("/api/hosts/{id}/reconnect", post(hosts::reconnect))
         .route("/api/hosts/{id}/update-worker", post(enrollment::update))
         .route(
@@ -1885,6 +1888,7 @@ async fn status(State(app): State<App>) -> Json<Value> {
         {"id":"opencode","name":"OpenCode · free models","installed":installed("opencode"),"keyPresent":true}
     ]});
     status["features"] = json!({"modelViewer": cfg!(feature = "model-viewer")});
+    status["build"] = json!(agentworks_runtime::remote::BUILD);
     let hidden = defaults.hidden_providers.unwrap_or_default();
     for p in status["providers"].as_array_mut().unwrap() {
         let id = p["id"].as_str().unwrap_or_default().to_string();

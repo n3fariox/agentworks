@@ -15,12 +15,13 @@ export function breadcrumbs(root,path){
 // the server's canonical answers, never trusted browser input.
 export function setupDirectoryPicker({$,api}) {
   let state=null,generation=0;
-  const query=(hostId,path)=>`/api/directories?${new URLSearchParams({...(hostId!=='local'?{hostId}:{}),...(path?{path}:{})})}`;
+  // scope 'home' browses beneath the host's home directory, for choosing allowed roots.
+  const query=(hostId,path,scope)=>`/api/directories?${new URLSearchParams({...(hostId!=='local'?{hostId}:{}),...(path?{path}:{}),...(scope==='home'?{scope}:{})})}`;
   function render(listing){
     const at=listing.path;state.path=at;state.root=listing.root;
     const crumbs=$('directory-picker-crumbs');crumbs.replaceChildren();
     const crumb=(label,path)=>{const b=document.createElement('button');b.type='button';b.className='text-button';b.textContent=label;b.onclick=()=>load(path);crumbs.append(b);};
-    crumb('Allowed roots',null);
+    if(state.scope!=='home')crumb('Allowed roots',null);
     if(at){
       for(const [label,path] of breadcrumbs(listing.root,at))crumb(label,path);
       crumbs.lastElementChild.setAttribute('aria-current','location');
@@ -40,18 +41,18 @@ export function setupDirectoryPicker({$,api}) {
     // Actions wait for the listing so they never apply to the previous folder.
     const gen=++generation;$('directory-picker-error').textContent='';
     $('directory-picker-select').disabled=true;$('directory-picker-create').disabled=true;
-    try{const listing=await api(query(state.hostId,path));if(gen===generation&&state)render(listing);}
+    try{const listing=await api(query(state.hostId,path,state.scope));if(gen===generation&&state)render(listing);}
     catch(error){
       if(gen!==generation||!state)return;if(path&&path===state.start){state.start=null;return load(null);}
       $('directory-picker-error').textContent=error.message;$('directory-picker-select').disabled=!state.path;$('directory-picker-create').disabled=!state.path;
     }
   }
   // Resolves to the chosen canonical path, or null when dismissed.
-  function pick({hostId='local',hostName='Local',start=''}={}){
+  function pick({hostId='local',hostName='Local',start='',scope='roots'}={}){
     state?.resolve(null);
     return new Promise(resolve=>{
-      state={hostId,start:start||null,path:null,root:null,resolve};
-      $('directory-picker-host').textContent=`Folders on ${hostName}. Only folders inside allowed roots are shown.`;
+      state={hostId,scope,start:start||null,path:null,root:null,resolve};
+      $('directory-picker-host').textContent=scope==='home'?`Folders on ${hostName}, inside its home directory.`:`Folders on ${hostName}. Only folders inside allowed roots are shown.`;
       $('directory-picker-name').value='';$('directory-picker-list').replaceChildren();
       $('directory-picker-select').disabled=true;$('directory-picker-create').disabled=true;
       $('directory-picker-dialog').showModal();load(state.start);
@@ -66,7 +67,7 @@ export function setupDirectoryPicker({$,api}) {
     const name=$('directory-picker-name').value.trim();if(!state?.path||!name)return;
     const button=$('directory-picker-create');button.disabled=true;$('directory-picker-error').textContent='';
     try{
-      const created=await api('/api/directories',{method:'POST',body:JSON.stringify({...(state.hostId!=='local'?{hostId:state.hostId}:{}),parent:state.path,name})});
+      const created=await api('/api/directories',{method:'POST',body:JSON.stringify({...(state.hostId!=='local'?{hostId:state.hostId}:{}),...(state.scope==='home'?{scope:'home'}:{}),parent:state.path,name})});
       $('directory-picker-name').value='';await load(created.path);
     }catch(error){$('directory-picker-error').textContent=error.message;}finally{button.disabled=!state?.path;}
   };

@@ -48,6 +48,21 @@ pub struct Host {
 }
 pub const DEFAULT_REMOTE_COMMAND: &str = "agentworks";
 pub const PROTOCOL: u64 = 3;
+/// This build's identity, `<crate version>+<git commit>`; see build.rs. Unlike
+/// the protocol, a different build still connects, but is shown as out of date.
+pub const BUILD: &str = env!("AGENTWORKS_BUILD");
+
+/// Whether a worker reporting `build` is out of date with this server. Unknown
+/// commits on either side cannot be compared; a worker too old to report a
+/// build is out of date.
+pub fn outdated(worker_build: Option<&str>) -> Option<bool> {
+    let known = |b: &str| !b.is_empty() && !b.ends_with("+unknown");
+    match worker_build.filter(|b| !b.is_empty()) {
+        None => Some(true),
+        Some(b) if known(b) && known(BUILD) => Some(b != BUILD),
+        Some(_) => None,
+    }
+}
 const MAX_FRAME: usize = 64 * 1024 * 1024;
 /// The worker prints this line on stdout before the WebSocket starts. Anything
 /// earlier, such as output from the remote shell's startup files, is skipped.
@@ -1070,6 +1085,7 @@ fn check_hello(hello: &Value) -> Result<Value, String> {
         .collect();
     Ok(json!({
         "version": text("version", 40),
+        "build": text("build", 80),
         "platform": text("platform", 40),
         "hostname": text("hostname", 80),
         "providers": providers,
@@ -1152,6 +1168,20 @@ async fn skip_preamble(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builds_compare_only_when_both_are_known() {
+        assert!(BUILD.starts_with(concat!(env!("CARGO_PKG_VERSION"), "+")));
+        assert_eq!(outdated(None), Some(true));
+        assert_eq!(outdated(Some("")), Some(true));
+        assert_eq!(outdated(Some("0.1.0+unknown")), None);
+        if BUILD.ends_with("+unknown") {
+            assert_eq!(outdated(Some("0.1.0+0123456789ab")), None);
+        } else {
+            assert_eq!(outdated(Some(BUILD)), Some(false));
+            assert_eq!(outdated(Some("0.0.1+0123456789ab")), Some(true));
+        }
+    }
 
     #[tokio::test]
     async fn mcp_credentials_are_scoped_to_live_channels_and_links() {

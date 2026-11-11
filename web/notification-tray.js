@@ -80,7 +80,7 @@ export function setupNotificationTray({openAlert}={}){
   }
   async function refresh(){
     const generation=++request;
-    try{const data=await read('/api/notifications/inbox');if(generation!==request)return;alerts=data.alerts;loaded=true;error.textContent='';retry.hidden=true;render();}
+    try{const data=await read('/api/notifications/inbox');if(generation!==request)return;alerts=Array.isArray(data?.alerts)?data.alerts:[];loaded=true;error.textContent='';retry.hidden=true;render();}
     catch(err){if(generation!==request)return;error.textContent=err.message;retry.hidden=false;}
   }
   async function change(ids,dismissed){

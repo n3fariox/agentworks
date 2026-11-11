@@ -474,12 +474,13 @@ function hostState(host){
 function hostTitle(host){
   if(host.kind!=='remote')return 'Connected';
   const w=host.worker;
-  return [hostState(host),'ssh '+host.destination,w?.hostname,w?.platform,w?.providers?.length?'providers: '+w.providers.join(', '):'',w?.version?'v'+w.version:'',host.status==='offline'?host.detail:''].filter(Boolean).join(' · ');
+  return [hostState(host),'ssh '+host.destination,w?.hostname,w?.platform,w?.providers?.length?'providers: '+w.providers.join(', '):'',buildLabel(w?.build)||(w?.version?'v'+w.version:''),host.outdated?'worker update available':'',host.status==='offline'?host.detail:''].filter(Boolean).join(' · ');
 }
 function hostNote(host){
   if(host.status==='offline')return (host.detail||'Offline.')+(host.managed&&/\bUpdate\b/.test(host.detail||'')?' Use ⋯ → Connection → Update worker.':'');
   if(host.status==='connecting')return host.detail?'Reconnecting. Last attempt: '+host.detail:'Connecting over SSH…';
-  return host.roots?.length?'Connected. No sessions yet.':'Connected. Add working directories (⋯) to start sessions here.';
+  const update=host.outdated?' Worker update available (⋯ → Connection).':'';
+  return (host.roots?.length?'Connected. No sessions yet.':'Connected. Add working directories (⋯) to start sessions here.')+update;
 }
 async function hostAction(host,action){
   if(action==='remove'&&!confirm(`Remove host ${host.name}? Its worker stops; nothing on that machine is deleted.`))return;
@@ -493,7 +494,8 @@ function treeGroup(key,label,items,{host=null,projectId=null,level=0,archived=fa
   const heading=el('summary','tree-heading');if(!host&&projectId){heading.dataset.projectId=projectId;heading.setAttribute('aria-haspopup','menu');}heading.append(el('span','tree-chevron','›'));
   heading.append(el('span',host?'tree-icon host':'tree-icon',host?'▤':'◇'),el('span','tree-label',label),badges(items));
   if(archived)heading.append(el('span','group-total','Archived'));
-  if(host){const dot=el('span','connection-dot '+(host.status||'connected'));dot.title=hostTitle(host);dot.setAttribute('aria-label',hostTitle(host));heading.append(dot);}
+  // An out-of-date worker rings the status dot; the row has no room for a badge.
+  if(host){const dot=el('span','connection-dot '+(host.status||'connected')+(host.outdated?' host-update':''));dot.title=hostTitle(host);dot.setAttribute('aria-label',hostTitle(host));heading.append(dot);}
   if(!host&&projectId){
     const rename=el('button','group-action','⋯');rename.type='button';rename.setAttribute('aria-label','Edit project '+label);
     rename.onclick=event=>{event.preventDefault();event.stopPropagation();openProjectDialog(projects.find(p=>p.id===projectId));};heading.append(rename);
@@ -1295,22 +1297,36 @@ $('new-session').onclick=()=>openCreate();$('welcome-new').onclick=()=>openCreat
 $('view-hosts').onclick=()=>setSidebarView('hosts');$('view-projects').onclick=()=>setSidebarView('projects');
 $('new-project').onclick=()=>sidebarView==='hosts'?openHostDialog():openProjectDialog();$('create-project-new').onclick=()=>openProjectDialog();
 // Host settings follow the Settings dialog: categories, sections, one Save.
-let editingHost=null;
+let editingHost=null,editingHostView=null;
 const selectHostSettings=setupSettingsTabs($('host-settings-dialog'));
-function openHostSettings(host,category='directories'){
-  editingHost=host.id;
+function openHostSettings(host,category='general'){
+  editingHost=host.id;editingHostView=host;
   $('host-settings-title').textContent=host.name;
   $('host-settings-description').textContent=`Remote host · ${host.destination}`;
+  $('host-edit-name').value=host.name;$('host-edit-destination').value=host.destination;$('host-edit-command').value=host.command||'';
+  $('host-edit-command-field').hidden=!!host.managed;$('host-edit-managed').hidden=!host.managed;
+  const count=sessions.filter(s=>s.hostId===host.id).length;
+  $('remove-host').disabled=count>0;
+  $('host-remove-note').textContent=count?`Delete this host’s ${count} session${count===1?'':'s'} before removing it.`:host.managed?'Stops the worker and deletes this server’s SSH key for the host. The worker installation and its public key entry stay on the host.':'Stops the worker. Nothing on the host is deleted.';
   $('host-roots').replaceChildren();for(const root of host.roots||[])addHostRoot(root);if(!host.roots?.length)addHostRoot();
   renderHostTools(host);renderHostConnection(host);
   $('host-settings-error').textContent='';
   selectHostSettings(category);$('host-settings-dialog').showModal();
-  if(category==='directories')$('host-roots').querySelector('input')?.focus();
+  (category==='directories'?$('host-roots').querySelector('input'):category==='general'?$('host-edit-name'):null)?.focus();
+}
+// Browse… picks a folder under the host's home directory, so new roots can be found.
+function browseButton(input,{hostId,hostName,usable=()=>true,why=''}){
+  const browse=el('button','text-button','Browse…');browse.type='button';browse.setAttribute('aria-label','Browse for '+(input.getAttribute('aria-label')||'directory').toLowerCase());
+  if(!usable()){browse.disabled=true;browse.title=why;}
+  browse.onclick=async()=>{const path=await directoryPicker.pick({hostId,hostName:hostName(),start:input.value.trim(),scope:'home'});if(path){input.value=path;input.focus();}};
+  return browse;
 }
 function addHostRoot(value=''){
   const row=el('div','root-item'),input=el('input');input.value=value;input.placeholder='~/projects';input.setAttribute('aria-label','Working directory');input.autocomplete='off';input.spellcheck=false;
+  const host=editingHostView;
+  const browse=browseButton(input,{hostId:host?.id,hostName:()=>host?.name,usable:()=>host?.status==='connected'&&host.worker?.directories,why:host?.status==='connected'?'Update this host’s worker to browse folders.':'Connect this host to browse folders.'});
   const remove=el('button','icon-button','×');remove.type='button';remove.setAttribute('aria-label','Remove working directory');remove.onclick=()=>{row.remove();if(!$('host-roots').children.length)addHostRoot();};
-  row.append(input,remove);$('host-roots').append(row);return input;
+  row.append(input,browse,remove);$('host-roots').append(row);return input;
 }
 $('add-host-root').onclick=()=>addHostRoot().focus();
 function renderHostTools(host){
@@ -1335,14 +1351,17 @@ function renderHostConnection(host){
   fact('Status',status);
   if(host.status!=='connected'&&host.detail)fact('Last error',el('span','',host.detail));
   fact('SSH destination',el('code','',host.destination));
-  fact('Worker',w?[w.version&&'v'+w.version,w.platform,w.hostname].filter(Boolean).join(' · ')||'Connected':'Not connected');
+  const worker=el('span','',w?[buildLabel(w.build)||(w.version&&'v'+w.version),w.platform,w.hostname].filter(Boolean).join(' · ')||'Connected':'Not connected');
+  if(host.outdated)worker.append(el('span','update-badge','Update available'));
+  fact('Worker',worker);
+  fact('This server',buildLabel(config.build)||'Unknown build');
   fact('Installed by',host.managed?'This server, with a dedicated SSH key':'You (existing worker)');
   if(!host.managed)fact('Command',el('code','',host.command));
   box.append(facts);
   const actions=el('div','settings-actions'),result=el('span','host-action-result'),error=el('div','error-text host-action-error');result.setAttribute('role','status');
   const action=(label,run)=>{const button=el('button','settings-action',label);button.type='button';button.onclick=()=>run(button);actions.append(button);return button;};
   // Re-render from the refreshed host so status and worker details stay current.
-  const finish=async message=>{await refreshSessions();const fresh=hosts.find(h=>h.id===host.id);if(fresh&&editingHost===host.id){renderHostConnection(fresh);renderHostTools(fresh);}const live=$('host-connection').querySelector('.host-action-result');if(live)live.textContent=message;};
+  const finish=async message=>{await refreshSessions();const fresh=hosts.find(h=>h.id===host.id);if(fresh&&editingHost===host.id){editingHostView=fresh;renderHostConnection(fresh);renderHostTools(fresh);}const live=$('host-connection').querySelector('.host-action-result');if(live)live.textContent=message;};
   action('Reconnect',async button=>{button.disabled=true;error.textContent='';try{await api(`/api/hosts/${host.id}/reconnect`,{method:'POST'});await finish('Reconnecting…');}catch(e){error.textContent=e.message;button.disabled=false;}});
   if(host.managed)action('Update worker',async button=>{
     if(!confirm(`Install this server's worker on ${host.name} and reconnect? Running turns on this host are interrupted; resume them afterwards.`))return;
@@ -1351,19 +1370,38 @@ function renderHostConnection(host){
     catch(e){result.textContent='';error.textContent=e.message;for(const b of actions.querySelectorAll('button'))b.disabled=false;}
   });
   actions.append(result);box.append(actions,error);
+  if(host.managed&&host.outdated)box.append(el('p','field-note','This host’s worker was built from a different commit than this server.'));
   box.append(el('p','field-note',host.managed?'Update worker installs this server’s worker for the host’s OS and CPU beside the current one, then switches to it and reconnects. If the install fails, the host keeps its current worker. Reconnecting interrupts running turns on this host.':'This host runs a worker you set up. Update its Agentworks binary on the host, then reconnect.'));
 }
 $('dismiss-host-settings').onclick=()=>$('host-settings-dialog').close();
 $('host-settings-form').onsubmit=async event=>{
   event.preventDefault();$('host-settings-error').textContent='';$('save-host-settings').disabled=true;
+  const host=editingHostView,edit={name:$('host-edit-name').value.trim(),destination:$('host-edit-destination').value.trim(),...(host.managed?{}:{command:$('host-edit-command').value.trim()})};
+  const relink=edit.destination!==host.destination||(!host.managed&&edit.command!==(host.command||''));
+  if(relink&&!confirm(`Reconnect ${host.name} with the new connection settings? Running turns on this host are interrupted; resume them afterwards.`)){$('save-host-settings').disabled=false;return;}
+  let step='general';
   try{
+    if(edit.name!==host.name||relink)await api(`/api/hosts/${host.id}`,{method:'PATCH',body:JSON.stringify(edit)});
+    step='directories';
     const roots=[...$('host-roots').querySelectorAll('input')].map(input=>input.value.trim()).filter(Boolean);
-    await api(`/api/hosts/${editingHost}/roots`,{method:'PUT',body:JSON.stringify({roots})});
+    await api(`/api/hosts/${host.id}/roots`,{method:'PUT',body:JSON.stringify({roots})});
     $('host-settings-dialog').close();await refreshSessions();
-  }catch(error){selectHostSettings('directories');$('host-settings-error').textContent=error.message;}finally{$('save-host-settings').disabled=false;}
+  }catch(error){selectHostSettings(step);$('host-settings-error').textContent=error.message;await refreshSessions();}finally{$('save-host-settings').disabled=false;}
 };
+$('remove-host').onclick=async()=>{
+  const host=editingHostView;if(!host||!confirm(`Remove host ${host.name}? Its worker stops; nothing on that machine is deleted.`))return;
+  $('remove-host').disabled=true;$('host-settings-error').textContent='';
+  try{await api(`/api/hosts/${host.id}`,{method:'DELETE'});$('host-settings-dialog').close();await refreshSessions();}
+  catch(error){$('host-settings-error').textContent=error.message;$('remove-host').disabled=false;}
+};
+// `0.1.0+3f1c2d4e5a6b` → `v0.1.0 (3f1c2d4e5a6b)`.
+function buildLabel(build){
+  if(!build)return '';
+  const [version,commit]=build.split('+');
+  return 'v'+version+(commit&&commit!=='unknown'?` (${commit})`:'');
+}
 const enrollment=hostEnrollment({$,api,refresh:refreshSessions,directories:host=>{
-  $('host-dialog').close();openHostSettings(host);
+  $('host-dialog').close();openHostSettings(host,'directories');
 }});
 function openHostDialog(){enrollment.open();}
 $('dismiss-project').onclick=()=>{if(!savingProject)$('project-dialog').close();};
@@ -1558,8 +1596,9 @@ function applyRoots(){
 function rootValues(){return [...$('settings-roots').querySelectorAll('input')].map(input=>input.value.trim());}
 function addRoot(value=''){
   const row=el('div','root-item'),input=el('input');input.value=value;input.placeholder='/home/you/projects';input.setAttribute('aria-label','Allowed root directory');input.autocomplete='off';input.spellcheck=false;input.required=true;
+  const browse=browseButton(input,{hostId:'local',hostName:()=>'Local'});
   const remove=el('button','icon-button','×');remove.type='button';remove.setAttribute('aria-label','Remove root directory');remove.onclick=()=>{row.remove();if(!$('settings-roots').children.length)addRoot();};
-  row.append(input,remove);$('settings-roots').append(row);return input;
+  row.append(input,browse,remove);$('settings-roots').append(row);return input;
 }
 // Keep category contents mounted so switching sections preserves unsaved edits.
 // Shared by Settings and Host settings; returns the dialog's category selector.
@@ -1707,7 +1746,7 @@ $('host-terminal-back').onclick=()=>{workspace.showView('sessions');sidebar();if
 sidePanel=setupSidePanel({panel:$('side-panel'),tabs:{files:$('side-tab-files'),diff:$('side-tab-diff')},triggers:{files:$('session-files'),diff:$('session-diff')},close:$('side-close'),renderers:{files:workspace.sideFiles,diff:diffView},getActive:()=>active,phone});
 async function init(){
   config=await api('/api/status');
-  $('host-address').textContent=location.host+' · Linux prototype';
+  $('host-address').textContent=location.host+' · '+(buildLabel(config.build)||'Linux prototype');
   renderProviderPicker();
   applyRoots();
   await refreshSessions();

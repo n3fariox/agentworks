@@ -409,6 +409,26 @@ impl Catalog {
         destination: &str,
         command: &str,
     ) -> Result<Host, String> {
+        let (name, destination, command) = self.check_host(None, name, destination, command)?;
+        Ok(Host {
+            id: Uuid::new_v4().to_string(),
+            name,
+            destination,
+            identity_file: None,
+            known_hosts_file: None,
+            command,
+            roots: Vec::new(),
+        })
+    }
+    /// Validates a host's editable fields; `id` is the host being edited, whose
+    /// own name does not count as taken.
+    fn check_host(
+        &self,
+        id: Option<&str>,
+        name: &str,
+        destination: &str,
+        command: &str,
+    ) -> Result<(String, String, String), String> {
         let name = name.trim();
         if name.is_empty() || name.chars().count() > 80 {
             return Err("Use a host name between 1 and 80 characters".into());
@@ -420,7 +440,7 @@ impl Catalog {
             .data
             .hosts
             .iter()
-            .any(|h| h.name.to_lowercase() == name.to_lowercase())
+            .any(|h| Some(h.id.as_str()) != id && h.name.to_lowercase() == name.to_lowercase())
         {
             return Err("A host with that name already exists".into());
         }
@@ -442,15 +462,37 @@ impl Catalog {
         if command.len() > 400 || command.chars().any(char::is_control) {
             return Err("Use a single-line remote command under 400 characters".into());
         }
-        let host = Host {
-            id: Uuid::new_v4().to_string(),
-            name: name.into(),
-            destination: destination.into(),
-            identity_file: None,
-            known_hosts_file: None,
-            command: command.into(),
-            roots: Vec::new(),
-        };
+        Ok((name.into(), destination.into(), command.into()))
+    }
+    /// Renames a host or changes how it is reached. A host this server
+    /// installed keeps its own launch command; `command` applies to others.
+    pub fn update_host(
+        &mut self,
+        id: &str,
+        name: &str,
+        destination: &str,
+        command: Option<&str>,
+    ) -> Result<Host, String> {
+        let current = self
+            .data
+            .hosts
+            .iter()
+            .find(|h| h.id == id)
+            .ok_or("Host not found")?;
+        let command = match command {
+            Some(c) if current.identity_file.is_none() => c,
+            _ => current.command.as_str(),
+        }
+        .to_owned();
+        let (name, destination, command) =
+            self.check_host(Some(id), name, destination, &command)?;
+        let mut data = self.data.clone();
+        let host = data.hosts.iter_mut().find(|h| h.id == id).unwrap();
+        host.name = name;
+        host.destination = destination;
+        host.command = command;
+        let host = host.clone();
+        self.save(data).map_err(|_| "Could not save host")?;
         Ok(host)
     }
     pub fn set_host_roots(&mut self, id: &str, roots: Vec<String>) -> Result<Host, String> {
@@ -755,6 +797,50 @@ mod tests {
         assert_eq!(reopened.data.locations.len(), 2);
         reopened.remove(&project.id).unwrap();
         assert_eq!(reopened.data.locations.len(), 2);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn hosts_can_be_renamed_and_repointed() {
+        let path = std::env::temp_dir().join(format!("agentworks-hosts-{}.json", Uuid::new_v4()));
+        let mut catalog = Catalog::open(path.clone()).unwrap();
+        let manual = catalog.add_host("Box", "me@box", "").unwrap();
+        let managed = catalog
+            .add_managed_host(
+                "Rock",
+                "me@rock",
+                "\"$HOME/x\"/launch",
+                Some("/k".into()),
+                None,
+            )
+            .unwrap();
+        // Its own name is not taken; another host's is, in any case.
+        let renamed = catalog
+            .update_host(&manual.id, "box", "me@box2", Some("~/bin/agentworks"))
+            .unwrap();
+        assert_eq!(
+            (renamed.name.as_str(), renamed.destination.as_str()),
+            ("box", "me@box2")
+        );
+        assert_eq!(renamed.command, "~/bin/agentworks");
+        assert!(
+            catalog
+                .update_host(&manual.id, "ROCK", "me@box", None)
+                .is_err()
+        );
+        assert!(
+            catalog
+                .update_host(&manual.id, "box", "-oProxyCommand=sh", None)
+                .is_err()
+        );
+        // A host this server installed keeps the launch command it wrote.
+        let moved = catalog
+            .update_host(&managed.id, "Rock 2", "me@rock.lan", Some("evil"))
+            .unwrap();
+        assert_eq!(moved.command, managed.command);
+        assert!(catalog.update_host("missing", "x", "x", None).is_err());
+        let reopened = Catalog::open(path.clone()).unwrap();
+        assert_eq!(reopened.data.hosts[1].name, "Rock 2");
         std::fs::remove_file(path).unwrap();
     }
 
