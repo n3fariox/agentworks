@@ -532,3 +532,14 @@ body[data-code-theme=github-light] .source-line::before{color:#6e7781}
 .session-badge[href]{cursor:pointer;text-decoration:none}
 .session-badge[href]:hover{text-decoration:underline;filter:brightness(1.15)}
 .session-badge[href]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+#gemini-oauth:not([hidden]){display:grid;gap:12px;margin-top:20px;padding-top:20px;border-top:1px solid var(--border)}
+#gemini-oauth h3,#gemini-oauth p{margin:0}
+#settings-dialog #gemini-oauth label{display:block;margin:0 0 6px}
+#gemini-oauth-form{display:grid;gap:10px;min-width:0}
+#gemini-oauth button,#gemini-oauth-link{justify-self:start}
+#gemini-oauth-link{display:inline-block;padding:6px 0;line-height:1.6;overflow-wrap:anywhere}
+#gemini-oauth-status{overflow-wrap:anywhere;white-space:pre-wrap}
+
+.terminal-launch-options{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;padding:10px 18px;border-bottom:1px solid var(--border)}
+.terminal-launch-options label{font-size:12px;margin:0}.terminal-launch-options select,.terminal-launch-options input{width:auto;min-width:0;max-width:100%;margin:0;font-size:12px}.terminal-launch-options input{flex:1;min-width:180px}.terminal-launch-options p{flex-basis:100%;margin:0;font-size:11px}

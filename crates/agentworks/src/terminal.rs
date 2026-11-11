@@ -1,7 +1,7 @@
 //! One service-owned shell per session or host. Ghostty alone interprets PTY output and
 //! answers host queries; browsers receive presentation updates, never raw output.
 use crate::{App, Session, fail};
-pub use agentworks_terminal::{Frame, Handle, Input, spawn};
+pub use agentworks_terminal::{Frame, Handle, Input, Launch, spawn, spawn_launch};
 use axum::{
     Json,
     extract::{
@@ -94,12 +94,18 @@ pub async fn archive(session: &Session) -> crate::ApiResult {
 pub struct OpenRequest {
     #[serde(default)]
     restart: bool,
+    #[serde(default)]
+    launch: Launch,
 }
 pub async fn open(
     State(app): State<App>,
     Path(id): Path<String>,
     Json(request): Json<OpenRequest>,
 ) -> crate::ApiResult {
+    request
+        .launch
+        .validate()
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
     let _run = app.run_lock.lock().await;
     let session = app
         .sessions
@@ -152,12 +158,14 @@ pub async fn open(
     }
     crate::service_restart::allow_start(&app)?;
     let handle = if session.host_id == "local" {
-        spawn(session.cwd.clone())
+        spawn_launch(session.cwd.clone(), request.launch.clone())
     } else {
         app.hosts
             .live(&session.host_id)
             .ok_or_else(|| "The host is offline.".to_string())
-            .and_then(|host| host.terminal(&session.cwd.to_string_lossy()))
+            .and_then(|host| {
+                host.terminal_program(&session.cwd.to_string_lossy(), request.launch.clone())
+            })
     }
     .map_err(|error| fail(StatusCode::BAD_REQUEST, error))?;
     session
@@ -175,6 +183,53 @@ pub async fn open(
     Ok(Json(
         serde_json::json!({"ok":true,"available":true,"archived":false}),
     ))
+}
+pub async fn stop_session(State(app): State<App>, Path(id): Path<String>) -> crate::ApiResult {
+    let _run = app.run_lock.lock().await;
+    let session = app
+        .sessions
+        .lock()
+        .unwrap()
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| fail(StatusCode::NOT_FOUND, "Session not found"))?;
+    // Save a resumable presentation before awaiting PTY shutdown: a browser
+    // reload can cancel this HTTP request after observing the exit frame.
+    let snapshot = registry().lock().unwrap().get(&id).map(|handle| {
+        let mut frame = handle.frames.borrow().clone();
+        frame.exited = true;
+        frame.code = None;
+        frame.delta.clear();
+        frame
+    });
+    if let Some(frame) = snapshot {
+        session
+            .store
+            .lock()
+            .unwrap()
+            .save_terminal(&id, &frame)
+            .map_err(|_| {
+                fail(
+                    StatusCode::INSUFFICIENT_STORAGE,
+                    "Could not save terminal history",
+                )
+            })?;
+    }
+    if let Some(frame) = stop(&id, false).await {
+        session
+            .store
+            .lock()
+            .unwrap()
+            .save_terminal(&id, &frame)
+            .map_err(|_| {
+                fail(
+                    StatusCode::INSUFFICIENT_STORAGE,
+                    "Could not save terminal history",
+                )
+            })?;
+        registry().lock().unwrap().insert(id, saved_handle(frame));
+    }
+    Ok(Json(serde_json::json!({"ok":true})))
 }
 fn host_key(id: &str) -> String {
     format!("host:{id}")
@@ -320,7 +375,7 @@ async fn socket(ws: WebSocket, handle: Arc<Handle>, session: Option<Arc<Session>
         let archived = session
             .as_ref()
             .is_some_and(|session| session.data.lock().unwrap().lifecycle.archived);
-        let message = serde_json::json!({"archived":archived,"history":history,"alternate":frame.alternate,"type":"frame","seq":frame.seq,"cols":frame.cols,"rows":frame.rows,"data":data,"exited":frame.exited,"code":frame.code,"error":frame.error});
+        let message = serde_json::json!({"archived":archived,"history":history,"alternate":frame.alternate,"type":"frame","seq":frame.seq,"cols":frame.cols,"rows":frame.rows,"data":data,"exited":frame.exited,"code":frame.code,"error":frame.error,"launch":frame.launch});
         if !matches!(
             tokio::time::timeout(
                 Duration::from_secs(10),

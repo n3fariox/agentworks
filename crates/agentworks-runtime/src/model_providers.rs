@@ -228,7 +228,7 @@ fn validate(input: Input) -> Result<(Profile, Option<String>, bool)> {
     };
     if !matches!(
         input.kind.as_str(),
-        "openai-compatible" | "chatgpt_codex" | "claude-code"
+        "openai-compatible" | "chatgpt_codex" | "claude-code" | "gemini_oauth"
     ) {
         return Err("Unknown model provider type".into());
     }
@@ -338,6 +338,12 @@ pub fn dispatch(request: &Value) -> Result<Value> {
 }
 
 pub async fn execute(request: &Value) -> Result<Value> {
+    if request["operation"]
+        .as_str()
+        .is_some_and(|op| op.starts_with("gemini-"))
+    {
+        return crate::gemini_auth::execute(request).await;
+    }
     if request["operation"] == "models" || request["operation"] == "test" {
         let (p, key) = {
             let _lock = storage_lock()?;
@@ -499,7 +505,7 @@ mod tests {
     }
     #[test]
     fn subscription_profiles_use_host_auth_without_api_credentials() {
-        for kind in ["chatgpt_codex", "claude-code"] {
+        for kind in ["chatgpt_codex", "claude-code", "gemini_oauth"] {
             let input = json!({"kind":kind,"name":"Subscription","defaultModel":"account-model"});
             let (p, key, _) = validate(serde_json::from_value(input.clone()).unwrap()).unwrap();
             assert!(key.is_none());
@@ -557,7 +563,7 @@ pub fn auth_root(id: &str) -> Result<PathBuf> {
 }
 
 pub fn login_terminal(kind: &str, id: &str) -> Result<crate::terminal::Handle> {
-    if kind != "claude-code" {
+    if !matches!(kind, "claude-code" | "gemini_oauth") {
         return Err("This provider does not use subscription sign-in".into());
     }
     let root = auth_root(id)?;
@@ -576,5 +582,8 @@ pub fn login_terminal(kind: &str, id: &str) -> Result<crate::terminal::Handle> {
             "BROWSER",
             format!("{browser_executable} goose-browser-url %s"),
         );
+    if kind == "gemini_oauth" {
+        command.env("AGENTWORKS_GEMINI_CALLBACK_INPUT", "1");
+    }
     crate::terminal::spawn_command(std::env::temp_dir(), command)
 }

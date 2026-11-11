@@ -39,6 +39,58 @@ export function setupModelProviders({$,api,el,getHosts,selectionChanged,socketUr
   }
   $('codex-oauth-cancel').onclick=async()=>{const id=codexAuth;stopCodexPoll();const generation=codexGeneration;try{await api(codexPath(id)+'/cancel',{method:'POST'});if(generation===codexGeneration)hideCodexAuth(id);}catch(error){$('codex-oauth-status').textContent=error.message;}};
   addEventListener('pagehide',stopCodexPoll);
+  let geminiAuth=null,geminiTimer=null,geminiGeneration=0,geminiSubmitting=false,geminiPhase='idle';
+  const geminiPath=attempt=>`/api/model-providers/${encodeURIComponent(attempt.id)}/gemini-auth`;
+  const geminiEndpoint=(attempt,suffix='')=>geminiPath(attempt)+suffix+'?hostId='+encodeURIComponent(attempt.hostId);
+  function stopGeminiPoll(){clearTimeout(geminiTimer);geminiTimer=null;geminiGeneration++;}
+  function renderGemini(result){
+    geminiPhase=result.status;
+    const pending=['starting','pending','exchanging'].includes(result.status);
+    if(result.authorizationUrl){
+      const url=new URL(result.authorizationUrl);
+      if(url.origin!=='https://accounts.google.com')throw Error('Unexpected Google sign-in URL');
+      $('gemini-oauth-link').href=url.href;$('gemini-oauth-link').hidden=false;$('gemini-oauth-url').value=url.href;
+    }
+    $('gemini-oauth-submit').disabled=geminiSubmitting||result.status!=='pending';$('gemini-oauth-cancel').hidden=!pending;
+    if(!pending){$('gemini-oauth-link').hidden=true;$('gemini-oauth-link').removeAttribute('href');$('gemini-oauth-url').value='';$('gemini-oauth-callback').value='';}
+    const readableError=result.error?.replace(/^Internal error:\s*/, '').replace(/^"|"$/g,'').replace(/^Authentication error: OAuth flow failed:\s*/, '');
+    $('gemini-oauth-status').textContent=readableError||(result.status==='complete'?'Sign-in completed. You can start a Goose session.':result.status==='starting'?'Starting sign-in…':result.status==='exchanging'?'Completing sign-in…':result.status==='pending'?'Complete Google sign-in, then paste the returned localhost URL if needed.':'Sign-in cancelled.');
+    return pending;
+  }
+  async function pollGemini(attempt,generation){
+    try{
+      const result=await api(geminiEndpoint(attempt));if(generation!==geminiGeneration)return;
+      if(renderGemini(result))geminiTimer=setTimeout(()=>pollGemini(attempt,generation),500);
+    }catch(error){if(generation===geminiGeneration)$('gemini-oauth-status').textContent=error.message;}
+  }
+  async function signInGemini(p,hostId){
+    const previous=geminiAuth;stopGeminiPoll();const generation=geminiGeneration,attempt={id:p.id,hostId};geminiAuth=attempt;
+    $('gemini-oauth').hidden=false;$('gemini-oauth-title').textContent=p.name+' · '+hostName(hostId);
+    $('gemini-oauth-link').hidden=true;$('gemini-oauth-url').value='';$('gemini-oauth-callback').value='';renderGemini({status:'starting'});
+    $('gemini-oauth').scrollIntoView({block:'center'});
+    try{
+      if(previous)await api(geminiEndpoint(previous),{method:'DELETE'});
+      if(generation!==geminiGeneration)return;
+      await api(geminiEndpoint(attempt),{method:'POST'});if(generation===geminiGeneration)pollGemini(attempt,generation);
+    }catch(error){if(generation===geminiGeneration)renderGemini({status:'error',error:error.message});}
+  }
+  $('gemini-oauth-url').onclick=()=>{$('gemini-oauth-url').select();};
+  $('gemini-oauth-url').onkeydown=event=>{if(event.key==='Enter')event.preventDefault();};
+  $('gemini-oauth-callback').onkeydown=event=>{if(event.key==='Enter'){event.preventDefault();$('gemini-oauth-submit').click();}};
+  $('gemini-oauth-submit').onclick=async event=>{
+    event.preventDefault();if(!geminiAuth||geminiSubmitting)return;
+    const attempt=geminiAuth,generation=geminiGeneration,callbackUrl=$('gemini-oauth-callback').value.trim();
+    geminiSubmitting=true;$('gemini-oauth-submit').disabled=true;$('gemini-oauth-callback').value='';$('gemini-oauth-status').textContent='Checking callback…';
+    try{await api(geminiEndpoint(attempt,'/callback'),{method:'POST',body:JSON.stringify({callbackUrl})});}
+    catch(error){if(generation===geminiGeneration){$('gemini-oauth-status').textContent=error.message;}}
+    finally{geminiSubmitting=false;if(generation===geminiGeneration)$('gemini-oauth-submit').disabled=geminiPhase!=='pending';}
+  };
+  $('gemini-oauth-cancel').onclick=async()=>{
+    const attempt=geminiAuth;stopGeminiPoll();const generation=geminiGeneration;
+    try{await api(geminiEndpoint(attempt),{method:'DELETE'});if(generation===geminiGeneration){geminiAuth=null;renderGemini({status:'idle'});}}
+    catch(error){if(generation===geminiGeneration)$('gemini-oauth-status').textContent=error.message;}
+  };
+  addEventListener('pagehide',stopGeminiPoll);
   const authPath=id=>`/api/model-providers/${encodeURIComponent(id)}/auth`;
   const authTerminal=setupTerminal({$:id=>$(id==='session-terminal'?'provider-auth-terminal':id.replace(/^terminal-/,'provider-auth-')),api,getActive:()=>auth,socketUrl,tabs:false,runningStatus:'Sign-in running',exitStatus:frame=>frame.code===0?'Sign-in completed':frame.code==null?'Sign-in stopped':'Sign-in failed',
     endpoint:id=>authPath(auth.profileId)+'?hostId='+encodeURIComponent(auth.hostId),eventsEndpoint:id=>authPath(auth.profileId)+'/events?hostId='+encodeURIComponent(auth.hostId)});
@@ -46,10 +98,11 @@ export function setupModelProviders({$,api,el,getHosts,selectionChanged,socketUr
   function kind(){return $('model-provider-kind').value;}
   function kindChanged(){
     const subscription=kind()!=='openai-compatible';
+    $('model-provider-auth-note').textContent=kind()==='gemini_oauth'?'This legacy OAuth client is no longer supported for individual Gemini accounts. A personal Gemini plan cannot enable this Goose provider.':'Save the provider, then sign in. ChatGPT sign-in is shared with enabled hosts. Claude uses the installed Claude Code CLI on each host.';
     $('model-provider-api-fields').hidden=subscription;$('model-provider-auth-note').hidden=!subscription;
     $('test-model-provider').hidden=subscription;$('load-model-provider-models').hidden=subscription;
   }
-  $('model-provider-kind').onchange=()=>{kindChanged();$('model-provider-model').value=kind()==='claude-code'?'default':kind()==='chatgpt_codex'?'gpt-6.1-sol':'';};
+  $('model-provider-kind').onchange=()=>{kindChanged();$('model-provider-model').value=kind()==='claude-code'?'default':kind()==='chatgpt_codex'?'gpt-6.1-sol':kind()==='gemini_oauth'?'gemini-3-flash-preview':'';};
   const endpoint=host=>'/api/model-providers?hostId='+encodeURIComponent(host||'local');
   const hostOptions=()=>[{id:'local',name:'Local',status:'connected'},...getHosts().filter(h=>h.kind==='remote')];
   const hostName=id=>hostOptions().find(h=>h.id===id)?.name||id;
@@ -97,8 +150,8 @@ export function setupModelProviders({$,api,el,getHosts,selectionChanged,socketUr
         if(p.kind==='chatgpt_codex'){
           const text=el('span','model-provider-auth-status',p.signedIn?'Signed in':'Not signed in');text.dataset.signedIn=String(Boolean(p.signedIn));status.append(text);
           if(p.signedIn)status.append(document.createTextNode(' · shared with enabled hosts'));
-        }else status.append(document.createTextNode(p.kind==='claude-code'?'Sign-in managed on each host':p.keyConfigured?'API key configured':'No API key'));
-        copy.append(el('strong','',p.name),el('p','field-note',p.kind==='chatgpt_codex'?'ChatGPT subscription · Codex OAuth':p.kind==='claude-code'?'Claude subscription · Claude Code':p.baseUrl),status,el('p','field-note','Available on: '+(p.hostIds?.map(hostName).join(', ')||'No hosts')));
+        }else status.append(document.createTextNode(['claude-code','gemini_oauth'].includes(p.kind)?'Sign-in managed on each host':p.keyConfigured?'API key configured':'No API key'));
+        copy.append(el('strong','',p.name),el('p','field-note',p.kind==='chatgpt_codex'?'ChatGPT subscription · Codex OAuth':p.kind==='claude-code'?'Claude subscription · Claude Code':p.kind==='gemini_oauth'?'Gemini · legacy Google OAuth':p.baseUrl),status,el('p','field-note','Available on: '+(p.hostIds?.map(hostName).join(', ')||'No hosts')));
         const actions=el('div','model-provider-actions'),edit=el('button','text-button','Edit'),remove=el('button','text-button','Delete');edit.type=remove.type='button';
         edit.onclick=()=>editor(p);
         remove.onclick=async()=>{
@@ -111,9 +164,9 @@ export function setupModelProviders({$,api,el,getHosts,selectionChanged,socketUr
           const device=el('button','text-button','Device code');device.type='button';device.title='Experimental device-code sign-in';device.onclick=()=>signInCodex(p,true);actions.append(device);
           if(p.signedIn){const disconnect=el('button','text-button','Disconnect');disconnect.type='button';disconnect.onclick=async()=>{try{await api(codexPath(p.id),{method:'DELETE'});hideCodexAuth(p.id);message('');await refreshProviders();await loadCreate();}catch(error){message(error.message);}};actions.append(disconnect);}
         }
-        if(p.kind==='claude-code')for(const hostId of p.hostIds||[]){
+        if(['claude-code','gemini_oauth'].includes(p.kind))for(const hostId of p.hostIds||[]){
           const host=hostOptions().find(h=>h.id===hostId),signin=el('button','text-button','Sign in · '+hostName(hostId));signin.type='button';signin.disabled=host?.status!=='connected';
-          signin.onclick=()=>{auth={id:p.id+':'+hostId,profileId:p.id,hostId};$('provider-auth-title').textContent=p.name+' · '+hostName(hostId);$('provider-auth-terminal').hidden=false;$('provider-auth-surface').scrollIntoView({block:'center'});authTerminal.open();};actions.append(signin);
+          signin.onclick=()=>{if(p.kind==='gemini_oauth'){signInGemini(p,hostId);return;}auth={id:p.id+':'+hostId,profileId:p.id,hostId};$('provider-auth-title').textContent=p.name+' · '+hostName(hostId);$('provider-auth-instructions').textContent='Complete Claude Code sign-in in its browser flow. If the callback cannot reach this host, paste the returned code into this terminal.';$('provider-auth-terminal').hidden=false;$('provider-auth-surface').scrollIntoView({block:'center'});authTerminal.open();};actions.append(signin);
         }
         actions.append(edit,remove);card.append(copy,actions);listElement.append(card);
       }

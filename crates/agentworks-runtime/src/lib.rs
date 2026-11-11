@@ -15,3 +15,5 @@ pub mod model_providers;
 pub mod subagents;
 
 pub mod codex_auth;
+
+pub mod gemini_auth;

@@ -29,9 +29,38 @@ const SCROLLBACK_ROWS: usize = 10_000;
 const GHOSTTY_SCROLLBACK_BYTES: usize = 64 * 1024 * 1024;
 
 type Result<T> = std::result::Result<T, String>;
+/// Programs launched directly in the terminal, without an agent protocol bridge.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct Launch {
+    pub program: String,
+    pub conversation_id: Option<String>,
+}
+impl Launch {
+    pub fn validate(&self) -> Result<()> {
+        if !matches!(self.program.as_str(), "" | "shell" | "antigravity") {
+            return Err("Unknown terminal program".into());
+        }
+        if let Some(id) = &self.conversation_id {
+            if self.program != "antigravity"
+                || id.is_empty()
+                || id.starts_with('-')
+                || id.len() > 200
+                || !id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+            {
+                return Err("Use a valid Antigravity conversation ID".into());
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Frame {
+    pub launch: Launch,
     pub seq: u64,
     pub cols: u16,
     pub rows: u16,
@@ -238,15 +267,36 @@ impl Drop for Handle {
     }
 }
 pub fn spawn(cwd: PathBuf) -> Result<Handle> {
-    spawn_program(cwd, None)
+    spawn_program(cwd, None, Launch::default())
 }
 /// Run a fixed command in a fresh PTY, without an intervening interactive shell.
 pub fn spawn_command(cwd: PathBuf, command: Command) -> Result<Handle> {
-    spawn_program(cwd, Some(command))
+    spawn_program(cwd, Some(command), Launch::default())
 }
-fn spawn_program(cwd: PathBuf, command: Option<Command>) -> Result<Handle> {
+pub fn spawn_launch(cwd: PathBuf, launch: Launch) -> Result<Handle> {
+    launch.validate()?;
+    if launch.program != "antigravity" {
+        return spawn_program(cwd, None, launch);
+    }
+    let executable =
+        std::env::var_os("AGENTWORKS_ANTIGRAVITY_PATH").unwrap_or_else(|| "agy".into());
+    let available = std::path::Path::new(&executable).is_file()
+        || std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path).any(|dir| dir.join(&executable).is_file())
+        });
+    if !available {
+        return Err("Antigravity CLI (agy) is not installed on this host. Install it or set AGENTWORKS_ANTIGRAVITY_PATH, then restart Agentworks.".into());
+    }
+    let mut command = Command::new(executable);
+    if let Some(id) = &launch.conversation_id {
+        command.arg("--conversation").arg(id);
+    }
+    spawn_program(cwd, Some(command), launch)
+}
+fn spawn_program(cwd: PathBuf, command: Option<Command>, launch: Launch) -> Result<Handle> {
     let (input, incoming) = mpsc::channel(64);
     let (frames, receiver) = watch::channel(Frame {
+        launch,
         cols: 80,
         rows: 24,
         ..Default::default()

@@ -171,9 +171,96 @@ pub async fn update(
     }
     if operation == "delete" {
         if let Some(id) = id {
+            let all = profiles::dispatch(&json!({"operation":"list"})).map_err(bad)?;
+            if let Some(profile) = all["profiles"].as_array().and_then(|items| {
+                items
+                    .iter()
+                    .find(|p| p["id"] == id && p["kind"] == "gemini_oauth")
+            }) {
+                agentworks_runtime::gemini_auth::cancel(id).await;
+                if let Some(hosts) = profile["hostIds"].as_array() {
+                    for host in hosts
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .filter(|h| *h != "local")
+                    {
+                        if let Some(worker) = app.hosts.live(host) {
+                            let _ = worker.model_providers(json!({"operation":"gemini-cancel","profile":{
+                                "id":id,"kind":"gemini_oauth","name":"Sign-in","defaultModel":"unused"
+                            }})).await;
+                        }
+                    }
+                }
+            }
             crate::terminal::remove_provider_auth(id).await;
             crate::codex_oauth::remove(id).await;
         }
     }
     Ok(Json(profiles::dispatch(&request).map_err(bad)?))
+}
+
+async fn gemini_operation(
+    app: &App,
+    id: String,
+    query: HostQuery,
+    operation: &str,
+    callback: Option<String>,
+) -> ApiResult {
+    let _workspace = app.workspace_lock.lock().await;
+    let host = query.host_id.as_deref().unwrap_or("local");
+    let connection = profiles::connection(&id, host).map_err(bad)?;
+    if connection.profile.kind != "gemini_oauth" {
+        return Err(bad("Select a Gemini subscription provider"));
+    }
+    if operation == "gemini-start" {
+        crate::service_restart::allow_start(app)?;
+    }
+    let request =
+        json!({"operation":operation,"profile":connection.profile,"callbackUrl":callback});
+    let result = if host == "local" {
+        profiles::execute(&request).await.map_err(bad)?
+    } else {
+        app.hosts
+            .live(host)
+            .ok_or_else(|| bad("Connect this host before signing in"))?
+            .model_providers(request)
+            .await
+            .map_err(bad)?
+    };
+    Ok(Json(result))
+}
+
+pub async fn gemini_start(
+    State(app): State<App>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Query(query): Query<HostQuery>,
+) -> ApiResult {
+    gemini_operation(&app, id, query, "gemini-start", None).await
+}
+pub async fn gemini_status(
+    State(app): State<App>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Query(query): Query<HostQuery>,
+) -> ApiResult {
+    gemini_operation(&app, id, query, "gemini-status", None).await
+}
+pub async fn gemini_cancel(
+    State(app): State<App>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Query(query): Query<HostQuery>,
+) -> ApiResult {
+    gemini_operation(&app, id, query, "gemini-cancel", None).await
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GeminiCallback {
+    callback_url: String,
+}
+pub async fn gemini_callback(
+    State(app): State<App>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Query(query): Query<HostQuery>,
+    Json(input): Json<GeminiCallback>,
+) -> ApiResult {
+    gemini_operation(&app, id, query, "gemini-callback", Some(input.callback_url)).await
 }

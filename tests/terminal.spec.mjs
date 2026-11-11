@@ -17,7 +17,7 @@ async function waitFor(check){for(let n=0;n<150;n++){const value=await check();i
 const exists=pid=>{try{process.kill(Number(pid),0);return true;}catch{return false;}};
 
 async function startServer(){
-  server=spawn(resolve('target/debug/agentworks'),[],{detached:true,env:{...process.env,HOME:join(fixture,'home'),SHELL:'/bin/bash',NO_BROWSER:'1',NO_COLOR:'1',CODEX_CI:'1',PAGER:'cat',GIT_PAGER:'cat',AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:'4456',AGENTWORKS_ROOTS:fixture,AGENTWORKS_DB_PATH:join(fixture,'sessions.sqlite3'),AGENTWORKS_CATALOG_PATH:join(fixture,'catalog.json'),AGENTWORKS_DEMO_STATE_DIR:join(fixture,'demo'),AGENTWORKS_SSH:resolve('scripts/fake-ssh.sh')},stdio:['ignore','pipe','pipe']});
+  server=spawn(resolve(process.env.AGENTWORKS_TEST_BINARY||'target/debug/agentworks'),[],{detached:true,env:{...process.env,HOME:join(fixture,'home'),SHELL:'/bin/bash',NO_BROWSER:'1',NO_COLOR:'1',CODEX_CI:'1',PAGER:'cat',GIT_PAGER:'cat',AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:'4456',AGENTWORKS_ROOTS:fixture,AGENTWORKS_DB_PATH:join(fixture,'sessions.sqlite3'),AGENTWORKS_CATALOG_PATH:join(fixture,'catalog.json'),AGENTWORKS_DEMO_STATE_DIR:join(fixture,'demo'),AGENTWORKS_SSH:resolve('scripts/fake-ssh.sh')},stdio:['ignore','pipe','pipe']});
   let log='';server.stderr.on('data',data=>log+=data);server.stdout.on('data',data=>log+=data);
   await waitFor(async()=>{if(server.exitCode!==null)throw Error(log);return serverReady(server,base);});
 }
@@ -28,7 +28,7 @@ test.beforeAll(async()=>{
   await writeFile(join(fixture,'query.py'),`import os,tty,termios,select\nold=termios.tcgetattr(0)\ntry:\n tty.setraw(0)\n os.write(1,b'\\x1b[6n')\n reply=os.read(0,100) if select.select([0],[],[],3)[0] else b'NONE'\nfinally:\n termios.tcsetattr(0,termios.TCSANOW,old)\nprint('query-reply:'+repr(reply))\n`);
   await startServer();
   local=await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Terminal local'});
-  host=await api('/api/hosts',{name:'Terminal host',destination:'terminal-box',command:resolve('target/debug/agentworks')});
+  host=await api('/api/hosts',{name:'Terminal host',destination:'terminal-box',command:resolve(process.env.AGENTWORKS_TEST_BINARY||'target/debug/agentworks')});
   await waitFor(async()=>((await api('/api/catalog')).hosts.find(h=>h.id===host.id)?.status==='connected'));
   const roots=await fetch(base+`/api/hosts/${host.id}/roots`,{method:'PUT',headers:{Origin:base,'Content-Type':'application/json'},body:JSON.stringify({roots:[fixture]})});expect(roots.ok).toBe(true);
   remote=await api('/api/sessions',{provider:'demo',hostId:host.id,cwd:fixture,title:'Terminal remote'});
@@ -172,7 +172,7 @@ for(const kind of ['local','remote'])test(`${kind}: host terminal is lazy, indep
 });
 
 test('host terminals need no sessions or roots and stop when their host is removed',async()=>{
-  const h=await api('/api/hosts',{name:'Standalone host',destination:'standalone-box',command:resolve('target/debug/agentworks')});
+  const h=await api('/api/hosts',{name:'Standalone host',destination:'standalone-box',command:resolve(process.env.AGENTWORKS_TEST_BINARY||'target/debug/agentworks')});
   await waitFor(async()=>((await api('/api/catalog')).hosts.find(host=>host.id===h.id)?.status==='connected'));
   await api(`/api/hosts/${h.id}/terminal`,{});
   await shellInput(h.id,`printf '%s' $$ > ${fixture}/standalone.pid; printf 'standalone-%s\\n' ready\n`,'standalone-ready','hosts');
