@@ -4,7 +4,8 @@
 //!
 //! Goose reaches models through provider profiles, so its family is the profile;
 //! it may mirror another harness's account, but it is never merged with one.
-use crate::App;
+use crate::{ApiResult, App, Session, fail, session};
+use axum::{Json, extract::Path, http::StatusCode};
 use axum::{
     extract::{
         State, WebSocketUpgrade,
@@ -15,7 +16,13 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use serde_json::{Map, Value, json};
 use std::{collections::HashMap, sync::Mutex};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 use tokio::sync::broadcast;
+
+type QuotaCache = Option<(Instant, Result<Value, String>)>;
 
 const CLAUDE_WINDOWS: [&str; 2] = ["five_hour", "seven_day"];
 const CODEX_FIELDS: [&str; 3] = ["usedPercent", "windowDurationMins", "resetsAt"];
@@ -32,6 +39,7 @@ pub fn family(provider: &str, model_provider: Option<&str>) -> String {
 pub struct Hub {
     latest: Mutex<HashMap<(String, String), Value>>,
     tx: broadcast::Sender<Value>,
+    antigravity_refresh: Mutex<HashMap<String, Arc<tokio::sync::Mutex<QuotaCache>>>>,
 }
 
 impl Default for Hub {
@@ -39,6 +47,7 @@ impl Default for Hub {
         Hub {
             latest: Default::default(),
             tx: broadcast::channel(64).0,
+            antigravity_refresh: Default::default(),
         }
     }
 }
@@ -78,6 +87,72 @@ impl Hub {
             entry.clone()
         };
         let _ = self.tx.send(json!({"kind":"quota","entry":entry}));
+    }
+
+    pub fn observe_antigravity(&self, host: &str, session: &str, report: &Value) {
+        let Some(at) = report["observedAtMs"].as_u64() else {
+            return;
+        };
+        if !report["windows"].is_array() {
+            return;
+        }
+        let entry = {
+            let mut latest = self.latest.lock().unwrap();
+            let entry = latest
+                .entry((host.into(), "antigravity".into()))
+                .or_insert_with(|| json!({"hostId":host,"family":"antigravity"}));
+            if entry["antigravity"]["observedAtMs"].as_u64() > Some(at)
+                || (entry["antigravity"]["observedAtMs"].as_u64() == Some(at)
+                    && entry["antigravity"]["sessionId"] == session)
+            {
+                return;
+            }
+            entry["antigravity"] = report.clone();
+            entry["antigravity"]["sessionId"] = json!(session);
+            entry.clone()
+        };
+        let _ = self.tx.send(json!({"kind":"quota","entry":entry}));
+    }
+
+    async fn refresh_antigravity(&self, host: &str) -> Result<Value, String> {
+        // Coalesce browser/turn requests and avoid repeated backend requests.
+        let gate = self
+            .antigravity_refresh
+            .lock()
+            .unwrap()
+            .entry(host.to_owned())
+            .or_default()
+            .clone();
+        let mut cache = gate.lock().await;
+        if let Some((at, result)) = cache.as_ref() {
+            if at.elapsed() < Duration::from_secs(30) {
+                return result.clone();
+            }
+        }
+        let result = if host == "local" {
+            let home = std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir);
+            agentworks_runtime::antigravity::quota(crate::login_env::changes(&home, false).await)
+                .await
+        } else {
+            match crate::hosts::registry().and_then(|hosts| hosts.live(host)) {
+                Some(live) => live.antigravity_quota().await,
+                None => Err("That host is not connected".into()),
+            }
+        }
+        .map(|mut report| {
+            report["observedAtMs"] = json!(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64
+            );
+            report
+        });
+        *cache = Some((Instant::now(), result.clone()));
+        result
     }
 
     fn snapshot(&self) -> Value {
@@ -166,6 +241,36 @@ fn merge_codex(entry: &mut Value, limits: &Value, session_id: &str, time: u64) -
     changed
 }
 
+pub fn refresh_session(s: &Arc<Session>) {
+    if s.provider != "antigravity" {
+        return;
+    }
+    let s = s.clone();
+    tokio::spawn(async move {
+        match s.account_quota.refresh_antigravity(&s.host_id).await {
+            Ok(report) => s.emit("antigravity_quota", report),
+            Err(error) => tracing::debug!(%error, "Antigravity quota refresh failed"),
+        }
+    });
+}
+
+pub async fn refresh(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
+    let s = session(&app, &id)?;
+    if s.provider != "antigravity" {
+        return Err(fail(
+            StatusCode::BAD_REQUEST,
+            "Quota refresh is available for Antigravity sessions",
+        ));
+    }
+    let report = app
+        .account_quota
+        .refresh_antigravity(&s.host_id)
+        .await
+        .map_err(|e| fail(StatusCode::BAD_GATEWAY, e))?;
+    s.emit("antigravity_quota", report.clone());
+    Ok(Json(report))
+}
+
 pub async fn events(State(app): State<App>, ws: WebSocketUpgrade) -> Response {
     let hub = app.account_quota.clone();
     ws.on_upgrade(move |socket| quota_socket(socket, hub))
@@ -216,6 +321,27 @@ mod tests {
     }
     fn entry(hub: &Hub, host: &str, family: &str) -> Value {
         hub.latest.lock().unwrap()[&(host.to_owned(), family.to_owned())].clone()
+    }
+
+    #[test]
+    fn antigravity_snapshot_retains_source_time_and_host_boundaries() {
+        let hub = Hub::default();
+        let report = |at, value| json!({"observedAtMs":at,"windows":[{"id":"5h","remainingFraction":value}]});
+        hub.observe_antigravity("local", "a", &report(200, 0.8));
+        hub.observe_antigravity("local", "b", &report(100, 0.9));
+        hub.observe_antigravity("remote", "c", &report(300, 0.3));
+        assert_eq!(
+            entry(&hub, "local", "antigravity")["antigravity"]["observedAtMs"],
+            200
+        );
+        assert_eq!(
+            entry(&hub, "local", "antigravity")["antigravity"]["windows"][0]["remainingFraction"],
+            0.8
+        );
+        assert_eq!(
+            entry(&hub, "remote", "antigravity")["antigravity"]["windows"][0]["remainingFraction"],
+            0.3
+        );
     }
 
     #[test]

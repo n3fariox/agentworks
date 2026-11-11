@@ -97,7 +97,7 @@ pub struct Input {
 pub fn supported(provider: &str) -> bool {
     matches!(
         provider,
-        "claude" | "claude-rust" | "codex" | "codex-rust" | "goose" | "demo"
+        "claude" | "claude-rust" | "codex" | "codex-rust" | "goose" | "demo" | "antigravity"
     )
 }
 

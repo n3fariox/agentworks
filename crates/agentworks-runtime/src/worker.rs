@@ -73,6 +73,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         "deferredWorktree": true,
         // Model-provider profiles only run on the embedded Goose harness.
         "modelProviders": cfg!(feature = "goose"),
+        "antigravityQuota": true,
         "sharedModelProviders": cfg!(feature = "goose"),
         "worktreeCleanup": true,
         "directories": true,
@@ -300,6 +301,19 @@ pub async fn run(args: &[String]) -> Result<(), String> {
                                 ok = result.is_ok(),
                                 "Workspace request finished"
                             );
+                            let mut reply = json!({"type":"reply","request":request["request"]});
+                            match result {
+                                Ok(value) => reply["result"] = value,
+                                Err(error) => reply["error"] = json!(error),
+                            }
+                            let _ = out.send(Message::text(reply.to_string())).await;
+                        });
+                    }
+                    Some("antigravityQuota") => {
+                        let out = out.clone();
+                        workspace_tasks.spawn(async move {
+                            let env = mise_env(&home()).await.into_iter().collect();
+                            let result = crate::antigravity::quota(env).await;
                             let mut reply = json!({"type":"reply","request":request["request"]});
                             match result {
                                 Ok(value) => reply["result"] = value,

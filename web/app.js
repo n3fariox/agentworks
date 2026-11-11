@@ -1048,7 +1048,8 @@ function updateControls(){
   $('resume-session').disabled=!connected||!!active?.providerHistoryDeletion;
   $('show-commands').disabled=!connected||status!=='idle';
   const usage=usageCommand();
-  $('show-usage').hidden=!['claude','claude-rust','codex','codex-rust'].includes(active?.provider)||!usage;
+  $('show-usage').hidden=active?.provider!=='antigravity'&&(!['claude','claude-rust','codex','codex-rust'].includes(active?.provider)||!usage);
+  $('show-usage').textContent=active?.provider==='antigravity'?'Refresh quota':'Usage ↗';
   $('show-usage').disabled=!connected||status!=='idle';
   $('delete-provider-history').hidden=!active?.providerCapabilities?.delete;
   renderSessionConfig();
@@ -1344,7 +1345,7 @@ $('show-commands').onclick=()=>{commandsOpen=!commandsOpen;renderCommands();};
 $('show-usage').onclick=async()=>{
   if(!active||status!=='idle')return;
   $('show-usage').disabled=true;
-  try{await api(`/api/sessions/${active.id}/prompt`,{method:'POST',body:JSON.stringify({text:active.provider.startsWith('claude')?'/usage':'/status',requestId:uuid()})});}
+  try{if(active.provider==='antigravity'){await api(`/api/sessions/${active.id}/quota/refresh`,{method:'POST',body:'{}'});}else{await api(`/api/sessions/${active.id}/prompt`,{method:'POST',body:JSON.stringify({text:active.provider.startsWith('claude')?'/usage':'/status',requestId:uuid()})});}}
   catch(e){toast(e.message);}finally{updateControls();}
 };
 $('permission-mode-picker').onchange=async event=>{
@@ -1639,7 +1640,7 @@ setupPalettes({
   $,labels,selectSession,
   fallbackFocus:()=>active?$('prompt'):null,
   state:()=>({active,status,connected,sessions,projects,hosts,commands:availableCommands,
-    usageAvailable:!!active&&['claude','claude-rust','codex','codex-rust'].includes(active.provider)&&!!usageCommand(),
+    usageAvailable:!!active&&(active.provider==='antigravity'||['claude','claude-rust','codex','codex-rust'].includes(active.provider)&&!!usageCommand()),
     views:{files:()=>$('nav-files').click(),automations:()=>$('nav-automations').click()}}),
   handlers:{
     newSession:()=>openCreate(),

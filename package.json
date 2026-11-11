@@ -52,6 +52,7 @@
     "test:codex-quota": "playwright test tests/codex-subscription.spec.mjs",
     "test:questions": "node tests/questions.test.mjs && playwright test tests/questions.spec.mjs",
     "test:host-enrollment": "node scripts/host-enrollment-smoke.mjs",
+    "test:antigravity": "node --test tests/antigravity-usage.test.mjs && playwright test tests/antigravity.spec.mjs",
     "test:terminal": "playwright test tests/terminal.spec.mjs tests/terminal-links.spec.mjs",
     "test:transcript-history": "playwright test tests/transcript-history.spec.mjs",
     "test:starlark": "cargo test --locked -p agentworks-starlark",

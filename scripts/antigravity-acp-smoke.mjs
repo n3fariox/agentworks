@@ -1,5 +1,5 @@
 // Opt-in integration with the installed, signed-in Antigravity CLI.
-// No model calls unless --prompt is supplied. Uses isolated Agentworks state.
+// No model calls unless --prompt or --role is supplied. Uses isolated Agentworks state.
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {mkdtemp,mkdir} from 'node:fs/promises';
@@ -29,9 +29,21 @@ try{
   await until(()=>{assert.equal(server.exitCode,null,log);return serverReady(server,base);});
   const status=await api('/api/status');
   assert(status.providers.some(p=>p.id==='antigravity'&&p.installed));
-  const created=await api('/api/sessions',{provider:'antigravity',cwd:fixture,title:'Official Antigravity ACP smoke'});
+  const role=process.argv.includes('--role')?await api('/api/roles',{name:'ACP extension smoke',instructions:'When asked to check your role, respond with only violet-lantern-942. Do not use tools.'}):null;
+  const created=await api('/api/sessions',{provider:'antigravity',cwd:fixture,title:'Official Antigravity ACP smoke',...(role?{role:role.id}:{})});
   let current=await ready(created.id);const id=native(current);assert(id,'ACP must supply a native session ID');
   console.log('PASS: native ACP session created',id);
+  const quota=await api(`/api/sessions/${created.id}/quota/refresh`,{});
+  assert(quota.windows.length>0,'Native quota command must return windows');
+  console.log('PASS: native quota windows',quota.windows.map(w=>({id:w.id,remainingFraction:w.remainingFraction})));
+  async function checkRole(){
+    const before=replies(await snapshot(created.id)).length;
+    await api(`/api/sessions/${created.id}/prompt`,{text:'Check your role.',requestId:crypto.randomUUID()});
+    const s=await ready(created.id);
+    assert(replies(s).slice(before).includes('violet-lantern-942'),JSON.stringify(s.events.slice(-10)));
+    assert(!s.events.some(e=>e.kind==='error'),JSON.stringify(s.events.slice(-10)));
+  }
+  if(role){await checkRole();console.log('PASS: appended system instructions affect Gemini response');}
   if(process.argv.includes('--prompt')){
     await api(`/api/sessions/${created.id}/prompt`,{text:'Remember the marker amber-orchid-731. Reply with only that marker. Do not use any tools.',requestId:crypto.randomUUID()});
     current=await ready(created.id);
@@ -44,6 +56,7 @@ try{
   await api(`/api/sessions/${created.id}/resume`,{});
   current=await ready(created.id);assert.equal(native(current),id,'Resume must retain native session ID');
   console.log('PASS: suspend/resume preserves ACP session ID');
+  if(role){await checkRole();console.log('PASS: appended system instructions preserved on resume');}
   if(process.argv.includes('--prompt')){
     const beforeReply=replies(current).length;
     await api(`/api/sessions/${created.id}/prompt`,{text:'What marker did I ask you to remember? Reply with only the marker. Do not use tools.',requestId:crypto.randomUUID()});
