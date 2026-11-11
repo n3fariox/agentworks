@@ -1832,7 +1832,7 @@ async fn status(State(app): State<App>) -> Json<Value> {
         {"id":"claude-rust","name":"Claude","installed":installed("claude-rust"),"keyPresent":key_present("claude-rust"),"authMode":auth},
         {"id":"codex-rust","name":"Codex","installed":installed("codex-rust"),"keyPresent":key_present("codex-rust"),"authMode":auth},
         {"id":"goose","name":"Goose · embedded","installed":true,"keyPresent":true,"authMode":"configured"},
-        {"id":"antigravity","name":"Antigravity · official ACP","installed":installed("antigravity"),"keyPresent":true,"authMode":"existing"},
+        {"id":"antigravity","name":"Antigravity","installed":installed("antigravity"),"keyPresent":true,"authMode":"existing"},
         {"id":"opencode","name":"OpenCode · free models","installed":installed("opencode"),"keyPresent":true}
     ]});
     status["features"] = json!({"modelViewer": cfg!(feature = "model-viewer")});
