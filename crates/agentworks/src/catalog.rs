@@ -10,6 +10,10 @@ use uuid::Uuid;
 pub struct Project {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub slug: String,
+    #[serde(default, rename = "tasksEnabled")]
+    pub tasks_enabled: bool,
     #[serde(default, rename = "workspacePolicy")]
     pub workspace_policy: crate::worktrees::Policy,
     #[serde(
@@ -86,6 +90,8 @@ pub struct CatalogData {
     pub hosts: Vec<Host>,
     #[serde(default)]
     pub settings: Settings,
+    #[serde(default)]
+    pub tasks: HashMap<String, crate::tasks::ProjectTasks>,
 }
 pub struct Catalog {
     path: PathBuf,
@@ -106,9 +112,11 @@ impl Catalog {
                 models.entry(native.into()).or_insert(model);
             }
         }
+        migrate_slugs(&mut data)?;
+        crate::tasks::validate_catalog(&data)?;
         Ok(Self { path, data })
     }
-    fn save(&mut self, data: CatalogData) -> io::Result<()> {
+    pub(crate) fn save(&mut self, data: CatalogData) -> io::Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -147,12 +155,45 @@ impl Catalog {
             .or(self.data.settings.default_communication_role)
             .unwrap_or_default()
     }
+    #[cfg(test)]
     pub fn project(
         &mut self,
         id: Option<&str>,
         name: &str,
         role: Option<Option<crate::communication::Role>>,
     ) -> Result<Project, String> {
+        self.project_with_slug(id, name, role, None)
+    }
+    #[cfg(test)]
+    pub fn project_with_slug(
+        &mut self,
+        id: Option<&str>,
+        name: &str,
+        role: Option<Option<crate::communication::Role>>,
+        slug: Option<&str>,
+    ) -> Result<Project, String> {
+        self.project_with_options(id, name, role, slug, None)
+    }
+    /// Save project identity and the optional ticket opt-in in one atomic write.
+    pub fn project_with_options(
+        &mut self,
+        id: Option<&str>,
+        name: &str,
+        role: Option<Option<crate::communication::Role>>,
+        slug: Option<&str>,
+        tasks_enabled: Option<bool>,
+    ) -> Result<Project, String> {
+        if let Some(slug) = slug {
+            if !valid_slug(slug)
+                || self
+                    .data
+                    .projects
+                    .iter()
+                    .any(|p| Some(p.id.as_str()) != id && p.slug == slug)
+            {
+                return Err("Use a unique uppercase project slug (2-20 letters/digits, starting with a letter)".into());
+            }
+        }
         let name = name.trim();
         if name.is_empty() || name.chars().count() > 80 {
             return Err("Use a project name between 1 and 80 characters".into());
@@ -184,15 +225,34 @@ impl Catalog {
             let project = Project {
                 id: Uuid::new_v4().to_string(),
                 name: name.into(),
+                slug: unique_slug(&data, name),
                 location_ids: Vec::new(),
                 default_location_id: None,
                 workspace_policy: Default::default(),
                 archived: false,
+                tasks_enabled: false,
                 default_communication_role: role.flatten(),
             };
             data.projects.push(project.clone());
             project
         };
+        let mut project = project;
+        if let Some(slug) = slug {
+            project.slug = slug.into();
+            data.projects
+                .iter_mut()
+                .find(|p| p.id == project.id)
+                .unwrap()
+                .slug = slug.into();
+        }
+        if let Some(enabled) = tasks_enabled {
+            project.tasks_enabled = enabled;
+            data.projects
+                .iter_mut()
+                .find(|p| p.id == project.id)
+                .unwrap()
+                .tasks_enabled = enabled;
+        }
         self.save(data)
             .map_err(|_| "Could not save project metadata")?;
         Ok(project)
@@ -230,6 +290,7 @@ impl Catalog {
         }
         let mut data = self.data.clone();
         data.projects.retain(|p| p.id != id);
+        data.tasks.remove(id);
         self.save(data)
             .map_err(|_| "Could not save project metadata".into())
     }
@@ -741,6 +802,154 @@ mod tests {
         assert!(catalog.data.locations.iter().all(|l| l.host_id != host.id));
         assert!(catalog.data.projects[0].location_ids.is_empty());
         assert_eq!(catalog.data.hosts.len(), 1);
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+fn valid_slug(s: &str) -> bool {
+    (2..=20).contains(&s.len())
+        && s.as_bytes()[0].is_ascii_uppercase()
+        && s.bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+fn unique_slug(data: &CatalogData, name: &str) -> String {
+    let mut base: String = name
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_uppercase())
+        .take(12)
+        .collect();
+    if base.is_empty() || !base.as_bytes()[0].is_ascii_uppercase() {
+        base.insert_str(0, "P");
+    }
+    if base.len() < 2 {
+        base.push('X');
+    }
+    let mut slug = base.clone();
+    let mut n = 2u64;
+    while data.projects.iter().any(|p| p.slug == slug) {
+        slug = format!("{base}{n}");
+        n += 1;
+    }
+    slug
+}
+fn migrate_slugs(data: &mut CatalogData) -> io::Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for p in &data.projects {
+        if !seen.insert(p.id.clone()) || (!p.slug.is_empty() && !valid_slug(&p.slug)) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid project metadata",
+            ));
+        }
+    }
+    let mut slugs = std::collections::HashSet::new();
+    for p in &data.projects {
+        if !p.slug.is_empty() && !slugs.insert(p.slug.clone()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Duplicate project slug",
+            ));
+        }
+    }
+    let mut missing: Vec<_> = data
+        .projects
+        .iter()
+        .filter(|p| p.slug.is_empty())
+        .map(|p| p.id.clone())
+        .collect();
+    missing.sort();
+    for id in missing {
+        let index = data.projects.iter().position(|p| p.id == id).unwrap();
+        data.projects[index].slug = unique_slug(data, &data.projects[index].name);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod ticket_slug_tests {
+    use super::*;
+    #[test]
+    fn tickets_opt_in_defaults_migrates_and_saves_atomically() {
+        let path = std::env::temp_dir().join(format!("opt-in-{}.json", Uuid::new_v4()));
+        let mut c = Catalog::open(path.clone()).unwrap();
+        let p = c.project(None, "Default", None).unwrap();
+        assert!(!p.tasks_enabled);
+        let mut legacy = serde_json::to_value(&c.data).unwrap();
+        legacy["projects"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("tasksEnabled");
+        std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        c = Catalog::open(path.clone()).unwrap();
+        assert!(!c.data.projects[0].tasks_enabled);
+        let enabled = c
+            .project_with_options(Some(&p.id), "Enabled", None, Some("ON"), Some(true))
+            .unwrap();
+        assert!(enabled.tasks_enabled);
+        c = Catalog::open(path.clone()).unwrap();
+        assert!(c.data.projects[0].tasks_enabled);
+        assert!(
+            c.project(Some(&p.id), "Renamed", None)
+                .unwrap()
+                .tasks_enabled
+        );
+        let before = serde_json::to_value(&c.data).unwrap();
+        assert!(
+            c.project_with_options(Some(&p.id), "Invalid", None, Some("bad"), Some(false))
+                .is_err()
+        );
+        assert_eq!(serde_json::to_value(&c.data).unwrap(), before);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(
+            c.project_with_options(Some(&p.id), "Unsaved", None, Some("OFF"), Some(false))
+                .is_err()
+        );
+        assert_eq!(serde_json::to_value(&c.data).unwrap(), before);
+        std::fs::remove_dir(&path).unwrap();
+        let _ = std::fs::remove_file(path.with_extension("json.tmp"));
+    }
+    #[test]
+    fn legacy_slugs_are_deterministic_unique_and_stable() {
+        let path = std::env::temp_dir().join(format!("slugs-{}.json", Uuid::new_v4()));
+        let mut c = Catalog::open(path.clone()).unwrap();
+        let a = c.project(None, "hello world", None).unwrap();
+        let b = c.project(None, "hello-world", None).unwrap();
+        assert_ne!(a.slug, b.slug);
+        assert_eq!(
+            c.project(Some(&a.id), "renamed", None).unwrap().slug,
+            a.slug
+        );
+        assert!(
+            c.project_with_slug(Some(&a.id), "renamed", None, Some(&b.slug))
+                .is_err()
+        );
+        assert!(
+            c.project_with_slug(Some(&a.id), "renamed", None, Some("bad-slug"))
+                .is_err()
+        );
+        let mut v = serde_json::to_value(&c.data).unwrap();
+        for p in v["projects"].as_array_mut().unwrap() {
+            p.as_object_mut().unwrap().remove("slug");
+        }
+        std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+        let first = Catalog::open(path.clone()).unwrap();
+        v["projects"].as_array_mut().unwrap().reverse();
+        std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+        let second = Catalog::open(path.clone()).unwrap();
+        for p in &first.data.projects {
+            assert_eq!(
+                p.slug,
+                second
+                    .data
+                    .projects
+                    .iter()
+                    .find(|q| q.id == p.id)
+                    .unwrap()
+                    .slug
+            );
+        }
         std::fs::remove_file(path).unwrap();
     }
 }

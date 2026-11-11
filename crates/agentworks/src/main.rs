@@ -43,6 +43,7 @@ mod session_badges;
 mod session_config;
 mod session_runtime;
 mod store;
+mod tasks;
 mod terminal;
 mod tls;
 mod tool_bodies;
@@ -1152,6 +1153,24 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route(
+            "/tasks.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript")],
+                    include_str!("../../../web/tasks.js"),
+                )
+            }),
+        )
+        .route(
+            "/task-mentions.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript")],
+                    include_str!("../../../web/task-mentions.js"),
+                )
+            }),
+        )
+        .route(
             "/mentions.js",
             get(|| async {
                 (
@@ -1463,6 +1482,14 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/projects/{id}",
             axum::routing::patch(rename_project).delete(delete_project),
+        )
+        .route(
+            "/api/projects/{id}/tasks",
+            get(tasks::list).post(tasks::create),
+        )
+        .route(
+            "/api/projects/{id}/tasks/{taskId}",
+            get(tasks::get).put(tasks::update).delete(tasks::delete),
         )
         .route("/api/projects/{id}/archive", post(archive_project))
         .route(
@@ -2298,8 +2325,12 @@ async fn get_catalog(State(app): State<App>) -> Json<Value> {
     }))
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProjectName {
     name: String,
+    slug: Option<String>,
+    #[serde(default, rename = "tasksEnabled")]
+    tasks_enabled: Option<bool>,
     #[serde(
         default,
         rename = "defaultCommunicationRole",
@@ -2363,7 +2394,13 @@ fn save_project(
 ) -> ApiResult {
     let mut catalog = app.catalog.lock().unwrap();
     let mut project = catalog
-        .project(id, &req.name, req.default_communication_role)
+        .project_with_options(
+            id,
+            &req.name,
+            req.default_communication_role,
+            req.slug.as_deref(),
+            req.tasks_enabled,
+        )
         .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
     if let Some(location) = location {
         let location = match location {
@@ -2383,6 +2420,7 @@ fn save_project(
 }
 async fn create_project(State(app): State<App>, Json(req): Json<ProjectName>) -> ApiResult {
     let location = project_location(&app, &req.default_location).await?;
+    let _gate = app.communication_lock.lock().await;
     save_project(&app, None, req, location)
 }
 async fn rename_project(
@@ -2391,6 +2429,7 @@ async fn rename_project(
     Json(req): Json<ProjectName>,
 ) -> ApiResult {
     let location = project_location(&app, &req.default_location).await?;
+    let _gate = app.communication_lock.lock().await;
     save_project(&app, Some(&id), req, location)
 }
 /// What happens to a project's sessions when the project is archived or deleted.
@@ -4226,6 +4265,25 @@ fn autolink<'a>(text: &pulldown_cmark::CowStr<'a>) -> Vec<pulldown_cmark::Event<
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn project_request_ticket_opt_in_is_optional_and_camel_case() {
+        for (value, expected) in [
+            (json!({"name":"Rename"}), None),
+            (json!({"name":"Enabled","tasksEnabled":true}), Some(true)),
+            (json!({"name":"Disabled","tasksEnabled":false}), Some(false)),
+        ] {
+            let request: ProjectName = serde_json::from_value(value).unwrap();
+            assert_eq!(request.tasks_enabled, expected);
+        }
+        assert!(
+            serde_json::from_value::<ProjectName>(json!({"name":"Bad","tasks_enabled":true}))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ProjectName>(json!({"name":"Bad","tasksEnabled":"true"}))
+                .is_err()
+        );
+    }
     #[test]
     fn markdown_links_bare_urls_outside_code() {
         let html = render_markdown(

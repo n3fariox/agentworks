@@ -51,7 +51,7 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
 }
 /// Session-only tools (self-authored completion reports, service restart) are never listed
 /// for external controllers, regardless of stored grants.
-fn tools(a: &mail::Access, session: bool) -> Value {
+fn tools(a: &mail::Access, session: bool, tasks_enabled: bool) -> Value {
     let mut tools = Vec::new();
     if a.enabled() {
         tools.push(tool("list_sessions","List participating peers and their status in this project. Each has an id and an agentworks://sessions/<id> uri; tools accept either. Coordinators and archive controllers also see project sessions without messaging access.",json!({}),&[]));
@@ -67,6 +67,26 @@ fn tools(a: &mail::Access, session: bool) -> Value {
     }
     if a.communicate || mail::coordinator(a) {
         tools.push(tool("get_completion", "Read the latest agent claim for yourself or a permitted same-project session. Claims are not proof of review or success.", json!({"sessionId":{"type":"string","description":"Session ID or agentworks://sessions/<id> URI, passed exactly as given in list_sessions or a prompt."}}), &[]));
+    }
+    let task_id = json!({"oneOf":[{"type":"integer","minimum":1},{"type":"string","pattern":"^agentworks://projects/[^/]+/tasks/[1-9][0-9]*$"}]});
+    if tasks_enabled && (a.communicate || mail::coordinator(a)) {
+        tools.push(tool(
+            "list_tasks",
+            "List open tickets in your current project, with display keys and stable URIs. Set includeDone to also read completed tickets.",
+            json!({"includeDone":{"type":"boolean","default":false}}),
+            &[],
+        ));
+        tools.push(tool(
+            "get_task",
+            "Read a project ticket. Copy its numeric id or canonical URI, not its display key.",
+            json!({"taskId":task_id}),
+            &["taskId"],
+        ));
+    }
+    if tasks_enabled && session && mail::coordinator(a) {
+        tools.push(tool("create_task", "Create a project ticket with a Markdown body. Coordinator communication access required. Reuse requestId only for identical input.", json!({"title":{"type":"string","maxLength":160},"body":{"type":"string","maxLength":16384},"status":{"type":"string","enum":["open","done"]},"requestId":{"type":"string","maxLength":100}}), &["title","requestId"]));
+        tools.push(tool("update_task", "Edit a ticket using its current revision. Markdown body. Refresh after a revision conflict; reuse requestId only for identical input.", json!({"taskId":task_id,"revision":{"type":"integer","minimum":1},"title":{"type":"string","maxLength":160},"body":{"type":"string","maxLength":16384},"status":{"type":"string","enum":["open","done"]},"requestId":{"type":"string","maxLength":100}}), &["taskId","revision","requestId"]));
+        tools.push(tool("delete_task", "Permanently delete a project ticket using its current revision. Reuse requestId only for identical input.", json!({"taskId":task_id,"revision":{"type":"integer","minimum":1},"requestId":{"type":"string","maxLength":100}}), &["taskId","revision","requestId"]));
     }
     if a.restart_service && session {
         tools.push(tool("get_service_status", "Read global service activity and durable restart/handoff outcomes. Requires live restartService grant.",json!({}), &[]));
@@ -170,7 +190,21 @@ struct ArchiveSession {
 async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::Result<Value> {
     let grants = mail::actor_access(app, a)?;
     match operation {
-        "tools/list" => Ok(tools(&grants, a.session.is_some())),
+        "tools/list" => {
+            let tasks_enabled = a.project.as_deref().is_some_and(|id| {
+                app.catalog
+                    .lock()
+                    .unwrap()
+                    .data
+                    .projects
+                    .iter()
+                    .any(|p| p.id == id && p.tasks_enabled)
+            });
+            Ok(tools(&grants, a.session.is_some(), tasks_enabled))
+        }
+        "list_tasks" | "get_task" | "create_task" | "update_task" | "delete_task" => {
+            crate::tasks::agent(app, a, args, operation)
+        }
         "get_service_status" => {
             mail::require(app, session_only(a)?, "restart_service")?;
             crate::service_restart::status(State(app.clone()))
@@ -474,7 +508,7 @@ pub async fn serve_bridge(app: App, listener: TcpListener) {
                 };
                 let response=if let Some(s)=actor {
                     let operation=v["operation"].as_str().unwrap_or("");
-                    let mutation=!matches!(operation,"tools/list"|"read_inbox"|"list_sessions"|"list_automations"|"get_automation"|"list_automation_runs"|"get_completion"|"get_service_status");
+                    let mutation=!matches!(operation,"tools/list"|"read_inbox"|"list_sessions"|"list_automations"|"get_automation"|"list_automation_runs"|"get_completion"|"get_service_status"|"list_tasks"|"get_task");
                     let action=operation.chars().take(80).collect::<String>();
                     let argument_target=v["arguments"]["sessionId"].as_str().or(v["arguments"]["recipient"].as_str()).or(v["arguments"]["automationId"].as_str()).unwrap_or("").chars().take(128).collect::<String>();
                     let request=v["arguments"]["requestId"].as_str().unwrap_or("").chars().take(100).collect::<String>();
@@ -499,13 +533,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ticket_tools_require_project_opt_in_and_keep_existing_grants() {
+        let tickets = [
+            "list_tasks",
+            "get_task",
+            "create_task",
+            "update_task",
+            "delete_task",
+        ];
+        for role in [
+            mail::Role::Off,
+            mail::Role::Participant,
+            mail::Role::Coordinator,
+        ] {
+            for session in [true, false] {
+                let access = role.access();
+                let enabled = tools(&access, session, true);
+                let disabled = tools(&access, session, false);
+                let expected: Vec<_> = enabled["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|t| !tickets.contains(&t["name"].as_str().unwrap()))
+                    .cloned()
+                    .collect();
+                assert_eq!(disabled["tools"], json!(expected));
+                let listed = |name| {
+                    enabled["tools"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|t| t["name"] == name)
+                };
+                assert_eq!(
+                    listed("list_tasks"),
+                    access.communicate || mail::coordinator(&access)
+                );
+                assert_eq!(listed("create_task"), session && mail::coordinator(&access));
+            }
+        }
+    }
+    #[test]
     fn coordinators_and_explicit_controllers_can_archive_sessions() {
         for role in [mail::Role::Off, mail::Role::Participant] {
             let access = role.access();
             assert!(!access.archive_sessions);
             for session in [true, false] {
                 assert!(
-                    !tools(&access, session)["tools"]
+                    !tools(&access, session, true)["tools"]
                         .as_array()
                         .unwrap()
                         .iter()
@@ -517,7 +592,7 @@ mod tests {
         assert!(coordinator.archive_sessions);
         for session in [true, false] {
             assert!(
-                tools(&coordinator, session)["tools"]
+                tools(&coordinator, session, true)["tools"]
                     .as_array()
                     .unwrap()
                     .iter()
@@ -533,7 +608,7 @@ mod tests {
         assert!(access.enabled());
         assert!(!mail::coordinator(&access)); // No completion/review authority implied.
         let names = |session| {
-            tools(&access, session)["tools"]
+            tools(&access, session, true)["tools"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -560,7 +635,7 @@ mod tests {
         };
         assert!(access.enabled());
         assert!(!mail::coordinator(&access)); // No session-management authority implied.
-        let names = tools(&access, true)["tools"]
+        let names = tools(&access, true, true)["tools"]
             .as_array()
             .unwrap()
             .iter()

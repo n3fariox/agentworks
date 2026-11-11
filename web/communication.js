@@ -1,6 +1,6 @@
 export function setupCommunication({api,getActive,getSessions,selectSession,toast}) {
   const $=id=>document.getElementById(id);
-  const capabilities=[['communicate','Exchange messages with project peers'],['startSessions','Create sessions in this project'],['promptSessions','Start turns in project sessions'],['cancelSessions','Cancel turns in project sessions'],['runAutomations','Run existing project automations'],['manageAutomations','Create, edit, pause and delete project automations (explicit opt-in)'],['restartService','GLOBAL: restart the service and affect ALL projects (explicit opt-in)']];
+  const capabilities=[['communicate','Exchange messages and read project tickets'],['startSessions','Create sessions in this project'],['promptSessions','Start turns in project sessions'],['cancelSessions','Cancel turns in project sessions'],['runAutomations','Run existing project automations'],['manageAutomations','Create, edit, pause and delete project automations (explicit opt-in)'],['restartService','GLOBAL: restart the service and affect ALL projects (explicit opt-in)']];
   const reportPanel=nodePanel();
   function nodePanel(){const panel=document.createElement('article');panel.id='agent-completion';panel.className='agent-message';panel.hidden=true;$('agent-inbox').before(panel);return panel;}
   let id=null,after=0,messages=[],timer=null,loading=false,openGeneration=0;
