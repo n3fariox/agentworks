@@ -367,7 +367,7 @@ export function createWorkspace(hooks){
   }
   // Below this width the side panel replaces the chat rather than sitting beside it.
   const narrow=()=>matchMedia('(max-width:800px)').matches;
-  function openAutomation(id){state.automationId=id;showView('automations');}
+  function openAutomation(id,projectId){if(projectId!==undefined){state.projectId=projectId||null;contextControls();}state.automationId=id;showView('automations');}
   // On phones the Sessions tab is the full-screen session browser.
   $('nav-sessions').onclick=()=>{showView('sessions');if(matchMedia('(max-width:650px)').matches)document.body.classList.add('menu-open');};$('nav-files').onclick=()=>showView('files');$('nav-automations').onclick=()=>showView('automations');$('nav-github').onclick=()=>showView('github');$('nav-settings').onclick=()=>hooks.openSettings();
   $('workspace-project').onchange=()=>{contextGeneration++;state.projectId=$('workspace-project').value||null;state.locationKey='';contextControls();resetFiles();save();
@@ -405,7 +405,7 @@ export function createWorkspace(hooks){
   $('delete-automation').onclick=async()=>{if(!editing||!confirm('Delete this automation and its script? Existing sessions and run history will remain.'))return;try{await api('/api/automations/'+editing,{method:'DELETE'});$('automation-dialog').close();loadAutomations();}catch(error){$('automation-error').textContent=error.message;}};
   return {
     sync(next,list){catalog=next;sessions=list;contextControls();if(state.view==='automations')loadAutomations();},
-    sessionSelected,showView,sideFiles,githubContext:githubBrowser.context,
+    sessionSelected,showView,sideFiles,openAutomation,githubContext:githubBrowser.context,
     // Chat file links open in the side panel's Files tab.
     openSideFile(session,path,line=null){openFile({id:session.locationId,path:session.cwd,sessionId:session.id},path,true,line);hooks.openPanel('files');},
     context(){return {projectId:state.projectId,cwd:directory()};},

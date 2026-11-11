@@ -1,3 +1,4 @@
+import {setupNotificationTray} from './notification-tray.js';
 import {renderHostUsage, startHostUsage} from './host-usage.js';
 import {appUrl, socketUrl} from './hosting.js';
 import {STALE_MS, countdown, watchSharedQuota} from './usage-status.js';
@@ -210,3 +211,5 @@ if (typeof document !== 'undefined') {
   document.querySelector('#refresh').addEventListener('click', () => refresh());
   refresh();
 }
+
+if(typeof document!=='undefined')setupNotificationTray();

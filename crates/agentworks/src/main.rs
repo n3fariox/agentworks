@@ -294,7 +294,9 @@ impl Session {
                 .observe(&self.host_id, &family, &self.id, time, &event["data"]);
         }
         // U-02: fan out noteworthy events to connected browsers.
-        if let Some(category) = notifications::classify(kind, &event["data"]) {
+        if notifications::classify(kind, &event["data"]).is_some()
+            || matches!(kind, "approval_resolved" | "completion_reported")
+        {
             let (title, project_id) = (
                 state
                     .lifecycle
@@ -303,7 +305,7 @@ impl Session {
                     .unwrap_or_else(|| self.title.clone()),
                 state.project_id.clone(),
             );
-            self.notifications.publish(
+            self.notifications.observe(
                 &notifications::Context {
                     session_id: &self.id,
                     title: &title,
@@ -311,7 +313,8 @@ impl Session {
                     project_id: project_id.as_deref(),
                 },
                 state.seq,
-                category,
+                time,
+                kind,
                 &event["data"],
             );
         }
@@ -1045,6 +1048,15 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route(
+            "/notification-tray.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/notification-tray.js"),
+                )
+            }),
+        )
+        .route(
             "/notifications.js",
             get(|| async {
                 (
@@ -1403,6 +1415,15 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             get(get_notifications).put(save_notifications),
         )
         .route("/api/notifications/events", get(notification_events))
+        .route("/api/notifications/inbox", get(notification_inbox))
+        .route(
+            "/api/notifications/inbox/dismiss",
+            post(dismiss_notifications),
+        )
+        .route(
+            "/api/notifications/inbox/events",
+            get(notification_inbox_events),
+        )
         .route(
             "/api/sessions/{id}/timeouts",
             axum::routing::put(save_session_timeouts),
@@ -1920,6 +1941,38 @@ async fn get_notifications(State(app): State<App>) -> Json<Value> {
         "categories":notifications::Event::ALL.iter().map(|e|json!({"id":e,"label":e.label()})).collect::<Vec<_>>(),
         "projects":catalog.data.projects.iter().map(|p|json!({"id":p.id,"name":p.name})).collect::<Vec<_>>(),
     }))
+}
+async fn notification_inbox(State(app): State<App>) -> Json<Value> {
+    Json(json!({"alerts":app.notifications.list()}))
+}
+#[derive(Deserialize)]
+struct DismissNotifications {
+    ids: Vec<String>,
+    dismissed: bool,
+}
+async fn dismiss_notifications(
+    State(app): State<App>,
+    Json(request): Json<DismissNotifications>,
+) -> ApiResult {
+    if request.ids.len() > 10000 || request.ids.iter().any(|id| id.len() > 128) {
+        return Err(fail(
+            StatusCode::BAD_REQUEST,
+            "Too many notification identifiers",
+        ));
+    }
+    app.notifications
+        .dismiss(&request.ids, request.dismissed)
+        .map_err(|_| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not save notification dismissal",
+            )
+        })?;
+    Ok(Json(json!({"alerts":app.notifications.list()})))
+}
+async fn notification_inbox_events(State(app): State<App>, ws: WebSocketUpgrade) -> Response {
+    let receiver = app.notifications.subscribe_inbox();
+    ws.on_upgrade(move |socket| notification_socket(socket, receiver))
 }
 async fn save_notifications(
     State(app): State<App>,
@@ -3948,8 +4001,9 @@ async fn notification_socket(socket: WebSocket, mut rx: broadcast::Receiver<Valu
     loop {
         tokio::select! {
             next=rx.recv()=>{
-                // A lagging tab loses notices rather than blocking the session that
-                // produced them; it re-reads the sidebar on its next poll.
+                // Disconnect lagging consumers rather than blocking producers.
+                // Inbox clients reload durable state when they reconnect; optional
+                // browser popups deliberately have no historical backlog.
                 let Ok(event)=next else {break};
                 if sink.send(Message::Text(event.to_string().into())).await.is_err(){break;}
             }

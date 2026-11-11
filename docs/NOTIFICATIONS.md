@@ -1,4 +1,35 @@
-# U-02 browser notifications
+# Notifications
+
+## Persistent workspace tray
+
+The Notifications bell is available in the workspace navigation on every app page,
+including the dashboard. Full-screen mobile sessions also have a compact bell in
+the session header, shared by Chat and Terminal. Its count is the number of undismissed alerts across all
+projects. Approvals, questions, failures, blocked task reports and missed/skipped
+scheduled runs appear under Needs attention; turn endings, explicit task completion
+reports and resolved requests appear under Recent activity. A turn ending does not
+imply the task is complete.
+
+Alerts are saved in the catalog as events occur, even with no connected browser.
+They survive navigation, reloads and server restarts. Opening an alert takes you to
+its session and relevant history or pending request, or to its automation panel.
+Opening never dismisses it. Use the individual × or Dismiss all; Undo restores the
+last dismissal. Resolution updates a request in place without dismissing it.
+Dismissals sync between tabs and browsers connected to the same server. All viewers
+of this workspace share the inbox and its dismissal state. Undismissed alerts do
+not expire; at most 1000 older dismissed records are retained for Undo.
+
+The tray works independently of OS notification permission and the browser popup
+settings below. It catches up on connection and reconnect, when reopened or made
+visible, and periodically while visible. It starts collecting events when this
+version runs; it does not import historical session events.
+
+The inbox API is `GET /api/notifications/inbox`, with `POST
+/api/notifications/inbox/dismiss` accepting `{ids, dismissed}`. The inbox WebSocket
+at `/api/notifications/inbox/events` signals clients to reread durable state, so
+reconnects recover events missed while disconnected.
+
+## Optional browser popups
 
 Opt in under Settings → Notifications, then use **Allow notifications in this
 browser** to request browser permission. The request runs directly in that click,

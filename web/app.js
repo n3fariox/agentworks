@@ -30,6 +30,7 @@ import {setupTimeoutControls} from './timeout-controls.js';
 import {setupParserScripts} from './parser-scripts.js';
 import {setupInputQueue,setupPromptRecovery,BUSY,STARTING} from './input-queue.js';
 import {setupNotifications} from './notifications.js';
+import {setupNotificationTray} from './notification-tray.js';
 import {setupQuestions} from './questions.js';
 import {setupMentions} from './mentions.js';
 import {setupTaskMentions} from './task-mentions.js';
@@ -623,7 +624,44 @@ addEventListener('popstate',event=>{
   const entry=event.state?.agentworks;sidePanel?.popstate(entry);
   if(entry==='chat'||entry==='panel')document.body.classList.remove('menu-open');else showBrowser();
 });
+let notificationTarget=null;
+async function openNotificationAlert(alert){
+  if(alert.automationId){
+    const definitions=await api('/api/automations');
+    const definition=definitions.find(item=>item.id===alert.automationId);
+    if(!definition)throw new Error('This automation is no longer available.');
+    workspace.openAutomation(definition.id,definition.projectId);return;
+  }
+  const session=await api(`/api/sessions/${encodeURIComponent(alert.sessionId)}?view=meta`);
+  if(!session.id)throw new Error('This session is no longer available.');
+  selectSession(session);sessionTerminal.select('chat');
+  notificationTarget={...alert};
+  if(eventSeq!==null)revealNotificationTarget();
+}
+let revealingNotification=false;
+async function revealNotificationTarget(){
+  if(revealingNotification||!notificationTarget||notificationTarget.sessionId!==active?.id||eventSeq===null)return;
+  const target=notificationTarget;revealingNotification=true;
+  try{
+    while(notificationTarget===target&&active?.id===target.sessionId&&older.mode==='more'&&storedEvents[0]?.seq>target.seq){
+      if(older.loading){setTimeout(revealNotificationTarget,100);return;}
+      await loadOlder();if(older.error)throw new Error(older.error);
+    }
+    if(notificationTarget!==target||active?.id!==target.sessionId)return;
+    draw();
+    let node;
+    if(target.event==='approval'&&approvals.size){node=$('approval-area');}
+    else{
+      const item=transcript.findLast(item=>{const seq=Number(item.id.split(':').at(-2));return Number.isSafeInteger(seq)&&seq<=target.seq;});
+      node=item&&nodes.get(item.id);
+    }
+    node??=$('session-state');node.tabIndex=-1;node.classList.add('notification-target');node.scrollIntoView({block:'center'});node.focus({preventScroll:true});
+    setTimeout(()=>node.classList.remove('notification-target'),3000);notificationTarget=null;
+  }catch(error){toast('Could not locate the alert in session history: '+error.message);notificationTarget=null;}
+  finally{revealingNotification=false;if(notificationTarget&&notificationTarget!==target)requestAnimationFrame(revealNotificationTarget);}
+}
 function selectSession(s) {
+  notificationTarget=null;
   document.body.classList.remove('menu-open');enterChat();
   if(active?.id===s.id){$('welcome').hidden=true;$('conversation').hidden=false;workspace?.sessionSelected(s);sidePanel?.sessionChanged();sessionTerminal?.sessionChanged();return;}
   if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));scrollPositions.set(active.id,$('messages').scrollTop);}
@@ -692,6 +730,7 @@ function connect(gen){
       consume(e,true);
     }
     scheduleDraw();updateControls();renderContinuation();usageStatus.render();
+    if(notificationTarget)requestAnimationFrame(revealNotificationTarget);
   };
   ws.onclose=()=>{
     if(gen!==generation)return;
@@ -1622,9 +1661,16 @@ async function init(){
   await refreshSessions();
   const saved=sessions.find(s=>s.id===localStorage.getItem('agentworks-session'));if(saved)selectSession(saved);workspace.restoreView();
   // The dashboard's Settings link opens the dialog here; drop the flag so a reload doesn't reopen it.
-  const params=new URLSearchParams(location.search);if(params.has('settings')){params.delete('settings');history.replaceState(history.state,'',location.pathname+(params.size?'?'+params:'')+location.hash);openSettings();}
+  const params=new URLSearchParams(location.search);
+  if(params.has('notificationSession')||params.has('notificationAutomation')){
+    try{await openNotificationAlert({sessionId:params.get('notificationSession'),automationId:params.get('notificationAutomation'),seq:Number(params.get('notificationSeq')),event:params.get('notificationEvent')});}catch(error){toast('Could not open notification: '+error.message);}
+    for(const key of ['notificationSession','notificationSeq','notificationEvent','notificationAutomation'])params.delete(key);
+    history.replaceState(history.state,'',location.pathname+(params.size?'?'+params:'')+location.hash);
+  }
+  if(params.has('settings')){params.delete('settings');history.replaceState(history.state,'',location.pathname+(params.size?'?'+params:'')+location.hash);openSettings();}
   setInterval(()=>refreshSessions().catch(()=>{}),5000);
   notifications.start();
+  setupNotificationTray({openAlert:openNotificationAlert});
 }
 init().catch(error=>toast('Cannot reach the local server: '+error.message));
 

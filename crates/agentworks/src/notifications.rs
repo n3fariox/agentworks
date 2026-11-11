@@ -1,8 +1,8 @@
-// U-02 notification policy and the cross-session event stream.
+// Notification policy, browser popup stream, and durable workspace inbox.
 //
-// The server decides which events are noteworthy and applies saved policy, so a
-// muted project never reaches any browser. The browser owns permission,
-// de-duplication across tabs, and routing a click back to its session.
+// The inbox records noteworthy events independently of browser popup policy.
+// Saved policy controls the separate optional popup stream; the browser owns
+// permission and popup de-duplication across tabs.
 //
 // Streaming ACP updates are deliberately not notable events: a single turn emits
 // them per token and per tool call. The categories below cover the events a
@@ -151,6 +151,28 @@ impl Settings {
     }
 }
 
+/// Durable workspace inbox, independent of optional browser popup policy.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Alert {
+    pub id: String,
+    pub session_id: String,
+    #[serde(default)]
+    pub automation_id: Option<String>,
+    #[serde(default)]
+    pub question: bool,
+    pub seq: u64,
+    pub title: String,
+    pub project_id: Option<String>,
+    pub project_name: Option<String>,
+    pub event: String,
+    pub body: String,
+    pub created: u64,
+    pub approval_id: Option<String>,
+    pub resolved: bool,
+    pub dismissed: bool,
+}
+
 /// Everything the stream needs to address one session.
 pub struct Context<'a> {
     pub session_id: &'a str,
@@ -163,16 +185,191 @@ pub struct Context<'a> {
 #[derive(Clone)]
 pub struct Hub {
     tx: broadcast::Sender<Value>,
+    inbox_tx: broadcast::Sender<Value>,
     catalog: Arc<Mutex<Catalog>>,
 }
 
 impl Hub {
     pub fn new(catalog: Arc<Mutex<Catalog>>) -> Self {
         let (tx, _) = broadcast::channel(CHANNEL);
-        Hub { tx, catalog }
+        let (inbox_tx, _) = broadcast::channel(CHANNEL);
+        Hub {
+            tx,
+            inbox_tx,
+            catalog,
+        }
     }
     pub fn subscribe(&self) -> broadcast::Receiver<Value> {
         self.tx.subscribe()
+    }
+    pub fn subscribe_inbox(&self) -> broadcast::Receiver<Value> {
+        self.inbox_tx.subscribe()
+    }
+    pub fn list(&self) -> Vec<Alert> {
+        self.catalog
+            .lock()
+            .unwrap()
+            .data
+            .notification_inbox
+            .iter()
+            .filter(|a| !a.dismissed)
+            .cloned()
+            .rev()
+            .collect()
+    }
+    pub fn dismiss(&self, ids: &[String], dismissed: bool) -> std::io::Result<()> {
+        let mut catalog = self.catalog.lock().unwrap();
+        let mut alerts = catalog.data.notification_inbox.clone();
+        let ids: BTreeSet<&str> = ids.iter().map(String::as_str).collect();
+        for alert in &mut alerts {
+            if ids.contains(alert.id.as_str()) {
+                alert.dismissed = dismissed;
+            }
+        }
+        catalog.notification_inbox(alerts)?;
+        let _ = self.inbox_tx.send(json!({"changed":true}));
+        Ok(())
+    }
+    pub fn automation_issue(
+        &self,
+        definition: &crate::automations::Definition,
+        occurrence: &str,
+        time: u64,
+        detail: &str,
+    ) {
+        let result = (|| -> std::io::Result<()> {
+            let mut catalog = self.catalog.lock().unwrap();
+            let mut alerts = catalog.data.notification_inbox.clone();
+            let id = format!("automation:{}:{}", definition.id, occurrence);
+            if alerts.iter().any(|a| a.id == id) {
+                return Ok(());
+            }
+            alerts.push(Alert {
+                id,
+                session_id: String::new(),
+                seq: 0,
+                automation_id: Some(definition.id.clone()),
+                question: false,
+                title: definition.name.clone(),
+                project_id: definition.project_id.clone(),
+                project_name: definition
+                    .project_id
+                    .as_deref()
+                    .and_then(|id| catalog.data.projects.iter().find(|p| p.id == id))
+                    .map(|p| p.name.clone()),
+                event: "automationIssue".into(),
+                body: truncate(detail),
+                created: time,
+                approval_id: None,
+                resolved: false,
+                dismissed: false,
+            });
+            catalog.notification_inbox(alerts)?;
+            let _ = self.inbox_tx.send(json!({"changed":true}));
+            Ok(())
+        })();
+        if let Err(error) = result {
+            tracing::error!(%error, "Could not persist automation alert");
+        }
+    }
+    pub fn observe(&self, context: &Context, seq: u64, time: u64, kind: &str, data: &Value) {
+        let category = classify(kind, data);
+        if category.is_none() && !matches!(kind, "completion_reported" | "approval_resolved") {
+            return;
+        }
+        let result = (|| -> std::io::Result<()> {
+            let mut catalog = self.catalog.lock().unwrap();
+            let mut alerts = catalog.data.notification_inbox.clone();
+            if kind == "approval_resolved" {
+                let approval_id = data["id"].as_str();
+                let mut changed = false;
+                for alert in &mut alerts {
+                    if alert.session_id == context.session_id
+                        && alert.event == "approval"
+                        && approval_id.is_some()
+                        && alert.approval_id.as_deref() == approval_id
+                        && !alert.resolved
+                    {
+                        alert.resolved = true;
+                        alert.body = "This request has been resolved.".into();
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    return Ok(());
+                }
+            } else {
+                let id = format!("{}:{}", context.session_id, seq);
+                if alerts.iter().any(|a| a.id == id) {
+                    return Ok(());
+                }
+                let (event, body) = match category {
+                    Some(category) => (
+                        serde_json::to_value(category)
+                            .unwrap()
+                            .as_str()
+                            .unwrap()
+                            .to_string(),
+                        body(category, data),
+                    ),
+                    None => (
+                        if data["status"] == "blocked" {
+                            "taskBlocked"
+                        } else {
+                            "taskCompleted"
+                        }
+                        .into(),
+                        truncate(
+                            data["summary"]
+                                .as_str()
+                                .unwrap_or("An explicit completion report is available."),
+                        ),
+                    ),
+                };
+                alerts.push(Alert {
+                    id,
+                    session_id: context.session_id.into(),
+                    automation_id: None,
+                    question: kind == "approval" && data["kind"] == "question",
+                    seq,
+                    title: context.title.into(),
+                    project_id: context.project_id.map(str::to_string),
+                    project_name: context
+                        .project_id
+                        .and_then(|id| catalog.data.projects.iter().find(|p| p.id == id))
+                        .map(|p| p.name.clone()),
+                    event,
+                    body,
+                    created: time,
+                    approval_id: if kind == "approval" {
+                        data["id"].as_str().map(str::to_string)
+                    } else {
+                        None
+                    },
+                    resolved: false,
+                    dismissed: false,
+                });
+            }
+            // Undismissed alerts never expire. Keep recent dismissed records for Undo.
+            let mut dismissed = alerts.iter().filter(|a| a.dismissed).count();
+            alerts.retain(|a| {
+                if a.dismissed && dismissed > 1000 {
+                    dismissed -= 1;
+                    false
+                } else {
+                    true
+                }
+            });
+            catalog.notification_inbox(alerts)?;
+            let _ = self.inbox_tx.send(json!({"changed":true}));
+            Ok(())
+        })();
+        if let Err(error) = result {
+            tracing::error!(%error, "Could not persist notification inbox");
+        }
+        if let Some(category) = category {
+            self.publish(context, seq, category, data);
+        }
     }
     /// `seq` makes the identifier stable per session event so a reconnecting or
     /// duplicated tab can recognise a notification it already showed.
@@ -383,6 +580,68 @@ mod tests {
         assert!(hub.subscribe().try_recv().is_err());
         let reopened = Catalog::open(root.join("catalog.json")).unwrap();
         assert!(reopened.data.settings.notifications.enabled);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn inbox_survives_restart_dismissal_and_resolution_without_popup_permission() {
+        let root =
+            std::env::temp_dir().join(format!("notification-inbox-{}", uuid::Uuid::new_v4()));
+        let path = root.join("catalog.json");
+        let catalog = Arc::new(Mutex::new(Catalog::open(path.clone()).unwrap()));
+        let hub = Hub::new(catalog);
+        let context = Context {
+            session_id: "source",
+            title: "Work",
+            provider: "demo",
+            project_id: None,
+        };
+        let mut changes = hub.subscribe_inbox();
+        let mut popups = hub.subscribe();
+        hub.observe(
+            &context,
+            1,
+            100,
+            "approval",
+            &json!({"id":"approval-1","kind":"question"}),
+        );
+        hub.observe(&context, 2, 200, "turn_end", &json!({}));
+        hub.observe(&context, 2, 200, "turn_end", &json!({}));
+        assert_eq!(hub.list().len(), 2);
+        assert!(hub.list()[1].question);
+        assert!(changes.try_recv().is_ok());
+        assert!(popups.try_recv().is_err());
+        hub.dismiss(&["source:1".into()], true).unwrap();
+        hub.observe(
+            &context,
+            3,
+            300,
+            "approval_resolved",
+            &json!({"id":"approval-1"}),
+        );
+        assert_eq!(hub.list().len(), 1); // Resolving never resurrects a dismissed alert.
+        let reopened = Hub::new(Arc::new(Mutex::new(Catalog::open(path).unwrap())));
+        assert_eq!(reopened.list()[0].id, "source:2");
+        reopened.dismiss(&["source:1".into()], false).unwrap();
+        assert!(reopened.list()[1].resolved);
+        reopened.observe(
+            &context,
+            4,
+            400,
+            "completion_reported",
+            &json!({"status":"completed","summary":"Done"}),
+        );
+        reopened.observe(
+            &context,
+            5,
+            500,
+            "completion_reported",
+            &json!({"status":"blocked","summary":"Need credentials"}),
+        );
+        assert_eq!(reopened.list()[0].event, "taskBlocked");
+        assert_eq!(reopened.list()[1].event, "taskCompleted");
+        assert_eq!(reopened.list()[1].body, "Done");
+        assert_eq!(reopened.list()[2].event, "turnEnd");
         std::fs::remove_dir_all(root).unwrap();
     }
 

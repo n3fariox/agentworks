@@ -1095,6 +1095,16 @@ async fn dispatch(
         now,
         finish.as_ref(),
     )?;
+    if outcome != "started" {
+        app.notifications.automation_issue(
+            &def,
+            &slot.to_string(),
+            now as u64,
+            detail
+                .as_deref()
+                .unwrap_or("The scheduled run did not start."),
+        );
+    }
     Ok(())
 }
 /// What happens to a one-time definition when its occurrence is claimed.

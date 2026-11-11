@@ -135,7 +135,10 @@ pub fn report(app: &App, s: &Session, req: Report) -> mail::Result<Value> {
         data.input_queue
             .block("Completion reported; inspect, then resume.");
     }
-    s.emit("completion_reported", json!({"reportId":id}));
+    s.emit(
+        "completion_reported",
+        json!({"reportId":id,"status":report["status"],"summary":report["summary"]}),
+    );
     Ok(json!({"report":report,"duplicate":false}))
 }
 pub fn get(app: &App, a: &mail::Actor, req: Query) -> mail::Result<Value> {
