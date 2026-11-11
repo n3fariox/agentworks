@@ -486,6 +486,19 @@ impl Catalog {
         self.save(data).map_err(|_| "Could not save host")?;
         Ok(host)
     }
+    /// Points a host at a newly installed worker release.
+    pub fn set_host_command(&mut self, id: &str, command: &str) -> Result<Host, String> {
+        let mut data = self.data.clone();
+        let host = data
+            .hosts
+            .iter_mut()
+            .find(|h| h.id == id)
+            .ok_or("Host not found")?;
+        host.command = command.into();
+        let host = host.clone();
+        self.save(data).map_err(|_| "Could not save host")?;
+        Ok(host)
+    }
     /// Removes a host and the locations recorded on it. Callers must first
     /// make sure no sessions remain there.
     pub fn remove_host(&mut self, id: &str) -> Result<(), String> {

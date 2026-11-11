@@ -203,13 +203,35 @@ fn install_release(releases: &Path, name: Option<&str>) -> Result<PathBuf> {
     }
     let target = releases.join(&name);
     place(releases, &exe, &hash, &target)?;
-    // Enrollment ships the release's `-worker` siblings to remote hosts.
+    // Enrollment ships the release's workers to remote hosts: the per-platform
+    // bundle, and the older `-worker` siblings.
+    use crate::enrollment::workers;
+    if let Some(bundle) = workers::bundle() {
+        let target = releases.join(format!("{name}{}", workers::RELEASE_SUFFIX));
+        for platform in fs::read_dir(&bundle)? {
+            let platform = platform?.file_name();
+            let Some(platform_name) = platform.to_str() else {
+                continue;
+            };
+            let worker = bundle
+                .join(&platform)
+                .join(workers::file_name(platform_name));
+            if !worker.is_file() {
+                continue;
+            }
+            let dir = target.join(&platform);
+            fs::create_dir_all(&dir)?;
+            place(
+                releases,
+                &worker,
+                &digest(&worker)?,
+                &dir.join(workers::file_name(platform_name)),
+            )?;
+        }
+    }
     for (worker, suffix) in [
-        (crate::enrollment::worker_executable(), "-worker"),
-        (
-            crate::enrollment::windows_worker_executable(),
-            "-worker.exe",
-        ),
+        (workers::sibling_worker(), "-worker"),
+        (workers::windows_sibling(), "-worker.exe"),
     ] {
         if let Some(worker) = worker {
             place(

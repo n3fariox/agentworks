@@ -1502,6 +1502,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/api/hosts/{id}", axum::routing::delete(hosts::remove))
         .route("/api/hosts/{id}/reconnect", post(hosts::reconnect))
+        .route("/api/hosts/{id}/update-worker", post(enrollment::update))
         .route(
             "/api/hosts/{id}/terminal",
             post(terminal::open_host).delete(terminal::stop_host),

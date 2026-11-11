@@ -477,7 +477,7 @@ function hostTitle(host){
   return [hostState(host),'ssh '+host.destination,w?.hostname,w?.platform,w?.providers?.length?'providers: '+w.providers.join(', '):'',w?.version?'v'+w.version:'',host.status==='offline'?host.detail:''].filter(Boolean).join(' · ');
 }
 function hostNote(host){
-  if(host.status==='offline')return host.detail||'Offline.';
+  if(host.status==='offline')return (host.detail||'Offline.')+(host.managed&&/\bUpdate\b/.test(host.detail||'')?' Use ⋯ → Update worker.':'');
   if(host.status==='connecting')return host.detail?'Reconnecting. Last attempt: '+host.detail:'Connecting over SSH…';
   return host.roots?.length?'Connected. No sessions yet.':'Connected. Add working directories (⋯) to start sessions here.';
 }
@@ -1305,7 +1305,27 @@ function openHostRoots(host){
     if(path){const command=provider==='codex'?' login':' auth login';row.append(el('div','',`On ${host.destination}, run: `),el('code','',`'${path.replaceAll("'", "'\\''")}'${command}`));}
     tools.append(row);
   }
+  tools.append(workerSection(host));
   $('host-roots').value=(host.roots||[]).join('\n');$('host-roots-error').textContent='';$('host-roots-dialog').showModal();$('host-roots').focus();
+}
+// Installs this server's worker build on the host and reconnects it.
+function workerSection(host){
+  const section=el('div','field-note host-worker');
+  const w=host.worker;
+  section.append(el('strong','','Worker: '),el('span','',w?[w.version&&'v'+w.version,w.platform].filter(Boolean).join(' · ')||'Connected':host.status==='offline'?'Offline':'Not connected yet'));
+  if(!host.managed){section.append(el('div','','This host runs a worker you set up. Update its Agentworks binary on the host, then reconnect (↻).'));return section;}
+  const button=el('button','text-button','Update worker');button.type='button';
+  const status=el('div','');status.setAttribute('role','status');
+  const error=el('div','error-text');error.style.whiteSpace='pre-wrap';error.style.maxHeight='160px';error.style.overflow='auto';
+  button.onclick=async()=>{
+    if(!confirm(`Install this server's worker on ${host.name} and reconnect? Running turns on this host are interrupted; resume them afterwards.`))return;
+    button.disabled=true;error.textContent='';status.textContent='Copying and installing the worker…';
+    try{const updated=await api(`/api/hosts/${host.id}/update-worker`,{method:'POST'});status.textContent='Updated and connected'+(updated.worker?.version?' — v'+updated.worker.version:'')+'.';await refreshSessions();}
+    catch(e){status.textContent='';error.textContent=e.message;await refreshSessions();}
+    finally{button.disabled=false;}
+  };
+  section.append(' ',button,status,error);
+  return section;
 }
 $('dismiss-host-roots').onclick=()=>$('host-roots-dialog').close();
 $('host-roots-form').onsubmit=async event=>{
