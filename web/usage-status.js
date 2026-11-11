@@ -208,7 +208,19 @@ function codexWindows(state,now){
   });
 }
 
-export function usageView(state,{now=Date.now(),provider}={}){
+// Native /usage currently has no model-to-bucket IDs. These mappings cover the
+// installed model catalog and reported bucket IDs; unknown models stay unknown.
+export function activeAntigravityWindows(state,model,now=Date.now()){
+  const windows=antigravityWindows(state,now);
+  const effort='(?:-(?:low|medium|high|xhigh|max))?';
+  let ids=[];
+  if(new RegExp('^gemini-4-argon'+effort+'$').test(model||''))ids=['gemini-argon-wtu-weekly'];
+  else if(new RegExp('^gemini-3\\.8-flash'+effort+'$').test(model||''))ids=['gemini-weekly','gemini-5h'];
+  else if(new RegExp('^(?:claude-(?:opus|sonnet)-5-5|gpt-oss-120b)'+effort+'$').test(model||''))ids=['3p-weekly','3p-5h'];
+  return windows.filter(w=>ids.includes(w.id));
+}
+
+export function usageView(state,{now=Date.now(),provider,model}={}){
   const c=state.context;
   const cf=c?freshness(c,now):null;
   let label='Context unknown';
@@ -220,9 +232,9 @@ export function usageView(state,{now=Date.now(),provider}={}){
   const quota=['5h','7d'].map(k=>{const w=state.quota[k];if(!w)return `${k} quota: not reported`;
     return `${k} quota (reported): ${pct(100-w.usedPercent)}% remaining${w.status?' · status '+w.status:''} · ${w.resetsAt?`${resetText(w.resetsAt,now)} (${new Date(w.resetsAt).toLocaleString()})`:'reset unknown'} · ${freshness(w,now).text}`;});
   const codex=codexWindows(state,now);
-  const antigravity=antigravityWindows(state,now);
+  const antigravity=activeAntigravityWindows(state,model,now);
   const tightest=antigravity.filter(w=>w.percent!==null).sort((a,b)=>a.percent-b.percent)[0]||antigravity[0];
-  const quotaDetails=provider==='antigravity'?(antigravity.length?antigravity.map(w=>w.detail):['Antigravity quota: not reported yet']):codex.length?codex.map(w=>w.detail):['codex','codex-rust'].includes(provider)?['Subscription quota: not reported']:quota;
+  const quotaDetails=provider==='antigravity'?(antigravity.length?antigravity.map(w=>w.detail):[state.antigravityQuota?'Quota mapping unavailable for the active model. All account quotas remain on the dashboard.':'Antigravity quota: not reported yet']):codex.length?codex.map(w=>w.detail):['codex','codex-rust'].includes(provider)?['Subscription quota: not reported']:quota;
   const details=[
     c?`Context occupancy (current window): ${c.used!==undefined?c.used.toLocaleString():'unknown'} of ${c.size!==undefined?c.size.toLocaleString():'unknown'} tokens${c.percent!==undefined?` (${c.percent.toFixed(1)}%)`:''} · ${cf.text}`:'Context occupancy: not reported yet',
     c?.dropped?'Occupancy decreased since the previous report (cause not reported)':'',
@@ -267,13 +279,13 @@ export function watchSharedQuota(url,onChange){
 // snapshot replay, consume(event,{live}) per event, render() after updates.
 // An optional `chip` mirrors the short label (hidden while nothing is reported).
 // `getShared` returns the account quota reported by any session sharing this one's account.
-export function setupUsageStatus({root,getProvider,getShared=()=>null,chip}){
+export function setupUsageStatus({root,getProvider,getModel=()=>null,getShared=()=>null,chip}){
   let state=emptyUsage();
   root.innerHTML='<button type="button" class="usage-status-toggle" aria-expanded="false" aria-controls="usage-status-details"></button><div id="usage-status-details" class="usage-status-details" role="region" aria-label="Usage details" hidden></div>';
   const button=root.firstChild,panel=root.lastChild;
   button.onclick=()=>{panel.hidden=!panel.hidden;button.setAttribute('aria-expanded',String(!panel.hidden));};
   const render=()=>{
-    const v=usageView(withSharedQuota(state,getShared()),{provider:getProvider()});
+    const v=usageView(withSharedQuota(state,getShared()),{provider:getProvider(),model:getModel()});
     button.textContent=v.label;button.classList.toggle('stale',v.stale);button.classList.toggle('unknown',!v.known);
     button.title='Context usage details';
     if(chip){chip.textContent=v.short;chip.hidden=!v.short;chip.classList.toggle('stale',v.stale);chip.setAttribute('aria-label',`Usage: ${v.label}. More options`);}

@@ -55,8 +55,9 @@ const scrollPositions=new Map();let restoreScroll=null;
 let config, sessions=[], active=null, socket=null, generation=0, connected=false;
 // U-07: per-session composer usage statusline. Context and cost come only from this
 // session's events; account quota also takes newer reports from sessions sharing its account.
+let modelConfig=null;
 const sharedQuota=watchSharedQuota(socketUrl('/api/account-quota/events'),()=>usageStatus.render());
-const usageStatus=setupUsageStatus({root:$('usage-status'),getProvider:()=>active?.provider,chip:$('composer-info'),
+const usageStatus=setupUsageStatus({root:$('usage-status'),getProvider:()=>active?.provider,getModel:()=>modelConfig?.currentValue,chip:$('composer-info'),
   getShared:()=>active?sharedQuota.get(active.hostId,quotaFamily(active.provider,active.modelProvider)):null});
 const composerMenu=setupFlyout({menu:$('composer-menu'),triggers:[$('composer-more'),$('composer-info')]});
 const sessionMenu=setupFlyout({menu:$('session-menu'),triggers:[$('session-more')]});
@@ -100,7 +101,7 @@ let replaying=false,workLogs=null,turnEnds=new Map();
 // `older.mode`: 'none' (snapshot is complete), 'more' (server reported truncation) or
 // 'begin' (the server confirmed there is nothing earlier).
 let storedEvents=[],older={mode:'none',loading:false,error:''},rebuilding=false,itemKey=null,itemCount=0,eventTime=null;
-let modelConfig=null, availableCommands=[], commandsOpen=false;
+let availableCommands=[], commandsOpen=false;
 let discoveryGeneration=0;
 let externalSessions=[], externalSelection=null, externalCursor=null, externalGeneration=0, externalLoading=false, externalImporting=false;
 let externalFetch=Promise.resolve();
