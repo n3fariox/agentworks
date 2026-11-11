@@ -446,3 +446,16 @@ test('palette entries stay safe with hostile session text',async()=>{
   expect(items[0].label).toBe('<img src=x onerror=alert(1)>');
   expect(sessionRanking('img',items).map(i=>i.id)).toEqual(['x']);
 });
+
+for(const mobile of [false,true])test(`GitHub settings opens directly from the command palette ${mobile?'mobile':'desktop'}`,async({page})=>{
+  if(mobile)await page.setViewportSize({width:390,height:844});
+  const session=await api('/api/sessions',{provider:'demo',cwd:alpha(),title:`GitHub settings ${mobile?'mobile':'desktop'}`});
+  await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),session.id);
+  await page.goto(base);await expect(page.locator('#session-state')).toHaveText('Ready');
+  await page.keyboard.press('Control+k');await page.locator('#palette-input').fill('github settings');
+  await page.locator('#palette-list [role=option]').filter({hasText:'GitHub settings'}).click();
+  await expect(page.locator('#palette-dialog')).toBeHidden();await expect(page.locator('#settings-dialog')).toBeVisible();
+  await expect(page.locator('#settings-tab-github')).toHaveAttribute('aria-selected','true');
+  await expect(page.locator('#settings-panel-github')).toBeVisible();
+  expect(await page.evaluate(()=>localStorage.getItem('agentworks-session'))).toBe(session.id);
+});

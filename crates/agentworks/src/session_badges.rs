@@ -65,7 +65,7 @@ fn validate(value: &Value, source: &str) -> Result<Vec<Badge>, String> {
             || badge.tooltip.chars().any(char::is_control)
             || !matches!(
                 badge.tone.as_str(),
-                "neutral" | "success" | "warning" | "danger" | "info"
+                "neutral" | "success" | "warning" | "danger" | "info" | "merged"
             )
             || badge.url.as_deref().is_some_and(|u| !valid_url(u))
         {
@@ -223,7 +223,7 @@ pub(crate) fn pr_badge(pr: &Value, checkout: bool) -> Badge {
         .unwrap_or("UNKNOWN");
     let ci = pr["checks"]["state"].as_str().unwrap_or("UNKNOWN");
     let (tone, meaning) = if pr["state"] == "MERGED" {
-        ("neutral", "Merged")
+        ("merged", "Merged")
     } else if pr["state"] == "CLOSED" {
         ("neutral", "Closed")
     } else if pr["draft"] == true {
@@ -333,6 +333,17 @@ pub async fn list(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn merged_badges_take_priority_over_review_and_ci_status() {
+        let pr = json!({"number":42,"state":"MERGED","reviewDecision":"APPROVED","checks":{"state":"FAILURE"}});
+        let badge = pr_badge(&pr, true);
+        assert_eq!(badge.tone, "merged");
+        assert!(badge.tooltip.contains("Merged"));
+        assert!(validate(&json!([badge]), GITHUB).is_ok());
+        let mut closed = pr;
+        closed["state"] = json!("CLOSED");
+        assert_eq!(pr_badge(&closed, true).tone, "neutral");
+    }
     #[test]
     fn badge_values_and_links_are_bounded() {
         let mut badge = json!({"id":"build","label":"Build","tone":"danger","tooltip":"Failed"});

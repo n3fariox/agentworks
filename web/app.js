@@ -1646,6 +1646,7 @@ setupPalettes({
     importSession:()=>openImport(),
     newProject:()=>openProjectDialog(),
     settings:openSettings,
+    githubSettings:async()=>{await openSettings();$('settings-tab-github').click();},
     agents:()=>{if(active)$('session-agents').click();},
     workspaceInfo:()=>{if(active)$('session-workspace').click();},
     diff:()=>sidePanel.open('diff'),
