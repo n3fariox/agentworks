@@ -215,9 +215,12 @@ async fn platform(host: &Host, os: Os) -> Result<String> {
     match parse(&text) {
         Some(platform) if reply.status.success() => Ok(platform),
         _ => Err(format!(
-            "Could not detect the host's OS and CPU: {}",
+            "Could not detect the host's OS and CPU (ssh {}). {}",
+            reply.status,
             String::from_utf8_lossy(&reply.stderr).trim()
-        )),
+        )
+        .trim_end()
+        .to_owned()),
     }
 }
 

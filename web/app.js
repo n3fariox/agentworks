@@ -1314,7 +1314,7 @@ function workerSection(host){
   const w=host.worker;
   section.append(el('strong','','Worker: '),el('span','',w?[w.version&&'v'+w.version,w.platform].filter(Boolean).join(' · ')||'Connected':host.status==='offline'?'Offline':'Not connected yet'));
   if(!host.managed){section.append(el('div','','This host runs a worker you set up. Update its Agentworks binary on the host, then reconnect (↻).'));return section;}
-  const button=el('button','text-button','Update worker');button.type='button';
+  const button=el('button','host-worker-update','Update worker');button.type='button';
   const status=el('div','');status.setAttribute('role','status');
   const error=el('div','error-text');error.style.whiteSpace='pre-wrap';error.style.maxHeight='160px';error.style.overflow='auto';
   button.onclick=async()=>{
@@ -1324,7 +1324,8 @@ function workerSection(host){
     catch(e){status.textContent='';error.textContent=e.message;await refreshSessions();}
     finally{button.disabled=false;}
   };
-  section.append(' ',button,status,error);
+  const row=el('div','host-worker-actions');row.append(button,status);
+  section.append(row,error);
   return section;
 }
 $('dismiss-host-roots').onclick=()=>$('host-roots-dialog').close();
