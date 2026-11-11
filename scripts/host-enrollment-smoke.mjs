@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import {spawn,execFileSync} from 'node:child_process';
 import {once} from 'node:events';
-import {mkdtemp,mkdir,writeFile,readFile,readdir,stat,rm,symlink} from 'node:fs/promises';
+import {mkdtemp,mkdir,writeFile,readFile,readdir,stat,rm,symlink,readlink,copyFile} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 import {tmpdir,userInfo} from 'node:os';
 import {createServer} from 'node:net';
@@ -52,8 +52,14 @@ let server,sshd,log='';const sockets=new Set();
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 const env={...process.env};for(const key of Object.keys(env))if(key.startsWith('AGENTWORKS_'))delete env[key];
 const catalog=join(dir,'catalog with spaces.json');
+// Run the server from a bundle layout: no `-worker` sibling, one worker per platform.
+const platform=`${process.platform==='darwin'?'macos':process.platform}-${{x64:'x86_64',arm64:'aarch64'}[process.arch]||process.arch}`;
+const serverBin=join(dir,'bundle','agentworks'),bundled=join(dir,'bundle','workers',platform,'agentworks-worker');
+await mkdir(join(bundled,'..'),{recursive:true});
+await copyFile(resolve('target/debug/agentworks'),serverBin);await copyFile(resolve('target/debug/agentworks-worker'),bundled);
+execFileSync('chmod',['755',serverBin,bundled]);
 async function start(){
- server=spawn(resolve('target/debug/agentworks'),[],{env:{...env,AGENTWORKS_PORT:String(port),AGENTWORKS_ROOTS:resolve('.'),AGENTWORKS_CATALOG_PATH:catalog,AGENTWORKS_SSH:join(dir,'ssh')},stdio:['ignore','pipe','pipe']});
+ server=spawn(serverBin,[],{env:{...env,AGENTWORKS_PORT:String(port),AGENTWORKS_ROOTS:resolve('.'),AGENTWORKS_CATALOG_PATH:catalog,AGENTWORKS_SSH:join(dir,'ssh')},stdio:['ignore','pipe','pipe']});
  server.stdout.on('data',b=>log+=b);server.stderr.on('data',b=>log+=b);
  for(let n=0;n<100;n++){try{if((await fetch(base+'/api/status')).ok)return;}catch{}await delay(50);}throw Error('Server did not start: '+log);
 }
@@ -92,9 +98,10 @@ try{
  assert.deepEqual(await readdir(join(dir,'host-keys')),[]);
  const installed=await enroll('Installed',destination);assert.equal(installed.type,'complete',installed.text+'\n'+installed.message);assert.equal(installed.host.status,'connected');assert(installed.host.managed);assert(installed.host.worker.providers.includes('demo'));
  const stored=JSON.parse(await readFile(catalog));const host=stored.hosts[0];
- // The worker-only binary beside the server is what enrollment installs, under the name `agentworks`.
+ // The bundle's worker for this host's platform is what enrollment installs, under the name `agentworks`.
  const releases=join(home,'.local/share/agentworks/releases'),[release]=await readdir(releases);
- assert.equal((await stat(join(releases,release,'agentworks'))).size,(await stat(resolve('target/debug/agentworks-worker'))).size);
+ assert.equal((await stat(join(releases,release,'agentworks'))).size,(await stat(bundled)).size);
+ assert.match(installed.text,new RegExp(`Installing the ${platform} worker`));
  assert.equal((await stat(host.identityFile)).mode&0o777,0o600);assert.equal((await stat(resolve(host.identityFile,'..'))).mode&0o777,0o700);
  assert(!('identityFile' in installed.host));assert(!('knownHostsFile' in installed.host));
  const keys=await readFile(join(home,'.ssh/authorized_keys'),'utf8');assert.match(keys,/restrict ssh-ed25519 .* agentworks:/);
@@ -105,6 +112,20 @@ try{
  // Restart without any SSH agent: the dedicated key must be sufficient.
  await stop(server);await start();
  for(let n=0;n<200;n++){const h=(await api('/api/catalog',undefined,'GET')).hosts.find(h=>h.id===host.id);if(h.status==='connected')break;if(n===199)throw Error('Managed host did not reconnect: '+JSON.stringify(h));await delay(50);}
+ // Update worker: a fresh release replaces the old one, and the host reconnects to it.
+ const shortcut=join(home,'.local/bin/agentworks');
+ assert.equal(await readlink(shortcut),join(releases,release,'launch'));
+ const updated=await api(`/api/hosts/${host.id}/update-worker`,{});
+ assert.equal(updated.status,'connected');assert(updated.worker.providers.includes('demo'));
+ const [next,...extra]=await readdir(releases);assert.deepEqual(extra,[]);assert.notEqual(next,release);
+ assert.equal(updated.command,`"$HOME/.local/share/agentworks/releases/${next}"/launch`);
+ assert.equal(JSON.parse(await readFile(catalog)).hosts[0].command,updated.command);
+ assert.equal(await readlink(shortcut),join(releases,next,'launch'));
+ assert.deepEqual((await readdir(resolve(host.identityFile,'..'))).sort(),['id_ed25519','id_ed25519.pub','known_hosts']);
+ const manual=await api('/api/hosts',{name:'Manual',destination:'manual.example'});
+ const refused=await fetch(`${base}/api/hosts/${manual.id}/update-worker`,{method:'POST',headers:{Origin:base}});
+ assert.equal(refused.status,409);assert.match(await refused.text(),/worker you set up yourself/);
+ await api(`/api/hosts/${manual.id}`,undefined,'DELETE');
  // A changed host identity must never silently become trusted.
  const pinned=await readFile(host.knownHostsFile,'utf8');
  const oldKey=(await readFile(hostkey+'.pub','utf8')).split(' ')[1];
@@ -115,6 +136,6 @@ try{
  await api(`/api/sessions/${session.id}`,undefined,'DELETE');await api(`/api/hosts/${host.id}`,undefined,'DELETE');
  await assert.rejects(stat(host.identityFile),{code:'ENOENT'});
  assert(!(await readFile(catalog,'utf8')).includes(secret));assert(!log.includes(secret));
- console.log('PASS: real SSH enrollment, hidden passphrase input, host-key confirmation, cancellation, isolated install without Node or mise, remote demo, and restart with managed key'+(realMise?' (launched through real mise)':''));
+ console.log('PASS: real SSH enrollment, hidden passphrase input, host-key confirmation, cancellation, isolated install without Node or mise, remote demo, restart with managed key, and worker update'+(realMise?' (launched through real mise)':''));
 }catch(error){console.error(log);throw error;}
 finally{for(const ws of sockets)ws.close();await stop(server);await stop(sshd);await rm(dir,{recursive:true,force:true});}

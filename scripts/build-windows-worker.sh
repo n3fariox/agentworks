@@ -9,4 +9,7 @@ profile=debug
 for arg; do [ "$arg" = --release ] && profile=release; done
 "$ROOT/scripts/mise-cargo.sh" build --locked --target x86_64-pc-windows-gnu -p agentworks-worker "$@"
 cp "$ROOT/target/x86_64-pc-windows-gnu/$profile/agentworks-worker.exe" "$ROOT/target/$profile/agentworks-worker.exe"
-echo "Windows worker: target/$profile/agentworks-worker.exe"
+# The bundle layout, which enrollment prefers (see scripts/build-bundle.sh).
+mkdir -p "$ROOT/target/$profile/workers/windows-x86_64"
+cp "$ROOT/target/x86_64-pc-windows-gnu/$profile/agentworks-worker.exe" "$ROOT/target/$profile/workers/windows-x86_64/"
+echo "Windows worker: target/$profile/workers/windows-x86_64/agentworks-worker.exe"

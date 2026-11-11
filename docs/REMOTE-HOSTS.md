@@ -351,7 +351,10 @@ support the full lifecycle. `directories: true` gates `browseDirectories` and
 
 Protocol 2 is intentionally rejected because it does not establish the protocol-3
 ownership-ready contract. Upgrade both binaries within a coordinated maintenance
-window, reconnect, and deliberately resume interrupted sessions. This protocol
+window, reconnect, and deliberately resume interrupted sessions. For hosts this
+server installed, `POST /api/hosts/{id}/update-worker` (**⋯ → Update worker**) does
+the worker half: it installs the server's current worker into a new release, then
+switches the saved launch command, reconnects, and removes the old release. This protocol
 does not promise mixed-version rolling upgrades or cross-link command replay.
 
 Future evolution should preserve existing field meanings within an epoch, use
