@@ -1,9 +1,11 @@
 import {serverReady} from './support/cleanup.mjs';
 import {test,expect} from '@playwright/test';
+import {openCreateSections} from './support/create-sections.mjs';
 import {spawn} from 'node:child_process';
 import {mkdtemp,mkdir,rm} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 
+openCreateSections(test);
 // Own server and data: never touch the user's sessions or settings.
 const base='http://127.0.0.1:4493';
 test.use({baseURL:base});
@@ -39,7 +41,7 @@ test('new session applies a chosen role; unsupported agents disable the picker',
   await expect(page.locator('#create-dialog')).toBeHidden();
   const [created]=await api('/api/sessions');
   expect(created.role.name).toBe('Release captain');
-  await page.locator('#prompt').fill('role?');await page.locator('#prompt').press('Enter');
+  await page.locator('#prompt-editor .cm-content').fill('role?');await page.locator('#prompt-editor .cm-content').press('Enter');
   await expect(page.locator('#messages')).toContainText('Always tag the release.');
 
   // A fork keeps its parent's snapshot and cannot select an unsupported agent.

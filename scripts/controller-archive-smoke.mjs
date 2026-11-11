@@ -40,7 +40,7 @@ try{
  assert(!(await m.tools()).some(t=>t.name==='archive_session'));
  assert(!(await c.tools()).some(t=>t.name==='archive_session'));
  assert.deepEqual((await archiver.tools()).map(t=>t.name).sort(),['archive_session','list_sessions']);
- for(const name of ['get_completion','get_review_queue','start_session','prompt_session','cancel_session','run_automation','restart_service'])assert.equal((await archiver.call(name,{sessionId:clean.id})).error.status,403,`${name} must remain denied`);
+ for(const name of ['get_completion','start_session','prompt_session','cancel_session','run_automation','restart_service'])assert.equal((await archiver.call(name,{sessionId:clean.id})).error.status,403,`${name} must remain denied`);
  assert.equal((await archiver.call('report_completion',{status:'completed',summary:'Denied',requestId:'no-report'})).error.status,403);
  assert((await archiver.call('list_sessions')).sessions.some(s=>s.id===clean.id),'Archive-only controller discovers non-messaging sessions');
  for(const caller of [m,c])assert.equal((await caller.call('archive_session',{sessionId:clean.id})).error.status,403);

@@ -75,7 +75,8 @@ test('Per-harness sections save models, permission defaults and picker visibilit
   expect(writes).toHaveLength(0);
   await root.fill('/repo');
   await page.locator('#settings-tab-directories').focus();
-  await page.keyboard.press('ArrowDown');await page.keyboard.press('ArrowDown');
+  // Directories → Git → GitHub → Harnesses.
+  for(let i=0;i<3;i++)await page.keyboard.press('ArrowDown');
   await expect(page.locator('#settings-tab-models')).toBeFocused();
   await expect(mode).toBeVisible();
   await page.locator('#save-settings').click();

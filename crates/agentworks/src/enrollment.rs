@@ -27,6 +27,9 @@ use tokio::{
 };
 use uuid::Uuid;
 
+mod windows;
+pub use windows::worker_executable as windows_worker_executable;
+
 type Result<T> = std::result::Result<T, String>;
 type Output = mpsc::Sender<Message>;
 static SLOTS: OnceLock<Semaphore> = OnceLock::new();
@@ -35,6 +38,17 @@ static SLOTS: OnceLock<Semaphore> = OnceLock::new();
 struct Start {
     name: String,
     destination: String,
+    #[serde(default)]
+    os: Os,
+}
+/// Chosen in the dialog rather than detected: probing needs a shell, and the
+/// shell is exactly what differs.
+#[derive(Deserialize, Default, Clone, Copy, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum Os {
+    #[default]
+    Unix,
+    Windows,
 }
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -235,12 +249,18 @@ async fn enroll(
         .await
         .map_err(|e| e.to_string())?;
     let public = format!("restrict {}", public.trim());
-    let bootstrap = format!(
-        "set -eu; {} command -v tar >/dev/null; umask 077; mkdir -p \"$HOME/.ssh\"; chmod 700 \"$HOME/.ssh\"; touch \"$HOME/.ssh/authorized_keys\"; chmod 600 \"$HOME/.ssh/authorized_keys\"; grep -qxF {} \"$HOME/.ssh/authorized_keys\" || printf '\\n%s\\n' {} >> \"$HOME/.ssh/authorized_keys\"; printf '\\nDedicated key installed.\\n'",
-        platform_check(),
-        quote(&public),
-        quote(&public)
-    );
+    let bootstrap = match req.os {
+        Os::Unix => format!(
+            "sh -c {}",
+            quote(&format!(
+                "set -eu; {} command -v tar >/dev/null; umask 077; mkdir -p \"$HOME/.ssh\"; chmod 700 \"$HOME/.ssh\"; touch \"$HOME/.ssh/authorized_keys\"; chmod 600 \"$HOME/.ssh/authorized_keys\"; grep -qxF {} \"$HOME/.ssh/authorized_keys\" || printf '\\n%s\\n' {} >> \"$HOME/.ssh/authorized_keys\"; printf '\\nDedicated key installed.\\n'",
+                platform_check(),
+                quote(&public),
+                quote(&public)
+            ))
+        ),
+        Os::Windows => windows::bootstrap(&public),
+    };
     stage(
         out,
         "Connect: confirm the host fingerprint and enter your SSH password if prompted.",
@@ -264,38 +284,19 @@ async fn enroll(
     .arg(hosts::known_hosts_option(&known))
     .arg("--")
     .arg(&host.destination)
-    .arg(format!("sh -c {}", quote(&bootstrap)));
+    .arg(bootstrap);
     interactive(&mut cmd, out, input).await?;
     host.identity_file = Some(key);
     host.known_hosts_file = Some(known);
     stage(out, "Verifying the new key…").await?;
-    run(&mut managed(&host, "true"), out).await?;
-    let release = format!(
-        ".local/share/agentworks/releases/{}",
-        dir.file_name().unwrap().to_string_lossy()
-    );
-    let remote = format!("\"$HOME/{release}\"");
+    // `exit 0` succeeds in sh, cmd.exe and PowerShell alike.
+    run(&mut managed(&host, "exit 0"), out).await?;
+    let id = dir.file_name().unwrap().to_string_lossy().into_owned();
     stage(out, "Preparing and copying the worker…").await?;
-    let bundle = bundle(&dir, out).await?;
-    let command = format!("umask 077; mkdir -p {remote} && cat > {remote}/bundle.tar.gz");
-    let mut upload = managed(&host, &command);
-    upload.stdin(Stdio::from(File::open(&bundle).map_err(|e| e.to_string())?));
-    run(&mut upload, out).await?;
-    // SHA-256 is checked before extraction; only our own source files are bundled.
-    let bytes = tokio::fs::read(&bundle).await.map_err(|e| e.to_string())?;
-    let checksum = tokio::task::spawn_blocking(move || crate::sha256::hex(&bytes))
-        .await
-        .map_err(|e| e.to_string())?;
-    stage(out, "Installing the worker…").await?;
-    let install = format!(
-        "set -eu; cd {remote}; if command -v sha256sum >/dev/null; then actual=$(sha256sum bundle.tar.gz); else actual=$(shasum -a 256 bundle.tar.gz); fi; test \"${{actual%% *}}\" = {checksum} || {{ echo 'Bundle checksum mismatch' >&2; exit 1; }}; tar -xzf bundle.tar.gz; rm bundle.tar.gz; sh install.sh"
-    );
-    run(
-        &mut managed(&host, &format!("sh -c {}", quote(&install))),
-        out,
-    )
-    .await?;
-    let command = format!("{remote}/launch");
+    let command = match req.os {
+        Os::Unix => install_unix(&host, &dir, &id, out).await?,
+        Os::Windows => windows::install(&host, &dir, &id, out).await?,
+    };
     stage(out, "Connecting the worker…").await?;
     let saved = app.catalog.lock().unwrap().add_managed_host(
         &host.name,
@@ -322,17 +323,79 @@ async fn enroll(
     Err("Host installed and saved; worker connection is taking longer than expected. Check its status in Hosts.".into())
 }
 
+/// Uploads and installs the worker over POSIX sh; returns the saved worker command.
+async fn install_unix(host: &Host, dir: &Path, id: &str, out: &Output) -> Result<String> {
+    let remote = format!("\"$HOME/.local/share/agentworks/releases/{id}\"");
+    let bundle = bundle(dir, out).await?;
+    let command = format!("umask 077; mkdir -p {remote} && cat > {remote}/bundle.tar.gz");
+    let mut upload = managed(host, &command);
+    upload.stdin(Stdio::from(File::open(&bundle).map_err(|e| e.to_string())?));
+    run(&mut upload, out).await?;
+    // SHA-256 is checked before extraction; only our own source files are bundled.
+    let checksum = checksum(&bundle).await?;
+    stage(out, "Installing the worker…").await?;
+    let install = format!(
+        "set -eu; cd {remote}; if command -v sha256sum >/dev/null; then actual=$(sha256sum bundle.tar.gz); else actual=$(shasum -a 256 bundle.tar.gz); fi; test \"${{actual%% *}}\" = {checksum} || {{ echo 'Bundle checksum mismatch' >&2; exit 1; }}; tar -xzf bundle.tar.gz; rm bundle.tar.gz; sh install.sh"
+    );
+    run(
+        &mut managed(host, &format!("sh -c {}", quote(&install))),
+        out,
+    )
+    .await?;
+    Ok(format!("{remote}/launch"))
+}
+
+/// SHA-256 of a local bundle; checked remotely before extraction.
+async fn checksum(path: &Path) -> Result<String> {
+    let bytes = tokio::fs::read(path).await.map_err(|e| e.to_string())?;
+    tokio::task::spawn_blocking(move || crate::sha256::hex(&bytes))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// The worker-only executable built or installed beside this one (`<exe>-worker`),
+/// if it speaks this server's worker protocol. Cargo relinks only changed binaries,
+/// so timestamps cannot tell a stale sibling from a current one.
+pub fn worker_executable() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let mut name = exe.file_name()?.to_os_string();
+    name.push("-worker");
+    let worker = exe.with_file_name(name);
+    let probe = std::process::Command::new(&worker)
+        .arg("--worker-protocol")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let reply: serde_json::Value = serde_json::from_slice(&probe.stdout).ok()?;
+    (probe.status.success() && reply["workerProtocol"] == agentworks_runtime::remote::PROTOCOL)
+        .then_some(worker)
+}
+
 async fn bundle(dir: &Path, out: &Output) -> Result<PathBuf> {
     let staging = dir.join("runtime");
     tokio::fs::create_dir_all(&staging)
         .await
         .map_err(|e| e.to_string())?;
-    tokio::fs::copy(
-        std::env::current_exe().map_err(|e| e.to_string())?,
-        staging.join("agentworks"),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    // The full service also serves every worker subcommand, so it remains a fallback.
+    // Either way the payload is named `agentworks`, which `launch` and hosts expect.
+    let executable = match tokio::task::spawn_blocking(worker_executable)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        Some(worker) => worker,
+        None => {
+            output(
+                out,
+                b"No current agentworks-worker beside this server; installing the full Agentworks binary.\r\n",
+            )
+            .await?;
+            std::env::current_exe().map_err(|e| e.to_string())?
+        }
+    };
+    tokio::fs::copy(executable, staging.join("agentworks"))
+        .await
+        .map_err(|e| e.to_string())?;
     for (file, bytes) in [
         (
             "launch",

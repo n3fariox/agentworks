@@ -150,7 +150,7 @@ pub fn seed(db: &Connection) -> rusqlite::Result<()> {
 pub fn list(db: &Connection) -> rusqlite::Result<Vec<Script>> {
     let mut stmt = db.prepare(
         "SELECT s.name,s.capability,s.source,s.hash,s.enabled,s.builtin,s.updated,COALESCE(o.priority,0) AS priority
-         FROM scripts s LEFT JOIN script_order o ON o.name=s.name
+         FROM scripts s LEFT JOIN script_order o ON o.name=s.name WHERE s.capability<>'automation'
          ORDER BY priority DESC, s.name COLLATE BINARY",
     )?;
     stmt.query_map([], |r| {
@@ -351,6 +351,12 @@ enum Message {
         lines: Vec<String>,
         reply: mpsc::SyncSender<Vec<Option<String>>>,
     },
+    Github {
+        session: String,
+        context: Value,
+        event: Value,
+        reply: mpsc::SyncSender<()>,
+    },
     Forget(String),
 }
 
@@ -363,6 +369,7 @@ pub struct Hub {
     headers: Headers,
     /// Chat message types with an enabled formatter, so rendering skips the thread otherwise.
     chat: Arc<Mutex<HashSet<String>>>,
+    github_pending: Arc<Mutex<HashMap<(String, i64), Arc<Mutex<mpsc::Receiver<()>>>>>>,
 }
 
 /// Formatted chat lines remembered across renders of a streaming message.
@@ -375,11 +382,17 @@ const MAX_CHAT_LINE_BYTES: usize = 8 * 1024;
 type ChatCache = HashMap<(String, String, String), (Option<String>, Vec<Value>)>;
 
 impl Hub {
+    pub(crate) fn engine(&self) -> Arc<Engine> {
+        self.engine.clone()
+    }
+
     pub fn new(engine: Arc<Engine>, parsers: Vec<StarlarkParser>) -> Self {
         let (views, headers) = (Views::default(), Headers::default());
         let (tx, rx) = mpsc::channel::<Message>();
         let mut formatters: Vec<Arc<Compiled>> = Vec::new();
         let mut chat_formatters: Vec<Arc<Compiled>> = Vec::new();
+        let mut github_hooks: Vec<Arc<Compiled>> = Vec::new();
+        let mut github_failures = HashSet::new();
         let mut chat_cache = ChatCache::new();
         let mut tracker = Tracker::new(parsers, views.clone());
         let mut header_tracker = HeaderTracker::new(engine.clone(), headers.clone());
@@ -418,6 +431,8 @@ impl Hub {
                             tracker.parsers = hooks.parsers;
                             formatters = hooks.formatters;
                             chat_formatters = hooks.chat;
+                            github_hooks = hooks.github;
+                            github_failures.clear();
                             chat_cache.clear();
                             header_tracker.reload(hooks.headers);
                         }
@@ -509,6 +524,44 @@ impl Hub {
                                 .collect();
                             let _ = reply.send(formatted);
                         }
+                        Message::Github {
+                            session,
+                            context,
+                            event,
+                            reply,
+                        } => {
+                            let _scope = interpreter.badge_scope(Some(&session));
+                            for script in &github_hooks {
+                                if !script.accepts_github_event(
+                                    event["kind"].as_str().unwrap_or_default(),
+                                ) {
+                                    continue;
+                                }
+                                match interpreter.call(script, &context, &event) {
+                                    Ok((value, _)) if value["result"].is_null() => {
+                                        interpreter.publish_badges(script, &value)
+                                    }
+                                    Ok(_) => {
+                                        if github_failures
+                                            .insert(format!("{}@{}", script.name, script.hash))
+                                        {
+                                            eprintln!(
+                                                "GitHub hook {} must return None",
+                                                script.name
+                                            );
+                                        }
+                                    }
+                                    Err(error) => {
+                                        if github_failures
+                                            .insert(format!("{}@{}", script.name, script.hash))
+                                        {
+                                            eprintln!("GitHub hook failed: {error}");
+                                        }
+                                    }
+                                }
+                            }
+                            let _ = reply.send(());
+                        }
                         Message::Forget(session) => {
                             tracker.forget(&session);
                             header_tracker.forget(&session);
@@ -523,9 +576,41 @@ impl Hub {
             views,
             headers,
             chat: Arc::default(),
+            github_pending: Arc::default(),
         }
     }
 
+    /// Returns only when the hook thread accepted this observation. Retrying a
+    /// timed-out delivery reuses its stable event ID; setters are idempotent.
+    pub fn github_event(&self, session: &str, provider: &str, cwd: &str, event: Value) -> bool {
+        let Some(id) = event["id"].as_i64() else {
+            return false;
+        };
+        let key = (session.to_owned(), id);
+        let mut pending = self.github_pending.lock().unwrap();
+        if !pending.contains_key(&key) {
+            let (reply, rx) = mpsc::sync_channel(1);
+            if self.tx.send(Message::Github {session:session.into(),context:json!({"provider":provider,"cwd":cwd.trim_end_matches('/'),"state":{}}),event,reply}).is_err() { return false; }
+            pending.insert(key.clone(), Arc::new(Mutex::new(rx)));
+        }
+        let receiver = pending[&key].clone();
+        drop(pending);
+        let result = receiver
+            .lock()
+            .unwrap()
+            .recv_timeout(std::time::Duration::from_secs(1));
+        match result {
+            Ok(()) => {
+                self.github_pending.lock().unwrap().remove(&key);
+                true
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => false,
+            Err(_) => {
+                self.github_pending.lock().unwrap().remove(&key);
+                false
+            }
+        }
+    }
     pub fn bind_badge_sessions(&self, sessions: &Arc<Mutex<HashMap<String, Arc<crate::Session>>>>) {
         let registry = Arc::downgrade(sessions);
         let failed = Mutex::new(HashSet::new());
@@ -600,6 +685,10 @@ impl Hub {
     }
 
     pub fn forget(&self, session: &str) {
+        self.github_pending
+            .lock()
+            .unwrap()
+            .retain(|(s, _), _| s != session);
         let _ = self.tx.send(Message::Forget(session.to_owned()));
     }
 
@@ -731,6 +820,7 @@ impl Hub {
 /// Enabled handlers by hook, in routing order.
 #[derive(Default)]
 struct Hooks {
+    github: Vec<Arc<Compiled>>,
     parsers: Vec<StarlarkParser>,
     formatters: Vec<Arc<Compiled>>,
     headers: Vec<Arc<Compiled>>,
@@ -809,9 +899,8 @@ fn compile_hooks(
                         Capability::MessageFormatter => hooks.formatters.push(handler.clone()),
                         Capability::ToolHeader => hooks.headers.push(handler.clone()),
                         Capability::ChatFormatter => hooks.chat.push(handler.clone()),
-                        Capability::Workflow => {
-                            unreachable!("workflow registrations are not exposed")
-                        }
+                        Capability::Github => hooks.github.push(handler.clone()),
+                        Capability::Workflow => {} // Routed only by explicitly bound automations.
                     }
                 }
             }
@@ -846,6 +935,23 @@ pub struct Enabled {
 #[serde(deny_unknown_fields)]
 pub struct Priority {
     priority: i64,
+}
+
+fn ensure_hook(db: &Connection, name: &str) -> Result<(), (axum::http::StatusCode, String)> {
+    let automation: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM scripts WHERE name=?1 AND capability='automation')",
+            [name],
+            |r| r.get(0),
+        )
+        .map_err(db_error)?;
+    if automation {
+        return Err(crate::fail(
+            axum::http::StatusCode::CONFLICT,
+            "Manage automation scripts from the Automations tab",
+        ));
+    }
+    Ok(())
 }
 
 fn db_error(e: rusqlite::Error) -> (axum::http::StatusCode, String) {
@@ -905,6 +1011,7 @@ pub async fn put_script(
             "Script names are lowercase letters, digits, - or _ ending in .star",
         ));
     }
+    ensure_hook(&app.store.lock().unwrap().connection, &name)?;
     app.progress
         .check(&name, &body.source)
         .map_err(|d| crate::fail(StatusCode::BAD_REQUEST, d.to_string()))?;
@@ -919,6 +1026,7 @@ pub async fn put_enabled(
     axum::Json(body): axum::Json<Enabled>,
 ) -> crate::ApiResult {
     let store = app.store.lock().unwrap();
+    ensure_hook(&store.connection, &name)?;
     if !set_enabled(&store.connection, &name, body.enabled).map_err(db_error)? {
         return Err(crate::fail(
             axum::http::StatusCode::NOT_FOUND,
@@ -942,6 +1050,7 @@ pub async fn put_priority(
         ));
     }
     let store = app.store.lock().unwrap();
+    ensure_hook(&store.connection, &name)?;
     if !set_priority(&store.connection, &name, body.priority).map_err(db_error)? {
         return Err(crate::fail(StatusCode::NOT_FOUND, "Script not found"));
     }
@@ -954,6 +1063,7 @@ pub async fn delete_script(
 ) -> crate::ApiResult {
     use axum::http::StatusCode;
     let store = app.store.lock().unwrap();
+    ensure_hook(&store.connection, &name)?;
     match delete(&store.connection, &name).map_err(db_error)? {
         Removal::Missing => Err(crate::fail(StatusCode::NOT_FOUND, "Script not found")),
         Removal::Builtin => Err(crate::fail(
@@ -968,6 +1078,7 @@ pub async fn delete_script(
 pub fn start(db: &Connection) -> Result<Hub, String> {
     seed(db).map_err(|e| e.to_string())?;
     let engine = Arc::new(Engine::new()?);
+    crate::automations::migrate_scripts(db, &engine)?;
     let hub = Hub::new(engine, Vec::new());
     for error in hub.reload(db).map_err(|e| e.to_string())? {
         eprintln!("Script disabled for this run: {error}");
@@ -1417,7 +1528,14 @@ agent.register_formatter(format_line, message_type = "chat.agent")
                 .starts_with("**Review request**")
         );
         seed(&db).unwrap();
-        assert!(!list(&db).unwrap()[1].builtin);
+        assert!(
+            !list(&db)
+                .unwrap()
+                .iter()
+                .find(|s| s.name == "inbox_message.star")
+                .unwrap()
+                .builtin
+        );
         set_enabled(&db, "inbox_message.star", false).unwrap();
         hub.reload(&db).unwrap();
         assert_eq!(hub.format_inbox(&messages), vec![None]);
@@ -1479,7 +1597,14 @@ agent.register_formatter(format_line, message_type = "chat.agent")
             "restoring returns to the shipped source"
         );
         save(&db, "make.star", "x").unwrap();
-        assert!(!list(&db).unwrap()[2].shipped);
+        assert!(
+            !list(&db)
+                .unwrap()
+                .iter()
+                .find(|s| s.name == "make.star")
+                .unwrap()
+                .shipped
+        );
         assert_eq!(delete(&db, "make.star").unwrap(), Removal::Deleted);
         assert_eq!(delete(&db, "missing.star").unwrap(), Removal::Missing);
         assert!(

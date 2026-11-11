@@ -19,7 +19,12 @@ use tokio_tungstenite::tungstenite::Message;
 pub fn allowed(operation: &str) -> bool {
     matches!(
         operation,
-        "tools/list" | "list_sessions" | "read_inbox" | "send_message" | "acknowledge_message"
+        "tools/list"
+            | "list_sessions"
+            | "read_inbox"
+            | "read_message"
+            | "send_message"
+            | "acknowledge_message"
     )
 }
 pub fn valid_call(call: &Value) -> bool {

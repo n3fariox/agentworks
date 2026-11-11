@@ -23,6 +23,10 @@ pub struct Owned {
     pub population: Option<String>,
     #[serde(default)]
     pub settings: Option<crate::config::Settings>,
+    /// While set, the destination is reserved but Git has not filled it yet;
+    /// the repository top-level to populate it from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize)]
@@ -61,6 +65,9 @@ pub struct Inspection {
     pub shared_with: Vec<Value>,
     /// Why removal is unsafe regardless of the dirty state.
     pub blocker: Option<String>,
+    /// The blocker is only that other sessions use the checkout; a human may override it.
+    #[serde(default)]
+    pub in_use: bool,
 }
 
 fn conflict(message: impl Into<String>) -> Error {
@@ -136,6 +143,7 @@ pub async fn inspect_in(
         locked: false,
         shared_with: Vec::new(),
         blocker: None,
+        in_use: false,
     };
     let Some(o) = owned else {
         return result;
@@ -258,7 +266,7 @@ pub async fn restore_in(
     match std::fs::symlink_metadata(&o.path) {
         Ok(_) => {
             // Adopt only the same repository's checkout of the recorded branch.
-            if verify(app, &o).await.is_ok() {
+            if verify(app, o).await.is_ok() {
                 return Ok(Some(
                     json!({"outcome":"adopted","path":o.path,"branch":o.branch,"population":"unknown (adopted)"}),
                 ));
@@ -326,7 +334,7 @@ pub async fn restore_in(
                 return Err(conflict(format!("Could not recreate worktree: {message}")));
             }
         };
-    verify(app, &o).await.map_err(conflict)?;
+    verify(app, o).await.map_err(conflict)?;
     Ok(Some(
         json!({"outcome":"restored","path":o.path,"branch":o.branch,"population":population}),
     ))

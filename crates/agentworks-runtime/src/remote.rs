@@ -20,6 +20,7 @@ use tokio::{
     process::Command,
 };
 use tokio_tungstenite::tungstenite::{Message, protocol::WebSocketConfig};
+use tracing::Instrument;
 
 /// A remote execution host. The server reaches it over SSH and starts the
 /// Agentworks worker there; all session state stays on this server. The
@@ -119,7 +120,12 @@ impl Hosts {
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         let mut tasks = self.tasks.lock().unwrap();
         self.write_link(&host.id, "connecting", String::new(), None);
-        let task = tokio::spawn(self.clone().supervise(host.clone(), generation));
+        let span = tracing::info_span!("host", host = %host.name);
+        let task = tokio::spawn(
+            self.clone()
+                .supervise(host.clone(), generation)
+                .instrument(span),
+        );
         tasks.insert(host.id, (generation, task.abort_handle()));
     }
     /// Aborting the supervisor drops its ssh child, which is killed on drop.
@@ -205,6 +211,7 @@ impl Hosts {
             );
             let started = Instant::now();
             let reason = self.connect_once(&host, generation).await;
+            tracing::warn!("Offline: {reason}");
             // A link that stayed up for a while was healthy; retry promptly.
             if started.elapsed() > MAX_BACKOFF {
                 backoff = MIN_BACKOFF;
@@ -224,6 +231,7 @@ impl Hosts {
 
     /// Runs one ssh session for its whole life and returns why it ended.
     async fn connect_once(&self, host: &Host, generation: u64) -> String {
+        let started = Instant::now();
         let mut child = match Command::new(&self.ssh)
             .args(ssh_args(host))
             .stdin(Stdio::piped())
@@ -241,6 +249,7 @@ impl Hosts {
             return "Could not attach to ssh's input and output.".into();
         };
         let log: Arc<Mutex<VecDeque<String>>> = Default::default();
+        // The worker logs to stderr, so its lines join the server's log here.
         collect(child.stderr.take(), log.clone());
         let tail = |log: &Arc<Mutex<VecDeque<String>>>| {
             let lines = log.lock().unwrap();
@@ -318,7 +327,7 @@ impl Hosts {
         };
         if ws
             .send(Message::text(
-                json!({"type":"welcome","protocol":PROTOCOL,"hostId":host.id}).to_string(),
+                json!({"type":"welcome","protocol":PROTOCOL,"hostId":host.id,"log":crate::log::configured()}).to_string(),
             ))
             .await
             .is_err()
@@ -346,6 +355,7 @@ impl Hosts {
             }
             let _ = sink.close().await;
         });
+        tracing::info!(elapsed_ms = crate::log::ms(started), "Connected");
         let live = Arc::new(Live::new(out.clone(), worker.clone()));
         let _connection = ConnectionGuard {
             live: live.clone(),
@@ -666,7 +676,7 @@ impl Live {
     pub fn home_terminal(self: &Arc<Self>) -> Result<crate::terminal::Handle, String> {
         let home = self.worker["home"]
             .as_str()
-            .filter(|home| home.starts_with('/'))
+            .filter(|home| agentworks_workspace::paths::normalize(home).is_some())
             .ok_or_else(|| "Update the remote worker to enable host terminals.".to_string())?;
         self.terminal(home)
     }
@@ -782,6 +792,9 @@ impl Live {
         let timeout =
             if request["type"] == "workspace" && request["operation"] == "runWorktreeHooks" {
                 Duration::from_secs(360)
+            } else if request["type"] == "workspace" && request["operation"] == "populateWorktree" {
+                // A checkout of a large repository; Git's own deadline is shorter.
+                Duration::from_secs(660)
             } else if request["type"] == "workspace" {
                 Duration::from_secs(120)
             } else {
@@ -797,19 +810,32 @@ impl Live {
             requests.insert(id, tx);
         }
         let _pending = DirectoryRequest { live: self, id };
+        let kind = request["operation"]
+            .as_str()
+            .or(request["type"].as_str())
+            .unwrap_or("")
+            .to_owned();
         request["request"] = json!(id);
         let request = request.to_string();
+        let started = Instant::now();
         if self.out.send(Message::text(request)).await.is_err() {
             self.requests.lock().unwrap().remove(&id);
             return Err("The host disconnected.".into());
         }
-        match tokio::time::timeout(timeout, rx).await {
+        let result = match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(result)) => result,
             _ => {
                 self.requests.lock().unwrap().remove(&id);
                 Err("The host did not answer.".into())
             }
-        }
+        };
+        tracing::debug!(
+            request = kind,
+            elapsed_ms = crate::log::ms(started),
+            ok = result.is_ok(),
+            "Host request finished"
+        );
+        result
     }
     /// Starts an agent adapter on the worker. The returned transport carries
     /// its ACP lines; dropping the guard stops the remote process.
@@ -1043,6 +1069,7 @@ fn check_hello(hello: &Value) -> Result<Value, String> {
         "mcpRelay": hello["mcpRelay"],
         "workspace": hello["workspace"] == true,
         "gitSettings": hello["gitSettings"] == true,
+        "deferredWorktree": hello["deferredWorktree"] == true,
         "modelProviders": hello["modelProviders"] == true,
         "sharedModelProviders": hello["sharedModelProviders"] == true,
         "worktreeCleanup": hello["worktreeCleanup"] == true,
@@ -1072,12 +1099,16 @@ fn collect(
     log: Arc<Mutex<VecDeque<String>>>,
 ) {
     let Some(output) = output else { return };
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(output).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            push_line(&log, &line);
+    tokio::spawn(
+        async move {
+            let mut lines = BufReader::new(output).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::info!(target: "agentworks::worker", "{line}");
+                push_line(&log, &line);
+            }
         }
-    });
+        .in_current_span(),
+    );
 }
 
 /// Reads ssh's stdout up to the worker's ready line, keeping what came before

@@ -1,19 +1,19 @@
 import {serverReady,stopChild} from './support/cleanup.mjs';
 import {test,expect} from '@playwright/test';
 import {spawn} from 'node:child_process';
-import {mkdtemp,mkdir,rm} from 'node:fs/promises';
+import {mkdtemp,mkdir,rm,writeFile} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 
 // L-05: isolated servers/databases on assigned ports 4511-4512; demo agent only, no paid inference.
 const base='http://127.0.0.1:4511';
 test.use({baseURL:base});
-let fixture,server,session;
+let fixture,server,session,gate;
 
 function launch(port,dir){
   const proc={log:'',exited:false};
   proc.child=spawn(resolve('target/debug/agentworks'),[],{env:{...process.env,
     AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:String(port),AGENTWORKS_ROOTS:dir,
-    AGENTWORKS_CATALOG_PATH:join(dir,'catalog.json'),AGENTWORKS_DB_PATH:join(dir,'sessions.sqlite3'),AGENTWORKS_DEMO_STATE_DIR:join(dir,'demo')},stdio:['ignore','pipe','pipe']});
+    AGENTWORKS_CATALOG_PATH:join(dir,'catalog.json'),AGENTWORKS_DB_PATH:join(dir,'sessions.sqlite3'),AGENTWORKS_DEMO_STATE_DIR:join(dir,'demo'),AGENTWORKS_DEMO_START_GATE:join(dir,'start-gate')},stdio:['ignore','pipe','pipe']});
   proc.child.on('error',e=>{proc.log+=e.message;proc.exited=true;});proc.child.on('exit',()=>proc.exited=true);
   for(const stream of [proc.child.stdout,proc.child.stderr])stream.on('data',s=>{proc.log+=s.toString();});
   return proc;
@@ -33,16 +33,16 @@ async function call(path,body,method,url=base){
 async function api(path,body,method,url=base){const r=await call(path,body,method,url);expect(r.status,JSON.stringify(r.body)).toBeLessThan(300);return r.body;}
 async function until(fn,ms=20000){const end=Date.now()+ms;while(Date.now()<end){if(await fn())return;await new Promise(r=>setTimeout(r,100));}throw new Error('Condition timed out');}
 const state=async(url=base,id=session.id)=>(await api(`/api/sessions/${id}`,undefined,undefined,url)).session.status;
-async function openSession(page,id=session.id){
+async function openSession(page,id=session.id,url='/'){
   await page.addInitScript(id=>{if(!sessionStorage.getItem('queue-init')){localStorage.setItem('agentworks-session',id);sessionStorage.setItem('queue-init','1');}},id);
-  await page.goto('/');
+  await page.goto(url);
   await expect(page.locator('#session-state')).toHaveText('Ready');
 }
-async function type(page,text){await page.locator('#prompt').fill(text);await page.locator('#prompt').press('Enter');}
+async function type(page,text){await page.locator('#prompt-editor .cm-content').fill(text);await page.locator('#send').click();}
 
 test.beforeAll(async()=>{
   await mkdir('.cache',{recursive:true});fixture=await mkdtemp(resolve('.cache/input-queue-'));
-  server=launch(4511,fixture);await ready(server,base);
+  gate=join(fixture,'start-gate');server=launch(4511,fixture);await ready(server,base);
 });
 test.afterAll(async()=>{await stopChild(server?.child);if(fixture)await rm(fixture,{recursive:true,force:true});});
 test.beforeEach(async()=>{session=null;session=await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Queue test'});await until(async()=>await state()==='idle');});
@@ -78,7 +78,7 @@ test('queue during a turn: FIFO order, edit/remove, activity label, dispatch onl
   await expect(items).toHaveCount(2);
   // After the first turn ends normally, the edited head item is sent with its revisioned request ID.
   await expect(page.locator('#messages')).toContainText('queued alpha edited',{timeout:20000});
-  await expect(items.nth(0).locator('.queue-state')).toHaveText(/Sending|Sent/);
+  expect((await api(`/api/sessions/${session.id}/queue`)).queue.items[0].state).toBe('sent');
   await until(async()=>(await api(`/api/sessions/${session.id}/queue`)).queue.items.every(i=>i.state==='sent'));
   const q=(await api(`/api/sessions/${session.id}/queue`)).queue;
   expect(q.items.map(i=>i.text)).toEqual(['queued alpha edited','queued beta']);
@@ -106,6 +106,44 @@ test('duplicate request IDs, changed payloads, stale revisions and bounds',async
   await api(`/api/sessions/${session.id}/stop`,{});
 });
 
+test('input typed during startup is queued and sent once the session is ready',async({page})=>{
+  await writeFile(gate,'hold');
+  const held=await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Startup queue'});
+  try{
+    await until(async()=>await state(base,held.id)==='starting');
+    await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),held.id);
+    await page.goto('/');
+    await expect(page.locator('#session-state')).toHaveText('Starting');
+    await expect(page.locator('#send')).toHaveAttribute('aria-label','Queue message');
+    await type(page,'typed while starting');
+    await expect(page.locator('#input-queue .queue-state')).toHaveText('Queued');
+    expect((await api(`/api/sessions/${held.id}`)).events.filter(e=>e.kind==='user').length).toBe(0);
+    await rm(gate);
+    await expect(page.locator('#messages')).toContainText('typed while starting',{timeout:15000});
+    await until(async()=>(await api(`/api/sessions/${held.id}/queue`)).queue.items[0].state==='sent');
+  }finally{await rm(gate,{force:true});await api(`/api/sessions/${held.id}`,undefined,'DELETE');}
+});
+
+test('input typed during a startup that fails is paused and never sent',async({page})=>{
+  await writeFile(gate,'hold');
+  const held=await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Failed startup'});
+  try{
+    await until(async()=>await state(base,held.id)==='starting');
+    await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),held.id);
+    await page.goto('/');
+    await expect(page.locator('#session-state')).toHaveText('Starting');
+    await type(page,'kept for inspection');
+    await expect(page.locator('#input-queue .queue-state')).toHaveText('Queued');
+    await writeFile(gate,'fail');
+    await expect(page.locator('#input-queue .queue-state')).toHaveText('Paused',{timeout:15000});
+    await expect(page.locator('.queue-paused')).toContainText('did not start');
+    await expect(page.locator('#input-queue .queue-text')).toHaveText('kept for inspection');
+    const after=await api(`/api/sessions/${held.id}`);
+    expect(after.session.status).toBe('error');
+    expect(after.events.filter(e=>e.kind==='user').length).toBe(0);
+  }finally{await rm(gate,{force:true});await api(`/api/sessions/${held.id}`,undefined,'DELETE');}
+});
+
 test('Stop pauses the queue; nothing sends until a deliberate resume',async({page})=>{
   await openSession(page);
   await type(page,'slow work to stop');
@@ -129,6 +167,7 @@ test('the queue panel disappears when no pending inputs remain',async({page})=>{
   await type(page,'already sent');
   await expect(page.locator('#messages')).toContainText('already sent',{timeout:15000});
   await until(async()=>(await api(`/api/sessions/${session.id}/queue`)).queue.items[0].state==='sent');
+  await expect(page.locator('#session-state')).toHaveText('Ready');
 
   await type(page,'slow turn to cancel');
   await expect(page.locator('#activity-indicator')).toBeVisible();
@@ -148,6 +187,50 @@ test('the queue panel disappears when no pending inputs remain',async({page})=>{
   expect((await api(`/api/sessions/${session.id}/queue`)).queue.paused).toContain('Cancelled');
 });
 
+test('queued input becomes sent as its turn starts and disappears from pending inputs',async({page})=>{
+  await openSession(page);
+  const path=`/api/sessions/${session.id}/queue`;
+  await api(path,{text:'slow queued turn',requestId:'slow-queued'});
+  await expect(page.locator('#input-queue .queue-state')).toHaveText('Queued');
+  await page.getByRole('button',{name:'Send next now'}).click();
+  await expect(page.locator('#messages')).toContainText('slow queued turn');
+  await expect(page.locator('#activity-indicator')).toBeVisible();
+  expect(await state()).toBe('running');
+  expect((await api(path)).queue.items[0].state).toBe('sent');
+  await expect(page.locator('#input-queue')).toBeHidden();
+  await api(`/api/sessions/${session.id}/stop`,{});
+  await until(async()=>await state()==='idle');
+  expect((await api(path)).queue.items[0].state).toBe('sent');
+});
+
+test('uncertain command handoff stays visible for inspection and pauses later inputs',async({page})=>{
+  const {DatabaseSync}=await import('node:sqlite');
+  const dir=await mkdtemp(resolve('.cache/input-queue-handoff-')),url='http://127.0.0.1:4513';
+  let proc,db;
+  try{
+    proc=launch(4513,dir);await ready(proc,url);
+    const s=await api('/api/sessions',{provider:'demo',cwd:dir,title:'Uncertain handoff'},undefined,url);
+    await until(async()=>await state(url,s.id)==='idle');
+    const path=`/api/sessions/${s.id}/queue`;
+    await api(path,{text:'slow uncertain handoff',requestId:'uncertain'},undefined,url);
+    await api(path,{text:'must stay paused',requestId:'later'},undefined,url);
+    db=new DatabaseSync(join(dir,'sessions.sqlite3'));
+    // Fail only the post-handoff Sent save, after the command channel accepted it.
+    db.exec(`CREATE TRIGGER reject_sent BEFORE UPDATE ON sessions WHEN NEW.state LIKE '%"sent"%' BEGIN SELECT RAISE(ABORT,'injected handoff persistence failure'); END;`);
+    await openSession(page,s.id,url);
+    await page.getByRole('button',{name:'Send next now'}).click();
+    await expect(page.locator('#input-queue')).toBeVisible();
+    await expect(page.locator('#input-queue [data-id="q1"] .queue-state')).toHaveText('Needs inspection');
+    await expect(page.locator('#input-queue [data-id="q2"] .queue-state')).toHaveText('Paused');
+    await expect(page.locator('#input-queue [data-id="q1"] .queue-note')).toContainText('handoff unconfirmed');
+    const queue=(await api(path,undefined,undefined,url)).queue;
+    expect(queue.items.map(i=>i.state)).toEqual(['error','paused']);
+    expect(queue.ready).toBe(false);
+    const users=(await api(`/api/sessions/${s.id}`,undefined,undefined,url)).events.filter(e=>e.kind==='user').map(e=>e.data.text);
+    expect(users).toEqual(['slow uncertain handoff']);
+  }finally{try{db?.close();}finally{await stopChild(proc?.child);await rm(dir,{recursive:true,force:true});}}
+});
+
 test('approval wait label, queued input dispatches after approval completes the turn',async({page})=>{
   await openSession(page);
   await type(page,'approval');
@@ -164,7 +247,7 @@ test('session switching keeps drafts and per-session queues; replay shows unknow
   await type(page,'slow switching');
   await expect(page.locator('#activity-indicator')).toBeVisible();
   await type(page,'queued in A');
-  await page.locator('#prompt').fill('unsent draft A');
+  await page.locator('#prompt-editor .cm-content').fill('unsent draft A');
   await page.locator('.session-item',{hasText:'Queue other'}).first().click();
   await expect(page.locator('#input-queue')).toBeHidden();
   await page.locator('.session-item',{hasText:'Queue test'}).first().click();
@@ -196,7 +279,7 @@ test('mobile, keyboard and reduced motion',async({browser})=>{
   }finally{await context.close();}
 });
 
-test('restart during queued dispatch pauses as ambiguous and never replays',async()=>{
+test('restart during an accepted queued turn preserves sent status and pauses later inputs',async()=>{
   const dir=await mkdtemp(resolve('.cache/input-queue-restart-'));const url='http://127.0.0.1:4512';
   let proc;
   try{
@@ -206,12 +289,11 @@ test('restart during queued dispatch pauses as ambiguous and never replays',asyn
   await api(`/api/sessions/${s.id}/prompt`,{text:'quick',requestId:'first'},undefined,url);
   await api(`/api/sessions/${s.id}/queue`,{text:'slow mutating queued work',requestId:'qa'},undefined,url);
   await api(`/api/sessions/${s.id}/queue`,{text:'later',requestId:'qb'},undefined,url);
-  await until(async()=>(await api(`/api/sessions/${s.id}/queue`,undefined,undefined,url)).queue.items[0].state==='sending');
+  await until(async()=>(await api(`/api/sessions/${s.id}/queue`,undefined,undefined,url)).queue.items[0].state==='sent');
   proc.child.kill('SIGKILL');await until(()=>proc.exited);
   proc=launch(4512,dir);await ready(proc,url);
     const q=(await api(`/api/sessions/${s.id}/queue`,undefined,undefined,url)).queue;
-    expect(q.items[0].state).toBe('error');
-    expect(q.items[0].note).toContain('delivery unknown');
+    expect(q.items[0].state).toBe('sent');
     expect(q.items[1].state).toBe('paused');
     expect(q.paused).toContain('restarted');
     await new Promise(r=>setTimeout(r,500));
@@ -253,7 +335,7 @@ test('quota failure of a queued item pauses the queue and never sends later item
   await api(path,{text:'after quota',requestId:'aq'});
   await until(async()=>(await api(path)).queue.paused!=null,25000);
   const q=(await api(path)).queue;
-  expect(q.items[0].state).toBe('error');
+  expect(q.items[0].state).toBe('sent');
   expect(q.items[1].state).toBe('paused');
   await new Promise(r=>setTimeout(r,800));
   const users=(await api(`/api/sessions/${session.id}`)).events.filter(e=>e.kind==='user').map(e=>e.data.text);
@@ -298,10 +380,10 @@ test('Stop and Suspend win over turn-end dispatch',async()=>{
 
 test('Send then Enter race queues the second input exactly once without losing it',async({page})=>{
   await openSession(page);
-  await page.locator('#prompt').fill('slow race first');
+  await page.locator('#prompt-editor .cm-content').fill('slow race first');
   await page.locator('#send').click();
-  await page.locator('#prompt').fill('race second');
-  await page.locator('#prompt').press('Enter');
+  await page.locator('#prompt-editor .cm-content').fill('race second');
+  await page.locator('#prompt-editor .cm-content').press('Enter');
   await expect(page.locator('#input-queue .queue-text')).toHaveText(['race second']);
   await expect(page.locator('#prompt')).toHaveValue('');
   await until(async()=>(await api(`/api/sessions/${session.id}/queue`)).queue.items[0]?.state==='sent',25000);

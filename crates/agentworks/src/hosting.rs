@@ -28,10 +28,24 @@ pub async fn index() -> Html<String> {
 
 pub async fn asset(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
     let (mime, body): (&str, &[u8]) = match name.as_str() {
+        "favicon.svg" => (
+            "image/svg+xml",
+            include_bytes!("../../../web/favicon.svg"),
+        ),
         "dashboard" => {
             let page = include_str!("../../../web/dashboard.html");
             return Html(page.replace("<!-- PWA_METADATA -->", metadata())).into_response();
         }
+        #[cfg(feature = "model-viewer")]
+        "model-viewer-frame.html" => (
+            "text/html; charset=utf-8",
+            include_bytes!("../../../web/model-viewer-frame.html"),
+        ),
+        #[cfg(feature = "model-viewer")]
+        "model-viewer-frame.bundle.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("../../../web/model-viewer-frame.bundle.js"),
+        ),
         "dashboard.js" => (
             "text/javascript; charset=utf-8",
             include_bytes!("../../../web/dashboard.js"),
@@ -43,10 +57,6 @@ pub async fn asset(axum::extract::Path(name): axum::extract::Path<String>) -> Re
         "dashboard.css" => (
             "text/css; charset=utf-8",
             include_bytes!("../../../web/dashboard.css"),
-        ),
-        "review-queue.js" => (
-            "text/javascript; charset=utf-8",
-            include_bytes!("../../../web/review-queue.js"),
         ),
         "terminal.js" => (
             "text/javascript; charset=utf-8",

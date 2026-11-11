@@ -128,8 +128,8 @@ test('temporary OAuth callback feeds local and SSH Goose sessions without worker
   }
   await page.evaluate(id=>localStorage.setItem('agentworks-session',id),sessions[0].id);
   await page.goto(base+'/');
-  await expect(page.locator('.usage-status-toggle')).toContainText('codex primary (5h) 88% left');
-  await expect(page.locator('.usage-status-toggle')).toContainText('codex secondary (7d) 75% left');
+  await expect(page.locator('.usage-status-toggle')).toContainText('5h 88% left');
+  await expect(page.locator('.usage-status-toggle')).toContainText('7d 75% left');
   const stored=await readFile(join(dir,'providers','codex-oauth.json'),'utf8');expect(stored).toContain('fixture-refresh-rotated-1');expect((await stat(join(dir,'providers','codex-oauth.json'))).mode&0o777).toBe(0o600);
   const workerFiles=await files(remoteProviders);expect(workerFiles.some(path=>/codex-oauth\.json|tokens\.json/.test(path))).toBe(false);
   for(const session of sessions){const publicState=JSON.stringify(await api('/api/sessions/'+session.id));expect(publicState).not.toContain('fixture-access');expect(publicState).not.toContain('fixture-refresh');}

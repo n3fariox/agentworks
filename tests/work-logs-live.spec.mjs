@@ -26,7 +26,7 @@ test('demo approval turn: approval stays actionable, log folds after completion 
   await page.goto(base+'/');await page.evaluate(id=>localStorage.setItem('agentworks-session',id),session.id);
   await page.goto(base+'/');
   await expect(page.locator('#prompt')).toBeEnabled({timeout:15000});
-  await page.fill('#prompt','approval');await page.click('#send');
+  await page.fill('#prompt-editor .cm-content','approval');await page.click('#send');
   const approval=page.locator('#approval-area .approval');
   await expect(approval).toBeVisible();
   await expect(page.locator('.work-log')).toHaveAttribute('open','');

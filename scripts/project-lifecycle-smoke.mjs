@@ -24,6 +24,13 @@ try{
  await start();
  // Archive cascades by default; unarchive restores the project and its sessions.
  let {p,ids}=await project('Archive cascade');
+ // A session in a turn refuses the whole cascade, before any session changes.
+ await until(async()=>(await find(ids.at(-1))).status==='idle');
+ await api(`/api/sessions/${ids.at(-1)}/prompt`,{text:'slow',requestId:crypto.randomUUID()});
+ await until(async()=>['running','waiting'].includes((await find(ids.at(-1))).status));
+ assert.match(await api(`/api/projects/${p.id}/archive`,{archived:true},'POST',409),/in a turn/);
+ for(const id of ids)assert.equal((await find(id)).archived,false);assert.equal((await catalogProject(p.id)).archived,false);
+ await api(`/api/sessions/${ids.at(-1)}/stop`,{});await until(async()=>(await find(ids.at(-1))).status==='idle');
  await api(`/api/projects/${p.id}/archive`,{archived:true});
  assert.equal((await catalogProject(p.id)).archived,true);
  for(const id of ids){const s=await find(id);assert.equal(s.archived,true);assert.equal(s.projectId,p.id);}

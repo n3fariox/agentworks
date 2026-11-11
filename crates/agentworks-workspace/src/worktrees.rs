@@ -29,6 +29,17 @@ pub struct Workspace {
     pub branch: Option<String>,
     pub base_ref: Option<String>,
     pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request: Option<PullRequest>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PullRequest {
+    pub host: String,
+    pub owner: String,
+    pub repo: String,
+    pub number: u64,
+    pub head_sha: String,
 }
 fn bad(message: impl Into<String>) -> Error {
     fail(StatusCode::BAD_REQUEST, message)
@@ -74,16 +85,73 @@ pub(crate) async fn git_limit(
     args: &[&str],
     limit: u64,
 ) -> Result<String, Error> {
-    let root = allowed(app, cwd)?;
-    let (ok, out, err, _) = tokio::time::timeout(
-        Duration::from_secs(10),
-        crate::git::git_bounded(cwd, &root, args, limit),
+    git_within(app, cwd, args, limit, Duration::from_secs(10)).await
+}
+/// How long a step that writes a checkout may take; large repositories need
+/// well over the usual Git deadline.
+pub(crate) const CHECKOUT_TIMEOUT: Duration = Duration::from_secs(600);
+/// Runs a Git command that writes a checkout, under `CHECKOUT_TIMEOUT`.
+pub(crate) async fn git_checkout(
+    app: &(impl Context + ?Sized),
+    cwd: &FsPath,
+    args: &[&str],
+) -> Result<String, Error> {
+    git_within(app, cwd, args, 256 * 1024, CHECKOUT_TIMEOUT).await
+}
+/// Checks Git's branch namespace before reserving a session. A branch conflicts
+/// if it already exists, is an existing branch's parent, or has existing child
+/// refs below it.
+async fn branch_ref_conflicts(
+    app: &(impl Context + ?Sized),
+    repo: &FsPath,
+    branch: &str,
+) -> Result<bool, Error> {
+    let requested = format!("refs/heads/{branch}");
+    let refs = git(
+        app,
+        repo,
+        &["for-each-ref", "--format=%(refname)", &requested],
     )
-    .await
-    .map_err(|_| {
-        conflict("Git operation timed out; inspect retained branch and files before retrying")
-    })?
-    .map_err(conflict)?;
+    .await?;
+    if refs.lines().any(|name| {
+        name == requested
+            || name
+                .strip_prefix(&requested)
+                .is_some_and(|rest| rest.starts_with('/'))
+    }) {
+        return Ok(true);
+    }
+
+    let mut ancestor = requested.as_str();
+    while let Some((parent, _)) = ancestor.rsplit_once('/') {
+        if parent == "refs/heads" {
+            break;
+        }
+        let refs = git(app, repo, &["for-each-ref", "--format=%(refname)", parent]).await?;
+        if refs.lines().any(|name| name == parent) {
+            return Ok(true);
+        }
+        ancestor = parent;
+    }
+    Ok(false)
+}
+async fn git_within(
+    app: &(impl Context + ?Sized),
+    cwd: &FsPath,
+    args: &[&str],
+    limit: u64,
+    timeout: Duration,
+) -> Result<String, Error> {
+    let root = allowed(app, cwd)?;
+    let (ok, out, err, _) =
+        tokio::time::timeout(timeout, crate::git::git_bounded(cwd, &root, args, limit))
+            .await
+            .map_err(|_| {
+                conflict(
+                    "Git operation timed out; inspect retained branch and files before retrying",
+                )
+            })?
+            .map_err(conflict)?;
     if !ok {
         return Err(bad(format!(
             "Git operation failed: {}",
@@ -113,9 +181,9 @@ pub(crate) async fn repository(
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )
     .await?;
-    let dir = std::fs::canonicalize(dir).map_err(|_| bad("Git directory is unavailable"))?;
-    let common =
-        std::fs::canonicalize(common).map_err(|_| bad("Git common directory is unavailable"))?;
+    let dir = crate::paths::canonicalize(dir).map_err(|_| bad("Git directory is unavailable"))?;
+    let common = crate::paths::canonicalize(common)
+        .map_err(|_| bad("Git common directory is unavailable"))?;
     allowed(app, &dir)?;
     allowed(app, &common)?;
     let main_top = common
@@ -218,6 +286,38 @@ pub async fn prepare_in(
     source: PathBuf,
     creation_key: Option<&str>,
 ) -> Result<(PathBuf, Option<Owned>), Error> {
+    prepare_with(
+        app,
+        workspace,
+        policy,
+        external,
+        source,
+        creation_key,
+        false,
+    )
+    .await
+}
+/// Like `prepare_in`, but a new worktree is only validated and its destination
+/// reserved: the returned ownership is `pending` until `populate_owned` fills it.
+pub async fn reserve_in(
+    app: &(impl Context + ?Sized),
+    workspace: Option<&Workspace>,
+    policy: Policy,
+    external: bool,
+    source: PathBuf,
+    creation_key: Option<&str>,
+) -> Result<(PathBuf, Option<Owned>), Error> {
+    prepare_with(app, workspace, policy, external, source, creation_key, true).await
+}
+async fn prepare_with(
+    app: &(impl Context + ?Sized),
+    workspace: Option<&Workspace>,
+    policy: Policy,
+    external: bool,
+    source: PathBuf,
+    creation_key: Option<&str>,
+    defer: bool,
+) -> Result<(PathBuf, Option<Owned>), Error> {
     // Histories are loaded in their actual supplied provider cwd, never in a new worktree.
     let mode = if external {
         Mode::Directory
@@ -225,7 +325,8 @@ pub async fn prepare_in(
         workspace.map(|w| w.mode).unwrap_or(policy.default_mode)
     };
     if mode != Mode::NewWorktree
-        && workspace.is_some_and(|w| w.branch.is_some() || w.base_ref.is_some())
+        && workspace
+            .is_some_and(|w| w.branch.is_some() || w.base_ref.is_some() || w.pull_request.is_some())
     {
         return Err(bad("branch and baseRef only apply to newWorktree"));
     }
@@ -276,6 +377,11 @@ pub async fn prepare_in(
                 &["check-ref-format", &format!("refs/heads/{branch}")],
             )
             .await?;
+            if branch_ref_conflicts(app, &repo.top, &branch).await? {
+                return Err(bad(
+                    "Branch already exists or conflicts with an existing branch",
+                ));
+            }
             let base = workspace
                 .and_then(|w| w.base_ref.as_deref())
                 .unwrap_or("HEAD");
@@ -285,6 +391,76 @@ pub async fn prepare_in(
                 || base.chars().any(char::is_control)
             {
                 return Err(bad("Invalid worktree base ref"));
+            }
+            if let Some(pr) = workspace.and_then(|w| w.pull_request.as_ref()) {
+                if pr.number == 0
+                    || pr.number > i32::MAX as u64
+                    || !matches!(pr.head_sha.len(), 40 | 64)
+                    || !pr.head_sha.bytes().all(|b| b.is_ascii_hexdigit())
+                    || base != pr.head_sha
+                {
+                    return Err(bad(
+                        "Invalid PR checkout or base ref; refresh the GitHub view",
+                    ));
+                }
+                let info = crate::git::inspect(&repo.top, &allowed(app, &repo.top)?).await;
+                let origin = info["origin"].as_str().and_then(|origin| {
+                    let (host, path) = if let Some(rest) = origin
+                        .strip_prefix("https://")
+                        .or_else(|| origin.strip_prefix("ssh://"))
+                    {
+                        rest.split_once('/')
+                    } else {
+                        origin.split_once(':')
+                    }?;
+                    Some(
+                        format!(
+                            "{}/{}",
+                            host.rsplit('@').next()?,
+                            path.trim_end_matches('/')
+                                .strip_suffix(".git")
+                                .unwrap_or(path.trim_end_matches('/'))
+                        )
+                        .to_ascii_lowercase(),
+                    )
+                });
+                if origin.as_deref()
+                    != Some(
+                        format!("{}/{}/{}", pr.host, pr.owner, pr.repo)
+                            .to_ascii_lowercase()
+                            .as_str(),
+                    )
+                {
+                    return Err(bad(
+                        "Choose a project/source directory whose origin matches this PR repository",
+                    ));
+                }
+                if let Some(path) = workspace.and_then(|w| w.path.as_ref()) {
+                    destination(app, &PathBuf::from(path))?;
+                }
+                if git(
+                    app,
+                    &repo.top,
+                    &["cat-file", "-e", &format!("{}^{{commit}}", pr.head_sha)],
+                )
+                .await
+                .is_err()
+                {
+                    app.arm(creation_key)?;
+                    git(
+                        app,
+                        &repo.top,
+                        &[
+                            "fetch",
+                            "--no-tags",
+                            "--no-recurse-submodules",
+                            "--no-write-fetch-head",
+                            "origin",
+                            &format!("refs/pull/{}/head", pr.number),
+                        ],
+                    )
+                    .await?;
+                }
             }
             let commit = git(
                 app,
@@ -322,12 +498,9 @@ pub async fn prepare_in(
                     bad("Could not reserve worktree destination directory")
                 }
             })?;
-            app.checked(path_str)?;
-            let population = populate(app, &repo, &path, &commit, &branch, true, &settings).await
-                .map_err(|(code, message)| (code, format!("{message}. Destination {} and any branch/files are retained; no cleanup was attempted", path.display())))?;
             let cwd = app.checked(path_str)?;
             // Only checkouts created here are owned; selected/directory worktrees never are.
-            owned = Some(Owned {
+            let mut created = Owned {
                 path: cwd.clone(),
                 branch,
                 common_dir: repo.common.clone(),
@@ -340,13 +513,20 @@ pub async fn prepare_in(
                     definitions: config.hooks,
                     ..Default::default()
                 }),
-                population: Some(population),
+                population: None,
                 settings: Some(settings),
-            });
+                pending: Some(repo.top.clone()),
+            };
+            if !defer {
+                populate_owned(app, &mut created).await?;
+            }
+            owned = Some(created);
             cwd
         }
     };
-    if policy.require_worktree && !repository(app, &cwd).await?.linked {
+    // A reserved checkout is linked once populated; until then Git would find the main one.
+    let reserved = owned.as_ref().is_some_and(|o| o.pending.is_some());
+    if policy.require_worktree && !reserved && !repository(app, &cwd).await?.linked {
         return Err(bad(
             "Project policy requires the final cwd to be a linked Git worktree",
         ));
@@ -357,6 +537,58 @@ pub async fn prepare_in(
             .ok_or_else(|| bad("Working directory must be UTF-8"))?,
     )?;
     Ok((cwd, owned))
+}
+
+/// Fills a checkout reserved by `reserve_in`, then records how it was populated.
+/// A failure leaves the destination and any branch in place for inspection.
+/// Safe to call again after a failure or restart: it proceeds only while the
+/// destination is still empty and the branch does not exist, so Git had
+/// changed nothing; otherwise it refuses and names what is left.
+pub async fn populate_owned(app: &(impl Context + ?Sized), owned: &mut Owned) -> Result<(), Error> {
+    let Some(top) = owned.pending.clone() else {
+        return Ok(());
+    };
+    let top = app.checked(
+        top.to_str()
+            .ok_or_else(|| bad("Repository path must be UTF-8"))?,
+    )?;
+    let repo = Repository {
+        top,
+        main_top: owned.main_top.clone(),
+        common: owned.common_dir.clone(),
+        linked: false,
+    };
+    allowed(app, &repo.common)?;
+    let left = |what: &str| {
+        conflict(format!(
+            "Worktree creation stopped partway: {what}. {} and branch {} were left as they are; remove them, or delete this session and start a new one",
+            crate::paths::display(&owned.path),
+            owned.branch
+        ))
+    };
+    // Git may fill only the empty directory reserved for this session.
+    let untouched = std::fs::symlink_metadata(&owned.path)
+        .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+        && std::fs::read_dir(&owned.path).is_ok_and(|mut entries| entries.next().is_none());
+    if !untouched {
+        return Err(left("the reserved directory is no longer empty"));
+    }
+    if branch_ref_conflicts(app, &repo.top, &owned.branch).await? {
+        return Err(left(
+            "its branch already exists or conflicts with another branch",
+        ));
+    }
+    let settings = owned.settings.clone().unwrap_or_default();
+    let population = populate(app, &repo, &owned.path, &owned.base_commit, &owned.branch, true, &settings).await
+        .map_err(|(code, message)| (code, format!("{message}. Destination {} and any branch/files are retained; Resume session retries only if Git changed neither", crate::paths::display(&owned.path))))?;
+    let path = owned
+        .path
+        .to_str()
+        .ok_or_else(|| bad("Worktree path must be UTF-8"))?;
+    owned.path = app.checked(path)?;
+    owned.population = Some(population);
+    owned.pending = None;
+    Ok(())
 }
 
 pub(crate) async fn populate(
@@ -379,7 +611,7 @@ pub(crate) async fn populate(
                 args.extend(["--no-track", "-b", branch]);
             }
             args.extend(["--", path, if new { commit } else { branch }]);
-            git(app, &repo.top, &args).await?;
+            git_checkout(app, &repo.top, &args).await?;
             Ok(reason)
         }
     }

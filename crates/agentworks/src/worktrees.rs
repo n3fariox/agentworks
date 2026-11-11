@@ -1,6 +1,6 @@
 //! HTTP and session coordination for workspace preparation.
 use crate::{ApiResult, App, Create, checked_cwd, effective_roots, fail, worktree_cleanup::Owned};
-pub(crate) use agentworks_workspace::worktrees::{Context, list_in, prepare_in};
+pub(crate) use agentworks_workspace::worktrees::{Context, list_in, reserve_in};
 pub use agentworks_workspace::worktrees::{Mode, Policy, Workspace};
 use axum::{
     Json,
@@ -222,7 +222,8 @@ pub async fn prepare(
             None => Policy::default(),
         }
     };
-    prepare_in(
+    // The session fills a new worktree while it starts; see `populate`.
+    reserve_in(
         app,
         req.workspace.as_ref(),
         policy,
@@ -231,4 +232,69 @@ pub async fn prepare(
         creation_key,
     )
     .await
+}
+
+/// Held while a reserved worktree is filled; one checkout at a time.
+static POPULATING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Whether a new session's worktree is being filled, or waiting to be.
+pub fn populating() -> bool {
+    POPULATING.try_lock().is_err()
+}
+
+/// Fills the worktree reserved for a new session, before its harness starts.
+/// After a failure or restart, Resume calls this again; `populate_owned`
+/// retries only when the earlier attempt left Git unchanged.
+pub async fn populate(app: &App, s: &crate::Session) -> Result<(), String> {
+    let Some(mut owned) = s
+        .data
+        .lock()
+        .unwrap()
+        .worktree
+        .clone()
+        .filter(|o| o.pending.is_some())
+    else {
+        return Ok(());
+    };
+    // One checkout at a time, as when creation held the workspace lock: the
+    // CoW cache refuses concurrent use.
+    let _populating = match POPULATING.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            s.startup("Waiting for another worktree to finish");
+            POPULATING.lock().await
+        }
+    };
+    s.startup("Creating worktree");
+    let started = std::time::Instant::now();
+    let result = if s.host_id == "local" {
+        tokio::time::timeout(
+            Duration::from_secs(660),
+            agentworks_workspace::worktrees::populate_owned(app, &mut owned),
+        )
+        .await
+        .unwrap_or_else(|_| Err(conflict("Worktree creation timed out")))
+        .map(|()| owned)
+    } else {
+        crate::hosts::populate_worktree(app, &s.host_id, &owned).await
+    };
+    tracing::info!(
+        elapsed_ms = agentworks_runtime::log::ms(started),
+        ok = result.is_ok(),
+        "Created the worktree"
+    );
+    let owned = result.map_err(|(_, message)| message)?;
+    let population = owned.population.clone();
+    {
+        let mut data = s.data.lock().unwrap();
+        if let Some(w) = data.worktree.as_mut() {
+            w.population = population;
+            w.pending = None;
+        }
+    }
+    let data = s.data.lock().unwrap();
+    s.store
+        .lock()
+        .unwrap()
+        .save_state(&s.id, &data)
+        .map_err(|_| "Could not save this session's worktree".to_string())
 }

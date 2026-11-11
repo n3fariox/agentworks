@@ -117,6 +117,10 @@ struct State {
     state_events: bool,
     /// Claude's other background tasks (AIR asyncTasks) by task id; they outlive turns.
     jobs: HashMap<String, Job>,
+    /// The compaction Claude reports as running.
+    compacting: Option<String>,
+    /// The finished compaction whose summary is the next user message.
+    compacted: Option<String>,
 }
 struct Turn {
     cancelled: bool,
@@ -238,6 +242,8 @@ struct Bridge {
     terminal_output: AtomicBool,
     subagents: AtomicBool,
     async_tasks: AtomicBool,
+    /// The client shows ACP compaction updates.
+    compaction: AtomicBool,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     /// A session's CLI exited on its own; the bridge then ends so the client sees it.
     exited: tokio::sync::Notify,
@@ -683,6 +689,48 @@ impl Session {
         };
         update(cx, &self.id, event)
     }
+    /// Upsert compaction `id`; `patch` adds summary, error or `_meta`.
+    fn compaction(
+        &self,
+        id: &str,
+        status: &str,
+        patch: Value,
+        cx: &ConnectionTo<Client>,
+    ) -> Result<()> {
+        let mut event =
+            json!({"sessionUpdate":"compaction_update","compactionId":id,"status":status});
+        event
+            .as_object_mut()
+            .unwrap()
+            .extend(patch.as_object().unwrap().clone());
+        update(cx, &self.id, event)
+    }
+    /// Claude reports a compaction as statuses, then a boundary, then its summary message.
+    fn compaction_status(&self, v: &Value, cx: &ConnectionTo<Client>) -> Result<()> {
+        if v["status"] == "compacting" {
+            // Automatic compaction repeats the status as its summary streams.
+            let started = {
+                let mut s = self.state.lock().unwrap();
+                match (&s.compacting, v["uuid"].as_str()) {
+                    (None, Some(uuid)) => {
+                        s.compacting = Some(uuid.to_owned());
+                        s.compacting.clone()
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(id) = started {
+                self.compaction(&id, "in_progress", json!({}), cx)?;
+            }
+        } else if v["compact_result"] == "failed" {
+            let failed = self.state.lock().unwrap().compacting.take();
+            if let Some(id) = failed {
+                let error = nonblank(&v["compact_error"]).unwrap_or("Compaction failed");
+                self.compaction(&id, "failed", json!({"error":error}), cx)?;
+            }
+        }
+        Ok(())
+    }
     fn publish_plan(&self, cx: &ConnectionTo<Client>) -> Result<()> {
         let entries: Vec<Value> = self
             .state
@@ -830,6 +878,16 @@ impl Session {
                 }
             }
             Some("user") => {
+                let compacted = if parent.is_none() {
+                    self.state.lock().unwrap().compacted.take()
+                } else {
+                    None
+                };
+                if let (Some(id), Some(text)) = (compacted, v["message"]["content"].as_str())
+                    && v["isSynthetic"] == true
+                {
+                    self.compaction(&id, "completed", compaction_summary(text), cx)?;
+                }
                 for block in v["message"]["content"].as_array().into_iter().flatten() {
                     if block["type"] == "tool_result" {
                         self.tool_result(block, &v["tool_use_result"], cx, bridge)?;
@@ -925,6 +983,9 @@ impl Session {
                     if let Some(mode) = v["permissionMode"].as_str() {
                         self.set_mode_state(mode, cx)?;
                     }
+                    if bridge.compaction.load(Ordering::Relaxed) {
+                        self.compaction_status(v, cx)?;
+                    }
                 }
                 Some("commands_changed") => {
                     update(
@@ -942,8 +1003,28 @@ impl Session {
                     )?;
                 }
                 Some("compact_boundary") => {
-                    self.state.lock().unwrap().used = v["compact_metadata"]["post_tokens"].as_u64();
+                    let id = {
+                        let mut s = self.state.lock().unwrap();
+                        s.used = v["compact_metadata"]["post_tokens"].as_u64();
+                        let id = s
+                            .compacting
+                            .take()
+                            .or_else(|| v["uuid"].as_str().map(str::to_owned));
+                        s.compacted = id
+                            .clone()
+                            .filter(|_| bridge.compaction.load(Ordering::Relaxed));
+                        id
+                    };
                     self.usage(cx, json!({}))?;
+                    if let Some(id) = id.filter(|_| bridge.compaction.load(Ordering::Relaxed)) {
+                        let meta = compaction_meta(
+                            &v["compact_metadata"],
+                            "pre_tokens",
+                            "post_tokens",
+                            "duration_ms",
+                        );
+                        self.compaction(&id, "completed", json!({"_meta":meta}), cx)?;
+                    }
                 }
                 _ => {}
             },
@@ -1116,6 +1197,7 @@ impl Session {
                 }
             }
             s.streamed.clear();
+            s.compacted = None;
             let delivered = std::mem::take(&mut s.delivered);
             (
                 s.turn.as_ref().is_some_and(|t| t.cancelled),
@@ -1123,6 +1205,11 @@ impl Session {
                 s.last_error.take(),
             )
         };
+        let unfinished = self.state.lock().unwrap().compacting.take();
+        if let Some(id) = unfinished {
+            let status = if cancelled { "cancelled" } else { "failed" };
+            self.compaction(&id, status, json!({}), cx)?;
+        }
         if self.state.lock().unwrap().used.is_some() {
             self.usage(
                 cx,
@@ -1630,6 +1717,8 @@ impl Bridge {
                     .store(caps["_meta"]["terminal_output"] == true, Ordering::Relaxed);
                 self.subagents
                     .store(caps["subagents"].is_object(), Ordering::Relaxed);
+                self.compaction
+                    .store(caps["session"]["compaction"].is_object(), Ordering::Relaxed);
                 let air = &caps["_meta"]["jetbrains"]["air"];
                 let async_tasks = air["version"].as_u64().is_some_and(|v| v >= 1)
                     && air["capabilities"]
@@ -1864,8 +1953,12 @@ impl Bridge {
             }
         };
         let settings = settings(&cwd);
-        let allow_bypass = (unsafe { libc::geteuid() } != 0
-            || std::env::var_os("IS_SANDBOX").is_some())
+        // Claude Code refuses bypass mode as root only on Unix.
+        #[cfg(unix)]
+        let root = unsafe { libc::geteuid() } == 0;
+        #[cfg(not(unix))]
+        let root = false;
+        let allow_bypass = (!root || std::env::var_os("IS_SANDBOX").is_some())
             && settings["permissions"]["disableBypassPermissionsMode"] != "disable";
         let mut command = Command::new(
             std::env::var_os("CLAUDE_CODE_EXECUTABLE").unwrap_or_else(|| "claude".into()),
@@ -2229,6 +2322,20 @@ fn total_tokens(usage: &Value) -> u64 {
     .iter()
     .map(|k| usage[*k].as_u64().unwrap_or(0))
     .sum()
+}
+/// `_meta` for a compaction boundary; live and transcript metadata name their fields differently.
+fn compaction_meta(m: &Value, pre: &str, post: &str, duration: &str) -> Value {
+    let mut meta = json!({"trigger":m["trigger"],"preTokens":m[pre],"postTokens":m[post],"durationMs":m[duration]});
+    meta.as_object_mut().unwrap().retain(|_, v| !v.is_null());
+    json!({"_claude/compaction":meta})
+}
+/// The summary patch for Claude's continuation message, without its preamble.
+fn compaction_summary(text: &str) -> Value {
+    let summary = text
+        .split_once("\nSummary:\n")
+        .map_or(text, |(_, s)| s)
+        .trim();
+    json!({"summary":[{"type":"text","text":summary}]})
 }
 fn text_of(content: &Value) -> String {
     match content {
@@ -2643,9 +2750,27 @@ fn replay_entries(
     bridge: &Bridge,
 ) -> Result<()> {
     let target = s.route(parent);
+    let compaction = parent.is_none() && bridge.compaction.load(Ordering::Relaxed);
     for e in entries {
         let content = &e["message"]["content"];
         match e["type"].as_str() {
+            Some("system") if compaction && e["subtype"] == "compact_boundary" => {
+                if let Some(id) = e["uuid"].as_str() {
+                    let meta = compaction_meta(
+                        &e["compactMetadata"],
+                        "preTokens",
+                        "postTokens",
+                        "durationMs",
+                    );
+                    s.compaction(id, "completed", json!({"_meta":meta}), cx)?;
+                }
+            }
+            // The summary follows its boundary.
+            Some("user") if compaction && e["isCompactSummary"] == true => {
+                if let Some(id) = e["parentUuid"].as_str() {
+                    s.compaction(id, "completed", compaction_summary(&text_of(content)), cx)?;
+                }
+            }
             Some("user") if e["isMeta"] != true && e["isCompactSummary"] != true => {
                 let blocks = match content {
                     Value::String(text) => vec![json!({"type":"text","text":text})],
@@ -2953,6 +3078,7 @@ pub async fn run() -> Result<()> {
         terminal_output: AtomicBool::new(false),
         subagents: AtomicBool::new(false),
         async_tasks: AtomicBool::new(false),
+        compaction: AtomicBool::new(false),
         sessions: Mutex::default(),
         exited: tokio::sync::Notify::new(),
         exit_reason: Mutex::default(),

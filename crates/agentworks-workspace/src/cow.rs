@@ -145,7 +145,11 @@ pub async fn populate(
             "CoW probe failed; check permissions and available space",
         ));
     }
-    let template = cache.join(commit);
+    // v1 templates were checked out without global LFS filters and may contain
+    // clean pointer files. Retain them, but never seed new checkouts from them.
+    let templates = cache.join("v2");
+    checked_directory(&templates)?;
+    let template = templates.join(commit);
     let template_text = template
         .to_str()
         .ok_or_else(|| error("CoW template path must be UTF-8"))?;
@@ -153,7 +157,7 @@ pub async fn populate(
         return Err(error("CoW template must be a directory without symlinks"));
     }
     if !template.exists() {
-        worktrees::git(
+        worktrees::git_checkout(
             app,
             &repo.top,
             &["worktree", "add", "--detach", "--", template_text, commit],
@@ -222,8 +226,8 @@ pub async fn populate(
         Path::new(&target_git).join("index"),
     )
     .map_err(|_| error("Could not initialize CoW worktree index"))?;
-    worktrees::git(app, path, &["update-index", "--really-refresh"]).await?;
-    worktrees::git(app, path, &["reset", "--hard", "--quiet", commit]).await?;
+    worktrees::git_checkout(app, path, &["update-index", "--really-refresh"]).await?;
+    worktrees::git_checkout(app, path, &["reset", "--hard", "--quiet", commit]).await?;
     for name in &settings.share {
         copy_cache(app, &repo.top, path, Path::new(name)).await?;
     }

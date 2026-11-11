@@ -116,19 +116,16 @@ name = "agentworks"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol 3.4.0",
- "agentworks-claude-acp",
- "agentworks-codex-acp",
- "agentworks-demo-acp",
  "agentworks-runtime",
  "agentworks-session",
  "agentworks-starlark",
  "agentworks-terminal",
+ "agentworks-worker",
  "agentworks-workspace",
  "ammonia",
  "axum",
  "base64 0.22.1",
  "futures",
- "goose",
  "jiff",
  "libc",
  "octocrab",
@@ -136,15 +133,15 @@ dependencies = [
  "reqwest 0.13.5",
  "rig-core",
  "rig-reqwest",
- "rmcp",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite 0.29.0",
  "tokio-util",
- "tracing-subscriber",
+ "tracing",
  "uuid",
  "windows-sys 0.61.2",
 ]
@@ -180,6 +177,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentworks-goose-acp"
+version = "0.1.0"
+dependencies = [
+ "agent-client-protocol 3.4.0",
+ "agentworks-runtime",
+ "goose",
+ "reqwest 0.13.5",
+ "rmcp",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "agentworks-runtime"
 version = "0.1.0"
 dependencies = [
@@ -195,6 +206,8 @@ dependencies = [
  "sysinfo",
  "tokio",
  "tokio-tungstenite 0.29.0",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -236,9 +249,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentworks-worker"
+version = "0.1.0"
+dependencies = [
+ "agentworks-claude-acp",
+ "agentworks-codex-acp",
+ "agentworks-demo-acp",
+ "agentworks-goose-acp",
+ "agentworks-runtime",
+ "rmcp",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "agentworks-workspace"
 version = "0.1.0"
 dependencies = [
+ "dunce",
  "http",
  "libc",
  "serde",
@@ -3381,8 +3411,6 @@ dependencies = [
 [[package]]
 name = "libghostty-vt-sys"
 version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df233d9b287cded4bbebba3463c6df7a8bdb516c0341ed984e870ef5594c2e6f"
 
 [[package]]
 name = "libredox"

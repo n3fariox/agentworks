@@ -1,0 +1,8 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-eval'; style-src 'unsafe-inline'; connect-src 'self' blob:; img-src 'self' blob: data:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<style>
+html{color-scheme:dark;background:#171a1e;color:#e7e9ed;font:14px system-ui;height:100%}body{margin:0;height:100%;display:flex;flex-direction:column}header{display:flex;gap:8px;padding:8px;align-items:center;flex-wrap:wrap}button{font:inherit;color:inherit;background:#292e36;border:1px solid #555d69;border-radius:5px;padding:5px 10px;cursor:pointer}button[aria-pressed=true]{background:#374d69}button:disabled{opacity:.5;cursor:default}#viewport{flex:1;min-height:0;overflow:hidden;position:relative}canvas{display:block;touch-action:none}p{margin:0;padding:5px 10px;color:#b8c0cc;font-size:12px}#status:empty{display:none}
+</style>
+<script type="module" src="model-viewer-frame.bundle.js"></script></head>
+<body><header aria-label="Model controls"><button id="fit" disabled>Fit model</button><button id="edges" aria-pressed="false" disabled>Edges</button><button id="albedo" aria-pressed="false" title="Show base colors and textures without lighting or metallic reflections" disabled>Albedo</button></header><div id="viewport" aria-label="Interactive 3D model"></div><p id="status" role="status">Loading model…</p><p>Drag to rotate · Shift + drag or right-drag to pan · Scroll or pinch to zoom</p></body></html>

@@ -62,12 +62,20 @@ pub struct Settings {
     /// Harnesses allowed to run at once; absent keeps the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_active_sessions: Option<u32>,
+    /// Minutes an idle harness runs before it is put to sleep; 0 never sleeps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_sleep_minutes: Option<u32>,
     /// Harnesses left out of the new-session picker; their sessions still run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden_providers: Option<Vec<String>>,
 }
 pub const DEFAULT_ACTIVE_SESSIONS: u32 = 32;
 pub const MAX_ACTIVE_SESSIONS: u32 = 256;
+/// Longer than the 1-hour extended prompt-cache lifetime, so sleeping never
+/// discards a cache that is still warm.
+pub const DEFAULT_IDLE_SLEEP_MINUTES: u32 = 120;
+pub const MIN_IDLE_SLEEP_MINUTES: u32 = 60;
+pub const MAX_IDLE_SLEEP_MINUTES: u32 = 7 * 24 * 60;
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct CatalogData {
     #[serde(default)]
@@ -380,18 +388,15 @@ impl Catalog {
             if root.trim().is_empty() {
                 return Err("Working directory cannot be empty".into());
             }
-            let root = root.trim().trim_end_matches('/').to_string();
-            let root = if root.is_empty() {
-                "/".to_string()
-            } else {
-                root
+            // Stored `/`-separated for every host OS; Windows workers accept that form.
+            let Some(root) = agentworks_workspace::paths::normalize(&root)
+                .filter(|r| r.len() <= 4096 && !r.chars().any(char::is_control))
+            else {
+                return Err(format!(
+                    "Use absolute paths (/srv/work, C:/work) or ~/… paths, not {}",
+                    root.trim()
+                ));
             };
-            if !(root.starts_with('/') || root == "~" || root.starts_with("~/"))
-                || root.len() > 4096
-                || root.chars().any(char::is_control)
-            {
-                return Err(format!("Use absolute paths or ~/… paths, not {root}"));
-            }
             if !cleaned.contains(&root) {
                 cleaned.push(root);
             }
@@ -497,7 +502,6 @@ mod tests {
                 && !access.cancel_sessions
                 && !access.run_automations
                 && !access.restart_service
-                && !access.manage_review_queue
         );
         catalog
             .settings(Settings {
@@ -646,12 +650,14 @@ mod tests {
                 default_communication_role: None,
                 notifications: Default::default(),
                 max_active_sessions: Some(48),
+                idle_sleep_minutes: Some(0),
                 git: None,
                 hidden_providers: None,
             })
             .unwrap();
         let mut reopened = Catalog::open(path.clone()).unwrap();
         assert_eq!(reopened.data.settings.max_active_sessions, Some(48));
+        assert_eq!(reopened.data.settings.idle_sleep_minutes, Some(0));
         assert_eq!(reopened.data.projects[0].name, "Renamed");
         assert!(reopened.data.projects[0].archived);
         assert_eq!(
@@ -705,6 +711,22 @@ mod tests {
             )
             .unwrap();
         assert_eq!(rooted.roots, ["~/projects", "/srv/app"]);
+        // Windows hosts: either separator, stored `/`-separated and deduplicated.
+        let windows = catalog
+            .set_host_roots(
+                &host.id,
+                vec!["C:\\work\\".into(), "c:/work".into(), "D:".into()],
+            )
+            .unwrap();
+        assert_eq!(windows.roots, ["C:/work", "D:/"]);
+        assert!(
+            catalog
+                .set_host_roots(&host.id, vec!["C:work".into()])
+                .is_err()
+        );
+        catalog
+            .set_host_roots(&host.id, vec!["~/projects".into(), "/srv/app".into()])
+            .unwrap();
         let remote = catalog
             .location_on(&host.id, Path::new("/srv/app"))
             .unwrap();

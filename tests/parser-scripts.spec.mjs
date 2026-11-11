@@ -17,7 +17,7 @@ async function api(path,body,method){
 const script=async name=>(await api('/api/scripts')).scripts.find(s=>s.name===name);
 test.beforeAll(async()=>{
   await mkdir('.cache',{recursive:true});fixture=await mkdtemp(resolve('.cache/parser-scripts-'));
-  server=spawn(resolve('target/debug/agentworks'),[],{env:{...process.env,
+  server=spawn(process.env.AGENTWORKS_TEST_BINARY||resolve('target/debug/agentworks'),[],{env:{...process.env,
     AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:'4474',AGENTWORKS_ROOTS:fixture,
     AGENTWORKS_CATALOG_PATH:join(fixture,'catalog.json'),AGENTWORKS_DB_PATH:join(fixture,'sessions.sqlite3'),AGENTWORKS_DEMO_STATE_DIR:join(fixture,'demo')},stdio:['ignore','pipe','pipe']});
   server.on('error',e=>{log+=e.message;exited=true;});server.on('exit',()=>exited=true);
@@ -98,6 +98,8 @@ test('chat line formatter starter links ticket keys in agent messages only',asyn
   expect(html).toContain('<code>OPS-13</code>');
   expect(html).toContain('OPS-14\n</code></pre>');
   expect(await render({text})).not.toContain('<a ');
+  // User Markdown must not run the agent's formatter.
+  expect(await render({text,sessionId:session.id,user:true})).not.toContain('<a ');
   // User prompts: nothing until a chat.user formatter exists, then only rewritten lines.
   const userFormat=body=>api(`/api/sessions/${session.id}/user-format`,body,'POST');
   expect((await userFormat({text:'Fixed OPS-12'})).lines).toBeNull();
@@ -108,6 +110,10 @@ test('chat line formatter starter links ticket keys in agent messages only',asyn
   await expect(panel.locator('[data-script-entry="user_tickets.star"] .parser-script-hooks')).toContainText('Formatter · chat.user · text:');
   expect((await userFormat({text:'*kept* OPS-12\nplain\n```\nOPS-14\n```'})).lines).toEqual([
     '<em>kept</em> <a href="https://jira.example.com/browse/OPS-12" rel="noopener noreferrer">OPS-12</a>',null,null,null,null]);
+  const userHtml=await render({text:'**Fixed** OPS-12\n\n```\nOPS-14\n```',sessionId:session.id,user:true});
+  expect(userHtml).toContain('<strong>Fixed</strong>');
+  expect(userHtml).toContain('href="https://jira.example.com/browse/OPS-12"');
+  expect(userHtml).toContain('OPS-14\n</code></pre>');
   await api('/api/sessions/'+session.id,undefined,'DELETE');
   await api('/api/scripts/tickets.star',undefined,'DELETE');
   await api('/api/scripts/user_tickets.star',undefined,'DELETE');
@@ -129,7 +135,7 @@ test('one arbitrarily named script exposes progress and formatter registrations'
   await row(panel,'a_handlers.star').getByRole('button',{name:'Edit a_handlers.star'}).click();
   await panel.locator('[data-source]').fill(saved.source.replace(/^agent\.register.*$/gm,''));
   await panel.getByRole('button',{name:'Save and check'}).click();
-  await expect(panel.locator('[data-error]')).toContainText('no hooks registered');
+  await expect(panel.locator('[data-error]')).toContainText('no handlers registered');
   expect((await script('a_handlers.star')).source).toBe(saved.source);
   await panel.getByRole('button',{name:'Cancel'}).click();
   await api('/api/scripts/a_handlers.star',undefined,'DELETE');

@@ -11,14 +11,16 @@ let fixture,server,log='',exited=false,session;
 const rustRaw='fn main() {\n    let greeting = "hi   there";  \n    // keep   spacing\n\tlet tab = 1;\n}\n';
 const prose='This paragraph was placed in a code block by the agent, but it is ordinary prose. It should read as text, not code.';
 const longLine='LONG:'+'abcdefghij'.repeat(40);
+const starlarkRaw='def build(ctx):\n    """Build docs.\n    # still a string\n    """\n    # comment\n    return True if ctx else None\n';
+const starlarkFiles=['sample.star','rules.bzl','BUILD','BUILD.bazel','WORKSPACE','WORKSPACE.bazel','MODULE.bazel'];
 const message=['Display check','','```rust',...rustRaw.slice(0,-1).split('\n'),'```','','```',prose,'```','','```text',longLine,'```','','[sample](sample.rs) and [notes](notes.md)'].join('\n');
 
 async function api(path,body,method){
   const response=await fetch(base+path,{method:method||(body?'POST':'GET'),headers:{Origin:base,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
   expect(response.ok,await response.clone().text()).toBe(true);return response.json();
 }
-async function openSession(page){
-  await page.addInitScript(id=>{if(!sessionStorage.getItem('display-test-init')){localStorage.setItem('agentworks-session',id);sessionStorage.setItem('display-test-init','1');}},session.id);
+async function openSession(page,{formatted=false}={}){
+  await page.addInitScript(({id,formatted})=>{if(!sessionStorage.getItem('display-test-init')){localStorage.setItem('agentworks-session',id);localStorage.setItem('agentworks-composer-source',String(!formatted));sessionStorage.setItem('display-test-init','1');}},{id:session.id,formatted});
   await page.goto('/');
   await expect(page.locator('#session-state')).toHaveText('Ready');
 }
@@ -26,6 +28,8 @@ async function sendDisplayMessage(page){
   await page.locator('#prompt').fill(message);await page.locator('#send').click();
   await expect(page.locator('#session-state')).toHaveText('Ready');
   await expect(page.locator('.message.assistant .code-block')).toHaveCount(3);
+  await expect(page.locator('.message.assistant')).toContainText('sample and notes');
+  await expect(page.locator('#session-state')).toHaveText('Ready');
 }
 async function setPreference(page,key,value){
   await page.locator('#nav-settings').click();await page.locator('#settings-tab-display').click();
@@ -38,11 +42,12 @@ const blocks=page=>page.locator('.message.assistant .code-block');
 test.beforeAll(async()=>{
   await mkdir('.cache',{recursive:true});fixture=await mkdtemp(resolve('.cache/display-prefs-'));
   await writeFile(join(fixture,'sample.rs'),'pub fn sample() -> u8 {\n    42 // answer\n}\n');
+  for(const file of starlarkFiles)await writeFile(join(fixture,file),starlarkRaw);
   await writeFile(join(fixture,'binary.rs'),Buffer.from([0,1,2]));
   await writeFile(join(fixture,'large.rs'),'// original\r\n'+'let x = 42;  \t\r\n'.repeat(7000));
   await writeFile(join(fixture,'unknown.txt'),'<img src=x onerror=alert(1)>\n  exact\ttext  \n');
   await writeFile(join(fixture,'notes.md'),'# Notes\n\n```python\ndef f():\n    return "x"\n```\n');
-  server=spawn(resolve('target/debug/agentworks'),[],{env:{...process.env,
+  server=spawn(process.env.AGENTWORKS_TEST_BINARY||resolve('target/debug/agentworks'),[],{env:{...process.env,
     AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:'4411',AGENTWORKS_ROOTS:fixture,
     AGENTWORKS_CATALOG_PATH:join(fixture,'catalog.json'),AGENTWORKS_DB_PATH:join(fixture,'sessions.sqlite3'),AGENTWORKS_DEMO_STATE_DIR:join(fixture,'demo')},stdio:['ignore','pipe','pipe']});
   server.on('error',e=>{log+=e.message;exited=true;});server.on('exit',()=>exited=true);
@@ -134,6 +139,7 @@ test('desktop: highlighting, exact raw copy, prose toggle, persisted preferences
   await expect(fileBlock.locator('.code-language')).toHaveText('rs');
   await expect(fileBlock.locator('.tok-keyword').first()).toHaveText('pub');
   expect(await fileBlock.locator('pre code').evaluate(n=>n.textContent)).toBe('pub fn sample() -> u8 {\n    42 // answer\n}\n');
+  await page.locator('#side-close').click();
   await page.locator('.message.assistant').getByRole('link',{name:'notes'}).click();
   await expect(page.locator('#workspace-preview .code-block .code-language')).toHaveText('python');
   await expect(page.locator('#workspace-preview .code-block .tok-keyword').first()).toHaveText('def');
@@ -149,6 +155,30 @@ test('desktop: highlighting, exact raw copy, prose toggle, persisted preferences
   expect(await toolPre.evaluate(n=>getComputedStyle(n).whiteSpace)).toBe('pre');
   await expect(page.locator('.tool-card [class^=tok-]')).toHaveCount(0);
   expect(errors).toEqual([]);
+});
+
+test('Starlark file previews, multiline strings, fenced blocks and highlighting preference',async({page})=>{
+  await openSession(page);
+  await page.locator('#prompt').fill(['```starlark',starlarkRaw,'```','',...starlarkFiles.map(file=>`[${file}](${file})`)].join('\n'));
+  await page.locator('#send').click();
+  await expect(page.locator('#session-state')).toHaveText('Ready');
+  const fence=page.locator('.message.assistant .code-block');
+  await expect(fence.locator('.tok-keyword').first()).toHaveText('def');
+  for(const file of starlarkFiles){
+    await page.locator('.message.assistant').getByRole('link',{name:file,exact:true}).click();
+    const code=page.locator('#workspace-preview pre code');
+    await expect(code).toHaveClass(/highlighted/);
+    expect(await code.textContent()).toBe(starlarkRaw);
+    await expect(code.locator('.tok-keyword')).toHaveText(['def','return','True','if','else','None']);
+    await expect(code.locator('.tok-comment')).toHaveText(['# comment']);
+    await expect(code.locator('.tok-string')).toHaveText(['"""Build docs.\n','    # still a string\n','    """']);
+    await page.locator('#side-close').click();
+  }
+  await setPreference(page,'highlight','off');
+  await expect(fence.locator('[class^=tok-]')).toHaveCount(0);
+  await page.locator('.message.assistant').getByRole('link',{name:'sample.star',exact:true}).click();
+  await expect(page.locator('#workspace-preview [class^=tok-]')).toHaveCount(0);
+  expect(await page.locator('#workspace-preview pre code').textContent()).toBe(starlarkRaw);
 });
 
 test('tokenizer: real categories, exact reconstruction, bounded on pathological input, prose detection',async({page})=>{
@@ -306,4 +336,184 @@ test('line renderer keeps multiline tokens, patch identity and bounded binary/la
   expect(result.patch.tokens).toBeGreaterThan(0);
   for(const name of ['unknown','prototype','binary','large','many','binaryPatch'])expect(result[name].tokens).toBe(0);
   for(const name of ['binary','large','many','binaryPatch'])expect(result[name].rows).toBe(0);
+});
+
+for(const mobile of [false,true])test(`user Markdown edits inline, preserves source, and toggles immediately (${mobile?'phone':'desktop'})`,async({page})=>{
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  await page.setViewportSize(mobile?{width:390,height:844}:{width:1280,height:900});
+  await openSession(page,{formatted:true});
+  const source='# My heading\n\n**Bold** and *italic* and `literal`\n\n- First\n- Second\n\n```js\nconst x = 1;\n```\n\n<img src=x onerror="window.userMarkdownUnsafe=true">';
+  const prompt=page.locator('#prompt'),editor=page.locator('#prompt-editor .cm-content');
+  await expect(prompt).toBeHidden();await expect(editor).toBeVisible();
+  await editor.fill(source);
+  await expect(page.locator('#prompt-editor .cm-md-h1')).toHaveText('My heading');
+  await expect(page.locator('#prompt-editor .cm-md-strong')).toHaveText('Bold');
+  await expect(page.locator('#prompt-editor .cm-md-em')).toHaveText('italic');
+  await expect(page.locator('#prompt-editor .cm-md-inline-code')).toHaveText('literal');
+  await expect(page.locator('#prompt-editor .cm-md-bullet')).toHaveCount(2);
+  await expect(page.locator('#prompt-preview')).toHaveCount(0);
+  expect(await page.evaluate(()=>window.userMarkdownUnsafe)).toBeUndefined();
+  await expect(page.locator('#prompt-editor img:not(.cm-widgetBuffer)')).toHaveCount(0);
+  await expect(prompt).toHaveValue(source);
+  // Source and formatted editing are the same document, with no lossy round-trip.
+  await page.getByRole('button',{name:'Edit Markdown source',exact:true}).click();
+  await expect(prompt).toBeVisible();await expect(prompt).toHaveValue(source);
+  await page.getByRole('button',{name:'Use formatted Markdown editor',exact:true}).click();
+  await expect(editor).toBeVisible();await expect(prompt).toHaveValue(source);
+  const submitted=page.waitForRequest(r=>r.url().endsWith(`/api/sessions/${session.id}/prompt`)&&r.method()==='POST');
+  if(mobile)await page.locator('#send').click();else await editor.press('Enter');
+  expect((await submitted).postDataJSON().text).toBe(source);
+  const body=page.locator('.message.user .message-body');
+  await expect(body.locator('h1')).toHaveText('My heading');
+  await expect(prompt).toHaveValue('');
+  // Sending resets undo history so Undo cannot resurrect a previous prompt.
+  await editor.press('Control+z');await expect(prompt).toHaveValue('');
+  await editor.fill('**Draft**');await expect(page.locator('#prompt-editor .cm-md-strong')).toHaveText('Draft');
+  const preference=async value=>{
+    await page.locator('#nav-settings').evaluate(n=>n.click());await page.locator('#settings-tab-display').click();
+    await page.getByLabel('Markdown in your messages').selectOption(value);
+    await page.locator('#dismiss-settings').click();
+  };
+  await preference('off');
+  await expect(body).toHaveText(source);await expect(body.locator('h1')).toHaveCount(0);
+  await expect(editor).toBeHidden();await expect(prompt).toBeVisible();await expect(prompt).toHaveValue('**Draft**');
+  await page.reload();await expect(page.locator('#session-state')).toHaveText('Ready');
+  await expect(page.locator('.message.user .message-body')).toHaveText(source);
+  await expect(prompt).toBeVisible();
+  await preference('on');
+  await expect(page.locator('.message.user h1')).toHaveText('My heading');
+  await expect(page.locator('#prompt-editor .cm-md-strong')).toHaveText('Draft');
+  // A late transcript render cannot undo the switch back to plain text.
+  await preference('off');
+  await page.route('**/api/markdown',async route=>{
+    const response=await route.fetch();await new Promise(r=>setTimeout(r,500));await route.fulfill({response});
+  });
+  await preference('on');await preference('off');await page.waitForTimeout(600);
+  await expect(editor).toBeHidden();
+  await expect(page.locator('.message.user .message-body strong')).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test('inline editor handles selection, undo, multiline input, IME and draft restoration',async({page})=>{
+  await openSession(page,{formatted:true});
+  const editor=page.locator('#prompt-editor .cm-content'),prompt=page.locator('#prompt');
+  await editor.pressSequentially('**hello**');
+  await expect(page.locator('#prompt-editor .cm-md-strong')).toHaveText('hello');
+  await editor.press('ArrowLeft');
+  await expect(page.locator('#prompt-editor .cm-md-strong')).toContainText('**hello**');
+  await editor.press('End');await editor.press('Shift+Enter');
+  await editor.pressSequentially('next line');await expect(prompt).toHaveValue('**hello**\nnext line');
+  await editor.press('Control+z');await expect(prompt).not.toHaveValue('**hello**\nnext line');
+  await editor.press('Control+y');await expect(prompt).toHaveValue('**hello**\nnext line');
+  await editor.dispatchEvent('keydown',{key:'Enter',code:'Enter',isComposing:true});
+  await expect(page.locator('.message.user')).toHaveCount(0);
+  const draft=await prompt.inputValue();
+  await page.reload();await expect(page.locator('#session-state')).toHaveText('Ready');
+  await expect(prompt).toHaveValue(draft);
+  await expect(page.locator('#prompt-editor .cm-md-strong')).toHaveText('hello');
+});
+
+
+test('mobile keyboard keeps the inline editor, caret and send button in the visual viewport',async({page})=>{
+  await page.setViewportSize({width:390,height:844});
+  // Headless browsers have no OS keyboard. Model its independent viewport
+  // resize and pan while leaving the layout viewport at the full screen size.
+  await page.addInitScript(()=>{
+    const viewport=window.visualViewport;
+    let keyboard=null;
+    for(const key of ['height','offsetTop','scale']){
+      const native=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(viewport),key).get.bind(viewport);
+      Object.defineProperty(viewport,key,{get:()=>keyboard?.[key]??native()});
+    }
+    window.setKeyboardViewport=value=>{keyboard=value;viewport.dispatchEvent(new Event('resize'));viewport.dispatchEvent(new Event('scroll'));};
+  });
+  await openSession(page,{formatted:true});
+  const editor=page.locator('#prompt-editor .cm-content'),source=page.locator('#prompt');
+  const text=Array.from({length:35},(_,i)=>`Line ${i+1}: **keep typing** here`).join('\n');
+  await editor.fill(text);
+  const bounds=async()=>page.evaluate(()=>{
+    const root=document.querySelector('.layout').getBoundingClientRect(),send=document.getElementById('send').getBoundingClientRect();
+    const scroller=document.querySelector('#prompt-editor .cm-scroller').getBoundingClientRect();
+    const selection=getSelection(),caret=selection.rangeCount?selection.getRangeAt(0).getBoundingClientRect():null;
+    return {top:root.top,bottom:root.bottom,sendTop:send.top,sendBottom:send.bottom,editorTop:scroller.top,editorBottom:scroller.bottom,caretTop:caret?.top,caretBottom:caret?.bottom};
+  });
+  await page.evaluate(()=>window.setKeyboardViewport({height:480,offsetTop:0,scale:1}));
+  await expect.poll(async()=>(await bounds()).bottom).toBe(480);
+  await expect.poll(async()=>(await bounds()).sendBottom).toBeLessThanOrEqual(480);
+  await expect.poll(async()=>(await bounds()).caretBottom).toBeLessThanOrEqual(480);
+  await expect.poll(async()=>{const r=await bounds();return r.caretTop>=r.editorTop-1&&r.caretBottom<=r.editorBottom+1;}).toBe(true);
+  // Safari may pan the visual viewport as well as shrinking it.
+  await page.evaluate(()=>window.setKeyboardViewport({height:400,offsetTop:70,scale:1}));
+  await expect.poll(async()=>(await bounds()).top).toBe(70);
+  await expect.poll(async()=>(await bounds()).bottom).toBe(470);
+  await expect.poll(async()=>(await bounds()).sendBottom).toBeLessThanOrEqual(470);
+  await expect.poll(async()=>(await bounds()).caretBottom).toBeLessThanOrEqual(470);
+  await expect(source).toHaveValue(text);
+  // Source mode shares the same keyboard-aware layout without losing the draft.
+  await page.getByRole('button',{name:'Edit Markdown source',exact:true}).click();
+  await expect(source).toBeVisible();await expect(source).toHaveValue(text);
+  expect((await source.boundingBox()).y+(await source.boundingBox()).height).toBeLessThanOrEqual(470);
+  await page.getByRole('button',{name:'Use formatted Markdown editor',exact:true}).click();
+  await page.evaluate(()=>window.setKeyboardViewport({height:320,offsetTop:0,scale:1}));
+  await expect.poll(async()=>(await bounds()).sendBottom).toBeLessThanOrEqual(320);
+  // Keyboard dismissal restores the available height, and pinch zoom stays native.
+  await page.evaluate(()=>window.setKeyboardViewport({height:844,offsetTop:0,scale:1}));
+  await expect.poll(async()=>(await bounds()).bottom).toBe(844);
+  await page.evaluate(()=>window.setKeyboardViewport({height:422,offsetTop:30,scale:2}));
+  await expect(page.locator('html')).not.toHaveAttribute('data-composer-viewport');
+  await page.evaluate(()=>window.setKeyboardViewport({height:480,offsetTop:0,scale:1}));
+  await expect(page.locator('html')).toHaveAttribute('data-composer-viewport','');
+  await page.locator('#send').focus();await page.locator('#session-more').focus();
+  await expect(page.locator('html')).not.toHaveAttribute('data-composer-viewport');
+  await expect(source).toHaveValue(text);
+});
+
+
+for(const formatted of [true,false])test(`mobile Enter makes newlines and only Send submits (${formatted?'formatted':'source'})`,async({browser})=>{
+  const context=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
+  try{
+    const page=await context.newPage();await openSession(page,{formatted});
+    const input=page.locator(formatted?'#prompt-editor .cm-content':'#prompt');
+    const source=page.locator('#prompt');
+    const submissions=[];page.on('request',request=>{if(request.method()==='POST'&&request.url().endsWith(`/api/sessions/${session.id}/prompt`))submissions.push(request.postDataJSON());});
+    await expect(input).toHaveAttribute('enterkeyhint','enter');
+    await expect(page.locator('#composer-hint')).toHaveText('Enter for a new line · Tap Send to send');
+    await input.fill('First line');await input.press('Enter');
+    await expect(source).toHaveValue('First line\n');
+    await input.pressSequentially('Second line');await input.press('Shift+Enter');
+    await expect(source).toHaveValue('First line\nSecond line\n');
+    // Touch devices still require the button when a wider viewport is used.
+    await page.setViewportSize({width:900,height:600});
+    await input.pressSequentially('Third line');await input.press('Enter');
+    await expect(source).toHaveValue('First line\nSecond line\nThird line\n');
+    await expect(page.locator('.message.user')).toHaveCount(0);expect(submissions).toEqual([]);
+    await page.locator('#send').click();
+    await expect(source).toHaveValue('');
+    expect(submissions.map(s=>s.text)).toEqual(['First line\nSecond line\nThird line\n']);
+    await expect(page.locator('.message.user')).toHaveCount(1);
+  }finally{await context.close();}
+});
+
+for(const formatted of [true,false])test(`mobile Send keeps typing active after send and queue (${formatted?'formatted':'source'})`,async({browser})=>{
+  const context=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
+  try{
+    const page=await context.newPage();await openSession(page,{formatted});
+    const input=page.locator(formatted?'#prompt-editor .cm-content':'#prompt'),source=page.locator('#prompt');
+    await input.fill('slow first mobile message');
+    await input.evaluate(node=>{window.typingTarget=node;window.composerBlurCount=0;node.addEventListener('blur',()=>window.composerBlurCount++);});
+    await page.locator('#send').tap();
+    await expect(source).toHaveValue('');await expect(input).toBeFocused();
+    // Use the existing keyboard target: locator.fill/press would silently focus
+    // the editor again and conceal the mobile keyboard handoff regression.
+    await page.keyboard.insertText('second message without reopening keyboard');
+    await expect(source).toHaveValue('second message without reopening keyboard');
+    await expect(page.locator('#send')).toHaveAttribute('aria-label','Queue message');
+    await page.locator('#send').tap();
+    await expect(source).toHaveValue('');await expect(input).toBeFocused();
+    await expect(page.locator('#input-queue .queue-text')).toHaveText('second message without reopening keyboard');
+    await page.keyboard.insertText('third draft with the same keyboard');
+    await expect(source).toHaveValue('third draft with the same keyboard');
+    expect(await input.evaluate(node=>node===window.typingTarget)).toBe(true);
+    expect(await page.evaluate(()=>window.composerBlurCount)).toBe(0);
+  }finally{await context.close();}
 });

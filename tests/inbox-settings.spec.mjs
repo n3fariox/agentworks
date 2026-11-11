@@ -51,6 +51,7 @@ async function openInbox(page){
   await page.locator('#session-agents').click();
   await expect(authorize(page)).toBeEnabled();
 }
+const useTurnCap=page=>page.locator('#inbox-unlimitedTurns').uncheck();
 async function closeInbox(page){await page.locator('#dismiss-agents').click();await expect(page.locator('#agents-dialog')).toBeHidden();}
 async function save(page){
   const response=page.waitForResponse(r=>r.url().endsWith('/inbox-delivery')&&r.request().method()==='PUT');
@@ -63,7 +64,7 @@ const localDate=timestamp=>{const d=new Date(timestamp);return new Date(d.getTim
 test('inbox deliveries are attributed to Agentworks live and after reload',async({page})=>{
   await openSession(page);
   await api(`/api/sessions/${session.id}/prompt`,{text:'Human request',requestId:crypto.randomUUID()});
-  await expect(page.locator('.message.user').filter({hasText:'Human request'}).locator('.message-label')).toHaveText('You');
+  await expect(page.locator('.message.user').filter({hasText:'Human request'}).locator('.message-label')).toHaveText(/^You/);
   await expect(page.locator('#session-state')).toHaveText('Ready');
   const sender=await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Peer sender',projectId:project.id,agentAccess:{communicate:true}});
   try{
@@ -71,16 +72,16 @@ test('inbox deliveries are attributed to Agentworks live and after reload',async
     await api(`/api/sessions/${session.id}/inbox-delivery`,{enabled:true,requestId:crypto.randomUUID(),deadline:Date.now()+60000,maxTurns:1,cooldownSeconds:5,maxBatch:1},'PUT');
     await api(`/api/sessions/${sender.id}/mailbox`,{recipient:session.id,text:`Peer **review** request\n\n[This session](agentworks://sessions/${session.id})`,requestId:crypto.randomUUID()});
     const delivery=page.locator('.message.agentworks');
-    await expect(delivery.locator('.message-label')).toHaveText('Agentworks',{timeout:15000});
+    await expect(delivery.locator('.message-label')).toHaveText(/^Agentworks/,{timeout:15000});
     await expect(delivery.locator('.avatar')).toHaveText('A');
     await expect(delivery.getByRole('link',{name:'@peer-sender'})).toHaveAttribute('href',`agentworks://sessions/${sender.id}`);
     await expect(delivery.locator('blockquote strong')).toHaveText('review');
     await expect(delivery.locator('blockquote').getByRole('link',{name:'@inbox-settings-test'})).toHaveAttribute('href',`agentworks://sessions/${session.id}`);
     await expect(page.locator('.message.user').filter({hasText:'Agentworks inbox delivery'})).toHaveCount(0);
     await page.reload();
-    await expect(delivery.locator('.message-label')).toHaveText('Agentworks');
+    await expect(delivery.locator('.message-label')).toHaveText(/^Agentworks/);
     await expect(delivery.locator('.avatar')).toHaveText('A');
-    await expect(page.locator('.message.user').filter({hasText:'Human request'}).locator('.message-label')).toHaveText('You');
+    await expect(page.locator('.message.user').filter({hasText:'Human request'}).locator('.message-label')).toHaveText(/^You/);
     await delivery.getByRole('link',{name:'@peer-sender'}).click();
     await expect(page.locator('#session-heading-title')).toHaveText('Peer sender');
     await expect(page.locator('#workspace-preview')).not.toBeVisible();
@@ -91,7 +92,9 @@ for(const mobile of [false,true])test(`inbox settings persist and reload capped,
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.setViewportSize(mobile?{width:390,height:844}:{width:1440,height:1000});
   await openSession(page);await openInbox(page);
-  await expect(page.locator('#inbox-unlimitedTurns')).not.toBeChecked();
+  await expect(page.locator('#inbox-delivery-status')).toContainText('Enabled');
+  await expect(page.locator('#inbox-unlimitedTurns')).toBeChecked();
+  await useTurnCap(page);
   const stopTimestamp=Math.floor((Date.now()+3600000)/60000)*60000;
   const stop=await page.evaluate(localDate,stopTimestamp);
   await page.locator('#inbox-maxTurns').fill('7');
@@ -147,6 +150,7 @@ for(const mobile of [false,true])test(`inbox settings persist and reload capped,
 test('invalid inbox policy and failed saves preserve persisted settings and the draft for retry',async({page})=>{
   await openSession(page);await openInbox(page);
   const before=(await policy()).policy;
+  await useTurnCap(page);
   await page.locator('#inbox-maxTurns').fill('6');
   await page.locator('#inbox-deadline').fill(localDate(Date.now()+48*3600000));
   await authorize(page).click();
@@ -185,6 +189,7 @@ test('failed initial load blocks saving stale fields and recovers on polling',as
 
 test('opening another session loads its own policy and discards the previous draft',async({page})=>{
   await openSession(page);await openInbox(page);
+  await useTurnCap(page);
   await page.locator('#inbox-maxTurns').fill('8');await save(page);
   await page.locator('#inbox-maxTurns').fill('9');await closeInbox(page);await openInbox(page);
   await expect(page.locator('#inbox-maxTurns')).toHaveValue('8');
@@ -201,11 +206,69 @@ test('opening another session loads its own policy and discards the previous dra
     await page.evaluate(id=>localStorage.setItem('agentworks-session',id),other.id);await page.reload();
     await expect(page.locator('#session-heading-title')).toHaveText('Other inbox policy');
     await openInbox(page);await expect(page.locator('#inbox-maxTurns')).toHaveValue('1');
-    await expect(page.locator('#inbox-delivery-status')).toContainText('Off');
+    await expect(page.locator('#inbox-delivery-status')).toContainText('Enabled');
+    await useTurnCap(page);
     await page.locator('#inbox-maxTurns').fill('2');await save(page);
     expect((await api(`/api/sessions/${other.id}/inbox-delivery`)).policy.maxTurns).toBe(2);
     expect((await policy()).policy.maxTurns).toBe(8);
   }finally{await api(`/api/sessions/${other.id}`,undefined,'DELETE');}
+});
+
+test('Stop keeps a standing inbox authorization',async()=>{
+  await expect.poll(async()=>(await api(`/api/sessions/${session.id}`)).session.status).toBe('idle');
+  await api(`/api/sessions/${session.id}/inbox-delivery`,{enabled:true,requestId:crypto.randomUUID(),deadline:null,unlimitedTurns:true,cooldownSeconds:5,maxBatch:1},'PUT');
+  await api(`/api/sessions/${session.id}/cancel`,{});
+  const p=(await policy()).policy;
+  expect(p.enabled).toBe(true);
+  expect(p.reason).toBe('Human enabled standing inbox turns');
+});
+
+test('unacknowledged messages show a dot on the session menu live and after reload',async({page})=>{
+  await openSession(page);
+  const menu=page.locator('#lifecycle-menu');
+  await expect(menu).not.toHaveClass(/has-unread/);
+  const sender=await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Dot sender',projectId:project.id,agentAccess:{communicate:true}});
+  try{
+    await api(`/api/sessions/${sender.id}/mailbox`,{recipient:session.id,text:'Unread peer note',requestId:crypto.randomUUID()});
+    await expect(menu).toHaveClass(/has-unread/);
+    await expect(page.locator('#session-agents')).toHaveClass(/has-unread/);
+    await expect(page.locator('#lifecycle-menu > summary')).toHaveAttribute('title','Session actions · 1 unacknowledged message');
+    await page.reload();
+    await expect(page.locator('#session-state')).toHaveText('Ready');
+    await expect(menu).toHaveClass(/has-unread/);
+  }finally{await api(`/api/sessions/${sender.id}`,undefined,'DELETE');}
+});
+
+test('archived sessions reject new messages but keep their authorization',async()=>{
+  const sender=await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Archive sender',projectId:project.id,agentAccess:{communicate:true}});
+  try{
+    await expect.poll(async()=>(await api(`/api/sessions/${session.id}`)).session.status).toBe('idle');
+    await api(`/api/sessions/${session.id}/inbox-delivery`,{enabled:true,requestId:crypto.randomUUID(),deadline:null,unlimitedTurns:true,cooldownSeconds:5,maxBatch:1},'PUT');
+    await api(`/api/sessions/${session.id}`,{archived:true},'PATCH');
+    const rejected=await fetch(`${base}/api/sessions/${sender.id}/mailbox`,{method:'POST',headers:{Origin:base,'Content-Type':'application/json'},body:JSON.stringify({recipient:session.id,text:'To an archived session',requestId:crypto.randomUUID()})});
+    expect(rejected.status).toBe(409);
+    const data=await policy();
+    expect(data.policy.enabled).toBe(true);
+    expect(data.held).toBe('session archived');
+  }finally{await api(`/api/sessions/${sender.id}`,undefined,'DELETE');}
+});
+
+test('Acknowledge all clears the inbox dot and the backlog',async({page})=>{
+  await openSession(page);
+  const sender=await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Backlog sender',projectId:project.id,agentAccess:{communicate:true}});
+  try{
+    for(const text of ['Old one','Old two'])await api(`/api/sessions/${sender.id}/mailbox`,{recipient:session.id,text,requestId:crypto.randomUUID()});
+    await expect(page.locator('#lifecycle-menu')).toHaveClass(/has-unread/);
+    if(await page.locator('#session-more').isVisible())await page.locator('#session-more').click();
+    await page.locator('#lifecycle-menu > summary').click();
+    await page.locator('#session-agents').click();
+    const ackAll=page.getByRole('button',{name:'Acknowledge all (2)'});
+    await ackAll.click();
+    await expect(ackAll).toBeHidden();
+    await expect(page.locator('#agent-inbox')).not.toContainText('In inbox');
+    await closeInbox(page);
+    await expect(page.locator('#lifecycle-menu')).not.toHaveClass(/has-unread/);
+  }finally{await api(`/api/sessions/${sender.id}`,undefined,'DELETE');}
 });
 
 test.afterAll(async()=>{await stopServer();if(fixture)await rm(fixture,{recursive:true,force:true});});

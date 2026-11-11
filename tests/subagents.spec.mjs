@@ -135,7 +135,7 @@ test('mobile strip scrolls, child Stop targets the root, and tabs stay within th
   const reviewer=page.getByRole('tab',{name:'Sub: Reviewer',exact:true});
   await reviewer.click();await expect(page.locator('#subagent-view')).toContainText('Modern working');
   await expect(reviewer).toHaveAttribute('aria-selected','true');
-  await expect(page.locator('#prompt')).toBeVisible();
+  await expect(page.locator('#prompt-editor .cm-content')).toBeVisible();
   await page.locator('#stop').click();await state(s.id,'idle');
   await expect(page.getByRole('tab',{name:'Sub: Researcher',exact:true})).toHaveAttribute('title','Researcher · Cancelled');
   await expect(page.locator('#subagent-view .subagent-state')).toHaveText('Cancelled');

@@ -1,13 +1,20 @@
 //! GitHub context. Git metadata may come from workers; credentials and API
 //! traffic always belong to this server's OS user. No agent write tools here.
+mod browser;
+mod review_requests;
+mod session_pivot;
 use crate::{ApiResult, App, fail, session};
 use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
 };
+pub use browser::{pulls, save_polling};
+pub(crate) use review_requests::review_requests;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+pub use session_pivot::sessions;
+pub(crate) use session_pivot::{SessionQuery, matching_sessions};
 use std::{
     collections::HashMap,
     process::Stdio,
@@ -25,6 +32,8 @@ pub struct Config {
     pub bindings: HashMap<String, String>,
     #[serde(default)]
     pub links: HashMap<String, Vec<Link>>,
+    #[serde(default)]
+    pub poll_intervals: HashMap<String, u64>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -62,15 +71,85 @@ struct Account {
 }
 #[derive(Default)]
 pub struct Hub {
+    tracking_locks: Mutex<HashMap<String, std::sync::Weak<Mutex<()>>>>,
     state: Mutex<HubState>,
 }
 #[derive(Default)]
 struct HubState {
+    review_requests: HashMap<String, (Instant, Value)>,
     discovery: Option<(Instant, Result<Vec<Account>, String>)>,
     snapshots: HashMap<String, (Instant, Value)>,
     failures: HashMap<String, (u64, String)>,
+    browser: HashMap<String, (Instant, Value)>,
+    prs: HashMap<String, (Instant, Value)>,
     // Serialize main-host requests and share work between sessions. Capped cache;
     // neither credentials nor Octocrab clients are persisted in this state.
+}
+impl Hub {
+    pub(crate) async fn tracking_lock(&self, id: &str) -> std::sync::Arc<Mutex<()>> {
+        let mut locks = self.tracking_locks.lock().await;
+        locks.retain(|_, weak| weak.strong_count() > 0);
+        if let Some(lock) = locks.get(id).and_then(std::sync::Weak::upgrade) {
+            return lock;
+        }
+        let lock = std::sync::Arc::new(Mutex::new(()));
+        locks.insert(id.into(), std::sync::Arc::downgrade(&lock));
+        lock
+    }
+}
+pub(crate) const DEFAULT_POLL_MS: u64 = 300_000;
+pub(crate) fn poll_interval(app: &App, host: &str) -> u64 {
+    app.catalog
+        .lock()
+        .unwrap()
+        .data
+        .github
+        .poll_intervals
+        .get(host)
+        .copied()
+        .unwrap_or(300)
+        .clamp(60, 3600)
+        * 1000
+}
+fn pr_key(repo: &Repository, login: &str, number: &Value) -> String {
+    json!([repo.key(), login.to_ascii_lowercase(), number]).to_string()
+}
+fn remember_prs(hub: &mut HubState, repo: &Repository, login: &str, snapshot: &Value) {
+    if hub.prs.len() > 2000 {
+        hub.prs.clear();
+    }
+    for pr in snapshot["resources"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["kind"] == "pullRequest")
+    {
+        let key = pr_key(repo, login, &pr["number"]);
+        if let Some((_, old)) = hub.prs.get_mut(&key) {
+            if old["fetchedAt"].as_u64().unwrap_or_default()
+                >= pr["fetchedAt"].as_u64().unwrap_or_default()
+            {
+                if old["fetchedAt"] == pr["fetchedAt"] {
+                    *old = pr.clone();
+                }
+                continue;
+            }
+        }
+        hub.prs.insert(key, (Instant::now(), pr.clone()));
+    }
+}
+fn overlay_prs(hub: &HubState, repo: &Repository, login: &str, snapshot: &mut Value, ttl: u64) {
+    if let Some(resources) = snapshot["resources"].as_array_mut() {
+        for pr in resources.iter_mut().filter(|p| p["kind"] == "pullRequest") {
+            if let Some((at, latest)) = hub.prs.get(&pr_key(repo, login, &pr["number"])) {
+                if at.elapsed().as_millis() < ttl as u128 {
+                    let explicit = pr["explicit"].clone();
+                    *pr = latest.clone();
+                    pr["explicit"] = explicit;
+                }
+            }
+        }
+    }
 }
 fn valid_host(host: &str) -> bool {
     host.len() <= 253
@@ -258,8 +337,9 @@ pub async fn connections(State(app): State<App>, Query(query): Query<Refresh>) -
             rows.push(json!({"host":saved.host,"login":saved.login,"state":"unavailable","enabled":saved.enabled,"apiBase":api_base(&saved.host)}));
         }
     }
+    let polling: std::collections::BTreeMap<_,_> = rows.iter().filter_map(|r|r["host"].as_str()).map(|host|(host.to_owned(),json!({"host":host,"intervalSeconds":config.poll_intervals.get(host).copied().unwrap_or(300)}))).collect();
     Ok(Json(
-        json!({"connections":rows,"message":result.err(),"credentialHost":"local"}),
+        json!({"connections":rows,"message":result.err(),"credentialHost":"local","polling":polling.into_values().collect::<Vec<_>>()}),
     ))
 }
 pub async fn save_connection(
@@ -309,6 +389,9 @@ pub async fn save_connection(
         })?;
     }
     hub.snapshots.clear();
+    hub.prs.clear();
+    hub.browser.clear();
+    hub.review_requests.clear();
     hub.failures.clear();
     Ok(Json(json!({"ok":true})))
 }
@@ -507,7 +590,7 @@ pub async fn save_binding(
                 "No supported GitHub origin in this workspace",
             )
         })?;
-    let mut hub = app.github.state.lock().await;
+    let _hub = app.github.state.lock().await;
     let mut catalog = app.catalog.lock().unwrap();
     let mut config = catalog.data.github.clone();
     if let Some(login) = input.login {
@@ -547,8 +630,6 @@ pub async fn save_binding(
             "Could not save GitHub binding",
         )
     })?;
-    hub.snapshots.clear();
-    hub.failures.clear();
     Ok(Json(json!({"ok":true})))
 }
 
@@ -575,7 +656,8 @@ pub async fn context(
     };
     let mut hub = app.github.state.lock().await;
     let config = app.catalog.lock().unwrap().data.github.clone();
-    let mut view = json!({"repository":repo,"branch":context["branch"],"commit":context["commit"],"links":config.links.get(&id).cloned().unwrap_or_default()});
+    let interval = poll_interval(&app, &repo.host);
+    let mut view = json!({"pollIntervalMs":interval,"repository":repo,"branch":context["branch"],"commit":context["commit"],"links":config.links.get(&id).cloned().unwrap_or_default()});
     let connection = match choose(&config, &repo) {
         Ok(connection) => connection,
         Err(state) => {
@@ -635,17 +717,9 @@ pub async fn context(
         repo.key(),
         connection.login.to_ascii_lowercase(),
         context["branch"],
-        context["commit"],
         links
     ]))
     .unwrap();
-    if let Some((at, cached)) = hub.snapshots.get(&key) {
-        if at.elapsed() < Duration::from_secs(if query.refresh { 10 } else { 60 }) {
-            view["snapshot"] = cached.clone();
-            view["status"] = json!("ready");
-            return Ok(Json(view));
-        }
-    }
     let connection_key = format!(
         "{}:{}",
         connection.host,
@@ -659,14 +733,29 @@ pub async fn context(
             return Ok(Json(view));
         }
     }
+    if !hub.failures.contains_key(&connection_key) {
+        if let Some((at, cached)) = hub.snapshots.get(&key) {
+            if at.elapsed() < Duration::from_millis(if query.refresh { 10_000 } else { interval }) {
+                let mut snapshot = cached.clone();
+                overlay_prs(&hub, &repo, &connection.login, &mut snapshot, interval);
+                if snapshot_deadline(&snapshot, interval) > now() {
+                    checkout_snapshot(&mut snapshot, context["commit"].as_str());
+                    view["snapshot"] = snapshot;
+                    view["status"] = json!("ready");
+                    return Ok(Json(view));
+                }
+            }
+        }
+    }
     let fetched = tokio::time::timeout(Duration::from_secs(50), async {
         let client = client(&connection).await?;
-        fetch_snapshot(
+        fetch_snapshot_cached(
             &client,
             &repo,
             context["branch"].as_str(),
             context["commit"].as_str(),
             &links,
+            Some((&hub, &connection.login, interval)),
         )
         .await
     })
@@ -674,6 +763,8 @@ pub async fn context(
     .unwrap_or_else(|_| Err("GitHub refresh timed out; retry later".into()));
     match fetched {
         Ok(snapshot) => {
+            hub.failures.remove(&connection_key);
+            remember_prs(&mut hub, &repo, &connection.login, &snapshot);
             if hub.snapshots.len() >= 128 {
                 hub.snapshots.clear();
             }
@@ -682,7 +773,8 @@ pub async fn context(
             view["status"] = json!("ready");
             view["snapshot"] = snapshot;
         }
-        Err(failure) => {
+        Err(mut failure) => {
+            failure.retry_at = failure.retry_at.max(now() + interval);
             if hub.failures.len() >= 128 {
                 hub.failures.clear();
             }
@@ -695,9 +787,28 @@ pub async fn context(
     }
     Ok(Json(view))
 }
+pub(crate) fn snapshot_deadline(snapshot: &Value, interval: u64) -> u64 {
+    let fetched = snapshot["fetchedAt"].as_u64().unwrap_or_else(now);
+    snapshot["resources"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["kind"] == "pullRequest")
+        .map(|r| r["fetchedAt"].as_u64().unwrap_or(fetched))
+        .fold(fetched, u64::min)
+        .saturating_add(interval)
+}
+fn checkout_snapshot(snapshot: &mut Value, sha: Option<&str>) {
+    snapshot["headSha"] = json!(sha);
+    if let Some(resources) = snapshot["resources"].as_array_mut() {
+        for pr in resources.iter_mut().filter(|p| p["kind"] == "pullRequest") {
+            pr["headMatches"] = json!(sha.is_some_and(|sha| pr["headSha"] == sha));
+        }
+    }
+}
 const PR_FIELDS: &str = r#"
  id number title url state isDraft headRefName headRefOid headRepository { nameWithOwner }
- baseRefName reviewDecision
+ baseRefName reviewDecision author { login } updatedAt createdAt
  latestOpinionatedReviews(first:50) { pageInfo { hasNextPage } nodes { state commit { oid } } }
  commits(last:1) { nodes { commit { oid statusCheckRollup { state contexts(first:50) {
  pageInfo { hasNextPage } nodes {
@@ -731,12 +842,13 @@ async fn graphql(
     }
     Ok(response["data"].clone())
 }
-async fn fetch_snapshot(
+async fn fetch_snapshot_cached(
     client: &octocrab::Octocrab,
     repo: &Repository,
     branch: Option<&str>,
     sha: Option<&str>,
     links: &[Link],
+    cache: Option<(&HubState, &str, u64)>,
 ) -> Result<Value, Failure> {
     let query = format!(
         r#"query($owner:String!,$name:String!,$branch:String!) {{ repository(owner:$owner,name:$name) {{ id nameWithOwner url pullRequests(first:20,headRefName:$branch,orderBy:{{field:UPDATED_AT,direction:DESC}}) {{ pageInfo {{ hasNextPage }} nodes {{ {PR_FIELDS} }} }} }} }}"#
@@ -780,6 +892,26 @@ async fn fetch_snapshot(
         repository = json!({"id":data["repository"]["id"],"name":data["repository"]["nameWithOwner"],"url":data["repository"]["url"]});
     }
     for link in links {
+        if let Some(existing) = resources
+            .iter_mut()
+            .find(|r| r["number"] == link.number && r["kind"] == link.kind)
+        {
+            existing["explicit"] = json!(true);
+            continue;
+        }
+        if link.kind == "pullRequest" {
+            if let Some((hub, login, ttl)) = cache {
+                if let Some((at, pr)) = hub.prs.get(&pr_key(repo, login, &json!(link.number))) {
+                    if at.elapsed().as_millis() < ttl as u128 {
+                        let mut pr = pr.clone();
+                        pr["explicit"] = json!(true);
+                        pr["headMatches"] = json!(sha.is_some_and(|sha| pr["headSha"] == sha));
+                        resources.push(pr);
+                        continue;
+                    }
+                }
+            }
+        }
         let query = format!(
             r#"query($owner:String!,$name:String!,$number:Int!) {{ repository(owner:$owner,name:$name) {{ id nameWithOwner url issueOrPullRequest(number:$number) {{ ... on Issue {{ id number title url state }} ... on PullRequest {{ {PR_FIELDS} }} }} }} }}"#
         );
@@ -811,6 +943,16 @@ async fn fetch_snapshot(
     Ok(
         json!({"fetchedAt":now(),"repository":repository,"resources":resources,"complete":complete,"headSha":sha}),
     )
+}
+#[cfg(test)]
+async fn fetch_snapshot(
+    client: &octocrab::Octocrab,
+    repo: &Repository,
+    branch: Option<&str>,
+    sha: Option<&str>,
+    links: &[Link],
+) -> Result<Value, Failure> {
+    fetch_snapshot_cached(client, repo, branch, sha, links, None).await
 }
 fn review_summary(resource: &Value) -> Value {
     if let Some(decision) = resource["reviewDecision"]
@@ -846,8 +988,9 @@ fn review_summary(resource: &Value) -> Value {
 }
 fn normalize(resource: &Value, kind: &str, explicit: bool, sha: Option<&str>) -> Value {
     let rollup = &resource["commits"]["nodes"][0]["commit"]["statusCheckRollup"];
-    json!({"id":resource["id"],"kind":kind,"number":resource["number"],"title":resource["title"],"url":resource["url"],"state":resource["state"],"draft":resource["isDraft"],"headSha":resource["headRefOid"],"baseBranch":resource["baseRefName"],"explicit":explicit,
+    json!({"fetchedAt":now(),"id":resource["id"],"kind":kind,"number":resource["number"],"title":resource["title"],"url":resource["url"],"state":resource["state"],"draft":resource["isDraft"],"headSha":resource["headRefOid"],"baseBranch":resource["baseRefName"],"explicit":explicit,
         "headMatches":sha.is_some_and(|sha| resource["headRefOid"] == sha),"reviewDecision":resource["reviewDecision"],"reviewSummary":review_summary(resource),
+        "headBranch":resource["headRefName"],"headRepository":resource["headRepository"]["nameWithOwner"],"author":resource["author"]["login"],"updatedAt":resource["updatedAt"],"createdAt":resource["createdAt"],
         "checks":if rollup.is_null() { json!({"state":"UNKNOWN","items":[],"complete":false}) } else { json!({"state":rollup["state"],"items":rollup["contexts"]["nodes"],"complete":rollup["contexts"]["pageInfo"]["hasNextPage"] == false}) }})
 }
 
@@ -971,9 +1114,11 @@ mod tests {
     }
     #[test]
     fn checks_are_commit_scoped_and_absent_is_unknown() {
-        let pr = json!({"number":1,"headRefOid":"old"});
+        let pr = json!({"number":1,"headRefOid":"old","createdAt":"2026-10-01T12:00:00Z","updatedAt":"2026-11-02T12:00:00Z"});
         let normalized = normalize(&pr, "pullRequest", false, Some("new"));
         assert_eq!(normalized["headMatches"], false);
+        assert_eq!(normalized["createdAt"], pr["createdAt"]);
+        assert_eq!(normalized["updatedAt"], pr["updatedAt"]);
         assert_eq!(normalized["checks"]["state"], "UNKNOWN");
     }
     #[tokio::test]
@@ -1079,6 +1224,26 @@ mod tests {
             assert_eq!(snapshot["resources"][0]["headMatches"], false);
             assert_eq!(snapshot["resources"][0]["checks"]["state"], "FAILURE");
             assert_eq!(snapshot["resources"][1]["explicit"], true);
+            let mut pool = HubState::default();
+            remember_prs(&mut pool, &repo, "fixture-user", &snapshot);
+            let linked = fetch_snapshot_cached(
+                &client,
+                &repo,
+                None,
+                Some("current"),
+                &[Link {
+                    host: host.into(),
+                    owner: "team".into(),
+                    repo: "repo".into(),
+                    kind: "pullRequest".into(),
+                    number: 1,
+                }],
+                Some((&pool, "fixture-user", 300000)),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{}", e.message));
+            assert_eq!(linked["resources"][0]["headMatches"], true);
+            assert_eq!(linked["resources"][0]["explicit"], true);
             let detached = fetch_snapshot(&client, &repo, None, Some("old"), &[])
                 .await
                 .unwrap_or_else(|e| panic!("{}", e.message));
@@ -1103,5 +1268,17 @@ mod tests {
         assert!(failure.retry_at >= now() + 119_000);
         assert!(!failure.message.contains("do not expose"));
         server.abort();
+    }
+}
+
+#[cfg(test)]
+impl Hub {
+    pub(crate) async fn seed_pr_snapshot(&self, branch: &str, snapshot: Value) {
+        let key = json!(["github.com/team/repo", "fixture", branch, []]).to_string();
+        self.state
+            .lock()
+            .await
+            .snapshots
+            .insert(key, (Instant::now(), snapshot));
     }
 }

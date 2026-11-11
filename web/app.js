@@ -16,9 +16,11 @@ import {createWorkspace} from './workspace.js';
 import {setupCommunication} from './communication.js';
 import {setupPalettes} from './palettes.js';
 import {enhanceMermaid} from './mermaid.js';
+import {setupMarkdownComposer} from './markdown-composer.bundle.js';
 import {setupDisplayPreferences} from './display-preferences.js';
 import {setupWorkLogs,observeTool} from './work-logs.js';
-import {setupUsageStatus} from './usage-status.js';
+import {applyCompaction,renderCompaction} from './compaction.js';
+import {setupUsageStatus, watchSharedQuota, quotaFamily} from './usage-status.js';
 import {setupFlyout} from './flyout.js';
 import {setupResize,setupPromptResize} from './resize-handle.js';
 import {setupSidebarPin} from './sidebar-pin.js';
@@ -26,13 +28,15 @@ import {setupSidePanel} from './side-panel.js';
 import {setupContextMenu} from './context-menu.js';
 import {setupTimeoutControls} from './timeout-controls.js';
 import {setupParserScripts} from './parser-scripts.js';
-import {setupInputQueue,setupPromptRecovery,BUSY} from './input-queue.js';
+import {setupInputQueue,setupPromptRecovery,BUSY,STARTING} from './input-queue.js';
 import {setupNotifications} from './notifications.js';
 import {setupQuestions} from './questions.js';
 import {setupMentions} from './mentions.js';
 import {setupAttachments} from './attachments.js';
 import {setupModelProviders} from './model-providers.js';
 import {setupDirectoryPicker,setupProjectDirectory} from './directory-picker.js';
+import {setupCreateSections} from './create-sections.js';
+import {setupCreatePlace} from './create-place.js';
 const $ = id => document.getElementById(id);
 // randomUUID is unavailable on plain HTTP remote origins; getRandomValues is supported.
 const uuid = () => globalThis.crypto.randomUUID?.() ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -49,20 +53,39 @@ let editingProject=null,savingProject=false;
 const drafts=readStorage(sessionStorage,'agentworks-drafts',{});
 const scrollPositions=new Map();let restoreScroll=null;
 let config, sessions=[], active=null, socket=null, generation=0, connected=false;
-// U-07: per-session composer usage statusline; only this session's own events feed it.
-const usageStatus=setupUsageStatus({root:$('usage-status'),getProvider:()=>active?.provider,chip:$('composer-info')});
+// U-07: per-session composer usage statusline. Context and cost come only from this
+// session's events; account quota also takes newer reports from sessions sharing its account.
+const sharedQuota=watchSharedQuota(socketUrl('/api/account-quota/events'),()=>usageStatus.render());
+const usageStatus=setupUsageStatus({root:$('usage-status'),getProvider:()=>active?.provider,chip:$('composer-info'),
+  getShared:()=>active?sharedQuota.get(active.hostId,quotaFamily(active.provider,active.modelProvider)):null});
 const composerMenu=setupFlyout({menu:$('composer-menu'),triggers:[$('composer-more'),$('composer-info')]});
 const sessionMenu=setupFlyout({menu:$('session-menu'),triggers:[$('session-more')]});
+// Unacknowledged inbound peer messages: a dot on both ⋯ triggers and on Agents & inbox.
+function renderUnread(){
+  const n=active?.unacknowledged||0,label=n?`${n} unacknowledged message${n===1?'':'s'}`:'';
+  for(const id of ['session-more','lifecycle-menu','session-agents'])$(id).classList.toggle('has-unread',n>0);
+  $('session-more').setAttribute('aria-label',n?`Session options, ${label}`:'Session options');
+  $('lifecycle-menu').querySelector('summary').title=n?`Session actions · ${label}`:'Session actions';
+  $('session-agents').title=label;
+}
 setupResize({handle:$('sidebar-resize'),target:document.querySelector('.layout'),panel:$('sidebar'),variable:'--sidebar-width',key:'agentworks-sidebar-width',min:200,max:560,initial:228});
 const sidebarPin=setupSidebarPin({sidebar:$('sidebar'),button:$('sidebar-pin'),trigger:$('nav-sessions')});
 setupResize({handle:$('side-panel-resize'),target:$('side-panel'),panel:$('side-panel'),variable:'--side-panel-width',key:'agentworks-side-panel-width',min:300,max:960,initial:420,edge:'left'});
+const composerKeyboard=matchMedia('(pointer:coarse), (max-width:800px)');
+function updateComposerKeyboard(){
+  $('prompt').setAttribute('enterkeyhint',composerKeyboard.matches?'enter':'send');
+  $('composer-hint').textContent=composerKeyboard.matches?'Enter for a new line · Tap Send to send':'Enter to send · Shift + Enter for a new line';
+}
+updateComposerKeyboard();
+composerKeyboard.addEventListener('change',()=>{updateComposerKeyboard();renderComposer();});
 const promptResize=setupPromptResize($('prompt'));
+const markdownComposer=setupMarkdownComposer({area:$('prompt'),host:$('prompt-editor'),toggle:$('composer-source'),storage:localStorage});
 const promptRecovery=setupPromptRecovery({area:$('prompt'),storage:sessionStorage,getSession:()=>active?.id,onChange:()=>{$('prompt').dispatchEvent(new Event('input'));}});
 let currentUserSeq=null;
 let sidePanel=null;
 setInterval(()=>usageStatus.render(),60000);
 let timeoutControls=null,parserScripts=null;
-let transcript=[], tools=new Map(), approvals=new Map(), assistant=null, status='starting';
+let transcript=[], tools=new Map(), compactions=new Map(), approvals=new Map(), assistant=null, status='starting';
 const backgroundJobs=createBackgroundJobs({root:$('background-jobs'),api,getActive:()=>active,isConnected:()=>connected,onChange:()=>scheduleDraw()});
 const subagents=createSubagents({storage:localStorage,getSessionId:()=>active?.id,jobResult:job=>[`${job.name||'Background job'} · ${backgroundJobs.label(job.state)}`,...jobResultLines(job)].join('\n'),append:()=>{},tabs:$('session-tabs'),panel:$('subagent-view'),messages:$('messages'),onSelect:view=>{sessionTerminal.select(view);scheduleDraw();},uuid,applyToolUpdate,renderToolActivity,renderMessage:(body,item)=>{if(item.role==='Agent')updateMarkdown(item,body);else body.textContent=item.text;},el});
 // L-05 hook: activity indicator and explicit queued inputs (server-owned state).
@@ -89,10 +112,13 @@ let pendingCreate=readStorage(sessionStorage,'agentworks-pending-create',null);
 // L-08: set only while the new-session dialog is pre-filled from an existing session.
 let forkSource=null,forkGeneration=0,modelPicked=false,roleLibrary=[];
 const worktrees=setupWorktreeControls({$,api,onChange:()=>{if(config)providerNote();}});
+const createSections=setupCreateSections({$,storage:localStorage});
+// A place counts as used when it has a saved or remembered directory or a session.
+const createPlace=setupCreatePlace({$,el,used:(hostId,projectId)=>!!(projectDirectoryOn(hostId,projectId)||rememberedDirectory(hostId,projectId)||sessions.some(s=>(s.projectId||null)===projectId&&(s.hostId||'local')===hostId))});
 const policyEditor=setupPolicyEditor({$,api});
 const directoryPicker=setupDirectoryPicker({$,api});
 const projectDirectory=setupProjectDirectory({$,picker:directoryPicker,hosts:()=>hosts});
-const display=setupDisplayPreferences();display.mount($('display-preferences'));
+const display=setupDisplayPreferences({onChange:()=>{draw();renderComposer();}});display.mount($('display-preferences'));
 workLogs=setupWorkLogs({el});workLogs.mount($('display-preferences'),()=>scheduleDraw());
 // U-02: policy lives on the server; the browser only requests permission and shows.
 const notifications=setupNotifications({getSessions:()=>sessions,getActive:()=>active,selectSession,toast});
@@ -117,11 +143,14 @@ function providerNote() {
     const available=remote.status==='connected'&&remote.worker?.providers?.includes(p.id);
     $('provider-note').textContent=available?`Uses ${labels[p.id]} and its provider configuration on ${remote.name}.`:`${labels[p.id]} is unavailable on ${remote.name}.`;
     $('create-submit').disabled=!available||!remote.roots?.length||(p.id==='goose'&&$('create-model-provider').disabled)||creating||worktrees.blocked()||!!(forkSource?.role&&!p.roles);
-    return;
+    createChanged();return;
   }
   $('provider-note').textContent=p.id==='demo'?'Local test agent. No model calls, API key, or file changes.':p.id==='goose'?'Uses the model provider configured for Goose on this host.':p.id==='antigravity'?(p.installed?'Official ACP using your Antigravity sign-in. Sign in with agy on this host first.':'Install Antigravity CLI on this host or set AGENTWORKS_ANTIGRAVITY_PATH.'):p.id==='opencode'?(p.installed?'Native ACP. Choose an advertised free model. Availability and limits may change.':'Install OpenCode on this host or set AGENTWORKS_OPENCODE_PATH.'):!p.installed?(p.id==='codex-rust'?'Install native Codex on this host or set CODEX_PATH.':'Install native Claude Code on this host or set CLAUDE_CODE_EXECUTABLE.'):p.authMode==='existing'?'Uses the existing agent sign-in on this host. If it has expired, sign in with the CLI and try again.':!p.keyPresent?`Set ${['claude','claude-rust'].includes(p.id)?'ANTHROPIC_API_KEY':'OPENAI_API_KEY or CODEX_API_KEY'} before starting the server.`:'API key available on the host. Messages use your provider account.';
   $('create-submit').disabled=!p.installed||(p.authMode==='api_key'&&!p.keyPresent)||(p.id==='goose'&&$('create-model-provider').disabled)||creating||worktrees.blocked()||!!(forkSource?.role&&!p.roles);
+  createChanged();
 }
+// Keeps the folded section summaries and the place field in step with the form.
+function createChanged(){createSections.summarize();createPlace.sync();}
 // Roles add instructions to the agent's system prompt; they never change Agentworks access.
 function renderRoles(){
   const select=$('create-role'),previous=select.value;select.replaceChildren(new Option('No role',''));
@@ -138,6 +167,7 @@ function updateRoleNote(){
   select.disabled=!p?.roles;if(!p?.roles)select.value='';
   const role=roleLibrary.find(r=>r.id===select.value);
   $('create-role-note').textContent=!p?.roles?`${labels[p?.id]||'This agent'} does not accept role instructions yet.`:role?(role.description||'Custom role.')+' Added to the agent\'s system prompt.':'Adds instructions to the agent\'s system prompt. Roles do not change Agentworks access.';
+  createChanged();
 }
 const communicationLabels={off:'Off',participant:'Participant',coordinator:'Coordinator'};
 function updateCommunicationDefault(){
@@ -145,6 +175,7 @@ function updateCommunicationDefault(){
   const role=project?.defaultCommunicationRole||config.defaultCommunicationRole||'participant';
   $('create-agent-access').querySelector('option[value=""]').textContent=`Use ${project?.defaultCommunicationRole?'project':'global'} default · ${communicationLabels[role]}`;
   $('create-communication-note').textContent='Participant exchanges project messages. Coordinator can also start sessions and turns, cancel turns, and run project automations. Change session access later in Agents & inbox.';
+  createChanged();
 }
 // Most recently used harness first; hidden harnesses stay out unless a fork keeps one.
 function renderProviderPicker(keep){
@@ -153,8 +184,11 @@ function renderProviderPicker(keep){
   const items=(shown.length?shown:config.providers).map((p,i)=>({p,i})).sort((a,b)=>(used[b.p.id]||0)-(used[a.p.id]||0)||a.i-b.i);
   $('provider').replaceChildren(...items.map(({p})=>{const option=el('option','',p.name+(p.authMode==='api_key'&&!p.keyPresent?' · API key needed':''));option.value=p.id;return option;}));
 }
+let githubCreate=null;
 function openCreate(context={}) {
   if(!config)return;
+  githubCreate=context.githubPr||null;worktrees.setPrefill(context.worktreePrefill||null);
+  $('create-github-note').hidden=!githubCreate;$('create-github-note').textContent=githubCreate?`PR #${githubCreate.number} · ${githubCreate.host}/${githubCreate.owner}/${githubCreate.repo}. Choose a matching project/source directory. The worktree starts at this PR head; the session opens without a prompt.`:'';
   if(context.provider)context.provider=currentProvider(context.provider);
   renderProviderPicker(context.provider);
   updateProjectControls();
@@ -165,7 +199,7 @@ function openCreate(context={}) {
   const remembered=readStorage(localStorage,'agentworks-project-locations',{});
   $('create-resume-policy').checked=false;
   $('create-role').value='';api('/api/roles').then(list=>{roleLibrary=Array.isArray(list)?list:[];renderRoles();}).catch(()=>{});
-  $('create-agent-access').value='';updateCommunicationDefault();$('create-error').textContent='';$('directory').value=context.cwd||projectDirectoryOn('local',projectId)||workspaceContext?.cwd||remembered[projectId||'ungrouped']||(active?.hostId==='local'?active.cwd:null)||config.roots[0];$('session-title').value=context.title||'';
+  $('create-agent-access').value='';updateCommunicationDefault();$('create-error').textContent='';$('directory').value=context.cwd||(projectId?projectRoot('local',projectId):workspaceContext?.cwd||remembered.ungrouped||(active?.hostId==='local'?active.cwd:null))||config.roots[0];$('session-title').value=context.title||'';
   if(context.provider&&$('provider').querySelector(`option[value="${context.provider}"]`))$('provider').value=context.provider;
   $('fork-boundary').replaceChildren(new Option('Latest completed turn at submission',''));$('fork-context').value='auto';$('fork-summary').value='';
   renderForkHeader();fillCreateHosts(context.hostId||'local',context.cwd);providerNote();updateRoleNote();
@@ -198,13 +232,19 @@ function projectDirectoryOn(hostId,projectId){
   return location&&location.hostId===hostId?location.path:null;
 }
 // The last source directory chosen in this browser for a project on a host.
-function rememberedDirectory(){
-  const host=$('create-host').value||'local',project=$('create-project').value||'ungrouped';
+function rememberedDirectory(host=$('create-host').value||'local',projectId=$('create-project').value||null){
+  const project=projectId||'ungrouped';
   return readStorage(localStorage,'agentworks-project-locations',{})[host==='local'?project:host+':'+project];
+}
+// Where a project's sessions start on a host: its saved directory, the last
+// source chosen here, else its newest session's source checkout (never a worktree).
+function projectRoot(hostId,projectId){
+  const newest=projectId&&sessions.find(s=>s.projectId===projectId&&(s.hostId||'local')===hostId);
+  return projectDirectoryOn(hostId,projectId)||rememberedDirectory(hostId,projectId)||newest?.worktree?.mainTop||newest?.cwd||null;
 }
 function createHostChanged(cwd){
   const host=createHost(),roots=host?host.roots||[]:config.roots;
-  $('directory').value=cwd||projectDirectoryOn($('create-host').value||'local',$('create-project').value||null)||rememberedDirectory()||roots[0]||'';
+  $('directory').value=cwd||projectRoot($('create-host').value||'local',$('create-project').value||null)||roots[0]||'';
   $('create-resume-policy').disabled=false;
   worktrees.setHost(host?.id);
   $('project-roots').replaceChildren(...roots.map(root=>{const option=el('option');option.value=root;return option;}));
@@ -267,6 +307,7 @@ function resetCreateModels(){
   const option=el('option','',carried?`From “${forkSource.title}” · ${carried}`:defaultId?`Saved default · ${defaultId}`:'Harness default');option.value=defaultId||'';select.append(option);
   const remote=createHost();$('load-models').disabled=false;
   $('model-note').textContent=remote?`Load available models from ${remote.name} without sending a prompt.`:'Load available models from the agent without sending a prompt.';
+  createChanged();
 }
 async function loadCreateModels(){
   const gen=++discoveryGeneration,provider=$('provider').value,cwd=$('directory').value,hostId=$('create-host').value;
@@ -281,18 +322,33 @@ async function loadCreateModels(){
     select.value=[...select.options].some(o=>o.value===previous)?previous:'';
     $('model-note').textContent=result.options?.length?'Model is applied before the first turn.':'This harness did not advertise selectable models.';
   }catch(e){if(gen===discoveryGeneration)$('model-note').textContent=e.message;}
-  finally{if(gen===discoveryGeneration)$('load-models').disabled=false;}
+  finally{if(gen===discoveryGeneration){$('load-models').disabled=false;createChanged();}}
 }
 function commandText(command){return command.name.startsWith('$')?command.name:'/'+command.name.replace(/^\//,'');}
+function commandRange(){
+  const prompt=$('prompt'),caret=prompt.selectionStart;
+  if(caret!==prompt.selectionEnd)return null;
+  const before=prompt.value.slice(0,caret);
+  const match=/(?:^|\s)(\$[^\s$]*)$/.exec(before)||/^(\/\S*)$/.exec(before);
+  return match?{start:caret-match[1].length,end:caret,query:match[1].toLowerCase()}:null;
+}
+function updateCommands(){commandsOpen=!!commandRange();renderCommands();}
 function renderCommands(){
   const list=$('command-list');list.replaceChildren();list.hidden=!commandsOpen;
   if(!commandsOpen)return;
-  const query=$('prompt').value.trim().toLowerCase();
-  const items=availableCommands.filter(c=>!/^[/\$]\S*$/.test(query)||commandText(c).toLowerCase().includes(query));
+  const range=commandRange();
+  const items=availableCommands.filter(c=>!range||commandText(c).toLowerCase().includes(range.query)||range.query.startsWith('/')&&c.name.startsWith('$')&&('/'+c.name.slice(1)).toLowerCase().includes(range.query));
   if(!items.length)list.append(el('p','field-note','No matching commands advertised by this harness.'));
   for(const command of items){
     const button=el('button','',commandText(command));button.type='button';button.append(el('small','',command.description||''));
-    button.onclick=()=>{$('prompt').value=commandText(command)+' ';commandsOpen=false;renderCommands();$('prompt').dispatchEvent(new Event('input'));$('prompt').focus();};list.append(button);
+    button.addEventListener('pointerdown',event=>event.preventDefault());
+    button.onclick=()=>{
+      const prompt=$('prompt'),value=prompt.value,insert=commandText(command)+' ';
+      const start=range?.start??0,end=range?.end??value.length;
+      prompt.value=value.slice(0,start)+insert+value.slice(end).replace(/^ /,'');
+      prompt.setSelectionRange(start+insert.length,start+insert.length);
+      commandsOpen=false;renderCommands();prompt.dispatchEvent(new Event('input'));prompt.focus();
+    };list.append(button);
   }
 }
 function importHost(){return hosts.find(h=>h.id===$('import-host').value&&h.kind==='remote')||null;}
@@ -543,9 +599,9 @@ function openProjectDialog(project=null){
   projectDirectory.open(saved||(!project&&$('create-dialog').open?{hostId:$('create-host').value||'local',path:''}:null));
   policyEditor.open(editingProject);$('project-dialog').showModal();$('project-name').focus();
 }
-function resetTranscript(){eventSeq=null;backgroundJobs.reset();subagents.reset();transcript=[];tools=new Map();approvals=new Map();assistant=null;nodes.clear();turnEnds=new Map();workLogs?.reset();$('messages').replaceChildren();$('approval-area').replaceChildren();}
-// The desktop header and the phone session bar both show the session title.
-function setTitle(title){$('header-title').textContent=title;$('session-heading-title').textContent=title;}
+function resetTranscript(){eventSeq=null;backgroundJobs.reset();subagents.reset();transcript=[];tools=new Map();compactions=new Map();approvals=new Map();assistant=null;nodes.clear();turnEnds=new Map();workLogs?.reset();$('messages').replaceChildren();$('approval-area').replaceChildren();}
+// Keep the session identity in sync across desktop and phone layouts.
+function setTitle(title){$('header-title').textContent=title;$('session-heading-title').textContent=title;$('session-location-title').textContent=title;$('session-location-title').title=title;}
 // Phone navigation: the session browser and a chat are separate history
 // entries, so the system Back button returns from a chat to the browser.
 const phone=()=>matchMedia('(max-width:650px)').matches;
@@ -571,8 +627,9 @@ function selectSession(s) {
   github.sessionChanged();
   setTitle(s.title);$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;
   $('session-notice').hidden=true;document.body.classList.remove('menu-open');sidebarPin.close();sidebar();updateControls();connect(generation);
-  workspace?.sessionSelected(s);sidePanel?.sessionChanged();sessionTerminal?.sessionChanged();promptResize.size();
-  if(s.status==='suspended'&&!s.explicitlySuspended)resumeSession(s.id);
+  workspace?.sessionSelected(s);sidePanel?.sessionChanged();sessionTerminal?.sessionChanged();promptResize.size();renderComposer();
+  // Opening wakes a sleeping session; a reconnecting tab leaves it asleep.
+  if(s.status==='suspended'&&!s.explicitlySuspended&&!s.archived)resumeSession(s.id);
 }
 function connect(gen){
   if(gen!==generation||!active)return;
@@ -582,14 +639,18 @@ function connect(gen){
   ws.onmessage=event=>{
     if(gen!==generation)return;
     const e=JSON.parse(event.data);
+    if(e.kind==='github_context'){github.updateContext(active.id,e.data);return;}
+    if(e.kind==='github_event'){document.dispatchEvent(new CustomEvent('github-event',{detail:{sessionId:active.id,...e.data}}));return;}
     if(e.kind==='session_badges'){github.updateBadges(active.id,e.data);return;}
     if(e.kind==='input_queue'){inputQueue.set(e.data);updateControls();return;}
+    if(e.kind==='startup'){active.startup=e.data.step;scheduleDraw();return;}
     if(e.kind==='tool_progress'){if(applyToolProgress(tools.get(e.data.toolCallId),e.data,e.seq))scheduleDraw();return;}
     if(e.kind==='tool_header'){
       const d=e.data,tool=typeof d.parentSessionId==='string'?subagents.tool(d.acpSessionId,d.toolCallId):tools.get(d.toolCallId);
       if(tool){tool.header=d.header;scheduleDraw();}return;
     }
     if(Number.isSafeInteger(e.seq)&&e.kind!=='snapshot')eventSeq=Math.max(eventSeq??0,e.seq);
+    if(e.kind==='mailbox_updated'){if(Number.isSafeInteger(e.data.unacknowledged)){active.unacknowledged=e.data.unacknowledged;renderUnread();}return;}
     if(e.kind==='snapshot'){
       // A full snapshot replaces the transcript; a resumed one adds only newer events.
       if(e.resumed===null||e.resumed===undefined){
@@ -614,9 +675,9 @@ function connect(gen){
         subagents.setHeaders(e.toolHeaders);
       }
       for(const [id,view] of Object.entries(e.toolProgress||{}))applyToolProgress(tools.get(id),view,view.seq);
-      Object.assign(active,e.session);setTitle(active.title);
+      Object.assign(active,e.session);setTitle(active.title);renderUnread();
       active.continuation=e.session.continuation;
-      approvals=new Map(e.approvals.map(a=>[a.id,a]));status=e.session.status;modelConfig=e.models;syncModelLabel();permissionModes=e.permissionModes;sessionConfig=e.sessionConfig;active.providerCapabilities=e.providerCapabilities;attachments.setPolicy(e.attachments);if(status==='suspended'&&!e.session.explicitlySuspended&&!active.providerHistoryDeletion)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();inputQueue.set(e.session.inputQueue);inputQueue.observe(status,{live:false});
+      approvals=new Map(e.approvals.map(a=>[a.id,a]));status=e.session.status;modelConfig=e.models;syncModelLabel();permissionModes=e.permissionModes;sessionConfig=e.sessionConfig;active.providerCapabilities=e.providerCapabilities;attachments.setPolicy(e.attachments);if(status==='suspended'&&!e.session.explicitlySuspended&&!e.session.asleep&&!e.session.archived&&!active.providerHistoryDeletion)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();inputQueue.set(e.session.inputQueue);inputQueue.observe(status,{live:false});
       if(active.providerHistoryDeletion){$('session-notice').textContent=active.providerHistoryDeletion==='deleted'?'Provider history was deleted. This Agentworks transcript remains because local cleanup did not finish; retry Delete everywhere or delete this transcript.':'Provider-history deletion was not confirmed. This transcript is retained and resume is blocked; inspect provider history, then retry Delete everywhere or delete only this transcript.';$('session-notice').hidden=false;}
       if(e.storageError){$('session-notice').textContent=e.storageError;$('session-notice').hidden=false;}
     }else{
@@ -873,9 +934,9 @@ function consume(e,live=false){
   else if(e.kind==='provider_history_delete_failed'){$('session-notice').textContent='Provider-history deletion was not confirmed. The Agentworks transcript is retained. Inspect provider history, then retry Delete everywhere or delete only this transcript.';$('session-notice').hidden=false;}
   else if(e.kind==='attachment_policy'){attachments.setPolicy(d);}
   else if(e.kind==='commands'){availableCommands=Array.isArray(d)?d:[];renderCommands();}
-  else if(e.kind==='user'){assistant=null;if(d.inboxDelivery)transcript.push({id:itemId(),type:'notice',text:'Automatic inbox turn authorized by you; peer messages are untrusted context.'});else if(d.initiatedBy)transcript.push({id:itemId(),type:'notice',text:d.initiatedBy.startsWith('controller:')?'Turn started by external controller '+(d.initiatorTitle||d.initiatedBy):'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});const message=addMessage('user',d.text);message.seq=e.seq;message.inboxDelivery=!!d.inboxDelivery;if(d.attachments?.length)message.attachments=d.attachments;}
+  else if(e.kind==='user'){assistant=null;if(d.inboxDelivery)transcript.push({id:itemId(),type:'notice',text:'Automatic inbox turn; peer messages are untrusted context.'});else if(d.initiatedBy)transcript.push({id:itemId(),type:'notice',text:d.initiatedBy.startsWith('controller:')?'Turn started by external controller '+(d.initiatorTitle||d.initiatedBy):'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});const message=addMessage('user',d.text);message.seq=e.seq;message.inboxDelivery=!!d.inboxDelivery;if(d.attachments?.length)message.attachments=d.attachments;}
   else if(e.kind==='status'){
-    status=d.status;if(!replaying)inputQueue.observe(status,{live});if(active){active.status=status;if(d.explicitlySuspended!==undefined)active.explicitlySuspended=d.explicitlySuspended;const s=sessions.find(s=>s.id===active.id);if(s)s.status=status;}sidebar();
+    status=d.status;if(!replaying)inputQueue.observe(status,{live});if(active){active.status=status;if(!['starting','resuming'].includes(status))active.startup=null;if(d.explicitlySuspended!==undefined)active.explicitlySuspended=d.explicitlySuspended;if(d.asleep!==undefined)active.asleep=d.asleep;const s=sessions.find(s=>s.id===active.id);if(s)s.status=status;}sidebar();
   }else if(e.kind==='approval'){approvals.set(d.id,d);}
   else if(e.kind==='approval_resolved'){
     const pending=approvals.get(d.id);approvals.delete(d.id);
@@ -923,6 +984,11 @@ function consume(e,live=false){
       case 'tool_call_update':{
         let tool=tools.get(d.toolCallId);
         if(!tool){tool={id:d.toolCallId,type:'tool',title:'Tool activity'};tools.set(d.toolCallId,tool);transcript.push(tool);}if(applyToolUpdate(tool,d,e.seq,live&&!replaying?Date.now():null))observeTool(tool,{live:live&&!replaying});break;
+      }
+      case 'compaction_update':case 'compaction_summary_chunk':{
+        assistant=null;let item=compactions.get(d.compactionId);
+        if(!item){item={id:'compaction-'+d.compactionId,type:'compaction',meta:{}};compactions.set(d.compactionId,item);transcript.push(item);}
+        applyCompaction(item,d);break;
       }
       case 'plan':{
         const text=(d.entries||[]).map(p=>`- ${p.status==='completed'?'✓':'○'} ${p.content}`).join('\n');
@@ -975,6 +1041,7 @@ function renderSessionConfig(){
 function updateControls(){
   backgroundJobs.render();questions.refresh();
   $('archive-session').textContent=active?.archived?'Unarchive session':'Archive session';
+  $('archive-session').disabled=!active?.archived&&['running','waiting','cancelling'].includes(status);
   $('suspend-session').disabled=!connected||status==='suspended'||status==='closed';
   $('restart-session').disabled=!connected||!['idle','suspended','error'].includes(status)||!!active?.providerHistoryDeletion;
   $('resume-session').hidden=!['suspended','error'].includes(status);
@@ -1005,19 +1072,21 @@ function updateControls(){
     picker.disabled=!connected||status!=='idle';
   }
   const busy=['running','waiting','cancelling'].includes(status);
-  $('session-state').textContent=status==='waiting'?([...approvals.values()].some(a=>a.kind==='question')?'Needs your answer':'Needs your approval'):status==='idle'?'Ready':status[0]?.toUpperCase()+status.slice(1);
-  // Busy sessions keep the composer usable so input can be queued without losing the draft.
-  $('prompt').disabled=!connected||!(status==='idle'||busy);$('send').disabled=!connected||status==='cancelling'||!(status==='idle'||busy);
-  $('send').setAttribute('aria-label',busy?'Queue message':'Send message');$('send').textContent=busy?'＋':'↑';$('send').title=busy?'Queue to send after this turn ends':'';
+  $('session-state').textContent=status==='waiting'?([...approvals.values()].some(a=>a.kind==='question')?'Needs your answer':'Needs your approval'):status==='idle'?'Ready':status==='suspended'&&active?.asleep?'Asleep':status[0]?.toUpperCase()+status.slice(1);
+  // Busy and starting sessions keep the composer usable so input can be queued without losing the draft.
+  const asleep=status==='suspended'&&!!active?.asleep,starting=STARTING.includes(status),queues=busy||starting;
+  $('prompt').disabled=!connected||!(status==='idle'||queues||asleep);$('send').disabled=!connected||status==='cancelling'||!(status==='idle'||queues||asleep);
+  $('send').setAttribute('aria-label',queues?'Queue message':'Send message');$('send').textContent=queues?'＋':'↑';$('send').title=starting?'Queue to send once the session is ready':busy?'Queue to send after this turn ends':'';
   inputQueue.render();inputQueue.renderActivity();$('stop').hidden=!busy&&!['starting','resuming','configuring'].includes(status)&&!active?.continuation?.enabled;$('stop').disabled=!connected||status==='cancelling';
   attachments.render();
-  $('prompt').placeholder=status==='starting'?'Starting your agent…':status==='waiting'?'Respond to the permission request above…':busy?'Your agent is working… type to queue a follow-up':status==='error'?'Session unavailable. Use Resume session to try again.':'What would you like to work on?';
+  $('prompt').placeholder=starting?`${status==='starting'?'Starting':'Resuming'} your agent… type to queue a message`:status==='waiting'?'Respond to the permission request above…':busy?'Your agent is working… type to queue a follow-up':status==='error'?'Session unavailable. Use Resume session to try again.':asleep?'Asleep. Send a message to wake it.':'What would you like to work on?';
   if(subagents.viewingChild())$('prompt').placeholder=busy?'Queue a message for the main agent…':'Message the main agent…';
+  renderComposer();
 }
 function scheduleDraw(){if(!drawTimer)drawTimer=setTimeout(()=>{drawTimer=null;draw();},70);}
 function fileUrl(path,download=false){return appUrl(`/api/sessions/${active.id}/file?path=${encodeURIComponent(path)}${download?'&download=true':''}`);}
 const imageViewer=setupImageViewer($('messages'));
-const attachments=setupAttachments({appUrl,el,toast,uuid,getSession:()=>active,canAttach:()=>!!active&&!$('prompt').disabled,button:$('attach'),input:$('attach-input'),list:$('attachment-list'),dropTarget:$('composer')});
+const attachments=setupAttachments({appUrl,el,toast,uuid,getSession:()=>active,canAttach:()=>!!active&&!$('prompt').disabled&&!STARTING.includes(status),button:$('attach'),input:$('attach-input'),list:$('attachment-list'),dropTarget:$('composer')});
 const decorateMarkdown=setupChatReferences({getSession:()=>active,getSessions:()=>sessions,openSession:async id=>{
   try{const target=sessions.find(s=>s.id===id)||(await api('/api/sessions/'+encodeURIComponent(id))).session;selectSession(target);}
   catch(e){toast('Cannot open session: '+e.message);}
@@ -1033,8 +1102,7 @@ async function formatUserLines(sessionId,text){
   if(state===undefined)userFormatting.set(sessionId,request.then(lines=>userFormatting.set(sessionId,lines?'on':'off'),()=>userFormatting.delete(sessionId)));
   return request;
 }
-// User messages show exactly as typed, apart from session links and lines a
-// chat.user formatter rewrote, which arrive as sanitized HTML.
+// Plain-text mode keeps session links and sanitized chat.user formatter output.
 function paintUserLines(body,text,lines){
   body.replaceChildren();
   text.split('\n').forEach((line,i)=>{
@@ -1045,6 +1113,9 @@ function paintUserLines(body,text,lines){
   });
 }
 function renderUserMessage(message,body){
+  if(display.preferences().userMarkdown==='on'){updateUserMarkdown(message,body);return;}
+  body.classList.remove('markdown');
+  if(body.dataset.format!=='plain'){delete body.dataset.source;body.dataset.format='plain';}
   if(body.dataset.source!==message.text){
     body.dataset.source=message.text;paintUserLines(body,message.text,message.userLines);
     const id=active?.id;
@@ -1052,11 +1123,29 @@ function renderUserMessage(message,body){
       message.userFormatPending=true;
       formatUserLines(id,message.text).then(lines=>{
         message.userLines=lines;
-        if(lines&&body.dataset.source===message.text){paintUserLines(body,message.text,lines);decorateMarkdown(body);}
+        if(lines&&body.dataset.source===message.text&&body.dataset.format==='plain'){paintUserLines(body,message.text,lines);decorateMarkdown(body);}
       }).catch(()=>{}).finally(()=>{message.userFormatPending=false;});
     }
   }
   decorateMarkdown(body);
+}
+// Capture both the source and display mode so delayed responses cannot overwrite
+// a newer draft or a switch back to plain text.
+function updateUserMarkdown(message,body){
+  const format='user-markdown';
+  if(body.dataset.source===message.text&&body.dataset.format===format)return;
+  body.dataset.source=message.text;body.dataset.format=format;
+  body.classList.remove('markdown');body.textContent=message.text;
+  clearTimeout(message.markdownTimer);
+  const text=message.text,sessionId=active?.id;
+  message.markdownTimer=setTimeout(async()=>{
+    message.markdownTimer=null;
+    try{
+      const result=await api('/api/markdown',{method:'POST',body:JSON.stringify({text,user:true,...(sessionId?{sessionId}:{})})});
+      if(body.dataset.source!==text||body.dataset.format!==format||active?.id!==sessionId)return;
+      message.html=result.html;body.innerHTML=result.html;body.classList.add('markdown');decorateMarkdown(body,message.referenceCwd?message.referenceCwd.replace(/\/$/,'')+'/':'');enhanceMermaid(body,result.mermaidClass);display.enhance(body,message.id);
+    }catch{/* The original text stays readable if rendering is unavailable. */}
+  },200);
 }
 function updateMarkdown(message,body){
   if(body.dataset.source===message.text)return;
@@ -1077,15 +1166,32 @@ function updateMarkdown(message,body){
     }
   },status==='idle'?0:250);
 }
+function renderComposer(){
+  markdownComposer.sync({markdown:display.preferences().userMarkdown==='on',sessionId:active?.id});
+}
+
+// What startup is doing now (“Creating worktree…”), until the agent is ready.
+function drawStartup(area){
+  const empty=area.querySelector('.session-empty'),starting=['starting','resuming'].includes(status);
+  if(empty)empty.querySelector('h3').textContent=starting?'Preparing your workspace':'Ready when you are';
+  let hint=area.querySelector('.startup-hint');
+  if(!starting||!active.startup){hint?.remove();return;}
+  if(!hint){hint=el('div','startup-hint');hint.setAttribute('role','status');}
+  hint.textContent=active.startup+'…';
+  const heading=empty?.querySelector('h3');
+  if(heading){if(heading.nextSibling!==hint)heading.after(hint);}else if(hint!==area.lastChild)area.append(hint);
+}
 function draw(){
   if(!active)return;
+  renderComposer();
   backgroundJobs.render();
   const area=$('messages'),visible=!area.hidden&&!$('session-chat').hidden;const atBottom=visible&&area.scrollHeight-area.scrollTop-area.clientHeight<100;
   const empty=area.querySelector('.session-empty');if(transcript.length)empty?.remove();
   if(older.mode==='none')historyControl.remove();else if(area.firstChild!==historyControl){renderHistoryControl();area.prepend(historyControl);}
   if(!transcript.length&&!empty){
-    const wrap=el('div','session-empty');wrap.append(el('div','empty-symbol',icons[active.provider]),el('h3','',status==='starting'?'Preparing your workspace':'Ready when you are'),el('p','',active.provider==='demo'?'Try “hello”, “approval”, or “slow”. This demo uses no API credits.':'Send a message to start working in this project.'));area.append(wrap);
+    const wrap=el('div','session-empty');wrap.append(el('div','empty-symbol',icons[active.provider]),el('h3'),el('p','',active.provider==='demo'?'Try “hello”, “approval”, or “slow”. This demo uses no API credits.':'Send a message to start working in this project.'));area.append(wrap);
   }
+  drawStartup(area);
   for(const item of transcript){
     let node=nodes.get(item.id);
     if(!node){
@@ -1103,6 +1209,10 @@ function draw(){
       }else if(item.type==='image'){
         node=el('div','message');const image=el('img','agent-image');
         if(/^image\/(png|jpeg|gif|webp)$/.test(item.content.mimeType)&&item.content.data.length<14*1024*1024){image.src=`data:${item.content.mimeType};base64,${item.content.data}`;image.alt='Image from agent';imageViewer.decorate(image);node.append(image);}else node.textContent='Unsupported image format';
+      }else if(item.type==='compaction'){
+        node=el('details','compaction-card');node.append(el('summary'),el('div','compaction-summary'));
+        // Nothing to expand without a summary.
+        node.querySelector('summary').onclick=event=>{if(!item.summary)event.preventDefault();};
       }else node=el('div',item.type==='error'?'error-card':'notice-card',item.text);
       nodes.set(item.id,node);area.append(node);
     }else if(!node.isConnected)area.append(node);
@@ -1112,6 +1222,7 @@ function draw(){
     }else if(item.type==='tool'){
       renderToolActivity(node,item,['running','waiting','cancelling'].includes(status));
     }else if(item.type==='job')renderJobResult(node,item);
+    else if(item.type==='compaction')renderCompaction(node,item);
   }
   subagents.sync(['running','waiting','cancelling'].includes(status));
   const pending=$('approval-area');for(const node of [...pending.children])if(!node.classList.contains('question'))node.remove();
@@ -1163,7 +1274,8 @@ const enrollment=hostEnrollment({$,api,refresh:refreshSessions,directories:host=
 function openHostDialog(){enrollment.open();}
 $('dismiss-project').onclick=()=>{if(!savingProject)$('project-dialog').close();};
 $('project-dialog').addEventListener('cancel',event=>{if(savingProject)event.preventDefault();});
-$('create-project').onchange=()=>{const remembered=projectDirectoryOn($('create-host').value||'local',$('create-project').value||null)||rememberedDirectory();if(remembered)$('directory').value=remembered;worktrees.projectChanged();updateCommunicationDefault();};
+// Switching projects always moves the directory to the new project's root.
+$('create-project').onchange=()=>{const host=createHost(),projectId=$('create-project').value||null;$('directory').value=projectRoot(host?.id||'local',projectId)||(host?host.roots||[]:config.roots)[0]||'';$('directory').dispatchEvent(new Event('input'));worktrees.projectChanged();updateCommunicationDefault();};
 $('project-form').onsubmit=async event=>{
   event.preventDefault();if(savingProject)return;savingProject=true;
   for(const id of ['save-project','project-name','project-directory','project-directory-host','project-directory-browse','project-directory-clear','project-default-mode','project-require-worktree','project-communication-role','archive-project','delete-project','dismiss-project'])$(id).disabled=true;
@@ -1247,7 +1359,7 @@ $('model-picker').onchange=async event=>{
 };
 $('create-form').onsubmit=async event=>{
   event.preventDefault();if(creating||worktrees.blocked())return;creating=true;providerNote();$('create-error').textContent='';
-  const fork=forkSource;
+  const fork=forkSource,githubPr=githubCreate;
   try{
     const source=$('directory').value.trim();
     const payload={resumePolicy:{enabled:$('create-resume-policy').checked},provider:$('provider').value,modelProvider:modelProviders.selection(),...worktrees.submission(),title:$('session-title').value,projectId:$('create-project').value||null,hostId:$('create-host').value,model:$('create-model').value,...(!fork&&$('create-role').value?{role:$('create-role').value}:{}),...($('create-agent-access').value?{agentAccess:{communicate:$('create-agent-access').value!=='off',...Object.fromEntries(['startSessions','promptSessions','cancelSessions','runAutomations'].map(key=>[key,$('create-agent-access').value==='coordinator']))}}:{})};
@@ -1261,6 +1373,7 @@ $('create-form').onsubmit=async event=>{
     // Remember the chosen source directory, never a worktree created from it.
     const remembered=readStorage(localStorage,'agentworks-project-locations',{});remembered[created.hostId&&created.hostId!=='local'?created.hostId+':'+(created.projectId||'ungrouped'):created.projectId||'ungrouped']=source;try{localStorage.setItem('agentworks-project-locations',JSON.stringify(remembered));}catch{}
     const used=readStorage(localStorage,'agentworks-provider-used',{});used[created.provider]=Date.now();try{localStorage.setItem('agentworks-provider-used',JSON.stringify(used));}catch{}
+    if(githubPr){try{await api(`/api/sessions/${created.id}/github`,{method:'POST',body:JSON.stringify({links:[{host:githubPr.host,owner:githubPr.owner,repo:githubPr.repo,kind:'pullRequest',number:githubPr.number}]})});}catch(error){toast('Session created; could not attach PR: '+error.message);}}
     sessions.unshift(created);$('create-dialog').close();selectSession(created);
     if(fork)toast(`Forked from “${fork.title}”. Its recorded history and lineage are preserved; the selected context handoff is applied.`,'success');
   }catch(e){$('create-error').textContent=e.message;}finally{creating=false;providerNote();}
@@ -1277,10 +1390,15 @@ function pendingFor(sid,text,attached=[]){
 // draft is the composer text; submission.text may carry resolved @mentions.
 function settle(sid,submission,draft=submission.text){
   const recovered=promptRecovery.recovered(sid,submission.requestId);
-  if(!recovered&&active?.id===sid&&$('prompt').value===draft){$('prompt').value='';promptResize.size();}
+  if(!recovered&&active?.id===sid&&$('prompt').value===draft){$('prompt').value='';promptResize.size();renderComposer();}
   if(!recovered&&drafts[sid]===draft)delete drafts[sid];sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));
   if(pendingSends[sid]?.requestId===submission.requestId){delete pendingSends[sid];sessionStorage.setItem('agentworks-pending-sends',JSON.stringify(pendingSends));}
 }
+// Keep the active mobile keyboard attached while Send handles the tap.
+// Keyboard activation of the button keeps its normal focus behavior.
+$('send').addEventListener('pointerdown',event=>{
+  if(composerKeyboard.matches&&event.isPrimary&&event.button===0&&markdownComposer.hasFocus())event.preventDefault();
+});
 $('composer').onsubmit=async event=>{
   event.preventDefault();const text=$('prompt').value;if(!active)return;
   const sid=active.id,attached=attachments.ids(sid);
@@ -1289,15 +1407,17 @@ $('composer').onsubmit=async event=>{
     if(attachments.failed(sid)){toast('Remove attachments that failed to upload');return;}
     if(!text.trim()){toast('Add a message to send with the attachments');return;}
     // Queued inputs are text-only; attachments are never held for a later turn.
-    if(BUSY.includes(status)){toast('Attachments can’t be queued. Send once the agent is idle; your draft is kept.');return;}
+    if(BUSY.includes(status)||STARTING.includes(status)){toast('Attachments can’t be queued. Send once the agent is idle; your draft is kept.');return;}
   }
   if(!text.trim())return;
-  if(status==='cancelling'||(!BUSY.includes(status)&&status!=='idle'))return;
+  // A sleeping session wakes for the prompt on the server.
+  const asleep=status==='suspended'&&!!active.asleep,queues=BUSY.includes(status)||STARTING.includes(status);
+  if(status==='cancelling'||(!queues&&status!=='idle'&&!asleep))return;
   const submission={...pendingFor(sid,mentions.expand(text),attached)};
   promptRecovery.submitted(sid,submission,text);
   $('send').disabled=true;
   try{
-    if(BUSY.includes(status))await inputQueue.enqueue(sid,submission);
+    if(queues)await inputQueue.enqueue(sid,submission);
     else try{await api(`/api/sessions/${sid}/prompt`,{method:'POST',body:JSON.stringify(submission)});}
     catch(e){
       // Send→Enter race: the session became busy first. Queue the same intended input.
@@ -1309,8 +1429,10 @@ $('composer').onsubmit=async event=>{
     if(attached.length)attachments.clear(sid,attached);
   }catch(e){toast(e.message);}finally{updateControls();}
 };
-$('prompt').oninput=()=>{mentions.update();commandsOpen=/^[/\$]\S*$/.test($('prompt').value);renderCommands();if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));}};
-$('prompt').onkeydown=event=>{if(mentions.keydown(event))return;if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault();$('composer').requestSubmit();}};
+$('prompt').oninput=()=>{renderComposer();mentions.update();updateCommands();if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));}};
+$('prompt').addEventListener('click',updateCommands);
+$('prompt').addEventListener('keyup',event=>{if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End'].includes(event.key))updateCommands();});
+$('prompt').onkeydown=event=>{if(mentions.keydown(event))return;if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing&&!composerKeyboard.matches){event.preventDefault();$('composer').requestSubmit();}};
 $('resume-session').onclick=()=>{if(active)resumeSession(active.id);};
 $('stop').onclick=async()=>{if(!active)return;const sid=active.id,seq=currentUserSeq;$('stop').disabled=true;try{await api(`/api/sessions/${sid}/cancel${seq!=null?'?userSeq='+seq:''}`,{method:'POST',body:'{}'});}catch(e){toast(e.message);}finally{updateControls();}};
 async function deleteSession(session,providerHistory=false){
@@ -1384,6 +1506,7 @@ async function openSettings(){
     gitSettings.populate(settings.git);
     $('default-communication-role').value=settings.defaultCommunicationRole||'participant';
     $('max-active-sessions').value=settings.maxActiveSessions;
+    $('idle-sleep-hours').value=settings.idleSleepMinutes/60;
     const fields=$('default-model-fields');fields.replaceChildren();
     const hidden=new Set(settings.hiddenProviders||[]);
     for(const provider of config.providers){
@@ -1447,17 +1570,17 @@ $('settings-form').onsubmit=async event=>{
     const defaultModels={};for(const input of $('default-model-fields').querySelectorAll('input[data-provider]')){if(input.value.trim())defaultModels[input.dataset.provider]=input.value.trim();}
     const hiddenProviders=[...$('default-model-fields').querySelectorAll('[data-visible]')].filter(power=>power.getAttribute('aria-checked')!=='true').map(power=>power.dataset.visible);
     const timeouts=timeoutControls.pendingDefault();
-    const settings=await api('/api/settings',{method:'PUT',body:JSON.stringify({git:gitSettings.value(),roots:rootValues().filter(Boolean),defaultModels,claudeDefaultPermissionMode:$('claude-default-permission-mode')?.value,codexDefaultPermissionMode:$('codex-default-permission-mode')?.value,hiddenProviders,defaultCommunicationRole:$('default-communication-role').value,maxActiveSessions:Number.isInteger($('max-active-sessions').valueAsNumber)?$('max-active-sessions').valueAsNumber:undefined,...(timeouts?{timeouts}:{})})});
+    const settings=await api('/api/settings',{method:'PUT',body:JSON.stringify({git:gitSettings.value(),roots:rootValues().filter(Boolean),defaultModels,claudeDefaultPermissionMode:$('claude-default-permission-mode')?.value,codexDefaultPermissionMode:$('codex-default-permission-mode')?.value,hiddenProviders,defaultCommunicationRole:$('default-communication-role').value,maxActiveSessions:Number.isInteger($('max-active-sessions').valueAsNumber)?$('max-active-sessions').valueAsNumber:undefined,idleSleepMinutes:Number.isFinite($('idle-sleep-hours').valueAsNumber)?Math.round($('idle-sleep-hours').valueAsNumber*60):undefined,...(timeouts?{timeouts}:{})})});
     if(timeouts)timeoutControls.acceptDefault(timeouts);
     config.roots=settings.roots;config.defaultModels=settings.defaultModels;for(const p of config.providers)p.hidden=settings.hiddenProviders.includes(p.id);config.defaultCommunicationRole=settings.defaultCommunicationRole||'participant';applyRoots();
     $('settings-dialog').close();toast('Settings saved. They apply to new sessions.','success');
   }catch(e){$('settings-error').textContent='Host settings were not saved: '+e.message+' Display preferences are stored separately in this browser.';}finally{$('save-settings').disabled=false;}
 };
-document.addEventListener('keydown',event=>{if(event.key==='n'&&!event.ctrlKey&&!event.metaKey&&!event.altKey&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)&&!document.querySelector('dialog[open]')){event.preventDefault();openCreate();}});
+document.addEventListener('keydown',event=>{if(event.key==='n'&&!event.ctrlKey&&!event.metaKey&&!event.altKey&&!document.activeElement?.isContentEditable&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)&&!document.querySelector('dialog[open]')){event.preventDefault();openCreate();}});
 const diffView=setupDiff({api,root:$('side-diff'),enhanceBlocks:display.enhance});
 timeoutControls=setupTimeoutControls({$,api,getActive:()=>active});
 parserScripts=setupParserScripts({$,api,el});
-workspace=createWorkspace({api,toast,labels,uuid,
+workspace=createWorkspace({api,toast,labels,uuid,imageViewer,
   viewChanged(view){
     if(view==='host-terminal'){
       terminalHost=hosts.find(host=>host.id===(terminalHost?.id||localStorage.getItem('agentworks-terminal-host')));
@@ -1465,10 +1588,14 @@ workspace=createWorkspace({api,toast,labels,uuid,
       $('header-title').textContent=terminalHost.name+' · Terminal';$('host-terminal-title').textContent=terminalHost.name+' · Terminal';
       hostTerminal.open();document.body.classList.remove('menu-open');enterChat();
     }else if(active)setTitle(active.title);else $('header-title').textContent='Overview';
+  },openGithubSession(row){
+    const pr=row.pr,repo=row.repository,request={...repo,repo:repo.name,number:pr.number,headSha:pr.headSha};delete request.name;
+    const branch=`pr-${pr.number}-${(pr.headBranch||'work').replace(/[^a-zA-Z0-9_/-]/g,'-').slice(0,150)}-${uuid().slice(0,6)}`;
+    openCreate({title:`PR #${pr.number}: ${pr.title}`.slice(0,80),workspaceMode:'newWorktree',githubPr:request,worktreePrefill:{branch,baseRef:pr.headSha,pullRequest:request}});
   },getConfig:()=>config,getActive:()=>active,selectSession,openCreate,refreshSessions,enhanceBlocks:display.enhance,openSettings,
   overview(){ $('conversation').hidden=true;$('welcome').hidden=false;localStorage.removeItem('agentworks-session'); },
   openPanel:tab=>sidePanel?.open(tab),
-  appendDraft(text){if(!active)return;const current=$('prompt').value;$('prompt').value=current?current+'\n\n'+text:text;drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));promptResize.size();},
+  appendDraft(text){if(!active)return;const current=$('prompt').value;$('prompt').value=current?current+'\n\n'+text:text;drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));promptResize.size();renderComposer();},
 });
 const sessionTerminal=setupTerminal({$,api,getActive:()=>active,socketUrl,onSelect:view=>{subagents.select(view);updateControls();scheduleDraw();}});
 const hostTerminal=setupTerminal({$:id=>$(id==='session-terminal'?'host-terminal-view':id.replace(/^terminal-/,'host-terminal-')),api,getActive:()=>terminalHost,socketUrl,tabs:false,endpoint:id=>`/api/hosts/${id}/terminal`});
@@ -1489,7 +1616,7 @@ async function init(){
 }
 init().catch(error=>toast('Cannot reach the local server: '+error.message));
 
-setupCommunication({api,getActive:()=>active,getSessions:()=>sessions,selectSession,toast,uuid});
+setupCommunication({api,getActive:()=>active,getSessions:()=>sessions,selectSession,toast});
 setupInboxDelivery({api,getActive:()=>active,toast,uuid});
 
 const github=setupGithub({api,getActive:()=>active});
@@ -1519,6 +1646,7 @@ setupPalettes({
     importSession:()=>openImport(),
     newProject:()=>openProjectDialog(),
     settings:openSettings,
+    githubSettings:async()=>{await openSettings();$('settings-tab-github').click();},
     agents:()=>{if(active)$('session-agents').click();},
     workspaceInfo:()=>{if(active)$('session-workspace').click();},
     diff:()=>sidePanel.open('diff'),
@@ -1600,9 +1728,13 @@ async function archiveSession(session){
   const id=session.id;
   try{const updated=await worktreeOwnership.archive(session);if(!updated)return;if(active?.id===id)Object.assign(active,updated);await refreshSessions();updateControls();}catch(e){toast(e.message);}
 }
+async function removeRetainedWorktree(session){
+  try{if(await worktreeOwnership.removeRetained(session))await refreshSessions();}catch(e){toast(e.message);}
+}
 $('archive-session').onclick=()=>archiveSession(active);
 $('fork-session').onclick=()=>openFork();
 setupContextMenu({onError:message=>toast(message),resolve(target){
+  const githubContext=workspace?.githubContext(target);if(githubContext)return githubContext;
   if(target.closest('a[href]'))return null;
   const row=target.closest('.session-item');
   if(row){
@@ -1610,6 +1742,7 @@ setupContextMenu({onError:message=>toast(message),resolve(target){
     return {origin:row,focus:row.querySelector('.session-select')||row,label:`Actions for ${session.title}`,actions:[
       {label:'Fork session…',run:()=>openFork(session)},
       {label:session.archived?'Unarchive session':'Archive session',run:()=>archiveSession(session)},
+      ...(session.archived&&session.worktree?.owned&&!session.worktree.removed?[{label:'Remove worktree…',danger:true,run:()=>removeRetainedWorktree(session)}]:[]),
       {label:'Delete history…',danger:true,run:()=>deleteSession(session)},
     ]};
   }
@@ -1655,6 +1788,13 @@ $('lifecycle-menu').querySelector('.lifecycle-actions').addEventListener('click'
 const serviceSection=document.createElement('fieldset');serviceSection.id='service-controls';
 serviceSection.innerHTML=`<legend>Service · all projects</legend><p id="service-status" role="status" aria-live="polite">Loading service status…</p><label for="service-mode">Restart behavior</label><select id="service-mode"><option value="wait">Wait until all work is idle</option><option value="interrupt">Interrupt ALL active sessions</option></select><label for="service-expiry">Drain expiry (seconds, 5–900)</label><input id="service-expiry" type="number" min="5" max="900" value="300"><label for="service-release">Prepared release (blank keeps current executable)</label><input id="service-release" maxlength="128" placeholder="Immutable release basename"><button type="button" id="service-restart">Restart service</button><button type="button" id="service-cancel" hidden>Cancel pending restart</button><p id="service-error" class="error-text" role="alert"></p>`;
 $('settings-service-slot').replaceWith(serviceSection);
+api('/api/auth').then(auth=>{
+ if(!auth.user)return;
+ const row=document.createElement('p');row.id='auth-status';row.append(`Signed in as ${auth.user}. `);
+ const out=document.createElement('button');out.type='button';out.id='sign-out';out.textContent='Sign out';
+ out.onclick=async()=>{try{await api('/api/auth/logout',{method:'POST'});}finally{location.reload();}};
+ row.append(out);serviceSection.append(row);
+}).catch(()=>{});
 let servicePending=null,servicePolling=false;
 async function refreshService(){
  if(servicePolling||!$('settings-dialog').open)return;servicePolling=true;

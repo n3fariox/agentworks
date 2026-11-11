@@ -1,6 +1,6 @@
 # Scheduled automations (A-01)
 
-A definition's recipe trigger can be `manual`, a weekly `schedule`, or a one-time `once`. Scheduled runs use the same path as **Run now**: the same harness/auth checks, workspace policy, one-active-run limit, restart drain gate and request-ID deduplication. GitHub/event triggers (A-02) are not part of this.
+A definition's recipe trigger can be `manual`, a weekly `schedule`, or a one-time `once`. Scheduled runs use the same path as **Run now**: the same harness/auth checks, workspace policy, one-active-run limit, restart drain gate and request-ID deduplication. The separate [GitHub review trigger](GITHUB-REVIEW-AUTOMATIONS.md) completes when work is dispatched, independently of the review session. The scheduled-run rules below continue to apply to timed triggers.
 
 ## Trigger
 

@@ -1,8 +1,10 @@
 import {test,expect} from '@playwright/test';
+import {openCreateSections,choosePlace} from './support/create-sections.mjs';
 import {createServer} from 'node:http';
 import {readFile} from 'node:fs/promises';
 import {resolve,extname} from 'node:path';
 
+openCreateSections(test);
 // Static UI only: all API traffic is intercepted, no provider or live data access.
 const base='http://127.0.0.1:4363';let server;
 test.beforeAll(async()=>{
@@ -119,7 +121,7 @@ test('host working directories enable remote sessions in the new-session dialog'
   await expect(page.locator('#create-error')).toContainText('stop here');
   expect(s.created).toMatchObject({hostId:'r1',cwd:'~/projects',workspace:{mode:'directory'}});
   // Switching back to Local restores local roots and model discovery.
-  await page.locator('#create-host').selectOption('local');
+  await choosePlace(page,{host:'local'});
   await expect(page.locator('#load-models')).toBeEnabled();
   await expect(page.locator('#roots-note')).toContainText('Allowed roots: /repo');
   expect(errors).toEqual([]);
@@ -136,7 +138,7 @@ test('remote availability and directories are independent of local provider conf
   await expect(page.locator('#create-submit')).toBeEnabled();
   await expect(page.locator('#workspace-mode')).toBeEnabled();
   await expect(page.locator('#create-resume-policy')).toBeEnabled();
-  await page.locator('#create-host').selectOption('local');
+  await choosePlace(page,{host:'local'});
   await expect(page.locator('#directory')).toHaveValue('/repo');
   await expect(page.locator('#create-submit')).toBeDisabled();
   await expect(page.locator('#workspace-mode')).toBeEnabled();
@@ -148,11 +150,11 @@ test('remote selection respects required worktrees and restores local policy on 
   await page.route('**/api/projects/a/workspace-policy',route=>route.fulfill({json:{defaultMode:'newWorktree',requireWorktree:true}}));
   await page.locator('#view-hosts').click();
   await page.locator('[data-group="host:r1"]').getByRole('button',{name:'New session in build-box'}).click();
-  await page.locator('#create-project').selectOption('a');
+  await choosePlace(page,{project:'a'});
   await expect(page.locator('#workspace-policy-note')).toContainText('Isolated worktree required');
   await expect(page.locator('#workspace-mode')).toHaveValue('newWorktree');
   await expect(page.locator('#create-submit')).toBeEnabled();
-  await page.locator('#create-host').selectOption('local');
+  await choosePlace(page,{host:'local'});
   await expect(page.locator('#workspace-mode')).toHaveValue('newWorktree');
   await expect(page.locator('#workspace-policy-note')).toContainText('Isolated worktree required');
   await expect(page.locator('#create-submit')).toBeEnabled();
@@ -163,7 +165,7 @@ for(const mobile of [false,true])test(`guided enrollment terminal ${mobile?'mobi
   const state=await fixture(page);let typed='';
   await page.routeWebSocket('**/api/hosts/enroll/events',ws=>{ws.onMessage(data=>{
     const value=JSON.parse(data);
-    if(value.destination){expect(value).toEqual({name:'New box',destination:'dev@box'});ws.send(JSON.stringify({type:'stage',message:'Enter your SSH password in the terminal'}));ws.send(new TextEncoder().encode('Password: '));}
+    if(value.destination){expect(value).toEqual({name:'New box',destination:'dev@box',os:'unix'});ws.send(JSON.stringify({type:'stage',message:'Enter your SSH password in the terminal'}));ws.send(new TextEncoder().encode('Password: '));}
     if(value.type==='input')typed+=value.data;
     if(typed==='test-password'){
       const host=remote('enrolled','New box','connected',{managed:true});state.hosts.push(host);
@@ -204,7 +206,7 @@ test('enrollment error allows retry and close cancels the terminal',async({page}
   await page.locator('[data-group="host:r1"]').getByRole('button',{name:'New session in build-box'}).click();
   await page.locator('#load-models').click();
   await expect(page.locator('#create-model option[value="remote/model"]')).toHaveCount(1);
-  expect(modelRequest).toEqual({provider:'demo',cwd:'/remote/project',hostId:'r1'});
+  expect(modelRequest).toEqual({provider:'demo',cwd:'/remote/project',hostId:'r1',modelProvider:null});
   await page.locator('#workspace-mode').selectOption('existingWorktree');
   await page.locator('#discover-worktrees').click();
   await expect(page.locator('#existing-worktree option')).toHaveCount(2);

@@ -493,9 +493,10 @@ fn transient_shell_variable(key: &std::ffi::OsStr) -> bool {
     )
 }
 
-/// A kill-on-close Job Object owning the shell and everything it starts.
+/// A kill-on-close Job Object owning a process and everything it starts.
+/// Shared with the remote worker, which runs ACP adapters the same way.
 #[cfg(windows)]
-mod windows {
+pub mod windows {
     use std::{io, os::windows::io::RawHandle};
     use windows_sys::Win32::{
         Foundation::{CloseHandle, HANDLE},
@@ -506,13 +507,13 @@ mod windows {
         },
     };
 
-    pub(super) struct Job(HANDLE);
+    pub struct Job(HANDLE);
     // The handle is an owned kernel object reference, usable from any thread.
     unsafe impl Send for Job {}
     unsafe impl Sync for Job {}
 
     impl Job {
-        pub(super) fn new() -> io::Result<Self> {
+        pub fn new() -> io::Result<Self> {
             let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
             if handle.is_null() {
                 return Err(io::Error::last_os_error());
@@ -534,14 +535,14 @@ mod windows {
             Ok(job)
         }
 
-        pub(super) fn assign(&self, process: RawHandle) -> io::Result<()> {
+        pub fn assign(&self, process: RawHandle) -> io::Result<()> {
             if unsafe { AssignProcessToJobObject(self.0, process as HANDLE) } == 0 {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
         }
 
-        pub(super) fn terminate(&self) {
+        pub fn terminate(&self) {
             unsafe { TerminateJobObject(self.0, 1) };
         }
     }

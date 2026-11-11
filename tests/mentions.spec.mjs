@@ -43,21 +43,21 @@ test('unanchored @ fuzzy-picks project peers and resolves ids on send',async({pa
   for(let i=0;i<200&&(await api(`/api/sessions/${me.id}`)).session.status!=='idle';i++)await new Promise(r=>setTimeout(r,100));
   await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),me.id);
   await page.goto('/');await expect(page.locator('#session-state')).toHaveText('Ready');
-  const prompt=page.locator('#prompt'),list=page.locator('#mention-list');
-  await prompt.pressSequentially('Please send the summary to @');
+  const prompt=page.locator('#prompt'),editor=page.locator('#prompt-editor .cm-content'),list=page.locator('#mention-list');
+  await editor.pressSequentially('Please send the summary to @');
   await expect(list.getByRole('option')).toHaveCount(2);
   await expect(list).not.toContainText('Outsider');
   await expect(list).not.toContainText('@coordinator');
-  await prompt.pressSequentially('frv');
+  await editor.pressSequentially('frv');
   await expect(list.getByRole('option')).toHaveCount(1);
   await expect(list.getByRole('option').first()).toContainText('@frontend-reviewer');
-  await prompt.press('Enter');
+  await editor.press('Enter');
   await expect(prompt).toHaveValue('Please send the summary to @frontend-reviewer ');
   await expect(list).toBeHidden();
   // Escape dismisses without submitting; an email-like "a@b" does not trigger.
-  await prompt.pressSequentially('and me@x');await expect(list).toBeHidden();
-  await prompt.pressSequentially(' @b');await expect(list).toBeVisible();await prompt.press('Escape');await expect(list).toBeHidden();
-  await prompt.fill('Ping @frontend-reviewer.');await prompt.press('Enter');
+  await editor.pressSequentially('and me@x');await expect(list).toBeHidden();
+  await editor.pressSequentially(' @b');await expect(list).toBeVisible();await editor.press('Escape');await expect(list).toBeHidden();
+  await editor.fill('Ping @frontend-reviewer.');await editor.press('Enter');
   await expect(prompt).toHaveValue('');
   const message=page.locator('.message.user .message-body').last();
   await expect(message).toHaveText('Ping @frontend-reviewer.');

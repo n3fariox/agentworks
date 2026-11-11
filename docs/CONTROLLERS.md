@@ -14,7 +14,7 @@ Each controller belongs to exactly one project and is created by a human in **Pr
 | --- | --- |
 | any grant | `list_sessions` (same-project sessions; coordinators and archive controllers also see non-messaging sessions) |
 | `communicate` or coordinator grants | `get_completion` |
-| `communicate` | `read_inbox`, `send_message`, `acknowledge_message` |
+| `communicate` | `read_inbox`, `read_message`, `send_message`, `acknowledge_message` |
 | `startSessions` | `start_session` in its project; started sessions inherit no grants and record the controller as initiator |
 | `promptSessions` / `cancelSessions` | `prompt_session` / `cancel_session` on same-project sessions |
 | `archiveSessions` | `archive_session {sessionId}` on same-project sessions, including non-messaging sessions. Controller grant remains explicit. |
@@ -32,7 +32,7 @@ For session-based MCP callers, coordinator grants also enable `archive_session`;
 
 Project boundaries are enforced in every handler, including for known IDs, retries and reply targets.
 
-Sessions with `communicate` see live messaging controllers in a `controllers` array of `list_sessions` and can reply with `recipient: "agentworks://controllers/<id>"`. Messages from controllers are persisted and visible but **never feed opt-in inbox wake delivery**; starting work requires an explicit `promptSessions` grant. Controller-started turns and sessions are labelled in the browser with the controller's name (`initiatedBy`/`initiatorTitle` on the `user` event, `initiatedBy.actorTitle` on sessions). Agents & inbox activity shows the controller by name.
+Sessions with `communicate` see live messaging controllers in a `controllers` array of `list_sessions` and can reply with `recipient: "agentworks://controllers/<id>"`. Messages from controllers are persisted and visible but **never feed inbox wake delivery**; starting work requires an explicit `promptSessions` grant. Controller-started turns and sessions are labelled in the browser with the controller's name (`initiatedBy`/`initiatorTitle` on the `user` event, `initiatedBy.actorTitle` on sessions). Agents & inbox activity shows the controller by name.
 
 ## Credentials and revocation
 

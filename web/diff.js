@@ -1,5 +1,6 @@
 // Session diff, shown as the Diff tab of the side panel. show(session) loads it
 // for that session; hide() drops any in-flight response.
+import {languageForPath} from './display-preferences.js';
 export function setupDiff({api,root,enhanceBlocks}) {
   root.innerHTML=`<p id="diff-context" class="field-note"></p>
     <form id="diff-form" class="diff-controls"><label>Compare<select id="diff-mode"><option value="unstaged">Current unstaged changes</option><option value="branch">Branch against base</option><option value="commit">Specific commit</option></select></label>
@@ -71,7 +72,7 @@ export function setupDiff({api,root,enhanceBlocks}) {
       $('diff-other').textContent=[['Staged',data.staged],['Untracked',data.untracked]].map(([name,value])=>`${name}:\n${value.files.join('\n')||'None'}${value.unavailable?'\n'+value.unavailable:''}`).join('\n\n');
       $('diff-patch-note').textContent=data.patchUnavailable?`${data.patchUnavailable}. Preview unavailable (256 KiB maximum; binary contents are not rendered).`:file!==undefined?(data.patch?'Read-only patch · maximum 256 KiB · binary contents are not rendered.':'No patch remains; files may have changed during inspection. Refresh diff.'):data.files.length?'Choose a file to read its patch.':'';
       $('diff-patch').textContent=data.patch||'';
-      if(data.patch)enhanceBlocks?.(root.querySelector('.diff-patch-area'),`diff:${sessionId}:${file}`,{language:/\.([\w+-]+)$/.exec(file||'')?.[1]||'',diff:true});
+      if(data.patch)enhanceBlocks?.(root.querySelector('.diff-patch-area'),`diff:${sessionId}:${file}`,{language:languageForPath(file||''),diff:true});
     }catch(error){if(current===generation&&shown)$('diff-status').textContent=error.message;}
   }
   $('diff-mode').addEventListener('change',()=>{controls();load();});

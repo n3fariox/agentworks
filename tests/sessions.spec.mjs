@@ -1,5 +1,7 @@
 import {test,expect} from '@playwright/test';
+import {openCreateSections,choosePlace} from './support/create-sections.mjs';
 
+openCreateSections(test);
 async function create(page,name,directory){
   await page.locator('#new-session').click();
   await page.locator('#session-title').fill(name);
@@ -10,7 +12,7 @@ async function create(page,name,directory){
   await expect(page.locator('#session-state')).toHaveText('Ready');
 }
 async function send(page,text){
-  await page.locator('#prompt').fill(text);await page.locator('#send').click();
+  await page.locator('#prompt-editor .cm-content').fill(text);await page.locator('#send').click();
 }
 // Track this test's creations, including automation runs whose title differs
 // from the launch title. Never sweep another run's "Browser test" resources.
@@ -95,17 +97,17 @@ test('mobile: drawer, composer, image output, approval denial',async({page})=>{
   await page.locator('#session-home').click();
   await expect(page.locator('#new-session')).toBeInViewport();
   await page.getByRole('button',{name:/Browser test mobile/}).click();
-  await expect(page.locator('#prompt')).toBeInViewport();
+  await expect(page.locator('#prompt-editor .cm-content')).toBeInViewport();
   // The system Back button returns from a chat to the session browser, and
   // reopening a session makes Back work again.
   await page.goBack();
   await expect(page.locator('#new-session')).toBeInViewport();
   await page.getByRole('button',{name:/Browser test mobile/}).click();
-  await expect(page.locator('#prompt')).toBeInViewport();
+  await expect(page.locator('#prompt-editor .cm-content')).toBeInViewport();
   await page.goBack();
   await expect(page.locator('#new-session')).toBeInViewport();
   await page.goForward();
-  await expect(page.locator('#prompt')).toBeInViewport();
+  await expect(page.locator('#prompt-editor .cm-content')).toBeInViewport();
   // A quota chip and the stop control can coexist with both composer buttons.
   // Keep the essential stop action reachable even when its label is long.
   await page.evaluate(()=>{
@@ -165,13 +167,13 @@ test('project hierarchies preserve draft, stream, selection and independent expa
   await page.locator('#save-project').click();
   await expect(page.locator('#project-dialog')).not.toBeVisible();
   await page.locator('#new-session').click();
-  await page.locator('#create-project').selectOption({label:'Browser test Alpha'});
+  await choosePlace(page,{project:{label:'Browser test Alpha'}});
   await page.locator('#session-title').fill('Browser test grouped');
   await page.locator('#create-submit').click();
   await expect(page.locator('#session-state')).toHaveText('Ready');
   await send(page,'hello');
   await expect(page.locator('#session-state')).toHaveText('Ready');
-  await page.locator('#prompt').fill('A draft stays here');
+  await page.locator('#prompt-editor .cm-content').fill('A draft stays here');
   const currentSockets=sockets;
   await page.locator('#view-hosts').click();
   await expect(page.locator('#view-hosts')).toHaveAttribute('aria-selected','true');
@@ -276,7 +278,7 @@ test('models at creation, command and skill discovery, host settings',async({pag
     await page.locator('#send').click();
     await expect(page.locator('#session-state')).toHaveText('Ready');
     await page.reload();
-    await page.locator('#prompt').fill('$demo');
+    await page.locator('#prompt-editor .cm-content').fill('$demo');
     await expect(page.locator('#command-list')).toContainText('$demo-skill');
     await page.locator('#command-list button').click();
     await expect(page.locator('#prompt')).toHaveValue('$demo-skill ');
@@ -379,7 +381,7 @@ test('side panel: files and diff fill the conversation area, with Back on phones
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.setViewportSize({width:1400,height:900});
   await page.goto('/');await page.evaluate(()=>{localStorage.removeItem('agentworks-side-panel');localStorage.removeItem('agentworks-side-panel-width');});
-  await create(page,'Browser test side panel',cwd);await page.locator('#prompt').fill('Keep the side panel draft');
+  await create(page,'Browser test side panel',cwd);await page.locator('#prompt-editor .cm-content').fill('Keep the side panel draft');
   const panel=page.locator('#side-panel');await expect(panel).toBeHidden();
   // Files fills the conversation area and keeps the chat mounted.
   await page.locator('#session-files').click();await expect(panel).toBeVisible();await expect(page.locator('#session-files')).toHaveAttribute('aria-expanded','true');
@@ -398,8 +400,8 @@ test('side panel: files and diff fill the conversation area, with Back on phones
   await page.locator('#side-tab-files').click();await expect(page.locator('#workspace-preview')).toContainText('answer');
   // Chat links open image files in Files; inline images use the image viewer.
   await page.locator('#side-close').click();
-  await page.locator('#prompt').fill('See [the picture](pic.png) and ![inline picture](pic.png)');await page.locator('#send').click();
-  await expect(page.locator('#session-state')).toHaveText('Ready');await expect(page.locator('#prompt')).toHaveValue('');await page.locator('#prompt').fill('Keep the side panel draft');
+  await page.locator('#prompt-editor .cm-content').fill('See [the picture](pic.png) and ![inline picture](pic.png)');await page.locator('#send').click();
+  await expect(page.locator('#session-state')).toHaveText('Ready');await expect(page.locator('#prompt')).toHaveValue('');await page.locator('#prompt-editor .cm-content').fill('Keep the side panel draft');
   await page.locator('.message.assistant').getByRole('link',{name:'the picture'}).click();
   await expect(panel).toBeVisible();await expect(page.locator('#side-tab-files')).toHaveAttribute('aria-selected','true');
   await expect(page.locator('#workspace-preview .workspace-preview-header strong')).toHaveText('pic.png');await expect(page.locator('#workspace-preview img.file-image')).toBeVisible();
@@ -433,7 +435,7 @@ test('workspace: file browsing, side preview, drafts, and manual automation runs
   await writeFile(join(cwd,'README.md'),'# Workspace files\n\nOpen [the notes](docs/note.md).');await writeFile(join(cwd,'docs/note.md'),'# A project note\n\nThis file belongs to the selected directory.');
   let defId;const errors=[];page.on('pageerror',e=>errors.push(e.message));
   try{
-    await page.goto('/');await create(page,'Browser test workspace',cwd);await page.locator('#prompt').fill('Keep my existing draft.');
+    await page.goto('/');await create(page,'Browser test workspace',cwd);await page.locator('#prompt-editor .cm-content').fill('Keep my existing draft.');
     const original=await page.evaluate(()=>localStorage.getItem('agentworks-session'));
     await page.locator('#nav-files').click();await page.locator('.file-entry').filter({hasText:'README.md'}).click();
     await expect(page.locator('#workspace-file-detail h1')).toHaveText('Workspace files');
@@ -477,7 +479,7 @@ test('workspace mobile: browse without an agent, ask in a new session, preserve 
     await page.goto('/');await page.locator('#nav-files').click();await page.locator('#add-location').click();await page.locator('#location-path').fill(cwd);await page.locator('#save-location').click();
     await page.locator('.file-entry').filter({hasText:'README.md'}).click();await expect(page.locator('#workspace-file-detail h1')).toHaveText('Mobile files');
     await page.getByRole('button',{name:'Ask about this file'}).click();await expect(page.locator('#directory')).toHaveValue(cwd);await page.locator('#provider').selectOption('demo');await page.locator('#session-title').fill('Browser test mobile files');await page.locator('#create-submit').click();
-    await expect(page.locator('#session-state')).toHaveText('Ready');await expect(page.locator('#prompt')).toBeVisible();expect(await page.locator('#prompt').inputValue()).toContain('README.md');
+    await expect(page.locator('#session-state')).toHaveText('Ready');await expect(page.locator('#prompt-editor .cm-content')).toBeVisible();expect(await page.locator('#prompt').inputValue()).toContain('README.md');
     const id=await page.evaluate(()=>localStorage.getItem('agentworks-session'));const count=await page.evaluate(id=>fetch('/api/sessions/'+id).then(r=>r.json()).then(s=>s.events.filter(e=>e.kind==='user').length),id);expect(count).toBe(0);
     await page.locator('#session-home').click();await page.locator('#nav-files').click();await page.locator('.file-entry').filter({hasText:'README.md'}).click();await page.reload();await expect(page.locator('#workspace-files')).toBeVisible();await expect(page.locator('#workspace-file-detail h1')).toHaveText('Mobile files');await expect(page.locator('#workspace-location')).toHaveValue(await page.evaluate(()=>JSON.parse(localStorage.getItem('agentworks-workspace')).locationKey));
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
@@ -501,7 +503,7 @@ test('agent access and inbox: grants, safe drafts, activity, mobile layout',asyn
   });
   await page.reload();await page.getByRole('button',{name:/Browser test inbox/}).click();
   await expect(page.locator('#session-state')).toHaveText('Ready');
-  await page.locator('#prompt').fill('Existing draft');
+  await page.locator('#prompt-editor .cm-content').fill('Existing draft');
   await page.locator('#lifecycle-menu > summary').click();await page.locator('#session-agents').click();
   await expect(page.locator('#agent-preset')).toHaveValue('participant');
   await expect(page.locator('#agent-inbox')).toContainText('Review this peer message <script>unsafe()</script>');

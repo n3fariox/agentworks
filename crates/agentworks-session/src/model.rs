@@ -28,6 +28,9 @@ pub struct SessionData {
     pub events: VecDeque<Value>,
     #[serde(skip)]
     pub bytes: usize,
+    /// No harness is attached, so `events` stays empty and reads go to the store.
+    #[serde(skip)]
+    pub parked: bool,
     pub requests: HashSet<String>,
     /// Most recent submitted prompt survives the bounded in-memory event window.
     #[serde(default)]
@@ -98,6 +101,9 @@ pub struct SessionData {
     /// The running turn is a native `/rename`; its reported title is adopted.
     #[serde(skip)]
     pub native_rename: bool,
+    /// The startup step in progress, shown until the session is ready.
+    #[serde(skip)]
+    pub startup: Option<String>,
 }
 
 /// The resolved text of a role at the time a session was created. Later edits

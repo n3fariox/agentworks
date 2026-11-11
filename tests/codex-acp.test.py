@@ -198,8 +198,11 @@ def harness():
                 send(dict(id=v["id"], result={}))
             continue
         elif method == "skills/list":
+            if os.environ.get("ACP_FIXTURE_SKILLS_ERROR"):
+                send(dict(id=v["id"],error=dict(code=-32603,message="Skill discovery unavailable")))
+                continue
             assert p["cwds"]
-            result=dict(data=[dict(skills=[dict(name="check",description="Check the project")])])
+            result=dict(data=[dict(skills=[dict(name="check",description="Check the project",path="/tmp/check/SKILL.md",enabled=True),dict(name="disabled",description="Disabled skill",path="/tmp/disabled/SKILL.md",enabled=False)])])
         elif method == "mcpServerStatus/list":
             assert p["threadId"]
             assert p["detail"] == "toolsAndAuthOnly"
@@ -319,6 +322,8 @@ class BridgeTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         binary = os.environ.get("CODEX_ACP_TEST_BIN", str(root / "target/debug/agentworks-codex-acp"))
         env=dict(os.environ, CODEX_PATH=str(Path(__file__).resolve()))
+        if self._testMethodName == "test_skill_discovery_failure_keeps_session_usable":
+            env["ACP_FIXTURE_SKILLS_ERROR"]="1"
         if self._testMethodName=="test_cancel_native_compaction":
             env["ACP_FIXTURE_HOLD_COMPACT"]="1"
         if self._testMethodName=="test_subagents_missing_child_history_keeps_parent_loadable":
@@ -717,6 +722,26 @@ class BridgeTests(unittest.TestCase):
         self.assertTrue(any("one" in c and "two" in c for c in chunks))
         self.assertIn(dict(type="baseBranch",branch="main"),[json.loads(c) for c in chunks if c.startswith('{')])
         self.assertEqual(self.prompt("normal")["stopReason"],"end_turn")
+
+    def test_skills_are_advertised_and_invoke_native_skill_inputs(self):
+        self.session()
+        announced=[v["params"]["update"] for v in self.seen if v.get("method")=="session/update" and v["params"]["update"]["sessionUpdate"]=="available_commands_update"]
+        names={c["name"] for c in announced[-1]["availableCommands"]}
+        self.assertIn("$check", names)
+        self.assertNotIn("$disabled", names)
+        for text in ["$check", "Please use $check for this task", "/check do this", "$check and $check"]:
+            self.assertEqual(self.prompt(text)["stopReason"], "end_turn")
+            native=[v for v in self.native_requests() if v.get("method")=="turn/start"][-1]
+            self.assertEqual(native["params"]["input"], [
+                dict(type="text",text=text.replace("/check", "$check", 1),text_elements=[]),
+                dict(type="skill",name="check",path="/tmp/check/SKILL.md")])
+        self.prompt("$disabled word$check $checking")
+        native=[v for v in self.native_requests() if v.get("method")=="turn/start"][-1]
+        self.assertEqual(len(native["params"]["input"]), 1)
+
+    def test_skill_discovery_failure_keeps_session_usable(self):
+        self.session()
+        self.assertEqual(self.prompt("normal")["stopReason"], "end_turn")
 
     def test_invalid_commands_fail_without_starting_a_model_turn(self):
         self.session()

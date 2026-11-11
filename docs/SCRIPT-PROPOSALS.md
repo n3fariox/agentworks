@@ -10,7 +10,7 @@ these rules depend on is implemented; see
 The existing authorization model does not cover script writes:
 
 - **Scope mismatch.** Every Agentworks capability (`communicate`, `startSessions`,
-  `manageReviewQueue`, ...) is checked against the caller's own project. Scripts are
+  `manageAutomations`, ...) is checked against the caller's own project. Scripts are
   host-global: an enabled hook runs on the tool output and inbox deliveries of every
   session in every project. No grant expresses "may change behaviour for other
   projects".
@@ -77,7 +77,7 @@ a human save:
    diagnostic until a separate decision covers those surfaces.
 4. Shipped built-in names may be proposed only as replacements with a `baseHash`.
 5. Bounds: at most 5 pending proposals per actor and 20 host-wide; `(actor, requestId)`
-   is idempotent over the normalized payload (same rules as the review queue: exact
+   is idempotent over the normalized payload (exact
    retries return the original response, changed payloads conflict).
 
 Proposals never run user-visible hooks. Compilation runs the module body once with

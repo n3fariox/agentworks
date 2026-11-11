@@ -3,7 +3,7 @@ import {setupSessionBadges} from './session-badges.js';
 // connection identities, Git metadata and normalized resource snapshots.
 export function setupGithub({api,getActive}) {
   const $=id=>document.getElementById(id),button=$('session-github'),dialog=$('github-dialog');
-  let generation=0,view=null,busy=false,settingsGeneration=0;
+  let generation=0,view=null,busy=false,settingsGeneration=0,lastLoad=0;
   const browser=setupSessionBadges({api});
   const node=(tag,text,className)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(className)n.className=className;return n;};
   function link(text,url){
@@ -21,13 +21,13 @@ export function setupGithub({api,getActive}) {
   }
   async function load(refresh=false){
     const active=getActive();if(!active)return;
-    const gen=++generation;busy=true;button.disabled=true;
+    const gen=++generation;lastLoad=Date.now();busy=true;button.disabled=true;
     if(dialog.open)$('github-status').textContent='Loading GitHub context…';
     try{
       const data=await browser.read(active.id,refresh);
       if(gen!==generation||getActive()?.id!==active.id)return;
       view=data;button.textContent=statusText(data);button.title=data.message||'GitHub repository, pull requests, issues and checks';
-      button.dataset.status=data.status;button.hidden=data.status==='no_origin';
+      button.dataset.status=data.status;button.hidden=data.status==='no_origin';button.title=data.message||'GitHub repository, pull requests, issues and checks';
       if(dialog.open)render();
     }catch(error){
       if(gen!==generation)return;
@@ -74,7 +74,7 @@ export function setupGithub({api,getActive}) {
   }
   async function saveLinks(links){
     const active=getActive();if(!active)return;const id=active.id;
-    try{await api(endpoint(),{method:'POST',body:JSON.stringify({links})});browser.invalidate();if(getActive()?.id===id)await load();}
+    try{await api(endpoint(),{method:'POST',body:JSON.stringify({links})});browser.invalidate(id);if(getActive()?.id===id)await load();}
     catch(error){if(getActive()?.id===id)$('github-status').textContent=error.message;}
   }
   button.onclick=()=>{dialog.showModal();if(view)render();else load();};
@@ -97,6 +97,13 @@ export function setupGithub({api,getActive}) {
     try{
       const data=await api(`/api/github/connections${refresh?'?refresh=true':''}`);if(gen!==settingsGeneration)return;
       $('github-connections-status').textContent=data.message||(data.connections.length?'Connections save immediately.':'No signed-in accounts found. Run gh auth login on the main host, then rediscover.');
+      const polling=new Map((data.polling||[]).map(p=>[p.host,p.intervalSeconds]));
+      for(const host of new Set(data.connections.map(c=>c.host))){
+        const row=node('div',undefined,'github-polling-row'),label=node('label',`${host} · polling interval (minutes)`),input=node('input');input.type='number';input.min='1';input.max='60';input.step='1';input.value=String((polling.get(host)||300)/60);input.setAttribute('aria-label',`Polling minutes for ${host}`);label.append(input);
+        const save=node('button','Save interval','text-button'),note=node('span',undefined,'field-note');save.type='button';save.onclick=async()=>{save.disabled=true;try{await api('/api/github/polling',{method:'PUT',body:JSON.stringify({host,intervalSeconds:Number(input.value)*60})});note.textContent='Saved';browser.invalidate();document.dispatchEvent(new Event('github-polling-changed'));view=null;lastLoad=0;}catch(error){note.textContent=error.message;}finally{save.disabled=false;}};
+        row.append(label,save,note);rows.append(row);
+      }
+      rows.append(node('p','Polling intervals are shared by session PR tracking and this GitHub view. Your PR list refreshes while this app tab is visible, including draft-review warnings in the GitHub navigation item.','field-note'));
       for(const connection of data.connections){
         const row=node('div',undefined,'github-connection'),label=node('label',undefined,'workspace-check');
         const input=node('input');input.type='checkbox';input.checked=connection.enabled;
@@ -111,6 +118,13 @@ export function setupGithub({api,getActive}) {
   $('github-discover').onclick=()=>loadSettings(true);
   $('settings-tab-github').addEventListener('click',()=>loadSettings());
   function sessionChanged(){generation++;view=null;busy=false;button.disabled=false;button.hidden=!getActive();button.textContent='GitHub';if(dialog.open)dialog.close();if(getActive())load();}
-  setInterval(()=>{if(getActive()&&!document.hidden&&!busy)load();},60000);
-  return {sessionChanged,refreshBadges:browser.sync,updateBadges:browser.update};
+  setInterval(()=>{if(getActive()&&!document.hidden&&!busy&&(Date.now()-lastLoad>=(view?.pollIntervalMs||300000)||Date.now()>=(view?.nextPollAt||Infinity)))load();},5000);
+  function updateContext(id,data){
+    browser.update(id,data);
+    if(getActive()?.id!==id)return;
+    if((view?.tracking?.observedAt??-1)>(data.tracking?.observedAt??-1))return;
+    generation++;view=data;busy=false;button.disabled=false;button.textContent=statusText(data);button.dataset.status=data.status;button.hidden=data.status==='no_origin';button.title=data.message||'GitHub repository, pull requests, issues and checks';
+    if(dialog.open)render();
+  }
+  return {sessionChanged,refreshBadges:browser.sync,updateBadges:browser.update,updateContext};
 }

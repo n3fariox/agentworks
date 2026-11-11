@@ -1,7 +1,7 @@
 //! Installation-time hook declarations. Runtime calls never have a registry.
 use super::*;
 use starlark::values::Value;
-use starlark::values::list::{AllocList, ListRef};
+use starlark::values::list::{AllocList, ListRef, UnpackList};
 use starlark::values::none::NoneType;
 use starlark::values::tuple::{AllocTuple, TupleRef};
 
@@ -15,6 +15,10 @@ pub struct HookInfo {
     pub message_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub events: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<Json>,
 }
 
 pub struct RegisteredScript {
@@ -29,6 +33,7 @@ fn register<'v>(
     pattern: Option<&str>,
     label: &str,
     message_type: &str,
+    events: Option<Vec<String>>,
 ) -> anyhow::Result<NoneType> {
     let registry = eval
         .module()
@@ -43,6 +48,7 @@ fn register<'v>(
         pattern.map_or(Value::new_none(), |p| heap.alloc(p)),
         heap.alloc(label),
         heap.alloc(message_type),
+        events.map_or(Value::new_none(), |events| heap.alloc(AllocList(events))),
     ]));
     let mut entries: Vec<_> = registry.iter().collect();
     entries.push(row);
@@ -99,7 +105,15 @@ pub(super) fn registration_helpers(builder: &mut GlobalsBuilder) {
         #[starlark(require = named, default = "Progress")] display_name: &str,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        register(eval, function, "progress", Some(command_pattern), display_name, "")
+        register(
+            eval,
+            function,
+            "progress",
+            Some(command_pattern),
+            display_name,
+            "",
+            None,
+        )
     }
 
     fn register_formatter<'v>(
@@ -116,7 +130,67 @@ pub(super) fn registration_helpers(builder: &mut GlobalsBuilder) {
             text_pattern.into_option(),
             "",
             message_type,
+            None,
         )
+    }
+
+    fn register_github_trigger<'v>(
+        #[starlark(require = pos)] function: Value<'v>,
+        #[starlark(require = named)] host: &str,
+        #[starlark(require = named)] repo: &str,
+        #[starlark(require = named)] account: &str,
+        #[starlark(require = named)] events: UnpackList<String>,
+        #[starlark(require = named, default = "default")] name: &str,
+        #[starlark(require = named, default = false)] include_existing: bool,
+        #[starlark(require = named, default = NoneOr::None)] settings: NoneOr<Value<'v>>,
+        #[starlark(require = named, default = NoneOr::None)] instructions: NoneOr<&str>,
+        #[starlark(require = named, default = NoneOr::None)] steps: NoneOr<UnpackList<String>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        anyhow::ensure!(
+            !name.is_empty()
+                && name.len() <= 32
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')),
+            "invalid trigger name"
+        );
+        anyhow::ensure!(
+            !events.items.is_empty()
+                && events.items.len() <= 2
+                && events
+                    .items
+                    .iter()
+                    .all(|s| matches!(s.as_str(), "pr.assigned_to_me" | "pr.review_requested")),
+            "events must select pr.assigned_to_me and/or pr.review_requested"
+        );
+        anyhow::ensure!(
+            [host, repo, account].iter().all(|s| !s.is_empty() && s.len() <= 256),
+            "invalid GitHub subscription"
+        );
+        let settings = settings.into_option().map(|s| s.to_json_value()).transpose()?;
+        let descriptor = serde_json::json!({"name":name,"host":host,"repo":repo,"account":account,"events":events.items,"includeExisting":include_existing,"settings":settings,"instructions":instructions.into_option(),"steps":steps.into_option().map(|s|s.items)}).to_string();
+        register(eval, function, "github_trigger", None, &descriptor, "", None)
+    }
+
+    fn register_github<'v>(
+        #[starlark(require = pos)] function: Value<'v>,
+        #[starlark(require = named, default = NoneOr::None)] events: NoneOr<UnpackList<String>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let events = events.into_option().map(|events| events.items);
+        if let Some(events) = &events {
+            anyhow::ensure!(
+                !events.is_empty() && events.len() <= GITHUB_EVENT_KINDS.len(),
+                "events must contain 1 to 6 GitHub event names; omit it to receive all events"
+            );
+            anyhow::ensure!(
+                events.iter().all(|kind| GITHUB_EVENT_KINDS.contains(&kind.as_str())),
+                "unknown GitHub event name; supported: {}",
+                GITHUB_EVENT_KINDS.join(", ")
+            );
+        }
+        register(eval, function, "github", None, "", "", events)
     }
 
     fn register_tool_header<'v>(
@@ -124,7 +198,7 @@ pub(super) fn registration_helpers(builder: &mut GlobalsBuilder) {
         #[starlark(require = named, default = ".*")] title_pattern: &str,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        register(eval, function, "tool_header", Some(title_pattern), "", "")
+        register(eval, function, "tool_header", Some(title_pattern), "", "", None)
     }
 }
 
@@ -136,11 +210,57 @@ impl Engine {
             .unwrap()
             .get(&(name.to_owned(), hash.to_owned()))
             .cloned()
+            .filter(|script| script.handlers.iter().all(|h| h.capability != Capability::Workflow))
     }
 
     /// Compile one explicitly supplied module and validate all registrations
     /// atomically. Both presentation APIs are available, with no workflow I/O.
+    /// Hook scripts may only register presentation/observation handlers.
     pub fn compile_registered(&self, name: &str, source: &str) -> Result<Arc<RegisteredScript>, Diagnostic> {
+        self.compile_kind(name, source, false)
+    }
+    /// Automation files may only register automation handlers. Helpers are fine;
+    /// hiding another kind of registered effect in this file is rejected.
+    pub fn compile_automation(&self, name: &str, source: &str) -> Result<Arc<RegisteredScript>, Diagnostic> {
+        self.compile_kind(name, source, true)
+    }
+    fn compile_kind(&self, name: &str, source: &str, automation: bool) -> Result<Arc<RegisteredScript>, Diagnostic> {
+        let script = self.compile_registrations(name, source)?;
+        if script
+            .handlers
+            .iter()
+            .any(|h| (h.capability == Capability::Workflow) != automation)
+        {
+            return Err(Diagnostic {
+                script: name.into(),
+                hash: content_hash(source),
+                kind: DiagnosticKind::Capability,
+                message: if automation {
+                    "Automation scripts can only register automation handlers; move hooks to a separate hook script."
+                } else {
+                    "Hook scripts cannot register automation handlers; import this file through Automations."
+                }
+                .into(),
+            });
+        }
+        if automation {
+            let mut names = std::collections::HashSet::new();
+            if script
+                .handlers
+                .iter()
+                .any(|h| !names.insert(h.automation_trigger.as_ref().unwrap()["name"].as_str().unwrap()))
+            {
+                return Err(Diagnostic {
+                    script: name.into(),
+                    hash: content_hash(source),
+                    kind: DiagnosticKind::Install,
+                    message: "Trigger names must be unique within one automation file".into(),
+                });
+            }
+        }
+        Ok(script)
+    }
+    fn compile_registrations(&self, name: &str, source: &str) -> Result<Arc<RegisteredScript>, Diagnostic> {
         let hash = content_hash(source);
         let key = (name.to_owned(), hash.clone());
         if let Some(script) = self.hook_cache.lock().unwrap().get(&key) {
@@ -185,13 +305,15 @@ impl Engine {
             &self.message_prelude,
             &self.tool_prelude,
             &self.chat_prelude,
+            &self.github_prelude,
+            &self.workflow_prelude,
         ];
         for load in ast.loads() {
             if !preludes.iter().any(|p| load.module_id == p.id) {
                 return Err(fail(
                     DiagnosticKind::Capability,
                     format!(
-                        "hook scripts may only load progress.star, message.star, tool.star and chat.star, not {:?}",
+                        "hook scripts may only load progress.star, message.star, tool.star chat.star and github.star, not {:?}",
                         load.module_id
                     ),
                 ));
@@ -239,7 +361,10 @@ impl Engine {
         let registry = module.owned_extra_value().expect("host registry initialized");
         let entries = ListRef::from_value(registry.value()).expect("host registry is a list");
         if entries.is_empty() {
-            return Err(fail(DiagnosticKind::Install, "no hooks registered; call agent.register_progress(...), agent.register_formatter(...) or agent.register_tool_header(...) at module scope".into()));
+            return Err(fail(
+                DiagnosticKind::Install,
+                "no handlers registered; call the appropriate agent.register_* function at module scope".into(),
+            ));
         }
         let mut handlers = Vec::new();
         let mut hooks = Vec::new();
@@ -257,9 +382,13 @@ impl Engine {
                     format!("unknown message_type {message_type:?}; supported: inbox.peer, chat.agent, chat.user"),
                 ));
             }
+            let events: Option<Vec<String>> = ListRef::from_value(row[5])
+                .map(|values| values.iter().map(|v| v.unpack_str().unwrap().to_owned()).collect());
             let capability = match kind {
                 "progress" => Capability::Parser,
                 "tool_header" => Capability::ToolHeader,
+                "github" => Capability::Github,
+                "github_trigger" => Capability::Workflow,
                 _ if message_type.starts_with("chat.") => Capability::ChatFormatter,
                 _ => Capability::MessageFormatter,
             };
@@ -315,17 +444,34 @@ impl Engine {
                 // Formatters route on message text, tool headers on the tool title.
                 text_pattern: regex.filter(|_| kind != "progress"),
                 message_type: (kind == "formatter").then(|| message_type.to_owned()),
+                github_events: events.clone(),
+                automation_trigger: if kind == "github_trigger" {
+                    Some(
+                        serde_json::from_str(label)
+                            .map_err(|e| fail(DiagnosticKind::Install, format!("invalid trigger: {e}")))?,
+                    )
+                } else {
+                    None
+                },
                 compile_time: started.elapsed(),
             }));
             hooks.push(HookInfo {
                 hook: match kind {
                     "progress" => "progress",
                     "tool_header" => "tool_header",
+                    "github" => "github",
+                    "github_trigger" => "github_trigger",
                     _ => "formatter",
                 },
                 pattern: pattern.map(str::to_owned),
                 message_type: (kind == "formatter").then(|| message_type.to_owned()),
                 display_name: (kind == "progress").then(|| label.to_owned()),
+                events,
+                trigger: if kind == "github_trigger" {
+                    serde_json::from_str(label).ok()
+                } else {
+                    None
+                },
             });
         }
         Ok(RegisteredScript { handlers, hooks })

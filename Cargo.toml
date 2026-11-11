@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-exclude = ["vendor/goose-1.56.0", "vendor/agent-client-protocol-3.4.0", "vendor/agent-client-protocol-schema-1.12.0"]
+exclude = ["vendor/goose-1.56.0", "vendor/agent-client-protocol-3.4.0", "vendor/agent-client-protocol-schema-1.12.0", "vendor/libghostty-vt-sys-0.2.2"]
 members = [
     "crates/agentworks",
     "crates/agentworks-codex-acp",
@@ -11,6 +11,8 @@ members = [
     "crates/agentworks-session",
     "crates/agentworks-workspace",
     "crates/agentworks-starlark",
+    "crates/agentworks-goose-acp",
+    "crates/agentworks-worker",
 ]
 default-members = ["crates/agentworks"]
 
@@ -20,6 +22,12 @@ edition = "2024"
 rust-version = "1.97.1"
 publish = false
 
+# Keep full debug info for this workspace, but limit dependency debug info to
+# file/line tables. This preserves useful backtraces without embedding the
+# full symbols for the large harness dependency trees in dev builds.
+[profile.dev.package."*"]
+debug = "line-tables-only"
+
 [workspace.dependencies]
 agent-client-protocol = { path = "vendor/agent-client-protocol-3.4.0", version = "=3.4.0", features = ["process", "unstable_session_fork", "unstable_subagents", "unstable_session_system_prompt"] }
 http = "1"
@@ -27,4 +35,10 @@ libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "std"] }
 uuid = { version = "1", features = ["v4"] }
+
+[patch.crates-io]
+# windows-gnu link fix; see vendor/GHOSTTY-SYS-SOURCES.md.
+libghostty-vt-sys = { path = "vendor/libghostty-vt-sys-0.2.2" }

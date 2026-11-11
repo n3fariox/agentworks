@@ -25,6 +25,9 @@ pub struct Update {
     worktree: Option<crate::worktree_cleanup::Cleanup>,
     /// Fingerprint from `GET /worktree` that the human confirmed for dirty removal.
     confirm_dirty: Option<String>,
+    /// IDs of sessions sharing the worktree that the human confirmed no longer use it.
+    #[serde(default)]
+    confirm_unused: Vec<String>,
 }
 impl Update {
     /// MCP archive exposes only the default safe cleanup policy.
@@ -34,6 +37,7 @@ impl Update {
             archived: Some(true),
             worktree: None,
             confirm_dirty: None,
+            confirm_unused: Vec::new(),
         }
     }
 }
@@ -54,21 +58,25 @@ pub async fn update(
             "Use a title of 1–80 characters without control characters",
         ));
     }
-    if req.archived != Some(true) && (req.worktree.is_some() || req.confirm_dirty.is_some()) {
+    if req.archived != Some(true)
+        && (req.worktree.is_some() || req.confirm_dirty.is_some() || !req.confirm_unused.is_empty())
+    {
         return Err(fail(
             StatusCode::BAD_REQUEST,
-            "worktree and confirmDirty only apply when archiving",
+            "worktree, confirmDirty and confirmUnused only apply when archiving",
         ));
     }
     let was_archived = s.data.lock().unwrap().lifecycle.archived;
     let mut cleanup = None;
     if req.archived == Some(true) && !was_archived {
+        between_turns(&s)?;
         cleanup = Some(
             crate::worktree_cleanup::cleanup(
                 &app,
                 &s,
                 req.worktree.unwrap_or_default(),
                 req.confirm_dirty.as_deref(),
+                &req.confirm_unused,
             )
             .await?,
         );
@@ -78,7 +86,7 @@ pub async fn update(
         // A failed or occupied restore leaves the session archived.
         restored = crate::worktree_cleanup::restore(&app, &s).await?;
     }
-    let Json(mut meta) = apply(&s, title, req.archived).await?;
+    let Json(mut meta) = apply(&app, &s, title, req.archived).await?;
     if let Some(outcome) = cleanup {
         meta["worktreeCleanup"] = outcome;
     }
@@ -87,13 +95,57 @@ pub async fn update(
     }
     Ok(Json(meta))
 }
+/// Archiving stops the harness, so it never cuts a turn short.
+pub fn between_turns(s: &Session) -> Result<(), (StatusCode, String)> {
+    let data = s.data.lock().unwrap();
+    if data.turn_active || matches!(data.status.as_str(), "running" | "waiting" | "cancelling") {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            format!(
+                "\"{}\" is in a turn; wait for it to finish, or stop it, before archiving",
+                data.lifecycle.title.as_deref().unwrap_or(&s.title)
+            ),
+        ));
+    }
+    Ok(())
+}
+/// Stops the harness and keeps it stopped until a deliberate resume. Callers hold the run lock.
+pub async fn release(app: &App, s: &Session) -> Result<(), (StatusCode, String)> {
+    let stopped = {
+        let data = s.data.lock().unwrap();
+        data.status == "suspended" && data.lifecycle.suspended
+    };
+    if s.commands.lock().unwrap().is_some() || !stopped {
+        let restart = crate::service_restart::stop_requester(app, &s.id).err();
+        let _ = suspend_locked(s).await?;
+        if let Some(error) = restart {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+/// Server start: sessions archived before archive stopped harnesses get the same state.
+pub fn settle_archived(data: &mut crate::SessionData) {
+    if data.lifecycle.archived && !data.lifecycle.suspended {
+        data.lifecycle.suspended = true;
+        data.lifecycle.asleep = false;
+        data.continuation.stop("Session archived");
+    }
+}
 /// Commits title/archive metadata; callers hold the run lock.
-pub async fn apply(s: &Session, title: Option<String>, archived: Option<bool>) -> ApiResult {
+pub async fn apply(
+    app: &App,
+    s: &Session,
+    title: Option<String>,
+    archived: Option<bool>,
+) -> ApiResult {
     if archived == Some(true) {
-        crate::inbox_delivery::cancel(s, "Recipient archived")?;
+        // Archived sessions are inactive: drop pending wakes; the authorization stays for unarchive.
+        crate::inbox_delivery::stop(s, "Recipient archived")?;
     }
     commit(s, title, archived)?;
     if archived == Some(true) {
+        release(app, s).await?;
         let _ = crate::terminal::archive(s).await?;
     }
     let meta = s.meta();
@@ -166,10 +218,12 @@ pub async fn stop_worker(s: &Session) {
     }
 }
 pub async fn suspend_locked(s: &Session) -> ApiResult {
-    let inbox_error = crate::inbox_delivery::cancel(s, "Explicit suspend").err();
+    // Queued wakes are held, not dropped, and resume with the session.
+    let inbox_error = crate::inbox_delivery::interrupt_inflight(s, "Explicit suspend").err();
     {
         let mut data = s.data.lock().unwrap();
         data.lifecycle.suspended = true;
+        data.lifecycle.asleep = false;
         data.continuation.stop("Explicit suspend");
         data.queued_prompt = None;
         data.input_queue

@@ -88,9 +88,9 @@ for(const mobile of [false,true])test(`Workspace dialog ${mobile?'mobile':'deskt
   await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),s.id);
   const errors=[];page.on('pageerror',e=>errors.push(e.message));let sockets=0;page.on('websocket',()=>sockets++);
   await page.goto(base);await expect(page.locator('#session-state')).toHaveText('Ready');
-  await page.locator('#prompt').fill('hello workspace');await page.locator('#send').click();
+  await page.locator('#prompt-editor .cm-content').fill('hello workspace');await page.locator('#send').click();
   await expect(page.locator('#messages')).toContainText('Local session, turn 1');
-  await page.locator('#prompt').fill('Keep this draft');const before=sockets;
+  await page.locator('#prompt-editor .cm-content').fill('Keep this draft');const before=sockets;
   if(mobile)await page.locator('#session-more').click();
   await page.getByRole('button',{name:'Workspace',exact:true}).click();
   await expect(page.getByRole('dialog',{name:'Workspace info'})).toBeVisible();

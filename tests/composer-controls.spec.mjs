@@ -11,11 +11,11 @@ test.beforeAll(async()=>{
   });await new Promise(ok=>server.listen(4523,'127.0.0.1',ok));
 });
 test.afterAll(async()=>{await new Promise(ok=>server.close(ok));});
-async function fixture(page,{delaySend=false,finishFirst=false}={}){
+async function fixture(page,{delaySend=false,finishFirst=false,commands=[]}={}){
   const sessions=['one','two'].map(id=>({id,title:id,provider:'demo',cwd:'/fixture',status:'idle',hostId:'local'}));
   const history=new Map(sessions.map(s=>[s.id,[]])),sockets=new Map(),writes=[];let release,seq=0;
   const send=(kind,data,id='one')=>{const event={kind,data,seq:++seq};history.get(id).push(event);if(kind==='status')sessions.find(s=>s.id===id).status=data.status;sockets.get(id)?.send(JSON.stringify(event));return event;};
-  const snapshot=s=>({kind:'snapshot',session:s,events:history.get(s.id),approvals:[],commands:[]});
+  const snapshot=s=>({kind:'snapshot',session:s,events:history.get(s.id),approvals:[],commands});
   await page.addInitScript(()=>localStorage.setItem('agentworks-session','one'));
   await page.routeWebSocket('**/api/sessions/*/events',ws=>{const s=sessions.find(s=>ws.url().includes('/'+s.id+'/'));sockets.set(s.id,ws);ws.send(JSON.stringify(snapshot(s)));});
   await page.route('**/api/**',async route=>{
@@ -40,37 +40,39 @@ async function fixture(page,{delaySend=false,finishFirst=false}={}){
   return {send,writes,release:()=>release?.()};
 }
 const prompt=page=>page.locator('#prompt');
+const editor=page=>page.locator('#prompt-editor .cm-content');
+const sourceMode=page=>page.addInitScript(()=>localStorage.setItem('agentworks-composer-source','true'));
 const recovery=page=>page.locator('.notice-card').filter({hasText:'History'});
 test('Stop restores exact whitespace, retains partial history and waits for deliberate retry',async({page})=>{
   const f=await fixture(page),text='  Original prompt\n\nwith trailing spaces  \n';
-  await prompt(page).fill(text);await page.locator('#send').click();await expect(prompt(page)).toHaveValue('');
+  await editor(page).fill(text);await page.locator('#send').click();await expect(prompt(page)).toHaveValue('');
   await page.locator('#stop').click();await expect(prompt(page)).toHaveValue(text);await expect(recovery(page)).toContainText('Stop requested');
   await expect(page.locator('#send')).toBeDisabled();await expect(page.locator('#messages')).toContainText('Partial answer');
   f.send('acp',{sessionUpdate:'agent_message_chunk',content:{type:'text',text:' late'}});
   f.send('turn_end',{stopReason:'cancelled'});f.send('status',{status:'idle'});
   await expect(recovery(page)).toContainText('Cancelled.');await expect(prompt(page)).toHaveValue(text);expect(f.writes.filter(w=>w.path.endsWith('/prompt'))).toHaveLength(1);
-  await prompt(page).fill('Edited retry');await page.locator('#send').click();expect(f.writes[2].body.requestId).not.toBe(f.writes[0].body.requestId);
+  await editor(page).fill('Edited retry');await page.locator('#send').click();expect(f.writes[2].body.requestId).not.toBe(f.writes[0].body.requestId);
 });
 test('completion winning Stop is explicit; replay does not replace edited draft',async({page})=>{
-  await fixture(page,{finishFirst:true});await prompt(page).fill('original');await page.locator('#send').click();await expect(prompt(page)).toHaveValue('');
+  await fixture(page,{finishFirst:true});await editor(page).fill('original');await page.locator('#send').click();await expect(prompt(page)).toHaveValue('');
   await page.locator('#stop').click();await expect(prompt(page)).toHaveValue('original');await expect(recovery(page)).toContainText('completed while Stop');
-  await prompt(page).fill('edited draft');await page.reload();await expect(prompt(page)).toHaveValue('edited draft');
+  await editor(page).fill('edited draft');await page.reload();await expect(prompt(page)).toHaveValue('edited draft');
 });
 test('a newer draft is preserved and recovery swaps it without discarding it',async({page})=>{
-  const f=await fixture(page);await prompt(page).fill('original');await page.locator('#send').click();await expect(prompt(page)).toHaveValue('');
-  await prompt(page).fill('newer draft');await page.locator('#stop').click();await expect(prompt(page)).toHaveValue('newer draft');
+  const f=await fixture(page);await editor(page).fill('original');await page.locator('#send').click();await expect(prompt(page)).toHaveValue('');
+  await editor(page).fill('newer draft');await page.locator('#stop').click();await expect(prompt(page)).toHaveValue('newer draft');
   await recovery(page).getByRole('button',{name:/Edit recovered prompt/}).click();await expect(prompt(page)).toHaveValue('original');
   await recovery(page).getByRole('button',{name:/Edit recovered prompt/}).click();await expect(prompt(page)).toHaveValue('newer draft');expect(f.writes).toHaveLength(2);
 });
 test('late POST acknowledgement cannot clear the restored prompt or reuse its identity',async({page})=>{
-  const f=await fixture(page,{delaySend:true});await prompt(page).fill('original');await page.locator('#send').click();await expect(page.locator('#stop')).toBeVisible();
+  const f=await fixture(page,{delaySend:true});await editor(page).fill('original');await page.locator('#send').click();await expect(page.locator('#stop')).toBeVisible();
   await page.locator('#stop').click();await expect(recovery(page)).toContainText('Stop requested');f.release();
   await expect(page.locator('#send')).toBeDisabled();await expect(prompt(page)).toHaveValue('original');
   f.send('turn_end',{stopReason:'cancelled'});f.send('status',{status:'idle'});await expect(page.locator('#send')).toBeEnabled();await page.locator('#send').click();
   await expect.poll(()=>f.writes.length).toBe(3);expect(f.writes[2].body.requestId).not.toBe(f.writes[0].body.requestId);f.release();
 });
 for(const mobile of [false,true])test(`textarea grows, caps, shrinks and respects manual size ${mobile?'phone':'desktop'}`,async({page})=>{
-  if(mobile)await page.setViewportSize({width:390,height:844});await fixture(page);
+  await sourceMode(page);if(mobile)await page.setViewportSize({width:390,height:844});await fixture(page);
   const height=()=>prompt(page).evaluate(n=>n.getBoundingClientRect().height),initial=await height();
   await prompt(page).fill(Array(8).fill('line').join('\n'));await expect.poll(height).toBeGreaterThan(initial+50);
   await prompt(page).fill(Array(100).fill('line').join('\n'));await expect.poll(height).toBeLessThanOrEqual(mobile?338:322);
@@ -99,29 +101,55 @@ test('exact editor text survives mention expansion and a later queued submission
   });expect(result.value).toBe(result.draft);expect(result.recovered).toBe(true);
 });
 test('a stale cancellation marker in replay cannot recover a prompt from an older turn',async({page})=>{
-  const f=await fixture(page);await prompt(page).fill('old prompt');await page.locator('#send').click();await expect(prompt(page)).toHaveValue('');
+  const f=await fixture(page);await editor(page).fill('old prompt');await page.locator('#send').click();await expect(prompt(page)).toHaveValue('');
   await page.locator('#stop').click();f.send('turn_end',{stopReason:'cancelled'});f.send('status',{status:'idle'});await expect(page.locator('#send')).toBeEnabled();
-  await prompt(page).fill('new prompt');await page.locator('#send').click();await expect(prompt(page)).toHaveValue('');
+  await editor(page).fill('new prompt');await page.locator('#send').click();await expect(prompt(page)).toHaveValue('');
   // A fresh tab has not acknowledged old recovery markers. The later user event
   // still makes the older marker ineligible to restore anything.
   await page.evaluate(()=>{for(const key of Object.keys(sessionStorage))if(/recovered-stops|stop-recovery/.test(key))sessionStorage.removeItem(key);});
   await page.reload();await expect(prompt(page)).toHaveValue('');await expect(recovery(page)).toHaveCount(0);
 });
 test('cancellation failure leaves the prompt and history available for inspection',async({page})=>{
-  const f=await fixture(page);await prompt(page).fill('original');await page.locator('#send').click();await expect(prompt(page)).toHaveValue('');await page.locator('#stop').click();
+  const f=await fixture(page);await editor(page).fill('original');await page.locator('#send').click();await expect(prompt(page)).toHaveValue('');await page.locator('#stop').click();
   f.send('error',{message:'Provider did not stop within grace period'});f.send('status',{status:'error'});
   await expect(prompt(page)).toHaveValue('original');await expect(page.locator('#messages')).toContainText('Partial answer');await expect(recovery(page)).toContainText('ended with an error');
 });
 test('repeated cancellations preserve previously recovered drafts',async({page})=>{
-  const f=await fixture(page);await prompt(page).fill('first prompt');await page.locator('#send').click();await expect(prompt(page)).toHaveValue('');
-  await prompt(page).fill('separate draft');await page.locator('#stop').click();f.send('turn_end',{stopReason:'cancelled'});f.send('status',{status:'idle'});await expect(page.locator('#send')).toBeEnabled();
-  await prompt(page).fill('second prompt');await page.locator('#send').click();await expect(prompt(page)).toHaveValue('');await page.locator('#stop').click();await expect(prompt(page)).toHaveValue('second prompt');
+  const f=await fixture(page);await editor(page).fill('first prompt');await page.locator('#send').click();await expect(prompt(page)).toHaveValue('');
+  await editor(page).fill('separate draft');await page.locator('#stop').click();f.send('turn_end',{stopReason:'cancelled'});f.send('status',{status:'idle'});await expect(page.locator('#send')).toBeEnabled();
+  await editor(page).fill('second prompt');await page.locator('#send').click();await expect(prompt(page)).toHaveValue('');await page.locator('#stop').click();await expect(prompt(page)).toHaveValue('second prompt');
   await recovery(page).getByRole('button',{name:/Edit recovered prompt/}).click();await expect(prompt(page)).toHaveValue('first prompt');
   await recovery(page).getByRole('button',{name:/Edit recovered prompt/}).click();await expect(prompt(page)).toHaveValue('second prompt');
 });
 test('native textarea drag retains the chosen height when typing resumes',async({page})=>{
-  await fixture(page);const box=await prompt(page).boundingBox();
+  await sourceMode(page);await fixture(page);const box=await prompt(page).boundingBox();
   await page.mouse.move(box.x+box.width-3,box.y+box.height-3);await page.mouse.down();await page.mouse.move(box.x+box.width-3,box.y+box.height+90,{steps:8});await page.mouse.up();
   const height=await prompt(page).evaluate(n=>n.getBoundingClientRect().height);expect(height).toBeGreaterThan(box.height+40);
   await prompt(page).fill('Writing after a manual drag');await expect.poll(()=>prompt(page).evaluate(n=>n.getBoundingClientRect().height)).toBe(height);
+});
+
+for(const source of [true,false])test(`skills complete at the caret while slash commands stay at the start (${source?'source':'formatted'})`,async({page})=>{
+  await page.addInitScript(source=>localStorage.setItem('agentworks-composer-source',String(source)),source);
+  const f=await fixture(page,{commands:[{name:'help'},{name:'$demo-skill'},{name:'$other-skill'}]});
+  const area=prompt(page),input=source?area:page.locator('#prompt-editor .cm-content'),list=page.locator('#command-list');
+  await input.fill('/');await expect(list.getByRole('button')).toHaveCount(3);
+  await input.fill('/demo');await expect(list.getByRole('button')).toHaveText('$demo-skill');
+  await list.getByRole('button').click();await expect(area).toHaveValue('$demo-skill ');
+  await input.fill('$demo');await expect(list.getByRole('button')).toHaveCount(1);
+  await list.getByRole('button').click();await expect(area).toHaveValue('$demo-skill ');
+  await input.fill('Please use $demo');await expect(list.getByRole('button')).toHaveCount(1);
+  await list.getByRole('button').click();await expect(area).toHaveValue('Please use $demo-skill ');
+  await input.fill('First line\nUse $demo for this task');
+  await area.evaluate(n=>{n.setSelectionRange(20,20);n.dispatchEvent(new Event('click'));});
+  await expect(list.getByRole('button')).toHaveCount(1);await list.getByRole('button').click();
+  await expect(area).toHaveValue('First line\nUse $demo-skill for this task');
+  expect(await area.evaluate(n=>n.selectionStart)).toBe(27);
+  for(const text of ['Please /help','First line\n/help','word$demo']){
+    await input.fill(text);await expect(list).toBeHidden();
+  }
+  await input.fill('/he');await expect(list.getByRole('button')).toHaveText('/help');
+  await list.getByRole('button').click();await expect(area).toHaveValue('/help ');
+  await input.fill('Please use $');await expect(list.getByRole('button')).toHaveCount(2);
+  await area.evaluate(n=>{n.setSelectionRange(0,12);n.dispatchEvent(new Event('click'));});
+  await expect(list).toBeHidden();expect(f.writes).toHaveLength(0);
 });

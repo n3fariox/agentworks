@@ -28,9 +28,13 @@ Remote Git context requires a worker advertising `gitContext`; update/reconnect 
 
 ## Display and attachment
 
+The left navigation’s [GitHub PR browser](GITHUB-BROWSER.md) lists your authored/assigned/review-requested open PRs across enabled hosts. Configure the shared per-host polling interval in **Settings → GitHub**; it defaults to five minutes.
+
+A main-host background monitor refreshes PR status for non-archived sessions even when no browser is open. See [PR tracking and events](GITHUB-PR-TRACKING.md).
+
 The sessions browser shows `PR#1234` badges on a shared third line below each session's title and provider/model. Empty badge rows collapse completely. Clicking a PR badge opens that PR in a new tab without switching sessions. Normal GitHub context collection updates these badges in the shared session badge store. Existing Starlark hooks can call `agent.set_badge` and `agent.clear_badge` to contribute to the same row. See [Session badges](SESSION-BADGES.md) for setters, persistence, bounds and composition rules.
 
-Green means approved; red means not approved and CI is failing; yellow means awaiting review or changes requested. Approval has priority over failed CI. Drafts, closed/merged PRs and unknown/stale states are neutral. Repositories without review rules use latest opinionated reviews, and fallback approvals must refer to the current PR head. Incomplete review data stays unknown.
+Green means approved; red means not approved and CI is failing; yellow means awaiting review or changes requested. Approval has priority over failed CI. Merged PRs are purple. Drafts, closed PRs and unknown/stale states are neutral. Repositories without review rules use latest opinionated reviews, and fallback approvals must refer to the current PR head. Incomplete review data stays unknown.
 
 The session GitHub panel lists PRs whose head branch and head repository match the origin repository, ordered by recent update, up to 20 candidates. It displays all candidates rather than silently choosing among several. A PR from a fork with the same branch name is not inferred as this checkout's PR. Fork PRs into another repository need broader repository association support in a later release.
 
@@ -38,9 +42,9 @@ Attach an issue or PR by type and number from the origin repository (up to 10 pe
 
 PR details show state, draft status, base branch, current head SHA, review decision and up to 50 check/status details. Every PR is marked according to whether its head SHA matches the checkout commit. Checks are explicitly labeled as belonging to the PR head; old-commit results are never labeled as current checkout results. Missing checks or review decisions are unknown. Pagination limits are visible; check success is not a claim that repository merge rules are satisfied.
 
-Snapshots include a fetched timestamp. Active visible sessions refresh approximately once a minute; manual refresh has a 10-second minimum cache interval. Sessions share a bounded in-memory cache scoped by connection, repository, branch, commit and attachments, with serialized requests. Errors show unavailable state rather than an empty result. API failures back off; rate-limit errors honor the reported reset time or numeric Retry-After, with a default pause. A partial GraphQL error does not become a successful empty snapshot. Restart clears snapshots and rediscovers credentials when needed.
+Snapshots include a fetched timestamp. Session status follows the configured per-host polling interval (five minutes by default); manual refresh has a 10-second minimum cache interval. Sessions share a bounded in-memory cache scoped by connection, repository, branch, commit and attachments, with serialized requests. Errors show unavailable state rather than an empty result. API failures back off; rate-limit errors honor the reported reset time or numeric Retry-After, with a default pause. A partial GraphQL error does not become a successful empty snapshot. Restart clears snapshots and rediscovers credentials when needed.
 
-The public UI/API currently supports read-only context and local connection/link management. GitHub event triggers, native GitHub write actions and dedicated agent tools remain future work. The [design proposal](GITHUB-INTEGRATION.md) describes those extensions.
+The public UI/API currently supports read-only context and local connection/link management. Browser-independent [PR tracking and observation hooks](GITHUB-PR-TRACKING.md) are available. Event-driven automation dispatch, native GitHub write actions and dedicated agent read tools remain future work. The [design proposal](GITHUB-INTEGRATION.md) describes those extensions.
 
 ## API and verification
 

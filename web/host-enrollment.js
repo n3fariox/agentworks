@@ -6,13 +6,13 @@ export function hostEnrollment({$, api, refresh, directories}) {
   function dispose(){if(socket){socket.onclose=null;socket.onmessage=null;socket.onerror=null;}socket?.close();socket=null;resize?.disconnect();resize=null;terminal?.dispose();terminal=null;active=false;}
   function controls(busy){
     active=busy;
-    for(const id of ['host-name','host-destination','host-mode','host-command','save-host'])$(id).disabled=busy;
+    for(const id of ['host-name','host-destination','host-mode','host-os','host-command','save-host'])$(id).disabled=busy;
     $('dismiss-host').setAttribute('aria-label',busy?'Cancel enrollment':'Close host dialog');
     $('dismiss-host').title=busy?'Cancel enrollment':'Close';
   }
   function mode(){
     const automatic=$('host-mode').value==='enroll';
-    $('host-manual').hidden=automatic;$('host-enrollment-note').hidden=!automatic;
+    $('host-manual').hidden=automatic;$('host-enrollment-note').hidden=!automatic;$('host-os-field').hidden=!automatic;
     $('save-host').textContent=automatic?'Connect and install':'Add host';
   }
   $('host-mode').onchange=mode;
@@ -46,7 +46,7 @@ export function hostEnrollment({$, api, refresh, directories}) {
       const url=new URL('./api/hosts/enroll/events',location.href);url.protocol=location.protocol==='https:'?'wss:':'ws:';
       const ws=socket=new WebSocket(url);ws.binaryType='arraybuffer';
       terminal.onData(data=>{if(active)send({type:'input',data});});
-      ws.onopen=()=>{send({name,destination});fit();terminal.focus();};
+      ws.onopen=()=>{send({name,destination,os:$('host-os').value});fit();terminal.focus();};
       ws.onmessage=event=>{
         if(event.data instanceof ArrayBuffer){terminal?.write(new Uint8Array(event.data));return;}
         let value;try{value=JSON.parse(event.data);}catch{return;}

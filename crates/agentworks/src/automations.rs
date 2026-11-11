@@ -10,11 +10,22 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
+mod generator;
+mod github_review;
+pub use generator::{get as get_script, inspect as inspect_script, preview as preview_script};
+mod scripts;
+pub use github_review::GithubReview;
+pub use scripts::ScriptTrigger;
+pub(crate) use scripts::migrate as migrate_scripts;
 
 pub use agentworks_session::origins::AutomationOrigin as Origin;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Definition {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_error: Option<String>,
     pub id: String,
     pub name: String,
     pub provider: String,
@@ -58,7 +69,7 @@ pub struct Author {
     pub title: String,
 }
 /// "When [trigger], do [steps]". Only what the runtime can perform is
-/// representable: a manual, weekly or one-time trigger, and agent steps that
+/// representable: manual, timed and GitHub review triggers, and agent steps that
 /// are carried out in order within one agent turn of the run's session.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -73,6 +84,7 @@ pub enum Trigger {
     Manual,
     Schedule(Schedule),
     Once(Once),
+    Script(ScriptTrigger),
 }
 /// A-01 weekly schedule: one local wall-clock time on selected weekdays in an
 /// IANA time zone. Run now remains available alongside it.
@@ -163,6 +175,7 @@ impl Workflow {
         }
         match &mut self.trigger {
             Trigger::Manual => {}
+            Trigger::Script(trigger) => trigger.validate()?,
             Trigger::Schedule(schedule) => {
                 schedule.time_zone = schedule.time_zone.trim().to_string();
                 schedule.days.sort_unstable();
@@ -209,7 +222,7 @@ impl Trigger {
     /// a manual one.
     pub fn timing(&self) -> Option<Result<(Plan, Missed), &'static str>> {
         match self {
-            Trigger::Manual => None,
+            Trigger::Manual | Trigger::Script(_) => None,
             Trigger::Schedule(schedule) => Some(schedule.plan().map(|p| (p, schedule.missed))),
             Trigger::Once(once) => Some(once.instant().map(|at| (Plan::Once(at), once.missed))),
         }
@@ -363,6 +376,14 @@ pub const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS automation_schedules(automation_id TEXT PRIMARY KEY,cursor INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS automation_slots(automation_id TEXT NOT NULL,slot INTEGER NOT NULL,request_id TEXT NOT NULL,outcome TEXT NOT NULL,detail TEXT,created INTEGER NOT NULL,PRIMARY KEY(automation_id,slot));
 CREATE TABLE IF NOT EXISTS automation_agent_requests(actor TEXT NOT NULL,request_id TEXT NOT NULL,operation TEXT NOT NULL,payload TEXT NOT NULL,result TEXT NOT NULL,created INTEGER NOT NULL,PRIMARY KEY(actor,request_id));
+CREATE TABLE IF NOT EXISTS automation_github_baselines(automation_id TEXT PRIMARY KEY,scope TEXT NOT NULL,snapshot TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS automation_events(id TEXT PRIMARY KEY,automation_id TEXT NOT NULL,revision INTEGER NOT NULL,payload TEXT NOT NULL,created INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'pending',action TEXT,target TEXT,detail TEXT);
+CREATE TABLE IF NOT EXISTS automation_github_polls(automation_id TEXT PRIMARY KEY,checked_at INTEGER NOT NULL,error TEXT);
+CREATE TABLE IF NOT EXISTS automation_event_actions(event_id TEXT NOT NULL,action_key TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',target TEXT,detail TEXT,PRIMARY KEY(event_id,action_key));
+CREATE TABLE IF NOT EXISTS automation_trigger_baselines(automation_id TEXT NOT NULL,trigger_name TEXT NOT NULL,scope TEXT NOT NULL,snapshot TEXT NOT NULL,PRIMARY KEY(automation_id,trigger_name));
+INSERT OR IGNORE INTO automation_trigger_baselines SELECT automation_id,'default',scope,snapshot FROM automation_github_baselines;
+DELETE FROM automation_github_baselines;
+CREATE INDEX IF NOT EXISTS automation_events_pending ON automation_events(automation_id,status);
 ";
 impl Definition {
     /// The trigger when it is timed (weekly or one-time), which gives the
@@ -371,17 +392,24 @@ impl Definition {
         self.workflow
             .as_ref()
             .map(|w| &w.trigger)
-            .filter(|t| !matches!(t, Trigger::Manual))
+            .filter(|t| matches!(t, Trigger::Schedule(_) | Trigger::Once(_)))
     }
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Input {
+    #[serde(default)]
     name: String,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    script_name: Option<String>,
+    #[serde(default)]
     provider: String,
     model: Option<String>,
     #[serde(default)]
     model_provider: Option<String>,
+    #[serde(default)]
     cwd: String,
     host_id: Option<String>,
     project_id: Option<String>,
@@ -406,9 +434,60 @@ fn now() -> u64 {
 async fn definition(
     app: &App,
     previous: Option<&Definition>,
-    input: Input,
+    mut input: Input,
     author: Option<Author>,
-) -> Result<Definition, (StatusCode, String)> {
+) -> Result<(Definition, Option<String>), (StatusCode, String)> {
+    let id = previous.map_or_else(|| Uuid::new_v4().to_string(), |p| p.id.clone());
+    let source = input.source.take();
+    if source.is_none()
+        && input
+            .workflow
+            .as_ref()
+            .is_some_and(|w| matches!(w.trigger, Trigger::Script(_)))
+    {
+        return Err(fail(
+            StatusCode::BAD_REQUEST,
+            "Import or save the automation file's source; separate script bindings are no longer created",
+        ));
+    }
+
+    if let Some(source) = &source {
+        let name = input
+            .script_name
+            .take()
+            .or_else(|| {
+                previous
+                    .and_then(scripts::binding)
+                    .map(|b| b.script.clone())
+            })
+            .unwrap_or_else(|| format!("automation_{id}.star"));
+        if !crate::tool_progress::valid_name(&name) {
+            return Err(fail(
+                StatusCode::BAD_REQUEST,
+                "Use a lowercase .star filename",
+            ));
+        }
+        let collision: bool = app
+            .store
+            .lock()
+            .unwrap()
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM scripts WHERE name=?1)",
+                [&name],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        if collision
+            && !previous.is_some_and(|d| scripts::binding(d).is_some_and(|b| b.script == name))
+        {
+            return Err(fail(
+                StatusCode::CONFLICT,
+                "This script already exists; edit its automation or choose another filename",
+            ));
+        }
+        generator::apply(app, &name, &mut input, source)?;
+    }
     let (workflow, prompt) = match input.workflow {
         Some(workflow) => {
             let (workflow, prompt) = workflow
@@ -446,6 +525,63 @@ async fn definition(
         ));
     }
     let host = input.host_id.as_deref().unwrap_or("local");
+    let mut script_hash = None;
+    if let Some(Workflow {
+        trigger: Trigger::Script(binding),
+        ..
+    }) = &workflow
+    {
+        if input.project_id.is_none() {
+            return Err(fail(
+                StatusCode::BAD_REQUEST,
+                "Choose a project for script automations",
+            ));
+        }
+        let resolved = if let Some(source) = &source {
+            scripts::resolve_source(&app.progress.engine(), binding, source)
+        } else {
+            scripts::resolve(
+                &app.store.lock().unwrap().connection,
+                &app.progress.engine(),
+                binding,
+            )
+        }
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+        script_hash = Some(resolved.script.hash.clone());
+        if input.enabled {
+            let recipes = if let Some(source) = &source {
+                scripts::resolve_all_source(&app.progress.engine(), binding, source)
+            } else {
+                scripts::resolve_all(
+                    &app.store.lock().unwrap().connection,
+                    &app.progress.engine(),
+                    binding,
+                )
+            }
+            .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+            for recipe in recipes {
+                if !app
+                    .catalog
+                    .lock()
+                    .unwrap()
+                    .data
+                    .github
+                    .connections
+                    .iter()
+                    .any(|c| {
+                        c.enabled
+                            && c.host.eq_ignore_ascii_case(&recipe.scope.host)
+                            && c.login.eq_ignore_ascii_case(&recipe.scope.login)
+                    })
+                {
+                    return Err(fail(
+                        StatusCode::BAD_REQUEST,
+                        "Enable each GitHub account registered by the automation first",
+                    ));
+                }
+            }
+        }
+    }
     let model_provider = input
         .model_provider
         .map(|p| p.trim().to_string())
@@ -476,25 +612,30 @@ async fn definition(
                 )
             })?;
     }
-    Ok(Definition {
-        id: previous.map_or_else(|| Uuid::new_v4().to_string(), |p| p.id.clone()),
-        name: name.into(),
-        provider: input.provider,
-        model,
-        model_provider,
-        cwd: cwd.to_string_lossy().into_owned(),
-        location_id: location.id,
-        host_id: host.into(),
-        project_id: input.project_id,
-        prompt,
-        workflow,
-        enabled: input.enabled,
-        created: previous.map_or_else(now, |p| p.created),
-        updated: now(),
-        created_by: previous.map_or(author, |p| p.created_by.clone()),
-        revision: previous.map_or(1, |p| p.revision + 1),
-        completed: None,
-    })
+    Ok((
+        Definition {
+            id,
+            name: name.into(),
+            provider: input.provider,
+            model,
+            model_provider,
+            cwd: cwd.to_string_lossy().into_owned(),
+            location_id: location.id,
+            host_id: host.into(),
+            project_id: input.project_id,
+            prompt,
+            workflow,
+            enabled: input.enabled,
+            created: previous.map_or_else(now, |p| p.created),
+            updated: now(),
+            created_by: previous.map_or(author, |p| p.created_by.clone()),
+            revision: previous.map_or(1, |p| p.revision + 1),
+            completed: None,
+            script_hash,
+            script_error: None,
+        },
+        source,
+    ))
 }
 fn storage(_error: impl std::fmt::Display) -> (StatusCode, String) {
     fail(
@@ -542,6 +683,9 @@ fn profiles_for(defs: &[&Definition]) -> Vec<serde_json::Value> {
         .unwrap_or_default()
 }
 pub async fn list(State(app): State<App>) -> ApiResult {
+    let _communication = app.communication_lock.lock().await;
+    let _run = app.run_lock.lock().await;
+    scripts::reconcile(&app)?;
     let defs = app
         .store
         .lock()
@@ -552,7 +696,39 @@ pub async fn list(State(app): State<App>) -> ApiResult {
     let profiles = profiles_for(&defs.iter().collect::<Vec<_>>());
     Ok(Json(json!(
         defs.iter()
-            .map(|d| view(d, now, &profiles))
+            .map(|d| {
+                let mut value = view(d, now, &profiles);
+                if matches!(
+                    d.workflow.as_ref().map(|w| &w.trigger),
+                    Some(Trigger::Script(_))
+                ) {
+                    value["githubPolling"] = github_review::poll_status(&app, &d.id);
+                    let binding = scripts::binding(d).unwrap();
+                    let source: Option<String> = app
+                        .store
+                        .lock()
+                        .unwrap()
+                        .connection
+                        .query_row(
+                            "SELECT source FROM scripts WHERE name=?1 AND capability='automation'",
+                            [&binding.script],
+                            |r| r.get(0),
+                        )
+                        .ok();
+                    if let Some(source) = source
+                        && let Ok((_, recipes)) =
+                            scripts::manifest(&app.progress.engine(), &binding.script, &source)
+                    {
+                        value["registrations"] = json!(
+                            recipes
+                                .iter()
+                                .map(|r| r.script.automation_trigger.clone().unwrap())
+                                .collect::<Vec<_>>()
+                        );
+                    }
+                }
+                value
+            })
             .collect::<Vec<_>>()
     )))
 }
@@ -575,6 +751,7 @@ fn save(
     previous: Option<&Definition>,
     def: &Definition,
     request: Option<(&str, &str, &str, &str)>,
+    source: Option<&str>,
 ) -> Result<serde_json::Value, (StatusCode, String)> {
     let rearm = def.enabled
         && def.timed().is_some()
@@ -601,17 +778,25 @@ fn save(
         payload,
         result: &result,
     });
-    app.store
-        .lock()
-        .unwrap()
-        .save_automation(def, rearm.then_some(now), ledger.as_ref())
-        .map_err(storage)?;
+    {
+        let mut store = app.store.lock().unwrap();
+        if let Some(source) = source {
+            store
+                .save_automation_source(def, rearm.then_some(now), ledger.as_ref(), Some(source))
+                .map_err(storage)?;
+            app.progress.reload(&store.connection).map_err(storage)?;
+        } else {
+            store
+                .save_automation(def, rearm.then_some(now), ledger.as_ref())
+                .map_err(storage)?;
+        }
+    }
     Ok(value)
 }
 pub async fn create(State(app): State<App>, Json(input): Json<Input>) -> ApiResult {
     let _workspace = app.workspace_lock.lock().await;
-    let def = definition(&app, None, input, None).await?;
-    save(&app, None, &def, None).map(Json)
+    let (def, source) = definition(&app, None, input, None).await?;
+    save(&app, None, &def, None, source.as_deref()).map(Json)
 }
 pub async fn update(
     State(app): State<App>,
@@ -622,8 +807,8 @@ pub async fn update(
     let _guard = app.run_lock.lock().await;
     let _workspace = app.workspace_lock.lock().await;
     let previous = existing(&app, &id)?;
-    let def = definition(&app, Some(&previous), input, None).await?;
-    save(&app, Some(&previous), &def, None).map(Json)
+    let (def, source) = definition(&app, Some(&previous), input, None).await?;
+    save(&app, Some(&previous), &def, None, source.as_deref()).map(Json)
 }
 fn existing(app: &App, id: &str) -> Result<Definition, (StatusCode, String)> {
     app.store
@@ -711,6 +896,15 @@ async fn start(
     if !def.enabled {
         return Err(fail(StatusCode::CONFLICT, "This automation is paused"));
     }
+    if matches!(
+        def.workflow.as_ref().map(|w| &w.trigger),
+        Some(Trigger::Script(_))
+    ) {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "GitHub review automations run from observed PR requests",
+        ));
+    }
     // A bound profile replaces the host environment as the credential source,
     // so it must still exist and be enabled on this host. Whether its key is
     // accepted is only known once the provider is contacted.
@@ -786,6 +980,7 @@ async fn start(
 }
 /// Dispatches due scheduled occurrences through the same path as Run now.
 pub async fn scheduler(app: App) {
+    tokio::spawn(github_review::scheduler(app.clone()));
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -934,7 +1129,13 @@ fn author_permits(app: &App, def: &Definition) -> Result<(), String> {
     if actor.project.is_none() || actor.project != def.project_id {
         return Err("The agent that created this automation is no longer in its project".into());
     }
-    for capability in ["manage_automations", "start_sessions"] {
+    for capability in ["manage_automations", "start_sessions"].into_iter().chain(
+        matches!(
+            def.workflow.as_ref().map(|w| &w.trigger),
+            Some(Trigger::Script(_))
+        )
+        .then_some("prompt_sessions"),
+    ) {
         mail::require_actor(app, &actor, capability).map_err(|_| {
             format!("The agent that created this automation no longer holds {capability}")
         })?;
@@ -1147,6 +1348,8 @@ pub async fn agent(
                 None
             };
             let input = Input {
+                source: None,
+                script_name: None,
                 name: req.name,
                 provider: req.provider,
                 model: req.model,
@@ -1166,8 +1369,14 @@ pub async fn agent(
                 id: a.id.clone(),
                 title: a.title.clone(),
             };
-            let def = definition(app, previous.as_ref(), input, Some(author)).await?;
-            save(app, previous.as_ref(), &def, Some(ledger))
+            let (def, source) = definition(app, previous.as_ref(), input, Some(author)).await?;
+            save(
+                app,
+                previous.as_ref(),
+                &def,
+                Some(ledger),
+                source.as_deref(),
+            )
         }
         "set_automation_enabled" => {
             let target: AgentTarget =
@@ -1187,7 +1396,7 @@ pub async fn agent(
                 completed: previous.completed.filter(|_| !enabled),
                 ..previous.clone()
             };
-            save(app, Some(&previous), &def, Some(ledger))
+            save(app, Some(&previous), &def, Some(ledger), None)
         }
         "delete_automation" => {
             let target: AgentTarget =

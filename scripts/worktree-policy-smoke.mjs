@@ -25,7 +25,7 @@ if(fs.existsSync(gate+'.overflow')&&a.includes('list')){process.stdout.write('x'
 else if(fs.existsSync(gate+'.inspection')&&a.includes('--show-toplevel')){process.stdout.write('x'.repeat(20000));process.exitCode=0;}
 else {
  if(a.includes('worktree')&&a.includes('add')&&fs.existsSync(gate)){
-  fs.writeFileSync(gate+'.entered','yes');const deadline=Date.now()+30000;
+  fs.writeFileSync(gate+'.entered','yes');if(fs.readFileSync(gate,'utf8')==='fail'){process.stderr.write('simulated checkout failure');process.exit(1);}const deadline=Date.now()+30000;
   while(fs.existsSync(gate)&&Date.now()<deadline)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,30);
  }
  const r=cp.spawnSync(${JSON.stringify(realGit)},a,{stdio:'inherit',env:process.env});process.exitCode=r.status??1;
@@ -45,6 +45,7 @@ const treeCount=()=>git(repo,'worktree','list','--porcelain').split('\n').filter
 async function external(cwd){const id=randomUUID();await mkdir(env.AGENTWORKS_DEMO_STATE_DIR,{recursive:true});await writeFile(join(env.AGENTWORKS_DEMO_STATE_DIR,id+'.json'),JSON.stringify({cwd,turn:1,model:'demo/steady',history:[]}));return {provider:'demo',providerSessionId:id,cwd};}
 try{
  await start();
+ const originalSettings=await api('/api/settings');
  const p=await api('/api/projects','POST',{name:'Policy fixture'}),policy='/api/projects/'+p.id+'/workspace-policy';
  assert.deepEqual(await api(policy),{defaultMode:'directory',requireWorktree:false});
  // Paused Git proves activity observes preparation before a session exists.
@@ -52,18 +53,27 @@ try{
  await until(async()=>{try{await access(gate+'.entered');return true;}catch{return false;}});
  const busy=await api('/api/activity');assert.equal(busy.workspacePreparing,true);assert.equal(busy.safeToClose,false);
  await unlink(gate);const prepared=await inFlight;await idle(prepared.id);await remove(prepared);await unlink(gate+'.entered');assert.equal((await api('/api/activity')).workspacePreparing,false);
- // Timeout after mutation is armed retains the reserved directory/key and releases activity.
- await writeFile(gate,'timeout');const timeoutRequest={provider:'demo',cwd:repo,requestId:'timeout-preparation',workspace:{mode:'newWorktree'}};
- const timeoutMessage=await api('/api/sessions','POST',timeoutRequest,409);assert.match(timeoutMessage,/timed out/);assert.equal((await api('/api/activity')).workspacePreparing,false);await unlink(gate);await unlink(gate+'.entered');await api('/api/sessions','POST',timeoutRequest,409);
+ // The checkout is filled after creation returns. A failure there errors the session,
+ // retains the reserved directory and releases activity; the same request returns the
+ // same session, and Resume fills it once Git is known to be unchanged.
+ await writeFile(gate,'fail');const populationRequest={provider:'demo',cwd:repo,requestId:'failed-population',workspace:{mode:'newWorktree'}};
+ const failed=await api('/api/sessions','POST',populationRequest);
+ const failedState=await until(async()=>{const s=await api('/api/sessions/'+failed.id);return s.session.status==='error'&&s;});
+ assert.match(failedState.events.filter(e=>e.kind==='error').at(-1).data.message,/simulated checkout failure.*retained/s);await access(failed.cwd);
+ assert.equal((await api('/api/activity')).workspacePreparing,false);await unlink(gate);await unlink(gate+'.entered');
+ assert.equal((await api('/api/sessions','POST',populationRequest)).id,failed.id);assert.equal((await api('/api/sessions/'+failed.id)).session.status,'error');
+ await api('/api/sessions/'+failed.id+'/resume','POST',{});await idle(failed.id);assert.equal(git(failed.cwd,'rev-parse','--abbrev-ref','HEAD'),failed.worktree.branch);await remove(failed);
  await writeFile(gate+'.overflow','large');await api('/api/worktrees/list','POST',{cwd:repo},409);await unlink(gate+'.overflow');
  const ordinary=await create({cwd:plain});await idle(ordinary.id);assert.equal(ordinary.cwd,plain);await remove(ordinary);
  // Capacity rejection is mutation-free: retain payload binding, permit unchanged retry.
+ await api('/api/settings','PUT',{...originalSettings,maxActiveSessions:12});
  const fillers=[];for(let i=0;i<12;i++)fillers.push(await create({cwd:plain}));
  await Promise.all(fillers.map(s=>idle(s.id)));
  const capacityRequest={provider:'demo',cwd:plain,requestId:'capacity-retry'};
  await api('/api/sessions','POST',capacityRequest,409);
  await api('/api/sessions','POST',{...capacityRequest,title:'different payload'},409);
  await remove(fillers.shift());const recovered=await api('/api/sessions','POST',capacityRequest);await idle(recovered.id);await remove(recovered);for(const s of fillers)await remove(s);
+ await api('/api/settings','PUT',originalSettings);
  const actor=await create({projectId:p.id,title:'Isolated test coordinator',agentAccess:{startSessions:true,runAutomations:true}});await idle(actor.id);
  const oldImportRequest={...await external(repo),projectId:p.id};const oldImport=await api('/api/sessions/import','POST',oldImportRequest);await idle(oldImport.id);
  const input={provider:'demo',cwd:repo,projectId:p.id,requestId:'tree-once',workspace:{mode:'newWorktree'}};

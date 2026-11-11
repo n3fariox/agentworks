@@ -14,8 +14,12 @@ The pinned Rust and Zig toolchains are selected by `mise exec -- cargo …` or
 | `agentworks-terminal` | PTY processes and cleanup, Ghostty emulation, presentation frames, incremental history, and terminal input |
 | `agentworks-workspace` | Bounded Git execution and inspection, comparisons, worktree policies, preparation, ownership verification, dirty fingerprints, removal, and restoration |
 | `agentworks-starlark` | Typed interpreter APIs, progress parsing, message formatting, experimental workflow decisions, worker binary, and bundled Starlark sources |
+| `agentworks-worker` | The `agentworks-worker` executable for remote hosts and the subcommand dispatch shared with the service: worker loop, ACP bridges, MCP stdio relay. Feature `goose` (default) embeds Goose |
+| `agentworks-goose-acp` | Embedded Goose harness behind ACP: system prompts, exact forks, Codex subscription tokens, usage reporting |
+| `agentworks-claude-acp`, `agentworks-codex-acp`, `agentworks-demo-acp` | Native ACP bridges started as `agentworks <bridge>` subprocesses |
 
-The service depends on all five libraries. Runtime depends on terminal and
+The service depends on runtime, session, terminal, workspace, Starlark and
+worker; the bridges and Goose reach it only through worker. Runtime depends on terminal and
 workspace; session depends on workspace for recorded worktree ownership. There
 are no dependencies back to the service. The runtime, session, terminal, and
 workspace libraries do not accept `App` or live `Session` handles, and do not

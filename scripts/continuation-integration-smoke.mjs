@@ -36,7 +36,7 @@ try{
   const held=await snap(id);await api(path(id)+`/approvals/${held.approvals[0].id}`,{optionId:'allow'});
   await until(async()=>users(await snap(id)).length===4);let done=await idle(id);
   assert.deepEqual(users(done).slice(1,3).map(u=>u.text),['First explicit input','Second explicit input']);
-  assert.equal(users(done)[3].initiatedBy,'human-authorized inbox delivery');
+  assert.equal(users(done)[3].initiatedBy,'inbox delivery');
   // A paused explicit input blocks inbox wake until deliberate queue resume.
   await prompt(id,'approval');await until(async()=>(await snap(id)).approvals.length);
   await queue(id,'Explicit input after inspection');await api(path(id)+'/stop',{});await idle(id);

@@ -136,6 +136,19 @@ pub async fn git_bounded_raw(
             "core.hooksPath=/dev/null",
             "-c",
             "submodule.recurse=false",
+            // Global config is disabled below, including the filters normally
+            // registered by `git lfs install`. Supply the standard LFS filters
+            // explicitly so checkouts hydrate and status/cleanup clean them
+            // consistently. Git invokes these only for filter=lfs attributes;
+            // repositories without LFS do not need git-lfs installed.
+            "-c",
+            "filter.lfs.clean=git-lfs clean -- %f",
+            "-c",
+            "filter.lfs.smudge=git-lfs smudge -- %f",
+            "-c",
+            "filter.lfs.process=git-lfs filter-process",
+            "-c",
+            "filter.lfs.required=true",
         ])
         .args(args)
         .env("LC_ALL", "C")

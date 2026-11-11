@@ -6,7 +6,7 @@ Implemented: native Rust stdio MCP and private loopback service bridge; durable 
 
 The sections below describe the intended architecture, including later capabilities. The current implementation exposes no settings, deletion, access-grant, or harness-approval tools.
 
-The [review queue](REVIEW-QUEUE.md) adds separately opted-in `manageReviewQueue` MCP access for scoped review records and manual integration reservations. Existing Coordinator presets do not grant it; no queue tool executes Git.
+Review and merge coordination uses ordinary messages: send a review request with `expectReply` and the reply wakes you (see [inbox delivery](INBOX-DELIVERY.md#reply-requests)). The former review queue and its `manageReviewQueue` grant were removed; saved grants with that key are accepted and ignored.
 
 ## Communication role defaults
 
@@ -34,7 +34,7 @@ References: [ACP session setup and MCP configuration](https://agentclientprotoco
 - Persist messages before acknowledging a send. A sender-scoped request ID prevents duplicate delivery on retries. Receipt/read state is separate from successful completion of requested work.
 - Show messages and their delivery state in the browser, with a link to the other session. Keep them distinguishable from human instructions and normal model output.
 - Sending a message does not interrupt a running turn or start a model request. Initially, agents read their inbox through tools and users can explicitly deliver pending messages as a new turn when a session is idle.
-- Automatic wake-up is a separate, opt-in capability. It needs queue ordering, cancellation, request deduplication, turn/cost limits, and loop protection before enabling unattended agent conversations. Never silently replay a possibly executed turn after a crash.
+- Automatic wake-up is on by default and can be limited or disabled per session; see [inbox delivery](INBOX-DELIVERY.md). Never silently replay a possibly executed turn after a crash.
 - Retain sender identity on deletion using a tombstone; do not let deleting a session erase the provenance of messages sent to another session.
 
 ## Permissions

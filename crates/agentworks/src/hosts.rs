@@ -80,7 +80,7 @@ pub async fn remove(State(app): State<App>, Path(id): Path<String>) -> ApiResult
                     .is_some_and(|name| uuid::Uuid::parse_str(&name.to_string_lossy()).is_ok())
             {
                 if tokio::fs::remove_dir_all(dir).await.is_err() {
-                    eprintln!("Could not remove a deleted host's managed SSH key directory");
+                    tracing::warn!("Could not remove a deleted host's managed SSH key directory");
                 }
             }
         }
@@ -275,6 +275,17 @@ pub(crate) fn diagnostic(app: &App, host: &str, provider: &str, message: &str) -
     )
 }
 
+/// A host's display name for logs; `local` and unknown hosts keep their ID.
+pub(crate) fn name(app: &App, host_id: &str) -> String {
+    app.catalog
+        .lock()
+        .unwrap()
+        .data
+        .hosts
+        .iter()
+        .find(|h| h.id == host_id)
+        .map_or_else(|| host_id.to_owned(), |h| h.name.clone())
+}
 fn host_roots(app: &App, host_id: &str) -> Result<Vec<String>, (StatusCode, String)> {
     app.catalog
         .lock()
@@ -329,6 +340,26 @@ pub(crate) async fn worktree_operation(
     live.workspace(request)
         .await
         .map_err(|e| fail(StatusCode::CONFLICT, e))
+}
+
+/// Fills a worktree that `prepare_workspace` reserved on the host.
+pub(crate) async fn populate_worktree(
+    app: &App,
+    host: &str,
+    owned: &crate::worktree_cleanup::Owned,
+) -> Result<crate::worktree_cleanup::Owned, (StatusCode, String)> {
+    let roots = host_roots(app, host)?;
+    let live = connected(app, host)?;
+    let result = live
+        .workspace(json!({"operation":"populateWorktree","owned":owned,"roots":roots}))
+        .await
+        .map_err(|e| fail(StatusCode::CONFLICT, e))?;
+    serde_json::from_value(result["owned"].clone()).map_err(|_| {
+        fail(
+            StatusCode::BAD_GATEWAY,
+            "Invalid remote workspace ownership",
+        )
+    })
 }
 
 pub(crate) async fn prepare_workspace(
@@ -403,7 +434,9 @@ pub(crate) async fn prepare_workspace(
     if mode == crate::worktrees::Mode::NewWorktree {
         crate::worktrees::arm_creation(app, key)?;
     }
-    let result = live.workspace(json!({"gitSettings":git_settings,"operation":"prepare","cwd":source,"roots":roots,"policy":policy,"workspace":if req.external_id.is_some() { json!({"mode":"directory"}) } else { json!(req.workspace) }})).await
+    // Workers that can reserve a worktree let the session fill it while it starts.
+    let defer = live.worker()["deferredWorktree"] == true;
+    let result = live.workspace(json!({"gitSettings":git_settings,"operation":"prepare","defer":defer,"cwd":source,"roots":roots,"policy":policy,"workspace":if req.external_id.is_some() { json!({"mode":"directory"}) } else { json!(req.workspace) }})).await
         .map_err(|e| fail(StatusCode::CONFLICT, format!("{e} Inspect retained remote branches/files before retrying.")))?;
     let path = result["cwd"]
         .as_str()

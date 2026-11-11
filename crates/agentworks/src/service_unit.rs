@@ -202,30 +202,52 @@ fn install_release(releases: &Path, name: Option<&str>) -> Result<PathBuf> {
         return Err("Release must be an executable basename".into());
     }
     let target = releases.join(&name);
+    place(releases, &exe, &hash, &target)?;
+    // Enrollment ships the release's `-worker` siblings to remote hosts.
+    for (worker, suffix) in [
+        (crate::enrollment::worker_executable(), "-worker"),
+        (
+            crate::enrollment::windows_worker_executable(),
+            "-worker.exe",
+        ),
+    ] {
+        if let Some(worker) = worker {
+            place(
+                releases,
+                &worker,
+                &digest(&worker)?,
+                &releases.join(format!("{name}{suffix}")),
+            )?;
+        }
+    }
+    fs::File::open(releases)?.sync_all()?;
+    Ok(target)
+}
+
+/// Copies `source` to `target` read-only, unless an identical file is already there.
+fn place(releases: &Path, source: &Path, hash: &str, target: &Path) -> Result<()> {
     if target.exists() {
-        if digest(&target)? != hash {
+        if digest(target)? != hash {
             return Err(format!(
                 "{} already exists with different contents",
                 target.display()
             )
             .into());
         }
-        return Ok(target);
+        return Ok(());
     }
     let temp = releases.join(format!(".install-{}", uuid::Uuid::new_v4()));
     let copied = (|| -> Result<()> {
-        fs::copy(&exe, &temp)?;
+        fs::copy(source, &temp)?;
         fs::set_permissions(&temp, fs::Permissions::from_mode(0o500))?;
         fs::File::open(&temp)?.sync_all()?;
-        fs::rename(&temp, &target)?;
+        fs::rename(&temp, target)?;
         Ok(())
     })();
     if copied.is_err() {
         let _ = fs::remove_file(&temp);
     }
-    copied?;
-    fs::File::open(releases)?.sync_all()?;
-    Ok(target)
+    copied
 }
 
 fn systemctl(args: &[&str]) -> Result<()> {

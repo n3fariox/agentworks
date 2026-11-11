@@ -129,8 +129,11 @@ pub async fn scheduler(app: App) {
         }
         let sessions: Vec<Arc<Session>> = app.sessions.lock().unwrap().values().cloned().collect();
         for s in &sessions {
-            let p = s.data.lock().unwrap().continuation.clone();
-            if !p.limited || p.due_at.is_none() {
+            let (p, archived) = {
+                let data = s.data.lock().unwrap();
+                (data.continuation.clone(), data.lifecycle.archived)
+            };
+            if archived || !p.limited || p.due_at.is_none() {
                 continue;
             }
             if !p.eligible(now()) || !lineage(&app, s) {

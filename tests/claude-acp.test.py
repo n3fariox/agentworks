@@ -206,6 +206,18 @@ def harness():
         elif prompt == "unfinished":
             tool("Read", "tool-r", dict(file_path=os.getcwd() + "/a.txt"))
             result()
+        elif prompt == "/compact":
+            # Recorded from Claude Code 2.1.312: statuses, then the boundary, then the summary message.
+            send(type="system", subtype="status", status="compacting", uuid="status-1")
+            send(type="system", subtype="status", status=None, compact_result="success", uuid="status-2")
+            send(type="system", subtype="compact_boundary", uuid="boundary-1", compact_metadata=dict(trigger="manual", pre_tokens=33385, post_tokens=7780, duration_ms=4013))
+            send(type="user", parent_tool_use_id=None, isSynthetic=True, message=dict(role="user", content="This session is being continued from a previous conversation.\n\nSummary:\n1. Primary Request: say banana"))
+            send(type="user", parent_tool_use_id=None, isReplay=True, message=dict(role="user", content="<local-command-stdout>Compacted </local-command-stdout>"))
+            result(output=0)
+        elif prompt == "compact-fail":
+            send(type="system", subtype="status", status="compacting", uuid="status-3")
+            send(type="system", subtype="status", status=None, compact_result="failed", compact_error="Not enough messages to compact.", uuid="status-4")
+            result(output=0)
         else:
             text("msg-x", "unknown")
             result()
@@ -284,7 +296,7 @@ class BridgeTests(unittest.TestCase):
             self.messages.put(None)
 
         threading.Thread(target=read, daemon=True).start()
-        init = self.call("initialize", dict(protocolVersion=1, clientCapabilities=dict(elicitation=dict(form={}), _meta=dict(terminal_output=True, terminal_output_delta=True))))
+        init = self.call("initialize", dict(protocolVersion=1, clientCapabilities=dict(elicitation=dict(form={}), session=dict(compaction={}), _meta=dict(terminal_output=True, terminal_output_delta=True))))
         caps = init["agentCapabilities"]
         self.assertTrue(caps["loadSession"])
         self.assertTrue(all(k in caps["sessionCapabilities"] for k in ["resume", "fork", "list", "close", "delete"]))
@@ -524,6 +536,34 @@ class BridgeTests(unittest.TestCase):
         self.prompt("args")
         args = json.loads(self.answer_text().split("new answer", 1)[1])["args"]
         self.assertEqual(args[args.index("--resume") + 1], self.id)
+
+    def test_compaction_updates(self):
+        self.session()
+        self.prompt("/compact")
+        self.prompt("compact-fail")
+        compactions = [(u["compactionId"], u["status"]) for u in self.updates("compaction_update")]
+        self.assertEqual(compactions, [("status-1", "in_progress"), ("status-1", "completed"), ("status-1", "completed"), ("status-3", "in_progress"), ("status-3", "failed")])
+        boundary, summary, failed = self.updates("compaction_update")[1:3] + self.updates("compaction_update")[-1:]
+        self.assertEqual(boundary["_meta"], {"_claude/compaction": dict(trigger="manual", preTokens=33385, postTokens=7780, durationMs=4013)})
+        self.assertEqual(summary["summary"], [dict(type="text", text="1. Primary Request: say banana")])
+        self.assertEqual(failed["error"], "Not enough messages to compact.")
+        self.assertIn(7780, [u["used"] for u in self.updates("usage_update")])
+        self.assertNotIn("Primary Request", json.dumps(self.updates("user_message_chunk")))
+
+    def test_load_replays_compactions(self):
+        session = "11111111-1111-4111-8111-111111111111"
+        rows = transcript(cwd=self.cwd)[:2] + [
+            dict(type="system", subtype="compact_boundary", uuid="b1", parentUuid=None, logicalParentUuid="a1", sessionId=session, cwd=self.cwd, isSidechain=False, compactMetadata=dict(trigger="auto", preTokens=243295, postTokens=9575, durationMs=35419)),
+            entry("user", "s1", "b1", session, dict(role="user", content="This session is being continued.\n\nSummary:\nEarlier work"), self.cwd, isCompactSummary=True),
+            entry("user", "u5", "s1", session, dict(role="user", content="after compaction"), self.cwd),
+        ]
+        self.write_transcript(rows, cwd=self.cwd)
+        self.call("session/load", dict(sessionId=session, cwd=self.cwd, mcpServers=[]))
+        kinds = [u["sessionUpdate"] for u in self.updates() if u["sessionUpdate"] in ("user_message_chunk", "agent_message_chunk", "compaction_update")]
+        self.assertEqual(kinds, ["user_message_chunk", "agent_message_chunk", "compaction_update", "compaction_update", "user_message_chunk"])
+        boundary, summary = self.updates("compaction_update")
+        self.assertEqual((boundary["compactionId"], boundary["_meta"]["_claude/compaction"]["trigger"]), ("b1", "auto"))
+        self.assertEqual((summary["compactionId"], summary["summary"][0]["text"]), ("b1", "Earlier work"))
 
     def test_list_close_delete(self):
         path = self.write_transcript(transcript(cwd=self.cwd), cwd=self.cwd)

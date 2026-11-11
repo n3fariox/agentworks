@@ -23,6 +23,7 @@ use tokio::{
     sync::{mpsc, oneshot},
 };
 use tokio_tungstenite::tungstenite::Message;
+use tracing::Instrument;
 
 const USAGE: &str = "Usage: agentworks agent --stdio (started by the Agentworks server over SSH)";
 const STDERR_LINES: usize = 8;
@@ -49,7 +50,12 @@ pub async fn run(args: &[String]) -> Result<(), String> {
     let mcp = crate::mcp_relay::WorkerBridge::start(out.clone())
         .await
         .map_err(|e| e.to_string())?;
+    let started = Instant::now();
     let base = mise_env(&home()).await;
+    tracing::info!(
+        elapsed_ms = crate::log::ms(started),
+        "Read the home directory's mise environment"
+    );
     let providers = available_providers(&base);
     let hello = json!({
         "type": "hello",
@@ -63,15 +69,18 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         "workspace": true,
         "gitSettings": true,
         "gitContext": true,
-        "modelProviders": true,
-        "sharedModelProviders": true,
+        // `prepare` can reserve a new worktree for `populateWorktree` to fill later.
+        "deferredWorktree": true,
+        // Model-provider profiles only run on the embedded Goose harness.
+        "modelProviders": cfg!(feature = "goose"),
+        "sharedModelProviders": cfg!(feature = "goose"),
         "worktreeCleanup": true,
         "directories": true,
         "terminal": true,
         "hostMetrics": if crate::metrics::supported() { 1 } else { 0 },
         "providerAuthTerminal": true,
         "managedCodexAuth": true,
-        "home": home(),
+        "home": agentworks_workspace::paths::display(&home()),
     });
     ws.send(Message::text(hello.to_string()))
         .await
@@ -92,6 +101,9 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         }
         _ => return Err("The server sent an unexpected reply".into()),
     }
+    if let Some(filter) = reply["log"].as_str() {
+        crate::log::adopt(filter);
+    }
     let _ownership = ownership_at(
         &home().join(".cache/agentworks/workers"),
         reply["hostId"].as_str().unwrap_or(""),
@@ -102,7 +114,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
     ))
     .await
     .map_err(|e| format!("Could not confirm host ownership: {e}"))?;
-    eprintln!("agentworks agent: connected ({})", providers.join(", "));
+    tracing::info!("Connected ({})", providers.join(", "));
 
     let (mut sink, mut frames) = ws.split();
     let writer = tokio::spawn(async move {
@@ -269,7 +281,9 @@ pub async fn run(args: &[String]) -> Result<(), String> {
                             Vec::new()
                         };
                         workspace_tasks.spawn(async move {
+                            let queued = Instant::now();
                             let _guard = lock.lock().await;
+                            let started = Instant::now();
                             let result = async {
                                 if active { return Err("An agent is still running in this worktree; stop it and retry".into()); }
                                 // A kill request only initiates process-group shutdown. Wait for
@@ -279,6 +293,13 @@ pub async fn run(args: &[String]) -> Result<(), String> {
                                 }
                                 workspace_request(&request).await
                             }.await;
+                            tracing::debug!(
+                                operation = request["operation"].as_str().unwrap_or(""),
+                                wait_ms = started.duration_since(queued).as_millis() as u64,
+                                elapsed_ms = crate::log::ms(started),
+                                ok = result.is_ok(),
+                                "Workspace request finished"
+                            );
                             let mut reply = json!({"type":"reply","request":request["request"]});
                             match result {
                                 Ok(value) => reply["result"] = value,
@@ -341,7 +362,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
     // Keep exclusive host ownership until any Git mutation finishes. A lost reply
     // retains its checkout; a replacement must not race the old worker.
     while workspace_tasks.join_next().await.is_some() {}
-    eprintln!("agentworks agent: the link closed");
+    tracing::info!("The link closed");
     ended
 }
 
@@ -354,8 +375,12 @@ async fn ownership_at(dir: &Path, host_id: &str) -> Result<std::fs::File, String
         .map_err(|e| format!("Could not create worker lock directory: {e}"))?;
     let mut options = std::fs::OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
-    use std::os::unix::fs::OpenOptionsExt;
-    options.mode(0o600);
+    // Windows: the file inherits the private ACL of the user's profile directory.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
     let file = options
         .open(dir.join(format!("{id}.lock")))
         .map_err(|e| format!("Could not open worker ownership lock: {e}"))?;
@@ -405,13 +430,23 @@ fn start(request: Value, channel: u32, out: mpsc::Sender<Message>) -> Process {
     let (completed, finished) = tokio::sync::watch::channel(false);
     let (input, lines) = mpsc::unbounded_channel();
     let (stop, stopped) = oneshot::channel();
-    let task = tokio::spawn(async move {
-        if let Err(message) = run_process(request, channel, out.clone(), lines, stopped).await {
-            let exit = json!({"type":"exit","channel":channel,"message":message});
-            let _ = out.send(Message::text(exit.to_string())).await;
+    let span = tracing::info_span!(
+        "agent",
+        session = %request["session"].as_str().unwrap_or("-"),
+        provider = %request["provider"].as_str().unwrap_or(""),
+        channel,
+    );
+    let task = tokio::spawn(
+        async move {
+            if let Err(message) = run_process(request, channel, out.clone(), lines, stopped).await {
+                tracing::warn!("Could not run the agent: {message}");
+                let exit = json!({"type":"exit","channel":channel,"message":message});
+                let _ = out.send(Message::text(exit.to_string())).await;
+            }
+            let _ = completed.send(true);
         }
-        let _ = completed.send(true);
-    });
+        .instrument(span),
+    );
     Process {
         cwd,
         finished,
@@ -439,12 +474,22 @@ async fn run_process(
             cwd.display()
         ));
     }
+    let started = Instant::now();
     crate::provider::prepare(provider).map_err(|e| format!("Could not prepare {provider}: {e}"))?;
+    tracing::info!(
+        elapsed_ms = crate::log::ms(started),
+        "Prepared the provider"
+    );
     // Environment discovery must not block link pings, other channels or kill.
+    let step = Instant::now();
     let env = tokio::select! {
         env = mise_env(&cwd) => env,
         _ = &mut stopped => return Ok(()),
     };
+    tracing::info!(
+        elapsed_ms = crate::log::ms(step),
+        "Read the mise environment"
+    );
     // Remote sessions always use the host's own sign-ins.
     let config = crate::provider::agent_config(
         provider,
@@ -476,6 +521,9 @@ async fn run_process(
     if let Some(id) = request["session"].as_str() {
         command.envs(crate::provider::session_environment(id));
     }
+    // Windows has no process groups; a Job Object below owns the adapter's descendants.
+    #[cfg(unix)]
+    command.process_group(0);
     let mut child = command
         .args(config.arguments())
         .current_dir(&cwd)
@@ -484,11 +532,27 @@ async fn run_process(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .process_group(0)
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("Could not start {provider}: {e}"))?;
+    tracing::info!(
+        pid = child.id(),
+        total_ms = crate::log::ms(started),
+        "Started the agent"
+    );
+    let spawned = Instant::now();
+    #[cfg(unix)]
     let group = child.id().ok_or("The process exited immediately")? as i32;
+    // A descendant started before assignment escapes the job. ACP adapters wait
+    // for `initialize`, and nothing is written to stdin until input_task runs.
+    #[cfg(windows)]
+    let job = {
+        let job = agentworks_terminal::pty::windows::Job::new()
+            .map_err(|e| format!("Could not start {provider}: {e}"))?;
+        job.assign(child.raw_handle().ok_or("The process exited immediately")?)
+            .map_err(|e| format!("Could not start {provider}: {e}"))?;
+        job
+    };
     let (Some(mut stdin), Some(stdout), Some(stderr)) =
         (child.stdin.take(), child.stdout.take(), child.stderr.take())
     else {
@@ -505,51 +569,76 @@ async fn run_process(
     });
     let errors: Arc<Mutex<VecDeque<String>>> = Default::default();
     let collected = errors.clone();
-    let stderr_task = tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let line: String = line.trim().chars().take(300).collect();
-            if line.is_empty() {
-                continue;
+    let stderr_task = tokio::spawn(
+        async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let line: String = line.trim().chars().take(300).collect();
+                if line.is_empty() {
+                    continue;
+                }
+                tracing::debug!("agent stderr: {line}");
+                let mut tail = collected.lock().unwrap();
+                if tail.len() == STDERR_LINES {
+                    tail.pop_front();
+                }
+                tail.push_back(line);
             }
-            let mut tail = collected.lock().unwrap();
-            if tail.len() == STDERR_LINES {
-                tail.pop_front();
-            }
-            tail.push_back(line);
         }
-    });
+        .in_current_span(),
+    );
     let stdout_out = out.clone();
-    let mut stdout_task = tokio::spawn(async move {
-        let out = stdout_out;
-        let mut reader = BufReader::new(stdout);
-        let mut line = Vec::new();
-        loop {
-            line.clear();
-            match reader.read_until(b'\n', &mut line).await {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    while line.last().is_some_and(|b| *b == b'\n' || *b == b'\r') {
-                        line.pop();
-                    }
-                    let mut frame = Vec::with_capacity(line.len() + 4);
-                    frame.extend_from_slice(&channel.to_be_bytes());
-                    frame.extend_from_slice(&line);
-                    if out.send(Message::binary(frame)).await.is_err() {
-                        return;
+    let mut stdout_task = tokio::spawn(
+        async move {
+            let out = stdout_out;
+            let mut reader = BufReader::new(stdout);
+            let mut line = Vec::new();
+            let mut first = true;
+            loop {
+                line.clear();
+                match reader.read_until(b'\n', &mut line).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        while line.last().is_some_and(|b| *b == b'\n' || *b == b'\r') {
+                            line.pop();
+                        }
+                        if std::mem::take(&mut first) {
+                            tracing::debug!(
+                                elapsed_ms = crate::log::ms(spawned),
+                                "First output from the agent"
+                            );
+                        }
+                        let mut frame = Vec::with_capacity(line.len() + 4);
+                        frame.extend_from_slice(&channel.to_be_bytes());
+                        frame.extend_from_slice(&line);
+                        if out.send(Message::binary(frame)).await.is_err() {
+                            return;
+                        }
                     }
                 }
             }
         }
-    });
+        .in_current_span(),
+    );
     let status = tokio::select! {
         status = child.wait() => status,
         _ = stopped => {
             // Do not reap the group leader before escalation: its PID must
             // remain reserved until we have sent the final group signal.
-            unsafe { libc::killpg(group, libc::SIGTERM); }
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            unsafe { libc::killpg(group, libc::SIGKILL); }
+            #[cfg(unix)]
+            {
+                unsafe { libc::killpg(group, libc::SIGTERM); }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                unsafe { libc::killpg(group, libc::SIGKILL); }
+            }
+            // Without SIGTERM, closing stdin is the polite request to exit; the job
+            // keeps descendants addressable after the adapter itself has gone.
+            #[cfg(windows)]
+            {
+                input_task.abort();
+                let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+                job.terminate();
+            }
             child.wait().await
         }
     };
@@ -567,6 +656,7 @@ async fn run_process(
     if !tail.is_empty() {
         message.push_str(&format!(" Last output: {}", tail.join(" / ")));
     }
+    tracing::info!("{message}");
     let exit = json!({"type":"exit","channel":channel,"message":message});
     let _ = out.send(Message::text(exit.to_string())).await;
     Ok(())
@@ -718,17 +808,24 @@ async fn workspace_request(request: &Value) -> Result<Value, String> {
                     .map_err(|_| "Invalid workspace")?;
             let policy = serde_json::from_value(request["policy"].clone())
                 .map_err(|_| "Invalid workspace policy")?;
-            let (cwd, owned) = crate::worktrees::prepare_in(
-                &context,
-                workspace.as_ref(),
-                policy,
-                false,
-                cwd,
-                None,
-            )
-            .await
+            let (cwd, owned) = if request["defer"] == true {
+                crate::worktrees::reserve_in(&context, workspace.as_ref(), policy, false, cwd, None)
+                    .await
+            } else {
+                crate::worktrees::prepare_in(&context, workspace.as_ref(), policy, false, cwd, None)
+                    .await
+            }
             .map_err(|e| e.1)?;
             Ok(json!({"cwd":cwd,"owned":owned}))
+        }
+        Some("populateWorktree") => {
+            let mut owned: crate::worktree_cleanup::Owned =
+                serde_json::from_value(request["owned"].clone())
+                    .map_err(|_| "Invalid worktree ownership")?;
+            crate::worktrees::populate_owned(&context, &mut owned)
+                .await
+                .map_err(|e| e.1)?;
+            Ok(json!({"owned":owned}))
         }
         Some("browseDirectories" | "createDirectory") => {
             // `~` is the worker's home; any other path is resolved and contained by
@@ -749,7 +846,7 @@ async fn workspace_request(request: &Value) -> Result<Value, String> {
                         parent.as_deref().unwrap_or(""),
                         name.as_deref().unwrap_or(""),
                     )
-                    .map(|path| json!({"path":path}))
+                    .map(|path| json!({"path":agentworks_workspace::paths::display(&path)}))
                 } else {
                     crate::directories::browse(&context.roots, parent.as_deref(), hidden)
                 }
@@ -767,7 +864,8 @@ fn available_providers(env: &HashMap<String, String>) -> Vec<&'static str> {
     PROVIDERS
         .into_iter()
         .filter(|provider| match crate::provider::cli_provider(provider) {
-            "goose" | "demo" => true,
+            "demo" => true,
+            "goose" => cfg!(feature = "goose"),
             "codex" => {
                 let executable = env
                     .get("CODEX_PATH")
@@ -816,15 +914,12 @@ async fn mise_env(dir: &Path) -> HashMap<String, String> {
                     return map;
                 }
             }
-            Ok(Ok(output)) => eprintln!(
-                "agentworks agent: mise env in {} failed: {}",
+            Ok(Ok(output)) => tracing::warn!(
+                "mise env in {} failed: {}",
                 dir.display(),
                 String::from_utf8_lossy(&output.stderr).trim()
             ),
-            _ => eprintln!(
-                "agentworks agent: mise env in {} did not finish",
-                dir.display()
-            ),
+            _ => tracing::warn!("mise env in {} did not finish", dir.display()),
         }
     }
     HashMap::new()
@@ -858,23 +953,21 @@ fn check_dir(path: &str) -> Result<String, String> {
         None if path == "~" => home(),
         None => PathBuf::from(path),
     };
-    let canonical = std::fs::canonicalize(&expanded)
+    let canonical = agentworks_workspace::paths::canonicalize(&expanded)
         .map_err(|_| format!("{path} does not exist on this host."))?;
     if !canonical.is_dir() {
         return Err(format!("{path} is not a directory on this host."));
     }
-    Ok(canonical.to_string_lossy().into_owned())
+    Ok(agentworks_workspace::paths::display(&canonical))
 }
 
+/// `$HOME`, or the profile directory on Windows, which does not set `HOME`.
 fn home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| "/".into())
+    std::env::home_dir().unwrap_or_else(|| "/".into())
 }
 
 fn hostname() -> Option<String> {
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .ok()
+    sysinfo::System::host_name()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
@@ -897,7 +990,7 @@ mod tests {
         let providers = available_providers(&env);
         assert!(providers.contains(&"codex-rust"));
         assert!(providers.contains(&"codex"));
-        assert!(providers.contains(&"goose"));
+        assert_eq!(providers.contains(&"goose"), cfg!(feature = "goose"));
     }
     #[test]
     fn native_claude_serves_both_claude_ids() {

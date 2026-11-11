@@ -1,10 +1,9 @@
 //! Stored session badges. Existing hooks stage set/clear operations; the host
 //! commits them for the session bound to that invocation after it succeeds.
-use crate::{ApiResult, App, Session, SessionData, fail, session};
+use crate::{ApiResult, App, Session, SessionData, session};
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
 };
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -66,7 +65,7 @@ fn validate(value: &Value, source: &str) -> Result<Vec<Badge>, String> {
             || badge.tooltip.chars().any(char::is_control)
             || !matches!(
                 badge.tone.as_str(),
-                "neutral" | "success" | "warning" | "danger" | "info"
+                "neutral" | "success" | "warning" | "danger" | "info" | "merged"
             )
             || badge.url.as_deref().is_some_and(|u| !valid_url(u))
         {
@@ -100,9 +99,13 @@ fn visible(data: &SessionData, db: &Connection) -> Vec<Badge> {
                 continue;
             }
             if source == GITHUB
-                && record["observedAt"]
-                    .as_u64()
-                    .is_none_or(|at| now().saturating_sub(at) > 120_000)
+                && record["observedAt"].as_u64().is_none_or(|at| {
+                    now().saturating_sub(at)
+                        > record["pollIntervalMs"]
+                            .as_u64()
+                            .unwrap_or(crate::github::DEFAULT_POLL_MS)
+                            .saturating_mul(2)
+                })
             {
                 badge.tone = "neutral".into();
                 badge.tooltip = format!(
@@ -213,9 +216,54 @@ pub fn apply(s: &Session, source: &str, hash: &str, effects: &[Value]) -> Result
     let _ = s.tx.send(json!({"kind":"session_badges","data":event}));
     Ok(())
 }
+pub(crate) fn pr_badge(pr: &Value, checkout: bool) -> Badge {
+    let review = pr["reviewSummary"]["state"]
+        .as_str()
+        .or(pr["reviewDecision"].as_str())
+        .unwrap_or("UNKNOWN");
+    let ci = pr["checks"]["state"].as_str().unwrap_or("UNKNOWN");
+    let (tone, meaning) = if pr["state"] == "MERGED" {
+        ("merged", "Merged")
+    } else if pr["state"] == "CLOSED" {
+        ("neutral", "Closed")
+    } else if pr["draft"] == true {
+        ("neutral", "Draft")
+    } else if review == "APPROVED" {
+        ("success", "Approved")
+    } else if matches!(review, "REVIEW_REQUIRED" | "CHANGES_REQUESTED" | "NONE")
+        && matches!(ci, "FAILURE" | "ERROR")
+    {
+        ("danger", "Not approved; CI failing")
+    } else if review == "CHANGES_REQUESTED" {
+        ("warning", "Changes requested")
+    } else if review == "REVIEW_REQUIRED" {
+        ("warning", "Awaiting review")
+    } else {
+        ("neutral", "Review status unknown")
+    };
+    Badge {
+        id: format!("github.pr.{}", pr["number"]),
+        label: format!("PR#{}", pr["number"]),
+        tone: tone.into(),
+        tooltip: format!(
+            "PR#{} · {meaning} · CI: {ci}{}",
+            pr["number"],
+            if checkout && pr["headMatches"] == false {
+                " · PR head differs from checkout"
+            } else {
+                ""
+            }
+        ),
+        url: pr["url"]
+            .as_str()
+            .filter(|u| valid_url(u))
+            .map(str::to_owned),
+        source: GITHUB.into(),
+    }
+}
 /// GitHub is a host producer using the same stored badge state, not a script
 /// callback invoked by a badge read. A successful sync replaces its own badges.
-fn sync_github(s: &Session, context: &Value) -> Result<(), String> {
+pub(crate) fn sync_github(s: &Session, context: &Value) -> Result<(), String> {
     let mut data = s.data.lock().unwrap();
     let previous = data.script_badges.clone();
     if context["status"] == "ready" {
@@ -234,54 +282,12 @@ fn sync_github(s: &Session, context: &Value) -> Result<(), String> {
             .filter(|r| r["kind"] == "pullRequest")
             .take(16.min(available))
         {
-            let review = pr["reviewSummary"]["state"]
-                .as_str()
-                .or(pr["reviewDecision"].as_str())
-                .unwrap_or("UNKNOWN");
-            let ci = pr["checks"]["state"].as_str().unwrap_or("UNKNOWN");
-            let (tone, meaning) = if pr["state"] == "MERGED" {
-                ("neutral", "Merged")
-            } else if pr["state"] == "CLOSED" {
-                ("neutral", "Closed")
-            } else if pr["draft"] == true {
-                ("neutral", "Draft")
-            } else if review == "APPROVED" {
-                ("success", "Approved")
-            } else if matches!(review, "REVIEW_REQUIRED" | "CHANGES_REQUESTED" | "NONE")
-                && matches!(ci, "FAILURE" | "ERROR")
-            {
-                ("danger", "Not approved; CI failing")
-            } else if review == "CHANGES_REQUESTED" {
-                ("warning", "Changes requested")
-            } else if review == "REVIEW_REQUIRED" {
-                ("warning", "Awaiting review")
-            } else {
-                ("neutral", "Review status unknown")
-            };
-            badges.push(Badge {
-                id: format!("github.pr.{}", pr["number"]),
-                label: format!("PR#{}", pr["number"]),
-                tone: tone.into(),
-                tooltip: format!(
-                    "PR#{} · {meaning} · CI: {ci}{}",
-                    pr["number"],
-                    if pr["headMatches"] == false {
-                        " · PR head differs from checkout"
-                    } else {
-                        ""
-                    }
-                ),
-                url: pr["url"]
-                    .as_str()
-                    .filter(|u| valid_url(u))
-                    .map(str::to_owned),
-                source: GITHUB.into(),
-            });
+            badges.push(pr_badge(pr, true));
         }
         if badges.is_empty() {
             data.script_badges.remove(GITHUB);
         } else {
-            data.script_badges.insert(GITHUB.into(),json!({"hash":"host","observedAt":context["snapshot"]["fetchedAt"],"badges":badges}));
+            data.script_badges.insert(GITHUB.into(),json!({"hash":"host","observedAt":context["snapshot"]["fetchedAt"],"pollIntervalMs":context["pollIntervalMs"],"badges":badges}));
         }
     } else if matches!(
         context["status"].as_str(),
@@ -309,17 +315,12 @@ pub async fn context(
     Path(id): Path<String>,
     Query(query): Query<crate::github::Refresh>,
 ) -> ApiResult {
-    let s = session(&app, &id)?;
-    let Json(mut value) =
-        crate::github::context(State(app.clone()), Path(id), Query(query)).await?;
-    sync_github(&s, &value).map_err(|e| fail(StatusCode::INSUFFICIENT_STORAGE, e))?;
+    crate::github_tracking::refresh(&app, &id, query).await
+}
+pub(crate) fn stored_payload(s: &Session) -> Value {
     let data = s.data.lock().unwrap();
     let store = s.store.lock().unwrap();
-    let result = payload(&data, &store.connection);
-    value["badges"] = result["badges"].clone();
-    value["badgesAt"] = result["badgesAt"].clone();
-    value["badgeRevision"] = result["badgeRevision"].clone();
-    Ok(Json(value))
+    payload(&data, &store.connection)
 }
 /// Reads stored state only: never fetches GitHub or runs a script.
 pub async fn list(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
@@ -332,6 +333,17 @@ pub async fn list(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn merged_badges_take_priority_over_review_and_ci_status() {
+        let pr = json!({"number":42,"state":"MERGED","reviewDecision":"APPROVED","checks":{"state":"FAILURE"}});
+        let badge = pr_badge(&pr, true);
+        assert_eq!(badge.tone, "merged");
+        assert!(badge.tooltip.contains("Merged"));
+        assert!(validate(&json!([badge]), GITHUB).is_ok());
+        let mut closed = pr;
+        closed["state"] = json!("CLOSED");
+        assert_eq!(pr_badge(&closed, true).tone, "neutral");
+    }
     #[test]
     fn badge_values_and_links_are_bounded() {
         let mut badge = json!({"id":"build","label":"Build","tone":"danger","tooltip":"Failed"});

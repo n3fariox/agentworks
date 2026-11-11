@@ -92,6 +92,9 @@ try{
  assert.deepEqual(await readdir(join(dir,'host-keys')),[]);
  const installed=await enroll('Installed',destination);assert.equal(installed.type,'complete',installed.text+'\n'+installed.message);assert.equal(installed.host.status,'connected');assert(installed.host.managed);assert(installed.host.worker.providers.includes('demo'));
  const stored=JSON.parse(await readFile(catalog));const host=stored.hosts[0];
+ // The worker-only binary beside the server is what enrollment installs, under the name `agentworks`.
+ const releases=join(home,'.local/share/agentworks/releases'),[release]=await readdir(releases);
+ assert.equal((await stat(join(releases,release,'agentworks'))).size,(await stat(resolve('target/debug/agentworks-worker'))).size);
  assert.equal((await stat(host.identityFile)).mode&0o777,0o600);assert.equal((await stat(resolve(host.identityFile,'..'))).mode&0o777,0o700);
  assert(!('identityFile' in installed.host));assert(!('knownHostsFile' in installed.host));
  const keys=await readFile(join(home,'.ssh/authorized_keys'),'utf8');assert.match(keys,/restrict ssh-ed25519 .* agentworks:/);

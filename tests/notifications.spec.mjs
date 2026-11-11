@@ -435,8 +435,10 @@ test('forwarded origin is derived from proxy headers and must match browser Orig
   for(const origin of ['https://unconfigured.example','http://localhost:4414']){
     const response=await fetch(base+'/api/notifications',{method:'PUT',headers:{Origin:origin,Host:'localhost:4414','X-Forwarded-Proto':'https','X-Forwarded-Host':'localhost:4414','Content-Type':'application/json'},body:'{}'});
     expect(response.status).toBe(403);
+    // Same headers fetch actually sends (it drops Host): a matching Host would be a
+    // genuine same-origin loopback request, which tunnels rely on.
     const outcome=await new Promise(resolve=>{
-      const ws=new WebSocket(base.replace('http','ws')+'/api/notifications/events',{headers:{Origin:origin,Host:'localhost:4414','X-Forwarded-Proto':'https'}});
+      const ws=new WebSocket(base.replace('http','ws')+'/api/notifications/events',{headers:{Origin:origin,'X-Forwarded-Proto':'https','X-Forwarded-Host':'localhost:4414'}});
       ws.on('open',()=>{ws.close();resolve('open');});ws.on('error',error=>resolve(error.message));
     });
     expect(outcome).toContain('403');

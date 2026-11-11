@@ -107,7 +107,7 @@ test('ordinary delete preserves provider history and unsupported adapters hide d
   await page.locator('#session-config-options>summary').click();
   await page.locator('#lifecycle-menu>summary').click();
   await expect(page.locator('#delete-provider-history')).toBeHidden();
-  page.once('dialog',dialog=>{expect(dialog.message()).toContain('Provider conversation history, worktree files and branches remain');dialog.accept();});
+  page.once('dialog',dialog=>{expect(dialog.message()).toContain('Provider conversation history remains. Worktree files and branches remain');dialog.accept();});
   await page.locator('#close-session').click();
   await expect.poll(()=>f.deletes.length).toBe(1);expect(f.deletes).toEqual(['']);
 });

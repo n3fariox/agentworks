@@ -1,4 +1,5 @@
 import {test,expect} from '@playwright/test';
+import {openCreateSections} from './support/create-sections.mjs';
 import {spawn} from 'node:child_process';
 import {createServer} from 'node:http';
 import {mkdtemp,readFile,writeFile,chmod,rm} from 'node:fs/promises';
@@ -6,6 +7,7 @@ import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {serverReady,stopChild,removeFixture} from './support/cleanup.mjs';
 
+openCreateSections(test);
 const base='http://127.0.0.1:4498';
 let dir,server,fixture,providerUrl,remote,offline,output='';
 async function api(path,body){const res=await fetch(base+path,{method:body===undefined?'GET':'POST',headers:{Origin:base,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});expect(res.ok).toBeTruthy();return res.json();}

@@ -75,7 +75,8 @@ pub fn installed(provider: &str) -> bool {
             });
     }
     match provider {
-        "demo" | "goose" => true,
+        "demo" => true,
+        "goose" => cfg!(feature = "goose"),
         "opencode" => opencode_path().is_some(),
         "antigravity" => antigravity_path().is_some(),
         _ => false,
@@ -93,6 +94,13 @@ pub const SERVICE_ENVIRONMENT: &[&str] = &[
     "AGENTWORKS_DB_PATH",
     "AGENTWORKS_AUTH_MODE",
     "AGENTWORKS_PWA",
+    "AGENTWORKS_TLS_CERT",
+    "AGENTWORKS_TLS_KEY",
+    "AGENTWORKS_TLS_CLIENT_CA",
+    "AGENTWORKS_PAM_SERVICE",
+    "AGENTWORKS_PAM_USERS",
+    "AGENTWORKS_PAM_CONFDIR",
+    "AGENTWORKS_TRUSTED_PROXIES",
     "AGENTWORKS_MODEL_PROVIDERS_DIR",
     "AGENTWORKS_SUPERVISOR_DIR",
     "AGENTWORKS_SUPERVISOR_TOKEN",
@@ -421,7 +429,7 @@ mod tests {
                 );
             }
         }
-        assert!(installed("goose"));
+        assert_eq!(installed("goose"), cfg!(feature = "goose"));
         assert!(
             !agent_config("goose", false, true)
                 .environment()
