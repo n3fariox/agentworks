@@ -29,7 +29,8 @@ fn old_database_payloads_load_without_enabling_new_execution_policies() {
 fn persisted_identities_and_uncertain_dispatch_survive_the_crate_boundary() {
     let mut saved = legacy();
     saved["inbox_turn"] = json!({"requestId":"inbox-r", "generation":3, "native":"native-saved"});
-    saved["lifecycle"] = json!({"title":"Stored title", "archived":true, "suspended":true, "asleep":false});
+    saved["lifecycle"] =
+        json!({"title":"Stored title", "archived":true, "suspended":true, "asleep":false});
     saved["initial_codex_permission_mode"] = json!("workspace-write");
     saved["permission_modes"] = json!({"configId":"mode","currentValue":"read-only","options":[{"value":"read-only"},{"value":"agent-full-access"}]});
     saved["initial_claude_permission_mode"] = json!("acceptEdits");

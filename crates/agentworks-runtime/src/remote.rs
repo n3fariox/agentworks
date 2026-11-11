@@ -53,13 +53,14 @@ const MAX_FRAME: usize = 64 * 1024 * 1024;
 /// earlier, such as output from the remote shell's startup files, is skipped.
 pub const READY: &str = "agentworks worker ready";
 const MAX_PREAMBLE: usize = 64 * 1024;
-pub const PROVIDERS: [&str; 7] = [
+pub const PROVIDERS: [&str; 8] = [
     "demo",
     "claude",
     "claude-rust",
     "codex",
     "codex-rust",
     "opencode",
+    "antigravity",
     "goose",
 ];
 const PING_EVERY: Duration = Duration::from_secs(15);
@@ -777,6 +778,13 @@ impl Live {
         let result = self.request(request).await?;
         serde_json::from_str(&result).map_err(|_| "Invalid workspace reply".into())
     }
+    pub async fn antigravity_quota(&self) -> Result<Value, String> {
+        if self.worker["antigravityQuota"] != true {
+            return Err("Update this host's worker to retrieve Antigravity quota".into());
+        }
+        let result = self.request(json!({"type":"antigravityQuota"})).await?;
+        serde_json::from_str(&result).map_err(|_| "Invalid Antigravity quota reply".into())
+    }
     pub async fn model_providers(&self, mut request: Value) -> Result<Value, String> {
         if self.worker["modelProviders"] != true {
             return Err("Update this host's worker to configure model providers".into());
@@ -788,17 +796,18 @@ impl Live {
     async fn request(&self, mut request: Value) -> Result<String, String> {
         // Lifecycle operations perform several bounded Git checks plus adapter
         // shutdown. Directory validation retains its shorter deadline.
-        let timeout =
-            if request["type"] == "workspace" && request["operation"] == "runWorktreeHooks" {
-                Duration::from_secs(360)
-            } else if request["type"] == "workspace" && request["operation"] == "populateWorktree" {
-                // A checkout of a large repository; Git's own deadline is shorter.
-                Duration::from_secs(660)
-            } else if request["type"] == "workspace" {
-                Duration::from_secs(120)
-            } else {
-                Duration::from_secs(15)
-            };
+        let timeout = if request["type"] == "antigravityQuota" {
+            Duration::from_secs(40)
+        } else if request["type"] == "workspace" && request["operation"] == "runWorktreeHooks" {
+            Duration::from_secs(360)
+        } else if request["type"] == "workspace" && request["operation"] == "populateWorktree" {
+            // A checkout of a large repository; Git's own deadline is shorter.
+            Duration::from_secs(660)
+        } else if request["type"] == "workspace" {
+            Duration::from_secs(120)
+        } else {
+            Duration::from_secs(15)
+        };
         let id = self.next_request.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = oneshot::channel();
         {
@@ -1070,6 +1079,7 @@ fn check_hello(hello: &Value) -> Result<Value, String> {
         "gitSettings": hello["gitSettings"] == true,
         "deferredWorktree": hello["deferredWorktree"] == true,
         "modelProviders": hello["modelProviders"] == true,
+        "antigravityQuota": hello["antigravityQuota"] == true,
         "sharedModelProviders": hello["sharedModelProviders"] == true,
         "worktreeCleanup": hello["worktreeCleanup"] == true,
         "directories": hello["directories"] == true,

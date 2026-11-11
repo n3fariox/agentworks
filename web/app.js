@@ -43,10 +43,10 @@ import {setupCreatePlace} from './create-place.js';
 const $ = id => document.getElementById(id);
 // randomUUID is unavailable on plain HTTP remote origins; getRandomValues is supported.
 const uuid = () => globalThis.crypto.randomUUID?.() ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
-const labels = {goose:'Goose · embedded',demo:'Demo agent',claude:'Claude','claude-rust':'Claude',codex:'Codex','codex-rust':'Codex',opencode:'OpenCode'};
+const labels = {goose:'Goose · embedded',demo:'Demo agent',claude:'Claude','claude-rust':'Claude',codex:'Codex','codex-rust':'Codex',opencode:'OpenCode',antigravity:'Antigravity'};
 // Sessions saved under the retired npm adapter IDs now run the Rust bridges.
 const currentProvider=id=>({claude:'claude-rust',codex:'codex-rust'})[id]||id;
-const icons = {goose:'◉',demo:'◈',claude:'✳','claude-rust':'✳',codex:'⌘','codex-rust':'⌘',opencode:'▣'};
+const icons = {goose:'◉',demo:'◈',claude:'✳','claude-rust':'✳',codex:'⌘','codex-rust':'⌘',opencode:'▣',antigravity:'△'};
 function readStorage(storage,key,fallback){try{return JSON.parse(storage.getItem(key))??fallback;}catch{return fallback;}}
 let workspace;
 let projects=[],locations=[],hosts=[{id:'local',name:'Local',status:'connected'}];
@@ -58,8 +58,9 @@ const scrollPositions=new Map();let restoreScroll=null;
 let config, sessions=[], active=null, socket=null, generation=0, connected=false;
 // U-07: per-session composer usage statusline. Context and cost come only from this
 // session's events; account quota also takes newer reports from sessions sharing its account.
+let modelConfig=null;
 const sharedQuota=watchSharedQuota(socketUrl('/api/account-quota/events'),()=>usageStatus.render());
-const usageStatus=setupUsageStatus({root:$('usage-status'),getProvider:()=>active?.provider,chip:$('composer-info'),
+const usageStatus=setupUsageStatus({root:$('usage-status'),getProvider:()=>active?.provider,getModel:()=>modelConfig?.currentValue,chip:$('composer-info'),
   getShared:()=>active?sharedQuota.get(active.hostId,quotaFamily(active.provider,active.modelProvider)):null});
 const composerMenu=setupFlyout({menu:$('composer-menu'),triggers:[$('composer-more'),$('composer-info')]});
 const sessionMenu=setupFlyout({menu:$('session-menu'),triggers:[$('session-more')]});
@@ -107,7 +108,7 @@ let replaying=false,workLogs=null,turnEnds=new Map();
 // `older.mode`: 'none' (snapshot is complete), 'more' (server reported truncation) or
 // 'begin' (the server confirmed there is nothing earlier).
 let storedEvents=[],older={mode:'none',loading:false,error:''},rebuilding=false,itemKey=null,itemCount=0,eventTime=null;
-let modelConfig=null, availableCommands=[], commandsOpen=false;
+let availableCommands=[], commandsOpen=false;
 let discoveryGeneration=0;
 let externalSessions=[], externalSelection=null, externalCursor=null, externalGeneration=0, externalLoading=false, externalImporting=false;
 let externalFetch=Promise.resolve();
@@ -152,7 +153,7 @@ function providerNote() {
     $('create-submit').disabled=!available||!remote.roots?.length||(p.id==='goose'&&$('create-model-provider').disabled)||creating||worktrees.blocked()||!!(forkSource?.role&&!p.roles);
     createChanged();return;
   }
-  $('provider-note').textContent=p.id==='demo'?'Local test agent. No model calls, API key, or file changes.':p.id==='goose'?'Uses the model provider configured for Goose on this host.':p.id==='opencode'?(p.installed?'Native ACP. Choose an advertised free model. Availability and limits may change.':'Install OpenCode on this host or set AGENTWORKS_OPENCODE_PATH.'):!p.installed?(p.id==='codex-rust'?'Install native Codex on this host or set CODEX_PATH.':'Install native Claude Code on this host or set CLAUDE_CODE_EXECUTABLE.'):p.authMode==='existing'?'Uses the existing agent sign-in on this host. If it has expired, sign in with the CLI and try again.':!p.keyPresent?`Set ${['claude','claude-rust'].includes(p.id)?'ANTHROPIC_API_KEY':'OPENAI_API_KEY or CODEX_API_KEY'} before starting the server.`:'API key available on the host. Messages use your provider account.';
+  $('provider-note').textContent=p.id==='demo'?'Local test agent. No model calls, API key, or file changes.':p.id==='goose'?'Uses the model provider configured for Goose on this host.':p.id==='antigravity'?(p.installed?'Official ACP using your Antigravity sign-in. Sign in with agy on this host first.':'Install Antigravity CLI on this host or set AGENTWORKS_ANTIGRAVITY_PATH.'):p.id==='opencode'?(p.installed?'Native ACP. Choose an advertised free model. Availability and limits may change.':'Install OpenCode on this host or set AGENTWORKS_OPENCODE_PATH.'):!p.installed?(p.id==='codex-rust'?'Install native Codex on this host or set CODEX_PATH.':'Install native Claude Code on this host or set CLAUDE_CODE_EXECUTABLE.'):p.authMode==='existing'?'Uses the existing agent sign-in on this host. If it has expired, sign in with the CLI and try again.':!p.keyPresent?`Set ${['claude','claude-rust'].includes(p.id)?'ANTHROPIC_API_KEY':'OPENAI_API_KEY or CODEX_API_KEY'} before starting the server.`:'API key available on the host. Messages use your provider account.';
   $('create-submit').disabled=!p.installed||(p.authMode==='api_key'&&!p.keyPresent)||(p.id==='goose'&&$('create-model-provider').disabled)||creating||worktrees.blocked()||!!(forkSource?.role&&!p.roles);
   createChanged();
 }
@@ -1094,7 +1095,8 @@ function updateControls(){
   $('resume-session').disabled=!connected||!!active?.providerHistoryDeletion;
   $('show-commands').disabled=!connected||status!=='idle';
   const usage=usageCommand();
-  $('show-usage').hidden=!['claude','claude-rust','codex','codex-rust'].includes(active?.provider)||!usage;
+  $('show-usage').hidden=active?.provider!=='antigravity'&&(!['claude','claude-rust','codex','codex-rust'].includes(active?.provider)||!usage);
+  $('show-usage').textContent=active?.provider==='antigravity'?'Refresh quota':'Usage ↗';
   $('show-usage').disabled=!connected||status!=='idle';
   $('delete-provider-history').hidden=!active?.providerCapabilities?.delete;
   renderSessionConfig();
@@ -1393,7 +1395,7 @@ $('show-commands').onclick=()=>{commandsOpen=!commandsOpen;renderCommands();};
 $('show-usage').onclick=async()=>{
   if(!active||status!=='idle')return;
   $('show-usage').disabled=true;
-  try{await api(`/api/sessions/${active.id}/prompt`,{method:'POST',body:JSON.stringify({text:active.provider.startsWith('claude')?'/usage':'/status',requestId:uuid()})});}
+  try{if(active.provider==='antigravity'){await api(`/api/sessions/${active.id}/quota/refresh`,{method:'POST',body:'{}'});}else{await api(`/api/sessions/${active.id}/prompt`,{method:'POST',body:JSON.stringify({text:active.provider.startsWith('claude')?'/usage':'/status',requestId:uuid()})});}}
   catch(e){toast(e.message);}finally{updateControls();}
 };
 $('permission-mode-picker').onchange=async event=>{
@@ -1697,7 +1699,7 @@ setupPalettes({
   $,labels,selectSession,
   fallbackFocus:()=>active?$('prompt'):null,
   state:()=>({active,status,connected,sessions,projects,hosts,commands:availableCommands,
-    usageAvailable:!!active&&['claude','claude-rust','codex','codex-rust'].includes(active.provider)&&!!usageCommand(),
+    usageAvailable:!!active&&(active.provider==='antigravity'||['claude','claude-rust','codex','codex-rust'].includes(active.provider)&&!!usageCommand()),
     views:{files:()=>$('nav-files').click(),automations:()=>$('nav-automations').click()}}),
   handlers:{
     newSession:()=>openCreate(),

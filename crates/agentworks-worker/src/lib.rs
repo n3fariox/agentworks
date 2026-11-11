@@ -97,7 +97,10 @@ fn goose_browser_url(url: Option<&String>) -> Result<(), Box<dyn Error>> {
 
 async fn probe(provider: &str) -> Result<(), Box<dyn Error>> {
     if !agentworks_runtime::remote::PROVIDERS.contains(&provider) {
-        return Err("Use --probe claude|claude-rust|codex|codex-rust|goose|opencode|demo".into());
+        return Err(
+            "Use --probe claude|claude-rust|codex|codex-rust|goose|opencode|antigravity|demo"
+                .into(),
+        );
     }
     agentworks_runtime::acp::probe(provider).await?;
     Ok(())

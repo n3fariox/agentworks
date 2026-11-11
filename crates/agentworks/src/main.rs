@@ -288,6 +288,10 @@ impl Session {
         if kind == "user" {
             state.last_prompt = Some(event.clone());
         }
+        if kind == "antigravity_quota" && self.provider == "antigravity" {
+            self.account_quota
+                .observe_antigravity(&self.host_id, &self.id, &event["data"]);
+        }
         if kind == "acp" {
             let family = account_quota::family(&self.provider, state.model_provider.as_deref());
             self.account_quota
@@ -870,6 +874,13 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             .collect();
         // Retained reports seed shared account quota with their original receipt times.
         let family = account_quota::family(&metadata.provider, data.model_provider.as_deref());
+        for event in window
+            .iter()
+            .filter(|e| e["kind"] == "antigravity_quota" && metadata.provider == "antigravity")
+        {
+            app.account_quota
+                .observe_antigravity(&metadata.host_id, &metadata.id, &event["data"]);
+        }
         for event in window.iter().filter(|e| e["kind"] == "acp") {
             if let Some(time) = event["time"].as_u64() {
                 app.account_quota.observe(
@@ -1437,6 +1448,10 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/import", post(import_session))
         .route("/api/dashboard/host-usage/events", get(host_usage::events))
         .route("/api/account-quota/events", get(account_quota::events))
+        .route(
+            "/api/sessions/{id}/quota/refresh",
+            post(account_quota::refresh),
+        )
         .route("/api/catalog", get(get_catalog))
         .route("/api/hosts", post(hosts::add))
         .route("/api/hosts/enroll/events", get(enrollment::upgrade))
@@ -1865,6 +1880,7 @@ async fn status(State(app): State<App>) -> Json<Value> {
         {"id":"claude-rust","name":"Claude","installed":installed("claude-rust"),"keyPresent":key_present("claude-rust"),"authMode":auth},
         {"id":"codex-rust","name":"Codex","installed":installed("codex-rust"),"keyPresent":key_present("codex-rust"),"authMode":auth},
         {"id":"goose","name":"Goose · embedded","installed":true,"keyPresent":true,"authMode":"configured"},
+        {"id":"antigravity","name":"Antigravity","installed":installed("antigravity"),"keyPresent":true,"authMode":"existing"},
         {"id":"opencode","name":"OpenCode · free models","installed":installed("opencode"),"keyPresent":true}
     ]});
     status["features"] = json!({"modelViewer": cfg!(feature = "model-viewer")});
@@ -3039,6 +3055,9 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
         return Err(fail(
             StatusCode::CONFLICT,
             match req.provider.as_str() {
+                "antigravity" => {
+                    "Antigravity CLI is not installed on PATH. Install agy or set AGENTWORKS_ANTIGRAVITY_PATH, then sign in with agy."
+                }
                 "opencode" => {
                     "OpenCode is not installed on PATH. Set AGENTWORKS_OPENCODE_PATH if needed."
                 }

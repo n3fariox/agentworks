@@ -1,7 +1,7 @@
 import {setupNotificationTray} from './notification-tray.js';
 import {renderHostUsage, startHostUsage} from './host-usage.js';
 import {appUrl, socketUrl} from './hosting.js';
-import {STALE_MS, countdown, watchSharedQuota} from './usage-status.js';
+import {STALE_MS, countdown, watchSharedQuota, antigravityWindows} from './usage-status.js';
 
 const STATES = ['running', 'waiting', 'idle', 'stopped', 'unknown'];
 const LABELS = {running:'Running', waiting:'Waiting for approval/input', idle:'Idle', stopped:'Stopped', unknown:'Unknown'};
@@ -52,6 +52,10 @@ export function usageMeters(state, now = Date.now()) {
     const duration = minutes === undefined ? 'window duration unknown' : `${minutes} minute window`;
     meters.push({label:`${quota.limitName || quota.limitId} · ${quota.role} · ${duration} · quota used`,
       percent:quota.usedPercent.value, detail:`${quotaReset(quota.resetsAt?.value, now)}${quota.resetsAt?.value !== undefined ? ` · Reset freshness: ${freshness(quota.resetsAt, now)}` : ''} · Usage freshness: ${freshness(quota.usedPercent, now)}`});
+  }
+  for(const quota of antigravityWindows(state,now)){
+    if(quota.percent===null)continue;
+    meters.push({label:`${quota.label} · quota used`,percent:100-quota.percent,detail:quota.detail});
   }
   return meters;
 }
@@ -124,6 +128,7 @@ function renderProjects(catalog, sessions) {
 export function familyLabel(family, profiles = []) {
   if (family === 'claude') return 'Claude';
   if (family === 'codex') return 'Codex';
+  if (family === 'antigravity') return 'Antigravity';
   if (!family.startsWith('goose/')) return family;
   const id = family.slice(6);
   return `Goose · ${id === 'default' ? 'default provider' : profiles.find(p => p.id === id)?.name || id}`;
@@ -168,6 +173,17 @@ function renderAccounts({status, catalog, profiles} = {}) {
       card.append(el('h4', 'Reported quota windows', 'quota-state'), note('Latest report from any session on this host and account. Percentages describe reported windows only; account spending cap and USD used / total are unavailable.'));
       renderQuotaMeters(card, `${account.hostId}-${account.family}`, account.state);
     } else card.append(el('h4', 'No quota reported', 'quota-state'), note('No retained or live session has reported subscription quota for this provider. This does not establish a no-usage-cap plan. Account spend / limit in USD is unavailable.'));
+    if(account.family==='antigravity'&&account.state?.antigravityQuota?.sessionId){
+      const refresh=el('button','Refresh quota');refresh.type='button';
+      refresh.onclick=async()=>{
+        refresh.disabled=true;
+        try{
+          const response=await fetch(appUrl(`api/sessions/${encodeURIComponent(account.state.antigravityQuota.sessionId)}/quota/refresh`),{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+          if(!response.ok)throw Error(await response.text());
+        }catch(error){card.append(note(error.message));}finally{refresh.disabled=false;}
+      };
+      card.append(refresh);
+    }
     root.append(card);
   }
 }

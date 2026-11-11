@@ -114,7 +114,10 @@ fn role_prompt(
     init: &Value,
 ) -> Result<Option<SystemPrompt>, agent_client_protocol::Error> {
     let role = s.data.lock().unwrap().role.clone();
-    if !init["agentCapabilities"]["sessionCapabilities"]["systemPrompt"].is_object() {
+    if !init["agentCapabilities"]["sessionCapabilities"]["systemPrompt"].is_object()
+        && !(s.provider == "antigravity"
+            && agentworks_runtime::antigravity::supports_system_prompt(init))
+    {
         if let Some(role) = role {
             return Err(agent_client_protocol::Error::internal_error().data(format!(
                 "This agent does not accept role instructions, so the “{}” role cannot be applied. The transcript is preserved.",
@@ -189,8 +192,26 @@ async fn open_initialized(
     let caps = init["agentCapabilities"]["promptCapabilities"].clone();
     s.data.lock().unwrap().prompt_capabilities = if caps.is_object() { caps } else { json!({}) };
     s.emit("attachment_policy", crate::attachments::session_policy(s));
-    let system_prompt = role_prompt(s, &init)?;
-    let open_meta = opening_metadata(&s.provider, &s.data.lock().unwrap(), &init);
+    let mut system_prompt = role_prompt(s, &init)?;
+    let mut open_meta = opening_metadata(&s.provider, &s.data.lock().unwrap(), &init);
+    if s.provider == "antigravity" && agentworks_runtime::antigravity::supports_system_prompt(&init)
+    {
+        if let Some(prompt) = system_prompt.take() {
+            let text = prompt
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            open_meta.insert(
+                "antigravity".into(),
+                json!({"systemPrompt":{"append":text}}),
+            );
+        }
+    }
     let saved = s.data.lock().unwrap().provider_session_id.clone();
     let Some(id) = saved else {
         let lineage = s.data.lock().unwrap().lineage.clone();
@@ -686,6 +707,7 @@ pub async fn run(
             if restored!=config {crate::session_config::publish(&s,&restored);}
             crate::limit_resume::ready(&s);
             tracing::info!(total_ms = ms(started), "The session is ready");
+            crate::account_quota::refresh_session(&s);
             s.emit("ready",json!({"providerSessionId":provider_id,"configuration":serde_json::to_value(&created).unwrap_or(Value::Null)}));
             if !s.start_queued_prompt().map_err(|e|agent_client_protocol::Error::internal_error().data(e))? {s.status("idle");}
             while let Some(command)=commands.recv().await {
@@ -778,6 +800,7 @@ pub async fn run(
                                         (Ok(result),None)=>{crate::limit_resume::finish(&s, Some(&serde_json::to_value(&result.stop_reason).unwrap_or(Value::Null)), None);s.emit("turn_end",json!({"stopReason":result.stop_reason}));},
                                         (Err(error),None)=>{let raw=serde_json::to_value(&error).unwrap_or(Value::Null);crate::limit_resume::enrich_codex(&s,&raw).await;crate::limit_resume::finish(&s,None,Some(&raw));s.emit("error",json!({"message":safe_error(&error.to_string())}));},
                                     }
+                                    crate::account_quota::refresh_session(&s);
                                     crate::inbox_delivery::finished(&s,inbox_owner.as_ref());
                                     crate::input_queue::record_outcome(&s,outcome);
                                     s.status("idle");
@@ -1087,8 +1110,14 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
-    async fn role_is_sent_on_every_open_and_never_dropped_silently() {
-        for supports in [true, false] {
+    async fn antigravity_extension_and_standard_roles_survive_every_open() {
+        for (provider, mode) in [
+            ("claude", "yes"),
+            ("claude", "no"),
+            ("antigravity", "extension"),
+            ("antigravity", "no"),
+        ] {
+            let supports = mode != "no";
             let dir = std::env::temp_dir().join(format!("agentworks-role-{}", Uuid::new_v4()));
             std::fs::create_dir_all(&dir).unwrap();
             let store = Arc::new(Mutex::new(
@@ -1110,7 +1139,7 @@ for line in sys.stdin:
             let (tx, _) = tokio::sync::broadcast::channel(16);
             let session = Arc::new(Session {
                 id: Uuid::new_v4().to_string(),
-                provider: "claude".into(),
+                provider: provider.into(),
                 cwd: dir.clone(),
                 title: "Role".into(),
                 initial_model: None,
@@ -1137,11 +1166,19 @@ caps={'resume':{}}
 if sys.argv[1]=='yes': caps['systemPrompt']={}
 for line in sys.stdin:
  r=json.loads(line); m=r.get('method'); p=r.get('params',{})
- if m=='initialize': out={'protocolVersion':1,'agentCapabilities':{'sessionCapabilities':caps},'authMethods':[]}
- elif m in ('session/new','session/resume'):
-  assert sys.argv[1]=='yes', 'role must not open a session without the capability'
-  sp=p['systemPrompt']; assert sp['mode']=='append'
-  text=sp['content'][0]['text']; assert 'Agentworks role: Reviewer' in text and 'Review only.' in text
+ if m=='initialize':
+  capabilities={'loadSession':True,'sessionCapabilities':caps}
+  if sys.argv[1]=='extension': capabilities['_meta']={'antigravity':{'systemPrompt':{'append':True}}}
+  out={'protocolVersion':1,'agentCapabilities':capabilities,'authMethods':[]}
+ elif m in ('session/new','session/resume','session/load'):
+  assert sys.argv[1]!='no', 'role must not open a session without the capability'
+  if sys.argv[1]=='extension':
+   assert 'systemPrompt' not in p
+   text=p['_meta']['antigravity']['systemPrompt']['append']
+  else:
+   sp=p['systemPrompt']; assert sp['mode']=='append'
+   text=sp['content'][0]['text']
+  assert 'Agentworks role: Reviewer' in text and 'Review only.' in text
   out={'sessionId':'native'} if m=='session/new' else {}
  else: raise Exception('Unexpected method '+str(m))
  print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':out}),flush=True)
@@ -1150,7 +1187,7 @@ for line in sys.stdin:
                 AcpAgentConfig::new("python3")
                     .arg("-c")
                     .arg(script)
-                    .arg(if supports { "yes" } else { "no" }),
+                    .arg(mode),
             );
             let s = session.clone();
             Client
@@ -1161,6 +1198,8 @@ for line in sys.stdin:
                         assert_eq!(first.unwrap()["sessionId"], "native");
                         // A reconnect resumes and must carry the role again.
                         s.data.lock().unwrap().provider_session_id = Some("native".into());
+                        open_session(&connection, &s).await.unwrap();
+                        s.data.lock().unwrap().import_pending = true;
                         open_session(&connection, &s).await.unwrap();
                     } else {
                         assert!(first.unwrap_err().to_string().contains("Reviewer"));
