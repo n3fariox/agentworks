@@ -1,7 +1,7 @@
 import {test,expect} from '@playwright/test';
 import {spawn} from 'node:child_process';
 import {createServer} from 'node:http';
-import {mkdtemp,mkdir,readFile,writeFile,chmod,rm} from 'node:fs/promises';
+import {mkdtemp,readFile,writeFile,chmod,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {serverReady,stopChild,removeFixture} from './support/cleanup.mjs';
@@ -151,89 +151,6 @@ test('save subscription providers and run native Claude login on local and remot
   expect(errors).toEqual([]);
 });
 
-
-test('Gemini sign-in uses a form with copyable links on local and SSH hosts',async({page})=>{
-  await page.goto(base+'/?settings');await page.getByRole('tab',{name:'Model providers',exact:true}).click();
-  await page.getByRole('button',{name:'Add provider'}).click();
-  await page.locator('#model-provider-kind').selectOption('gemini_oauth');
-  await expect(page.locator('#model-provider-api-fields')).toBeHidden();
-  await expect(page.locator('#load-model-provider-models')).toBeHidden();
-  await page.locator('#model-provider-name').fill('Gemini account');
-  for(const id of [remote.id,offline.id])await page.locator(`#model-provider-hosts input[value="${id}"]`).check();
-  await page.locator('#save-model-provider').click();
-  await expect(page.locator('#model-provider-editor')).toBeHidden();
-  const card=page.locator('.model-provider-card').filter({has:page.getByText('Gemini account',{exact:true})});
-  await expect(card.getByRole('button',{name:'Sign in · Offline workstation',exact:true})).toBeDisabled();
-  const profile=(await api('/api/model-providers')).profiles.find(p=>p.name==='Gemini account');
-  expect(profile.defaultModel).toBe('gemini-3-flash-preview');
-  const authorizationUrl=async()=>{
-    await expect(page.locator('#gemini-oauth-link')).toBeVisible();
-    await expect(page.locator('#gemini-oauth-url')).toHaveValue(/^https:\/\/accounts\.google\.com\//);
-    return new URL(await page.locator('#gemini-oauth-link').getAttribute('href'));
-  };
-  for(const host of ['Local','Build server']){
-    await card.getByRole('button',{name:'Sign in · '+host,exact:true}).click();
-    await expect(page.locator('#provider-auth-terminal')).toBeHidden();
-    const url=await authorizationUrl(),callback=new URL(url.searchParams.get('redirect_uri'));
-    expect(callback.hostname).toBe('127.0.0.1');expect(callback.pathname).toBe('/auth/callback');
-    expect(url.searchParams.get('code_challenge_method')).toBe('S256');
-    for(const [above,below] of [['#gemini-oauth p.field-note:first-of-type','#gemini-oauth-link'],['#gemini-oauth-callback','#gemini-oauth-submit']]){
-      const top=await page.locator(above).boundingBox(),bottom=await page.locator(below).boundingBox();
-      expect(bottom.y).toBeGreaterThanOrEqual(top.y+top.height+6);
-    }
-    // Ctrl-C in the ordinary read-only input must not cancel the host process.
-    await page.locator('#gemini-oauth-url').focus();await page.keyboard.press('ControlOrMeta+A');await page.keyboard.press('ControlOrMeta+C');
-    const hostId=host==='Local'?'local':remote.id;
-    const authPath=`/api/model-providers/${profile.id}/gemini-auth?hostId=${hostId}`;
-    expect((await api(authPath)).status).toBe('pending');
-    if(host==='Build server'){
-      const denied=new URL(callback);denied.searchParams.set('state',url.searchParams.get('state'));denied.searchParams.set('error','access_denied');
-      for(const change of [u=>u.hostname='example.com',u=>u.pathname='/wrong',u=>u.searchParams.set('state','wrong-state'),u=>u.hash='fragment']){
-        const invalid=new URL(denied);change(invalid);
-        await page.locator('#gemini-oauth-callback').fill(invalid.href);await page.locator('#gemini-oauth-submit').click();
-        await expect(page.locator('#gemini-oauth-status')).toContainText('Invalid callback URL.');
-        expect((await api(authPath)).status).toBe('pending');
-      }
-      await page.locator('#gemini-oauth-callback').fill(denied.href);await page.locator('#gemini-oauth-submit').click();
-      await expect(page.locator('#gemini-oauth-status')).toContainText('Google authorization failed: access_denied');
-    }else{
-      await page.locator('#gemini-oauth-cancel').click();
-      await expect(page.locator('#gemini-oauth-status')).toHaveText('Sign-in cancelled.');
-    }
-    await expect.poll(async()=>{try{await fetch(callback,{signal:AbortSignal.timeout(1000)});return false;}catch{return true;}}).toBe(true);
-  }
-  await card.getByRole('button',{name:'Sign in · Local',exact:true}).click();
-  const direct=await authorizationUrl(),callback=new URL(direct.searchParams.get('redirect_uri'));
-  callback.searchParams.set('state',direct.searchParams.get('state'));callback.searchParams.set('error','access_denied');
-  await fetch(callback,{signal:AbortSignal.timeout(5000)});
-  await expect(page.locator('#gemini-oauth-status')).toContainText('access_denied');
-  const cache=join(dir,'providers','goose',profile.id,'config','gemini_oauth','tokens.json');
-  await expect(readFile(cache,'utf8')).rejects.toThrow();
-  await mkdir(join(cache,'..'),{recursive:true});
-  await writeFile(cache,JSON.stringify({project_id:'fixture-project',token:{access_token:'gemini-private-access-fixture',refresh_token:'gemini-private-refresh-fixture',expires_at:'2100-01-01T00:00:00Z'}}));
-  await card.getByRole('button',{name:'Sign in · Local',exact:true}).click();
-  await expect(page.locator('#gemini-oauth-status')).toContainText('Sign-in completed.');
-  const publicProfiles=JSON.stringify((await api('/api/model-providers')).profiles);
-  expect(publicProfiles).not.toContain('gemini-private-');expect(publicProfiles).not.toContain('refresh_token');
-  const rejected=await fetch(base+'/api/model-providers',{method:'POST',headers:{Origin:base,'Content-Type':'application/json'},body:JSON.stringify({operation:'save',profile:{...profile,type:undefined,keyConfigured:undefined,apiKey:'must-not-use'}})});
-  expect(rejected.status).toBe(400);expect(await rejected.text()).toContain('not an API key');
-  await page.locator('#dismiss-settings').click();await page.locator('#new-session').click();
-  await page.locator('#provider').selectOption('goose');await page.locator('#create-model-provider').selectOption(profile.id);
-  await expect(page.locator('#create-model')).toHaveValue(profile.defaultModel);
-});
-
-test('deleting a Gemini provider stops its local and remote sign-in attempts',async()=>{
-  const profile=await api('/api/model-providers',{operation:'save',profile:{kind:'gemini_oauth',name:'Delete pending Gemini',defaultModel:'gemini-3-flash-preview',hostIds:['local',remote.id]}});
-  const callbacks=[];
-  for(const hostId of ['local',remote.id]){
-    const path=`/api/model-providers/${profile.id}/gemini-auth?hostId=${hostId}`;
-    await api(path,{});
-    await expect.poll(async()=>(await api(path)).status).toBe('pending');
-    callbacks.push(new URL((await api(path)).authorizationUrl).searchParams.get('redirect_uri'));
-  }
-  await api('/api/model-providers',{operation:'delete',id:profile.id});
-  for(const callback of callbacks)await expect.poll(async()=>{try{await fetch(callback,{signal:AbortSignal.timeout(1000)});return false;}catch{return true;}}).toBe(true);
-});
 
 test('Codex sign-in uses a temporary fixed callback port and supports cancellation',async({page})=>{
   const profile=await api('/api/model-providers',{operation:'save',profile:{kind:'chatgpt_codex',name:'Codex OAuth test',defaultModel:'gpt-6.1-sol',hostIds:['local']}});

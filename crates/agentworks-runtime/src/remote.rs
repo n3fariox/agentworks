@@ -678,34 +678,21 @@ impl Live {
         if self.worker["providerAuthTerminal"] != true {
             return Err("Update the remote worker to enable subscription sign-in".into());
         }
-        self.terminal_request("", json!({"kind":kind,"id":id}), Default::default())
+        self.terminal_request("", json!({"kind":kind,"id":id}))
     }
     pub fn terminal(self: &Arc<Self>, cwd: &str) -> Result<crate::terminal::Handle, String> {
-        self.terminal_request(cwd, Value::Null, Default::default())
-    }
-    pub fn terminal_program(
-        self: &Arc<Self>,
-        cwd: &str,
-        launch: crate::terminal::Launch,
-    ) -> Result<crate::terminal::Handle, String> {
-        launch.validate()?;
-        if launch.program == "antigravity" && self.worker["terminalPrograms"] != true {
-            return Err("Update the remote worker to launch interactive terminal programs".into());
-        }
-        self.terminal_request(cwd, Value::Null, launch)
+        self.terminal_request(cwd, Value::Null)
     }
     fn terminal_request(
         self: &Arc<Self>,
         cwd: &str,
         auth: Value,
-        launch: crate::terminal::Launch,
     ) -> Result<crate::terminal::Handle, String> {
         if self.worker["terminal"] != true {
             return Err("Update the remote worker to enable terminals.".into());
         }
         let channel = self.next_channel.fetch_add(1, Ordering::Relaxed) + 1;
         let (frames, receiver) = tokio::sync::watch::channel(crate::terminal::Frame {
-            launch: launch.clone(),
             cols: 80,
             rows: 24,
             ..Default::default()
@@ -720,7 +707,7 @@ impl Live {
         if self
             .out
             .try_send(Message::text(
-                json!({"type":"terminalOpen","channel":channel,"cwd":cwd,"providerAuth":auth,"launch":launch})
+                json!({"type":"terminalOpen","channel":channel,"cwd":cwd,"providerAuth":auth})
                     .to_string(),
             ))
             .is_err()
@@ -1061,7 +1048,6 @@ fn check_hello(hello: &Value) -> Result<Value, String> {
         "worktreeCleanup": hello["worktreeCleanup"] == true,
         "directories": hello["directories"] == true,
         "terminal": hello["terminal"].as_bool().unwrap_or(false),
-        "terminalPrograms": hello["terminalPrograms"] == true,
         "hostMetrics": if hello["hostMetrics"].as_u64() == Some(1) { 1 } else { 0 },
         "providerAuthTerminal": hello["providerAuthTerminal"] == true,
         "managedCodexAuth": hello["managedCodexAuth"] == true,

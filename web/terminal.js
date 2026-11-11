@@ -2,27 +2,6 @@
 export function setupTerminal({$,api,getActive,socketUrl,tabs=true,onSelect=()=>{},endpoint=id=>`/api/sessions/${id}/terminal`,eventsEndpoint=id=>endpoint(id)+'/events',runningStatus='Shell running',exitStatus=frame=>frame.code==null?'Terminal stopped':`Shell exited (${frame.code})`}) {
   let current=null, terminal=null, socket=null, timer=null, observer=null, generation=0, ready=false, exited=false;
   const selected=new Map();
-  let program='shell',stopping=false,lastFrame=null;
-  function launchOptions(){
-    if(!$('terminal-program'))return {};
-    const program=$('terminal-program').value,conversationId=$('terminal-conversation').value.trim();
-    return {program,...(program==='antigravity'&&conversationId?{conversationId}:{})};
-  }
-  function updateLaunchChoice(){
-    if(!$('terminal-program'))return;
-    const agy=$('terminal-program').value==='antigravity';
-    $('terminal-conversation').hidden=!agy;$('terminal-conversation-label').hidden=!agy;
-    $('terminal-restart').textContent=agy?'Start Antigravity':'Start new terminal';
-    $('terminal-launch-note').textContent=agy?'Runs the interactive agy CLI directly. Leave the ID empty for a new conversation, or enter a native conversation ID to resume it.':'Stop the terminal to choose a different program. Antigravity runs directly in this session’s working directory.';
-  }
-  if($('terminal-program'))$('terminal-program').onchange=updateLaunchChoice;
-  function applyLaunch(frame){
-    program=frame.launch?.program||'shell';
-    if(!$('terminal-program'))return;
-    $('terminal-program').value=program;$('terminal-conversation').value=frame.launch?.conversationId||'';
-    const locked=stopping||!frame.exited||Boolean(getActive()?.archived);
-    $('terminal-program').disabled=locked;$('terminal-conversation').disabled=locked;updateLaunchChoice();
-  }
   let renderQueue=[],writing=false,alternate=false,historyStart=0,historyEpoch=null;
   function send(value){if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify(value));}
   function status(text){$('terminal-status').textContent=text;}
@@ -79,11 +58,9 @@ export function setupTerminal({$,api,getActive,socketUrl,tabs=true,onSelect=()=>
       if(gen!==generation)return;
       let frame;try{frame=JSON.parse(event.data);}catch{return;}
       if(frame.type!=='frame')return;
-      lastFrame=frame;applyLaunch(frame);
-      if(!frame.exited&&program==='antigravity')status('Antigravity running');
       if(frame.exited){exited=true;$('terminal-surface').classList.add('terminal-readonly');}
       renderQueue.push(frame);renderNext(gen);
-      if(frame.exited){exited=true;ready=false;if($('terminal-stop'))$('terminal-stop').disabled=true;status(frame.error||(frame.archived?'Archived · saved terminal history':(program==='antigravity'?`Antigravity exited (${frame.code??'stopped'})`:exitStatus(frame))));$('terminal-restart').hidden=Boolean(frame.archived);ws.onclose=null;ws.close();}
+      if(frame.exited){exited=true;ready=false;if($('terminal-stop'))$('terminal-stop').disabled=true;status(frame.error||(frame.archived?'Archived · saved terminal history':exitStatus(frame)));$('terminal-restart').hidden=Boolean(frame.archived);ws.onclose=null;ws.close();}
     };
     ws.onclose=()=>{if(gen!==generation)return;ready=false;status('Disconnected · reconnecting…');$('terminal-restart').hidden=false;timer=setTimeout(()=>connect(gen),1500);};
     ws.onerror=()=>ws.close();
@@ -94,7 +71,7 @@ export function setupTerminal({$,api,getActive,socketUrl,tabs=true,onSelect=()=>
     try{
       const {Terminal}=await import('./vendor/xterm.mjs');
       if(gen!==generation)return;
-      const opened=await api(endpoint(current),{method:'POST',body:JSON.stringify({restart,launch:launchOptions()})});
+      const opened=await api(endpoint(current),{method:'POST',body:JSON.stringify({restart})});
       if(opened.available===false){status('No saved terminal for this archived session');return;}
       if(gen!==generation)return;
       $('terminal-surface').replaceChildren();$('terminal-surface').classList.remove('terminal-readonly');
@@ -129,7 +106,7 @@ export function setupTerminal({$,api,getActive,socketUrl,tabs=true,onSelect=()=>
     };
   }
   $('terminal-restart').onclick=()=>start(true);
-  if($('terminal-stop'))$('terminal-stop').onclick=async()=>{const id=current;ready=false;stopping=true;$('terminal-stop').disabled=true;try{await api(endpoint(id),{method:'DELETE'});}catch(error){if(current===id){status(error.message);$('terminal-stop').disabled=false;ready=!exited;}}finally{stopping=false;if(current===id&&lastFrame)applyLaunch(lastFrame);}};
+  if($('terminal-stop'))$('terminal-stop').onclick=async()=>{const id=current;ready=false;$('terminal-stop').disabled=true;try{await api(endpoint(id),{method:'DELETE'});}catch(error){if(current===id){status(error.message);$('terminal-stop').disabled=false;ready=!exited;}}};
   // Escape belongs to terminal applications (vim, less, shell line editing).
   $('session-terminal').addEventListener('keydown',event=>event.stopPropagation());
   addEventListener('pagehide',dispose);

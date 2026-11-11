@@ -397,11 +397,6 @@ mod tests {
 /// Run sign-in in an isolated child, so Goose's global configuration is host-local.
 pub async fn login(kind: &str) -> Result<()> {
     match kind {
-        "gemini_oauth" => {
-            use goose::providers::{base::Provider, gemini_oauth::GeminiOAuthProvider};
-            let provider = GeminiOAuthProvider::from_env(None).await.map_err(failure)?;
-            provider.configure_oauth().await.map_err(failure)?;
-        }
         "claude-code" => {
             let command = std::env::var_os("CLAUDE_CODE_EXECUTABLE")
                 .or_else(|| std::env::var_os("CLAUDE_CODE_COMMAND"))

@@ -537,23 +537,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     if args.get(1).is_some_and(|arg| arg == "goose-login") {
-        let structured = std::env::var("AGENTWORKS_GEMINI_AUTH_JSON").as_deref() == Ok("1");
         tracing_subscriber::fmt()
             .with_ansi(false)
             .with_target(false)
-            .with_writer(std::io::stderr)
             .init();
         let result = goose_acp::login(args.get(2).map(String::as_str).unwrap_or("")).await;
-        if structured {
-            match result {
-                Ok(()) => println!("{}", json!({"event":"complete"})),
-                Err(error) => {
-                    println!("{}", json!({"event":"error","error":error.to_string()}));
-                    std::process::exit(1);
-                }
-            }
-            return Ok(());
-        }
         match result {
             Ok(()) => println!(
                 "Sign-in completed. You can close this terminal and start a Goose session."
@@ -1335,16 +1323,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(answer_question),
         )
         .route(
-            "/api/model-providers/{id}/gemini-auth",
-            post(model_providers::gemini_start)
-                .get(model_providers::gemini_status)
-                .delete(model_providers::gemini_cancel),
-        )
-        .route(
-            "/api/model-providers/{id}/gemini-auth/callback",
-            post(model_providers::gemini_callback),
-        )
-        .route(
             "/api/model-providers/{id}/auth",
             post(terminal::open_provider_auth).delete(terminal::stop_provider_auth),
         )
@@ -1366,10 +1344,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/model-providers/{id}/codex-auth/cancel",
             post(codex_oauth::cancel),
         )
-        .route(
-            "/api/sessions/{id}/terminal",
-            post(terminal::open).delete(terminal::stop_session),
-        )
+        .route("/api/sessions/{id}/terminal", post(terminal::open))
         .route("/api/sessions/{id}/terminal/events", get(terminal::events))
         .route("/api/sessions/{id}/events", get(events))
         .route("/api/sessions/{id}/history", get(transcript_history::older))

@@ -308,32 +308,6 @@ struct LoadCodeAssistResponse {
     current_tier: Option<TierInfo>,
     onboard_tiers: Option<Vec<TierInfo>>,
     allowed_tiers: Option<Vec<TierInfo>>,
-    ineligible_tiers: Option<Vec<IneligibleTier>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct IneligibleTier {
-    reason_message: Option<String>,
-}
-
-fn onboarding_failure(load: &LoadCodeAssistResponse) -> anyhow::Error {
-    let reasons: Vec<_> = load
-        .ineligible_tiers
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|tier| tier.reason_message.as_deref())
-        .map(str::trim)
-        .filter(|reason| !reason.is_empty())
-        .collect();
-    if !reasons.is_empty() {
-        return anyhow!(
-            "Google sign-in succeeded, but Google denied Gemini Code Assist access: {}",
-            reasons.join("; ")
-        );
-    }
-    anyhow!("Google sign-in succeeded, but Google did not return a Gemini Code Assist project. This legacy OAuth client is no longer supported for individual Gemini accounts. A personal Gemini plan cannot enable this Goose provider; use a supported Google integration instead.")
 }
 
 #[derive(Debug, Deserialize)]
@@ -444,24 +418,6 @@ async fn setup_code_assist(access_token: &str) -> Result<String> {
         }
     }
 
-    // Do not attempt an obsolete free-tier onboarding when Google has already
-    // rejected eligibility and offered no usable tier. Keep its actual reason.
-    let has_default = load_resp
-        .allowed_tiers
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .any(|tier| tier.is_default == Some(true));
-    if load_resp.current_tier.is_none()
-        && !has_default
-        && load_resp
-            .ineligible_tiers
-            .as_ref()
-            .is_some_and(|tiers| !tiers.is_empty())
-    {
-        return Err(onboarding_failure(&load_resp));
-    }
-
     // User is already onboarded with a tier but no project returned at top-level
     if let Some(ref tier) = load_resp.current_tier {
         if tier.id.is_some() {
@@ -528,13 +484,15 @@ async fn setup_code_assist(access_token: &str) -> Result<String> {
                 {
                     return Ok(project_id);
                 }
-                return Err(onboarding_failure(&load_resp));
+                return Err(anyhow!("Onboarding completed but no project ID returned"));
             }
         }
         return Err(anyhow!("Onboarding timed out after 60 seconds"));
     }
 
-    Err(onboarding_failure(&load_resp))
+    Err(anyhow!(
+        "Onboarding failed: no operation name or project ID returned"
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -711,82 +669,6 @@ impl Drop for ServerHandleGuard {
 // Full OAuth + setup flow
 // ---------------------------------------------------------------------------
 
-fn auth_event(event: &str, message: &str) {
-    if std::env::var("AGENTWORKS_GEMINI_AUTH_JSON").as_deref() == Ok("1") {
-        println!("{}", json!({"event":event,"url":message}));
-        let _ = std::io::Write::flush(&mut std::io::stdout());
-    } else if !message.is_empty() {
-        println!("{}", message);
-    }
-}
-
-// Agentworks enables this only in its dedicated sign-in child, never ACP stdio.
-fn pasted_callback(input: &str, redirect_uri: &str, state: &str) -> Result<CallbackParams> {
-    let url = reqwest::Url::parse(input.trim())?;
-    let expected = reqwest::Url::parse(redirect_uri)?;
-    if input.len() > 8192
-        || url.origin() != expected.origin()
-        || url.path() != expected.path()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.fragment().is_some()
-    {
-        return Err(anyhow!(
-            "Paste the full localhost callback URL for this sign-in"
-        ));
-    }
-    let params: CallbackParams = serde_urlencoded::from_str(url.query().unwrap_or(""))?;
-    if params.state.as_deref() != Some(state)
-        || (params.code.as_ref().is_none_or(|code| code.is_empty()) && params.error.is_none())
-    {
-        return Err(anyhow!("Callback does not match this sign-in"));
-    }
-    Ok(params)
-}
-
-async fn receive_callback(
-    mut callback: oneshot::Receiver<Result<String>>,
-    redirect_uri: &str,
-    state: &str,
-) -> Result<String> {
-    if std::env::var("AGENTWORKS_GEMINI_CALLBACK_INPUT").as_deref() != Ok("1")
-        && std::env::var("AGENTWORKS_GEMINI_AUTH_JSON").as_deref() != Ok("1")
-    {
-        return callback.await?;
-    }
-    if std::env::var("AGENTWORKS_GEMINI_AUTH_JSON").as_deref() != Ok("1") {
-        println!("If the browser cannot connect to localhost, copy its full address-bar URL, paste it here, and press Enter. No SSH tunnel is required.");
-    }
-    let (tx, mut lines) = tokio::sync::mpsc::unbounded_channel();
-    // A detached reader avoids tokio stdin's blocking task holding up process
-    // shutdown when a direct browser callback wins while input is still pending.
-    std::thread::spawn(move || {
-        use std::io::BufRead;
-        for line in std::io::stdin().lock().lines() {
-            if tx.send(line).is_err() {
-                break;
-            }
-        }
-    });
-    loop {
-        tokio::select! {
-            result = &mut callback => return result?,
-            line = lines.recv() => {
-                let Some(Ok(line)) = line else { return callback.await?; };
-                match pasted_callback(&line, redirect_uri, state) {
-                    Ok(params) => {
-                        if let Some(error) = params.error {
-                            return Err(anyhow!("Google authorization failed: {}", error));
-                        }
-                        return params.code.ok_or_else(|| anyhow!("Missing authorization code"));
-                    }
-                    Err(_) => auth_event("invalid-callback", "Invalid callback URL. Paste the complete localhost URL from this sign-in's browser tab and try again."),
-                }
-            }
-        }
-    }
-}
-
 async fn perform_oauth_flow(auth_state: &GeminiOAuthAuthState) -> Result<SetupData> {
     let _guard = auth_state.oauth_mutex.try_lock().map_err(|_| {
         anyhow!("Another OAuth flow is already in progress; please try again later")
@@ -804,24 +686,18 @@ async fn perform_oauth_flow(auth_state: &GeminiOAuthAuthState) -> Result<SetupDa
     let redirect_uri = format!("http://127.0.0.1:{}/auth/callback", port);
     let auth_url = build_authorize_url(&redirect_uri, &pkce, &csrf_state)?;
 
-    if std::env::var("AGENTWORKS_GEMINI_AUTH_JSON").as_deref() == Ok("1") {
-        auth_event("authorization", &auth_url);
-    } else if webbrowser::open(&auth_url).is_err() {
+    if webbrowser::open(&auth_url).is_err() {
         tracing::info!("Please open this URL in your browser:\n{}", auth_url);
     }
 
-    let code_result = tokio::time::timeout(
-        std::time::Duration::from_secs(OAUTH_TIMEOUT_SECS),
-        receive_callback(rx, &redirect_uri, &csrf_state),
-    )
-    .await;
+    let code_result =
+        tokio::time::timeout(std::time::Duration::from_secs(OAUTH_TIMEOUT_SECS), rx).await;
     server_guard.abort();
 
     let code = code_result
-        .map_err(|_| anyhow!("OAuth flow timed out"))?
+        .map_err(|_| anyhow!("OAuth flow timed out"))??
         .map_err(|e| anyhow!("OAuth callback error: {}", e))?;
 
-    auth_event("exchanging", "");
     let tokens = exchange_code_for_tokens(&code, &redirect_uri, &pkce).await?;
 
     let refresh_token = tokens.refresh_token.ok_or_else(|| {
@@ -1149,21 +1025,6 @@ impl Provider for GeminiOAuthProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn onboarding_failure_preserves_google_rejection() {
-        let load: LoadCodeAssistResponse = serde_json::from_value(json!({
-            "ineligibleTiers":[{"reasonMessage":"This client is no longer supported for Gemini Code Assist for individuals."}]
-        })).unwrap();
-        let message = onboarding_failure(&load).to_string();
-        assert!(message.contains("Google sign-in succeeded"));
-        assert!(message.contains("This client is no longer supported"));
-        assert!(!message.contains("no operation name"));
-        let missing: LoadCodeAssistResponse = serde_json::from_value(json!({})).unwrap();
-        assert!(onboarding_failure(&missing)
-            .to_string()
-            .contains("personal Gemini plan"));
-    }
 
     #[test]
     fn test_build_authorize_url() {

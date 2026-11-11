@@ -68,7 +68,6 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         "worktreeCleanup": true,
         "directories": true,
         "terminal": true,
-        "terminalPrograms": true,
         "hostMetrics": if crate::metrics::supported() { 1 } else { 0 },
         "providerAuthTerminal": true,
         "managedCodexAuth": true,
@@ -180,11 +179,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
                                 auth["id"].as_str().unwrap_or(""),
                             )
                         } else {
-                            let launch = serde_json::from_value(
-                                request.get("launch").cloned().unwrap_or_else(|| json!({})),
-                            )
-                            .map_err(|_| "Invalid terminal program".to_owned());
-                            launch.and_then(|launch| crate::terminal::spawn_launch(cwd, launch))
+                            crate::terminal::spawn(cwd)
                         };
                         match opened {
                             Ok(handle) => {
