@@ -180,7 +180,7 @@ test('scheduled occurrences dispatch once and stay deduplicated across restart',
   await api('/api/sessions/'+run.sessionId,undefined,'DELETE');
 });
 
-test('downtime applies the missed-run policy to the latest occurrence only',async()=>{
+test('downtime applies the missed-run policy to the latest occurrence only',async({page})=>{
   test.setTimeout(60000);
   // An occurrence two hours ago, while the cursor says the server last ran two days ago.
   const slot=minute(Date.now()-7200000);
@@ -199,6 +199,14 @@ test('downtime applies the missed-run policy to the latest occurrence only',asyn
   const [missed]=await scheduledRuns(skip.id);
   expect(missed).toMatchObject({status:'missed',scheduledFor:slot,sessionId:null});
   expect(missed.detail).toContain('Earlier missed occurrences were not run.');
+  const alert=(await api('/api/notifications/inbox')).alerts.find(a=>a.automationId===skip.id);
+  expect(alert).toMatchObject({event:'automationIssue',title:'Skip missed',dismissed:false});
+  await page.goto('/dashboard');await page.locator('#nav-notifications').click();
+  const card=page.locator('.notification-card').filter({hasText:'Skip missed'});
+  await expect(card).toBeVisible();await card.getByRole('link').click();
+  await expect(page.locator('.automation-item.selected')).toContainText('Skip missed');
+  expect((await api('/api/notifications/inbox')).alerts.some(a=>a.id===alert.id)).toBe(true);
+
   await expect.poll(async()=>(await scheduledRuns(once.id)).length,{timeout:15000}).toBe(1);
   const [late]=await scheduledRuns(once.id);
   expect(late.scheduledFor).toBe(slot);expect(late.sessionId).toBeTruthy();

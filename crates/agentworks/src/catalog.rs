@@ -79,6 +79,8 @@ pub const MAX_IDLE_SLEEP_MINUTES: u32 = 7 * 24 * 60;
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct CatalogData {
     #[serde(default)]
+    pub notification_inbox: Vec<crate::notifications::Alert>,
+    #[serde(default)]
     pub github: crate::github::Config,
     pub projects: Vec<Project>,
     pub locations: Vec<Location>,
@@ -92,6 +94,14 @@ pub struct Catalog {
     pub data: CatalogData,
 }
 impl Catalog {
+    pub fn notification_inbox(
+        &mut self,
+        alerts: Vec<crate::notifications::Alert>,
+    ) -> io::Result<()> {
+        let mut data = self.data.clone();
+        data.notification_inbox = alerts;
+        self.save(data)
+    }
     pub fn open(path: PathBuf) -> io::Result<Self> {
         let mut data: CatalogData = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)

@@ -93,6 +93,7 @@ test.afterAll(async()=>{
 });
 // Drive the background session until it is idle again.
 async function run(id,text='approval'){
+  await expect.poll(async()=> (await api(`/api/sessions/${id}`)).session.status).toBe('idle');
   await api(`/api/sessions/${id}/prompt`,{text,requestId:crypto.randomUUID()});
   for(let i=0;i<100;i++){
     const state=await api(`/api/sessions/${id}`);
@@ -226,6 +227,8 @@ test('clicking a notice opens the session that produced it',async({page})=>{
 test('the stream and its settings are unavailable cross-origin',async()=>{
   const post=await fetch(base+'/api/notifications',{method:'PUT',headers:{Origin:'http://evil.example','Content-Type':'application/json'},body:'{}'});
   expect(post.status).toBe(403);
+  const dismissal=await fetch(base+'/api/notifications/inbox/dismiss',{method:'POST',headers:{Origin:'http://evil.example','Content-Type':'application/json'},body:JSON.stringify({ids:[],dismissed:true})});
+  expect(dismissal.status).toBe(403);
   // A cross-origin WebSocket upgrade is refused by the same guard.
   const socket=new WebSocket(base.replace('http','ws')+'/api/notifications/events',{headers:{Origin:'http://evil.example'}});
   const outcome=await new Promise(resolve=>{
@@ -468,4 +471,144 @@ test('unavailable shared storage suppresses events while test display stays usab
   await page.waitForFunction(()=>window.__storageAttempted);
   await page.getByRole('button',{name:'Send a test notification'}).click();
   expect((await shown(page)).map(n=>n.tag)).toEqual(['test']);
+});
+
+async function clearInbox(){
+  const {alerts}=await api('/api/notifications/inbox');
+  if(alerts.length)await api('/api/notifications/inbox/dismiss',{ids:alerts.map(a=>a.id),dismissed:true});
+}
+
+test('persistent tray works without browser permission; opening keeps alerts until dismissal and Undo restores them',async({page,context})=>{
+  await clearInbox();
+  await captureNotifications(page,'denied');
+  await page.goto('/');
+  await run(background.id,'hello');
+  const bell=page.locator('#nav-notifications');
+  await expect(bell).toHaveAccessibleName('Notifications, 1 undismissed');
+  await bell.click();
+  const tray=page.locator('#notification-tray');
+  await expect(tray.getByText('Turn finished',{exact:true})).toBeVisible();
+  await tray.getByRole('link',{name:/Turn finished/}).click();
+  await expect(page.locator('#header-title')).toHaveText('Background session');
+  await expect(tray).not.toBeVisible();
+  await page.reload();
+  await expect(bell).toHaveAccessibleName('Notifications, 1 undismissed');
+  const second=await context.newPage();await second.goto('/dashboard');
+  await expect(second.locator('#nav-notifications')).toHaveAccessibleName('Notifications, 1 undismissed');
+  await bell.click();
+  await tray.getByRole('button',{name:'Dismiss Turn finished for Background session'}).click();
+  await expect(bell).toHaveAccessibleName('Notifications');
+  await expect(second.locator('#nav-notifications')).toHaveAccessibleName('Notifications');
+  await tray.getByRole('button',{name:'Undo',exact:true}).click();
+  await expect(bell).toHaveAccessibleName('Notifications, 1 undismissed');
+  await expect(second.locator('#nav-notifications')).toHaveAccessibleName('Notifications, 1 undismissed');
+  await tray.getByRole('button',{name:'Dismiss all',exact:true}).click();
+  await expect(tray.getByText(/caught up/)).toBeVisible();
+  await page.reload();await expect(bell).toHaveAccessibleName('Notifications');
+  expect(await shown(page)).toEqual([]);
+  await second.close();
+});
+
+test('tray groups approvals first and updates resolved requests without removing them',async({page})=>{
+  await clearInbox();await page.goto('/dashboard');
+  await api(`/api/sessions/${background.id}/prompt`,{text:'approval',requestId:crypto.randomUUID()});
+  await expect.poll(async()=> (await api(`/api/sessions/${background.id}`)).approvals.length).toBe(1);
+  await page.locator('#nav-notifications').click();
+  const tray=page.locator('#notification-tray');
+  await expect(tray.getByText('Needs attention',{exact:true})).toBeVisible();
+  await expect(tray.getByText('Approval needed',{exact:true})).toBeVisible();
+  const pending=(await api(`/api/sessions/${background.id}`)).approvals[0];
+  await api(`/api/sessions/${background.id}/approvals/${pending.id}`,{optionId:'allow'});
+  await expect(tray.getByText('Request resolved',{exact:true})).toBeVisible();
+  await expect(tray.getByText('Turn finished',{exact:true})).toBeVisible();
+  await page.screenshot({path:'.cache/notification-tray-desktop.png'});
+  const count=(await api('/api/notifications/inbox')).alerts.length;
+  expect(count).toBe(2);
+  await tray.getByRole('link',{name:/Turn finished/}).click();
+  await expect(page.locator('#header-title')).toHaveText('Background session');
+  await expect(page.locator('#session-state')).toHaveText('Ready');
+  await expect(page.locator('.notification-target')).toBeVisible();
+  expect((await api('/api/notifications/inbox')).alerts.length).toBe(count);
+});
+
+test('tray inbox and dismissal survive a server restart',async({page})=>{
+  await clearInbox();await run(background.id,'hello');await run(watched.id,'hello');
+  const {alerts}=await api('/api/notifications/inbox');expect(alerts).toHaveLength(2);
+  await api('/api/notifications/inbox/dismiss',{ids:[alerts[0].id],dismissed:true});
+  await page.goto('/dashboard');await page.locator('#nav-notifications').click();
+  await expect(page.locator('.notification-card')).toHaveCount(1);
+  const stopped=new Promise(r=>server.once('exit',r));server.kill('SIGTERM');await stopped;await startServer();
+  expect((await api('/api/notifications/inbox')).alerts.map(a=>a.id)).toEqual([alerts[1].id]);
+  await expect(page.locator('.notification-status')).toHaveText('1 undismissed · Live');
+  await expect(page.locator('.notification-card')).toHaveCount(1);
+});
+
+test('tray reports load and dismissal failures and retains alerts',async({page})=>{
+  await clearInbox();await run(background.id,'hello');
+  await page.route('**/api/notifications/inbox',route=>route.fulfill({status:503,body:'Unavailable'}));
+  await page.goto('/');await page.locator('#nav-notifications').click();
+  await expect(page.locator('.notification-error')).toHaveText('Could not load notifications.');
+  await page.unroute('**/api/notifications/inbox');
+  await page.locator('#notification-tray').getByRole('button',{name:'Retry',exact:true}).click();
+  await expect(page.locator('.notification-card')).toHaveCount(1);
+  await page.route('**/api/notifications/inbox/dismiss',route=>route.fulfill({status:503,body:'Unavailable'}));
+  await page.locator('#notification-tray').getByRole('button',{name:'Dismiss all',exact:true}).click();
+  await expect(page.locator('.notification-error')).toHaveText('Could not save changes.');
+  await expect(page.locator('.notification-card')).toHaveCount(1);
+});
+
+test('tray fits mobile and Escape returns focus to its bell',async({page})=>{
+  await clearInbox();await run(background.id,'hello');await page.setViewportSize({width:390,height:844});
+  await page.goto('/');await expect(page.locator('#nav-notifications')).toBeVisible();
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await page.locator('#nav-notifications').click();
+  const tray=page.locator('#notification-tray');await expect(tray).toBeVisible();
+  await page.screenshot({path:'.cache/notification-tray-mobile.png'});
+  const bounds=await tray.boundingBox();expect(bounds.x).toBeGreaterThanOrEqual(0);expect(bounds.width).toBeLessThanOrEqual(390);
+  await page.keyboard.press('Escape');await expect(tray).not.toBeVisible();await expect(page.locator('#nav-notifications')).toBeFocused();
+});
+
+
+test('tray distinguishes explicit task reports from turn endings and escapes report content',async({page})=>{
+  await clearInbox();
+  await expect.poll(async()=> (await api(`/api/sessions/${background.id}`)).session.status).toBe('idle');
+  await api(`/api/sessions/${background.id}/agent-access`,{communicate:true},'PUT');
+  const payload={status:'completed',summary:'<b>Finished the assigned task</b>',requestId:crypto.randomUUID()};
+  await run(background.id,'mcp report_completion '+JSON.stringify(payload));
+  await page.goto('/dashboard');await page.locator('#nav-notifications').click();
+  const tray=page.locator('#notification-tray');
+  await expect(tray.getByText('Task completed',{exact:true})).toBeVisible();
+  await expect(tray.getByText('Turn finished',{exact:true})).toBeVisible();
+  await expect(tray.getByText(payload.summary,{exact:true})).toBeVisible();
+  await expect(tray.locator('.notification-body b')).toHaveCount(0);
+  await run(background.id,'mcp report_completion '+JSON.stringify({...payload,status:'blocked',summary:'Need your input',requestId:crypto.randomUUID()}));
+  await expect(tray.getByText('Task blocked',{exact:true})).toBeVisible();
+  await expect(tray.getByText('Needs attention',{exact:true})).toBeVisible();
+});
+
+test('full-screen mobile sessions keep the bell and live count accessible in Chat and Terminal',async({page})=>{
+  await clearInbox();await page.setViewportSize({width:390,height:844});
+  await page.addInitScript(id=>{localStorage.setItem('agentworks-session',id);localStorage.setItem('agentworks-composer-source','true');},watched.id);
+  await page.goto('/');await expect(page.locator('#session-state')).toHaveText('Ready');
+  await expect(page.locator('#workspace-nav')).not.toBeVisible();
+  const bell=page.locator('#session-notifications'),tray=page.locator('#notification-tray');
+  await expect(bell).toBeVisible();await expect(bell).toHaveAccessibleName('Notifications');
+  await run(background.id,'hello');await expect(bell).toHaveAccessibleName('Notifications, 1 undismissed');
+  await page.locator('#prompt').fill('Keep this draft');
+  await page.screenshot({path:'.cache/notification-tray-mobile-session.png'});
+  await bell.click();await expect(tray).toBeVisible();await expect(tray.locator('.notification-card')).toHaveCount(1);
+  await page.screenshot({path:'.cache/notification-tray-mobile-session-open.png'});
+  await tray.getByRole('button',{name:'Dismiss all',exact:true}).click();
+  await expect(bell).toHaveAccessibleName('Notifications');
+  await tray.getByRole('button',{name:'Close notifications',exact:true}).click();
+  await expect(bell).toBeFocused();await expect(page.locator('#prompt')).toHaveValue('Keep this draft');
+  await expect(page.locator('#workspace-nav')).not.toBeVisible();
+  await page.locator('#session-tab-terminal').click();
+  await expect(bell).toBeVisible();await bell.click();await expect(tray).toBeVisible();
+  await page.keyboard.press('Escape');await expect(bell).toBeFocused();
+  await expect(page.locator('#session-terminal')).toBeVisible();
+  await page.setViewportSize({width:320,height:700});await expect(bell).toBeInViewport();
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+  await page.setViewportSize({width:1280,height:800});
+  await expect(bell).not.toBeVisible();await expect(page.locator('#nav-notifications')).toBeVisible();
 });

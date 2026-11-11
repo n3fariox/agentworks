@@ -217,3 +217,11 @@ test('browser merges older pages with live events and keeps them across a reconn
   const more=checkSeeded(await facts(page));
   expect(more.prompts[0]).toBeLessThan(seededMerged.prompts[0]);
 });
+
+
+test('notification deep links load older pages and focus the result of the source turn',async({page})=>{
+  const seq=seeded-(TURNS-1)*PER_TURN;
+  await page.goto(base+'/?'+new URLSearchParams({notificationSession:session.id,notificationSeq:String(seq),notificationEvent:'turnEnd'}));
+  await expect(page.locator('.notification-target')).toContainText('Reply 1 done');
+  await expect(page.locator('.notification-target')).toBeInViewport();
+});
