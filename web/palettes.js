@@ -159,6 +159,7 @@ export function actionItems(state={},handlers={}){
   if(views.files)add('view-files','Project files','Go to','Browse the selected project directory',views.files);
   if(views.automations)add('view-automations','Automations','Go to','Saved repeatable instructions',views.automations);
   add('settings','Settings','Go to','Allowed roots and default models',()=>handlers.settings?.());
+  if(handlers.githubSettings)add('github-settings','GitHub settings','Go to','GitHub accounts, connections and polling intervals',handlers.githubSettings);
   if(hasSession){
     if(handlers.diff)add('session-diff','Session diff','Current session','Inspect unstaged, branch or commit changes',handlers.diff);
     if(handlers.sessionFiles)add('session-files','Session files','Current session','Browse this session’s directory beside the chat',handlers.sessionFiles);

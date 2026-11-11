@@ -526,6 +526,7 @@ body[data-code-theme=github-light] .source-line::before{color:#6e7781}
 .session-badge.success{background:#173b2c;border-color:#31654b;color:#a1e4b7}
 .session-badge.warning{background:#403319;border-color:#79602d;color:#f0d38a}
 .session-badge.danger{background:#44252b;border-color:#854650;color:#ffb6bf}
+.session-badge.merged{background:#322348;border-color:#73509b;color:#d8b9ff}
 .session-badge.info{background:#1c3448;border-color:#3b6585;color:#aed7fa}
 
 .session-select{display:block;width:100%;padding:0;border:0;border-radius:3px;background:transparent;color:inherit;text-align:left;min-width:0}

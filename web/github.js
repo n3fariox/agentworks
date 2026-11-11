@@ -103,7 +103,7 @@ export function setupGithub({api,getActive}) {
         const save=node('button','Save interval','text-button'),note=node('span',undefined,'field-note');save.type='button';save.onclick=async()=>{save.disabled=true;try{await api('/api/github/polling',{method:'PUT',body:JSON.stringify({host,intervalSeconds:Number(input.value)*60})});note.textContent='Saved';browser.invalidate();document.dispatchEvent(new Event('github-polling-changed'));view=null;lastLoad=0;}catch(error){note.textContent=error.message;}finally{save.disabled=false;}};
         row.append(label,save,note);rows.append(row);
       }
-      rows.append(node('p','Polling intervals are shared by session PR tracking and this GitHub view. Your PR list is queried only while the GitHub view is open.','field-note'));
+      rows.append(node('p','Polling intervals are shared by session PR tracking and this GitHub view. Your PR list refreshes while this app tab is visible, including draft-review warnings in the GitHub navigation item.','field-note'));
       for(const connection of data.connections){
         const row=node('div',undefined,'github-connection'),label=node('label',undefined,'workspace-check');
         const input=node('input');input.type='checkbox';input.checked=connection.enabled;

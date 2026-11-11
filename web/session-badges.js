@@ -8,7 +8,7 @@ function badgeUrl(value){
 export function sessionBadges(context,now=Date.now()) {
   const fresh=!context?.badgesUnavailable&&Number.isFinite(context?.badgesAt)&&now-context.badgesAt<=2*(context?.pollIntervalMs||FRESH_MS);
   return (Array.isArray(context?.badges)?context.badges:[]).filter(b=>typeof b.label==='string'&&b.label.trim()&&b.label.length<=64).slice(0,32).map(b=>({
-    ...b,url:badgeUrl(b.url),tone:fresh&&['neutral','success','warning','danger','info'].includes(b.tone)?b.tone:'neutral',
+    ...b,url:badgeUrl(b.url),tone:fresh&&['neutral','success','warning','danger','info','merged'].includes(b.tone)?b.tone:'neutral',
     title:fresh?(b.tooltip||b.label):`${b.tooltip||b.label} · Status unavailable or out of date`,
   }));
 }

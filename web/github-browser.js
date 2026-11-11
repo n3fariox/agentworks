@@ -1,8 +1,8 @@
 import {localState as localStorage} from './hosting.js';
-// Broad PR membership is opt-in: this view issues requests only while visible.
+// Share one PR request between the dashboard and navigation reminders while the app tab is visible.
 export function setupGithubBrowser({api,root,openSession,selectSession,openSettings}){
   const el=(tag,text,cls)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;};
-  let active=false,busy=false,generation=0,timer=null,data=null;
+  let active=false,busy=false,timer=null,data=null;
   const rows=new Map(),collapsed=new Set();
   try{for(const key of JSON.parse(localStorage.getItem('agentworks-github-collapsed')||'[]'))collapsed.add(key);}catch{}
   function group(key,title){const details=el('details',undefined,'github-browser-group');details.open=!collapsed.has(key);details.append(el('summary',title));details.ontoggle=()=>{if(!details.isConnected)return;if(details.open)collapsed.delete(key);else collapsed.add(key);try{localStorage.setItem('agentworks-github-collapsed',JSON.stringify([...collapsed]));}catch{}};return details;}
@@ -179,16 +179,25 @@ export function setupGithubBrowser({api,root,openSession,selectSession,openSetti
     for(const n of root.querySelectorAll('.github-browser-scroll'))n.scrollLeft=tableScroll.get(n.querySelector('table')?.getAttribute('aria-label'))||0;
     if(viewport&&scrollTop!==undefined)viewport.scrollTop=scrollTop;
   }
-  async function load(){
-    if(!active||document.hidden||busy)return;const version=generation;busy=true;
-    try{const next=await api('/api/github/pulls');if(version!==generation)return;data=next;render();}
-    catch(error){if(version===generation){root.replaceChildren(el('h1','GitHub'),el('p',error.message,'error-text'));}}
-    finally{busy=false;if(active&&!document.hidden){if(version!==generation){load();return;}const due=Math.min(...(data?.hosts||[]).map(h=>h.nextPollAt||Date.now()+300000),Date.now()+300000);timer=setTimeout(load,Math.max(1000,due-Date.now()));}}
+  function updateNavigation(unavailable=false){
+    const nav=document.getElementById('nav-github'),mark=document.getElementById('github-nav-warning');
+    const pending=(data?.hosts||[]).flatMap(host=>host.rows).filter(item=>draftState(item)==='pending');
+    const stale=unavailable||pending.some(item=>item.stale||item.pendingReviews?.stale);
+    const message=pending.length?`${pending.length} ${pending.length===1?'PR has':'PRs have'} unsubmitted reviews${stale?' · last seen; current status unavailable':''}`:'';
+    if(mark)mark.hidden=!pending.length;
+    if(nav){nav.title=message||'GitHub';nav.setAttribute('aria-label',message?`GitHub · ${message}`:'GitHub');}
   }
-  document.addEventListener('visibilitychange',()=>{clearTimeout(timer);if(active&&!document.hidden)load();});
-  document.addEventListener('github-polling-changed',()=>{clearTimeout(timer);if(active)load();});
+  async function load(){
+    if(document.hidden||busy)return;busy=true;clearTimeout(timer);let failed=false;
+    try{data=await api('/api/github/pulls');updateNavigation();if(active)render();}
+    catch(error){failed=true;updateNavigation(true);if(active)root.replaceChildren(el('h1','GitHub'),el('p',error.message,'error-text'));}
+    finally{busy=false;if(!document.hidden){const due=failed?Date.now()+Math.min(...(data?.hosts||[]).map(h=>h.intervalMs||300000),300000):Math.min(...(data?.hosts||[]).map(h=>h.nextPollAt||Date.now()+300000),Date.now()+300000);timer=setTimeout(load,Math.max(1000,due-Date.now()));}}
+  }
+  document.addEventListener('visibilitychange',()=>{clearTimeout(timer);if(!document.hidden)load();});
+  document.addEventListener('github-polling-changed',()=>{clearTimeout(timer);load();});
+  load();
   return {
-    setActive(value){if(active===value)return;active=value;generation++;clearTimeout(timer);if(value){render();load();}else if(chooser.open)closePivot();},
+    setActive(value){if(active===value)return;active=value;if(value)render();else if(chooser.open)closePivot();},
     context(target){const row=target.closest('.github-browser-row'),item=row&&rows.get(row.dataset.prKey);if(!item)return null;return {origin:row,focus:row.querySelector('button'),label:`Actions for PR #${item.pr.number}`,actions:[{label:'Open in session…',run:()=>pivot(item)},{label:'New session…',run:()=>openSession(item)},...(destination(item.pr.url)?[{label:'Open PR in new tab',run:()=>window.open(destination(item.pr.url),'_blank','noopener,noreferrer')}]:[])]};},
   };
 }

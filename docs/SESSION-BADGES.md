@@ -33,7 +33,7 @@ State is persisted per session and script and survives restart. A script can cle
 | --- | --- |
 | `id` | Stable, 1–64 ASCII letters/digits, `.`, `_`, or `-` |
 | `label` | Nonempty plain text, at most 32 characters, no control characters |
-| `tone` | `neutral`, `success`, `warning`, `danger`, or `info` |
+| `tone` | `neutral`, `success`, `warning`, `danger`, `info`, or `merged` (purple) |
 | `tooltip` | Plain text, at most 256 characters, no control characters |
 | `url` | Optional absolute credential-free HTTPS URL, at most 2048 bytes, no whitespace/control characters |
 
