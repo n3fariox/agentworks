@@ -477,7 +477,7 @@ function hostTitle(host){
   return [hostState(host),'ssh '+host.destination,w?.hostname,w?.platform,w?.providers?.length?'providers: '+w.providers.join(', '):'',w?.version?'v'+w.version:'',host.status==='offline'?host.detail:''].filter(Boolean).join(' · ');
 }
 function hostNote(host){
-  if(host.status==='offline')return (host.detail||'Offline.')+(host.managed&&/\bUpdate\b/.test(host.detail||'')?' Use ⋯ → Update worker.':'');
+  if(host.status==='offline')return (host.detail||'Offline.')+(host.managed&&/\bUpdate\b/.test(host.detail||'')?' Use ⋯ → Connection → Update worker.':'');
   if(host.status==='connecting')return host.detail?'Reconnecting. Last attempt: '+host.detail:'Connecting over SSH…';
   return host.roots?.length?'Connected. No sessions yet.':'Connected. Add working directories (⋯) to start sessions here.';
 }
@@ -506,12 +506,12 @@ function treeGroup(key,label,items,{host=null,projectId=null,level=0,archived=fa
   if(host?.kind==='remote'){
     // Link controls and session creation belong to the owning host.
     if(level===0){
-      const actions=[['roots','⋯','Working directories on '+label],['reconnect','↻','Reconnect '+label]];if(!items.length)actions.push(['remove','×','Remove host '+label]);
+      const actions=[['roots','⋯','Settings for '+label],['reconnect','↻','Reconnect '+label]];if(!items.length)actions.push(['remove','×','Remove host '+label]);
       if(host.status==='connected'&&host.roots?.length)actions.unshift(['create','＋','New session in '+label]);
       actions.forEach(([action,text,name],index)=>{
         const button=el('button','group-action'+(index?'':' add-session'),text);button.type='button';button.setAttribute('aria-label',name);
         button.onclick=event=>{event.preventDefault();event.stopPropagation();
-          if(action==='create')openCreate({projectId,hostId:host.id});else if(action==='roots')openHostRoots(host);else hostAction(host,action);};
+          if(action==='create')openCreate({projectId,hostId:host.id});else if(action==='roots')openHostSettings(host);else hostAction(host,action);};
         heading.append(button);
       });
     }else if(host.status==='connected'&&host.roots?.length){
@@ -1294,51 +1294,76 @@ function draw(){
 $('new-session').onclick=()=>openCreate();$('welcome-new').onclick=()=>openCreate();
 $('view-hosts').onclick=()=>setSidebarView('hosts');$('view-projects').onclick=()=>setSidebarView('projects');
 $('new-project').onclick=()=>sidebarView==='hosts'?openHostDialog():openProjectDialog();$('create-project-new').onclick=()=>openProjectDialog();
-let editingHostRoots=null;
-function openHostRoots(host){
-  editingHostRoots=host.id;$('host-roots-title').textContent='Settings for '+host.name;
+// Host settings follow the Settings dialog: categories, sections, one Save.
+let editingHost=null;
+const selectHostSettings=setupSettingsTabs($('host-settings-dialog'));
+function openHostSettings(host,category='directories'){
+  editingHost=host.id;
+  $('host-settings-title').textContent=host.name;
+  $('host-settings-description').textContent=`Remote host · ${host.destination}`;
+  $('host-roots').replaceChildren();for(const root of host.roots||[])addHostRoot(root);if(!host.roots?.length)addHostRoot();
+  renderHostTools(host);renderHostConnection(host);
+  $('host-settings-error').textContent='';
+  selectHostSettings(category);$('host-settings-dialog').showModal();
+  if(category==='directories')$('host-roots').querySelector('input')?.focus();
+}
+function addHostRoot(value=''){
+  const row=el('div','root-item'),input=el('input');input.value=value;input.placeholder='~/projects';input.setAttribute('aria-label','Working directory');input.autocomplete='off';input.spellcheck=false;
+  const remove=el('button','icon-button','×');remove.type='button';remove.setAttribute('aria-label','Remove working directory');remove.onclick=()=>{row.remove();if(!$('host-roots').children.length)addHostRoot();};
+  row.append(input,remove);$('host-roots').append(row);return input;
+}
+$('add-host-root').onclick=()=>addHostRoot().focus();
+function renderHostTools(host){
   const tools=$('host-tools');tools.replaceChildren();
   tools.append(el('p','field-note',`Tools and sign-ins belong to ${host.destination}. Sign in over SSH as that user, then retry the session.`));
   for(const provider of ['codex','claude','opencode']){
-    const path=host.worker?.tools?.[provider];
-    const row=el('div','field-note');row.append(el('strong','',labels[provider]+': '),el('code','',path||(host.worker?.tools?'Not found by the worker':host.worker?'Update this worker to discover CLI paths':'Connect this host to discover CLI paths')));
-    if(path){const command=provider==='codex'?' login':' auth login';row.append(el('div','',`On ${host.destination}, run: `),el('code','',`'${path.replaceAll("'", "'\\''")}'${command}`));}
-    tools.append(row);
+    const path=host.worker?.tools?.[provider],item=el('div','host-tool');
+    item.append(el('h3','',labels[provider]));
+    if(path){
+      item.append(el('code','',path));
+      const command=provider==='codex'?' login':' auth login',sign=el('div','field-note','Sign in on the host: ');
+      sign.append(el('code','',`'${path.replaceAll("'", "'\\''")}'${command}`));item.append(sign);
+    }else item.append(el('div','field-note',host.worker?.tools?'Not found by the worker.':host.worker?'Update this worker to discover CLI paths.':'Connect this host to discover CLI paths.'));
+    tools.append(item);
   }
-  tools.append(workerSection(host));
-  $('host-roots').value=(host.roots||[]).join('\n');$('host-roots-error').textContent='';$('host-roots-dialog').showModal();$('host-roots').focus();
 }
-// Installs this server's worker build on the host and reconnects it.
-function workerSection(host){
-  const section=el('div','field-note host-worker');
-  const w=host.worker;
-  section.append(el('strong','','Worker: '),el('span','',w?[w.version&&'v'+w.version,w.platform].filter(Boolean).join(' · ')||'Connected':host.status==='offline'?'Offline':'Not connected yet'));
-  if(!host.managed){section.append(el('div','','This host runs a worker you set up. Update its Agentworks binary on the host, then reconnect (↻).'));return section;}
-  const button=el('button','host-worker-update','Update worker');button.type='button';
-  const status=el('div','');status.setAttribute('role','status');
-  const error=el('div','error-text');error.style.whiteSpace='pre-wrap';error.style.maxHeight='160px';error.style.overflow='auto';
-  button.onclick=async()=>{
+function renderHostConnection(host){
+  const box=$('host-connection');box.replaceChildren();
+  const w=host.worker,facts=el('dl','host-facts');
+  const fact=(term,...value)=>{const dd=el('dd');dd.append(...value);facts.append(el('dt','',term),dd);};
+  const status=el('span','host-status');status.append(el('span','connection-dot '+(host.status||'connected')),host.status==='connected'?'Connected':host.status==='connecting'?'Connecting…':'Offline');
+  fact('Status',status);
+  if(host.status!=='connected'&&host.detail)fact('Last error',el('span','',host.detail));
+  fact('SSH destination',el('code','',host.destination));
+  fact('Worker',w?[w.version&&'v'+w.version,w.platform,w.hostname].filter(Boolean).join(' · ')||'Connected':'Not connected');
+  fact('Installed by',host.managed?'This server, with a dedicated SSH key':'You (existing worker)');
+  if(!host.managed)fact('Command',el('code','',host.command));
+  box.append(facts);
+  const actions=el('div','settings-actions'),result=el('span','host-action-result'),error=el('div','error-text host-action-error');result.setAttribute('role','status');
+  const action=(label,run)=>{const button=el('button','settings-action',label);button.type='button';button.onclick=()=>run(button);actions.append(button);return button;};
+  // Re-render from the refreshed host so status and worker details stay current.
+  const finish=async message=>{await refreshSessions();const fresh=hosts.find(h=>h.id===host.id);if(fresh&&editingHost===host.id){renderHostConnection(fresh);renderHostTools(fresh);}const live=$('host-connection').querySelector('.host-action-result');if(live)live.textContent=message;};
+  action('Reconnect',async button=>{button.disabled=true;error.textContent='';try{await api(`/api/hosts/${host.id}/reconnect`,{method:'POST'});await finish('Reconnecting…');}catch(e){error.textContent=e.message;button.disabled=false;}});
+  if(host.managed)action('Update worker',async button=>{
     if(!confirm(`Install this server's worker on ${host.name} and reconnect? Running turns on this host are interrupted; resume them afterwards.`))return;
-    button.disabled=true;error.textContent='';status.textContent='Copying and installing the worker…';
-    try{const updated=await api(`/api/hosts/${host.id}/update-worker`,{method:'POST'});status.textContent='Updated and connected'+(updated.worker?.version?' — v'+updated.worker.version:'')+'.';await refreshSessions();}
-    catch(e){status.textContent='';error.textContent=e.message;await refreshSessions();}
-    finally{button.disabled=false;}
-  };
-  const row=el('div','host-worker-actions');row.append(button,status);
-  section.append(row,error);
-  return section;
+    for(const b of actions.querySelectorAll('button'))b.disabled=true;error.textContent='';result.textContent='Copying and installing the worker…';
+    try{const updated=await api(`/api/hosts/${host.id}/update-worker`,{method:'POST'});await finish('Updated and connected'+(updated.worker?.version?' — v'+updated.worker.version:'')+'.');}
+    catch(e){result.textContent='';error.textContent=e.message;for(const b of actions.querySelectorAll('button'))b.disabled=false;}
+  });
+  actions.append(result);box.append(actions,error);
+  box.append(el('p','field-note',host.managed?'Update worker installs this server’s worker for the host’s OS and CPU beside the current one, then switches to it and reconnects. If the install fails, the host keeps its current worker. Reconnecting interrupts running turns on this host.':'This host runs a worker you set up. Update its Agentworks binary on the host, then reconnect.'));
 }
-$('dismiss-host-roots').onclick=()=>$('host-roots-dialog').close();
-$('host-roots-form').onsubmit=async event=>{
-  event.preventDefault();$('host-roots-error').textContent='';$('save-host-roots').disabled=true;
+$('dismiss-host-settings').onclick=()=>$('host-settings-dialog').close();
+$('host-settings-form').onsubmit=async event=>{
+  event.preventDefault();$('host-settings-error').textContent='';$('save-host-settings').disabled=true;
   try{
-    const roots=$('host-roots').value.split('\n').map(r=>r.trim()).filter(Boolean);
-    await api(`/api/hosts/${editingHostRoots}/roots`,{method:'PUT',body:JSON.stringify({roots})});
-    $('host-roots-dialog').close();await refreshSessions();
-  }catch(error){$('host-roots-error').textContent=error.message;}finally{$('save-host-roots').disabled=false;}
+    const roots=[...$('host-roots').querySelectorAll('input')].map(input=>input.value.trim()).filter(Boolean);
+    await api(`/api/hosts/${editingHost}/roots`,{method:'PUT',body:JSON.stringify({roots})});
+    $('host-settings-dialog').close();await refreshSessions();
+  }catch(error){selectHostSettings('directories');$('host-settings-error').textContent=error.message;}finally{$('save-host-settings').disabled=false;}
 };
 const enrollment=hostEnrollment({$,api,refresh:refreshSessions,directories:host=>{
-  $('host-dialog').close();openHostRoots(host);
+  $('host-dialog').close();openHostSettings(host);
 }});
 function openHostDialog(){enrollment.open();}
 $('dismiss-project').onclick=()=>{if(!savingProject)$('project-dialog').close();};
@@ -1537,36 +1562,40 @@ function addRoot(value=''){
   row.append(input,remove);$('settings-roots').append(row);return input;
 }
 // Keep category contents mounted so switching sections preserves unsaved edits.
-const settingsTabs=[...document.querySelectorAll('[data-settings-category]')];
-function selectSettingsCategory(category){
-  for(const tab of settingsTabs){
-    const selected=tab.dataset.settingsCategory===category;
-    tab.setAttribute('aria-selected',String(selected));tab.tabIndex=selected?0:-1;
-    $(tab.getAttribute('aria-controls')).hidden=!selected;
+// Shared by Settings and Host settings; returns the dialog's category selector.
+function setupSettingsTabs(dialog){
+  const tabs=[...dialog.querySelectorAll('[data-settings-category]')],narrow=matchMedia('(max-width:900px)');
+  function select(category){
+    for(const tab of tabs){
+      const selected=tab.dataset.settingsCategory===category;
+      tab.setAttribute('aria-selected',String(selected));tab.tabIndex=selected?0:-1;
+      $(tab.getAttribute('aria-controls')).hidden=!selected;
+    }
+    dialog.querySelector('.settings-content').scrollTop=0;
   }
-  $('settings-dialog').querySelector('.settings-content').scrollTop=0;
+  const orientation=()=>dialog.querySelector('[role="tablist"]').setAttribute('aria-orientation',narrow.matches?'horizontal':'vertical');
+  orientation();narrow.addEventListener('change',orientation);
+  for(const [index,tab] of tabs.entries()){
+    tab.onclick=()=>{select(tab.dataset.settingsCategory);tab.scrollIntoView({block:'nearest',inline:'nearest'});};
+    tab.onkeydown=event=>{
+      const previous=narrow.matches?'ArrowLeft':'ArrowUp',next=narrow.matches?'ArrowRight':'ArrowDown';
+      let target;
+      if(event.key===previous)target=(index+tabs.length-1)%tabs.length;
+      else if(event.key===next)target=(index+1)%tabs.length;
+      else if(event.key==='Home')target=0;
+      else if(event.key==='End')target=tabs.length-1;
+      else return;
+      event.preventDefault();tabs[target].click();tabs[target].focus();
+    };
+  }
+  // Native form validation must reveal invalid fields in another category before focusing them.
+  dialog.querySelector('form').addEventListener('invalid',event=>{
+    const panel=event.target.closest('[role="tabpanel"]'),tab=tabs.find(t=>t.getAttribute('aria-controls')===panel?.id);
+    if(tab)select(tab.dataset.settingsCategory);
+  },true);
+  return select;
 }
-const settingsNarrow=matchMedia('(max-width:900px)');
-const settingsOrientation=()=>$('settings-dialog').querySelector('[role="tablist"]').setAttribute('aria-orientation',settingsNarrow.matches?'horizontal':'vertical');
-settingsOrientation();settingsNarrow.addEventListener('change',settingsOrientation);
-for(const [index,tab] of settingsTabs.entries()){
-  tab.onclick=()=>{selectSettingsCategory(tab.dataset.settingsCategory);tab.scrollIntoView({block:'nearest',inline:'nearest'});};
-  tab.onkeydown=event=>{
-    const previous=settingsNarrow.matches?'ArrowLeft':'ArrowUp',next=settingsNarrow.matches?'ArrowRight':'ArrowDown';
-    let target;
-    if(event.key===previous)target=(index+settingsTabs.length-1)%settingsTabs.length;
-    else if(event.key===next)target=(index+1)%settingsTabs.length;
-    else if(event.key==='Home')target=0;
-    else if(event.key==='End')target=settingsTabs.length-1;
-    else return;
-    event.preventDefault();settingsTabs[target].click();settingsTabs[target].focus();
-  };
-}
-// Native form validation must reveal invalid fields in another category before focusing them.
-$('settings-form').addEventListener('invalid',event=>{
-  const panel=event.target.closest('[role="tabpanel"]');
-  if(panel)selectSettingsCategory(panel.id.replace('settings-panel-',''));
-},true);
+const selectSettingsCategory=setupSettingsTabs($('settings-dialog'));
 const gitSettings=setupGitSettings({$,api,picker:directoryPicker,getHosts:()=>hosts,getLocations:()=>locations,getActive:()=>active});
 $('project-git-settings').onclick=async()=>{const cwd=$('project-directory').value.trim(),host=$('project-directory-host').value||'local';await openSettings();selectSettingsCategory('git');await gitSettings.repository(cwd,host);};
 $('add-root').onclick=()=>addRoot().focus();

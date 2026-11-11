@@ -100,13 +100,28 @@ test('host working directories enable remote sessions in the new-session dialog'
   const errors=[];page.on('pageerror',e=>errors.push(e.message));const s=await fixture(page);
   await page.locator('#view-hosts').click();
   const box=page.locator('[data-group="host:r1"]');
-  await box.getByRole('button',{name:'Working directories on build-box'}).click();
+  await box.getByRole('button',{name:'Settings for build-box'}).click();
+  const dialog=page.locator('#host-settings-dialog');
+  await expect(page.locator('#host-settings-title')).toHaveText('build-box');
+  await expect(dialog.getByRole('tab',{name:'Directories'})).toHaveAttribute('aria-selected','true');
+  await dialog.getByRole('tab',{name:'Harness tools'}).click();
   await expect(page.locator('#host-tools')).toContainText('/remote/bin/codex');
   await expect(page.locator('#host-tools')).toContainText('codex');
   await expect(page.locator('#host-tools')).toContainText('dev@build-box');
-  await page.locator('#host-roots').fill('~/projects\n\n/srv/app');
-  await page.locator('#save-host-roots').click();
-  await expect(page.locator('#host-roots-dialog')).toBeHidden();
+  await dialog.getByRole('tab',{name:'Connection'}).click();
+  await expect(page.locator('#host-connection')).toContainText('Connected');
+  await expect(page.locator('#host-connection').getByRole('button',{name:'Reconnect'})).toBeVisible();
+  // Edits survive switching categories, as in Settings.
+  await dialog.getByRole('tab',{name:'Directories'}).click();
+  await page.locator('#host-roots input').first().fill('~/projects');
+  await page.locator('#add-host-root').click();
+  await page.locator('#add-host-root').click();
+  await page.locator('#host-roots input').last().fill('/srv/app');
+  await dialog.getByRole('tab',{name:'Connection'}).click();await dialog.getByRole('tab',{name:'Directories'}).click();
+  await expect(page.locator('#host-roots input').last()).toHaveValue('/srv/app');
+  expect(await dialog.evaluate(e=>e.scrollWidth<=e.clientWidth)).toBe(true);
+  await page.locator('#save-host-settings').click();
+  await expect(dialog).toBeHidden();
   expect(s.requests.at(-1)).toEqual({path:'/api/hosts/r1/roots',method:'PUT',body:{roots:['~/projects','/srv/app']}});
   await expect(box).toContainText('No sessions yet');
   // Offline hosts cannot take new sessions; connected ones with directories can.
@@ -183,8 +198,9 @@ for(const mobile of [false,true])test(`guided enrollment terminal ${mobile?'mobi
   await expect(page.locator('#host-stage')).toContainText('Connected');
   await expect(page.locator('#host-terminal')).not.toContainText('test-password');
   expect(await page.locator('#host-dialog').evaluate(e=>e.scrollWidth<=e.clientWidth)).toBe(true);
-  await page.locator('#host-done').click();await expect(page.locator('#host-roots-dialog')).toBeVisible();
-  await expect(page.locator('#host-roots-title')).toHaveText('Settings for New box');
+  await page.locator('#host-done').click();await expect(page.locator('#host-settings-dialog')).toBeVisible();
+  await expect(page.locator('#host-settings-title')).toHaveText('New box');
+  await expect(page.locator('#host-settings-panel-directories')).toBeVisible();
 });
 
 test('enrollment error allows retry and close cancels the terminal',async({page})=>{

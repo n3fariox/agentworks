@@ -224,71 +224,71 @@ body[data-code-wrap=scroll] .tool-card pre,body[data-code-wrap=scroll] .approval
 .session-item,.tree-heading[data-project-id]{-webkit-touch-callout:none;user-select:none}
 
 /* Settings use the available width, with persistent actions and one scroll area. */
-#settings-dialog{width:1080px;max-width:calc(100vw - 32px);max-height:90dvh;padding:0;overflow:hidden}
-#settings-form{display:flex;flex-direction:column;height:min(760px,90dvh);max-height:90dvh;min-height:0}
-#settings-dialog .settings-header{padding:22px 26px 18px;border-bottom:1px solid var(--border);flex:none}
-#settings-title{margin:0;font-size:24px}
-#settings-description{margin:8px 0 0;font-size:13px;line-height:1.6}
-#settings-dialog .settings-body{display:grid;grid-template-columns:220px minmax(0,1fr);flex:1;min-height:0}
-#settings-dialog .settings-categories{display:flex;flex-direction:column;gap:6px;padding:20px 14px;background:#15171b;border-right:1px solid var(--border);overflow-y:auto}
-#settings-dialog .settings-categories button{flex:none;min-height:44px;padding:11px 14px;border:1px solid transparent;border-radius:7px;background:transparent;text-align:left;color:#aeb4bf;font-size:13px;line-height:1.5}
-#settings-dialog .settings-categories button:hover{background:#24262d;color:var(--text)}
-#settings-dialog .settings-categories button[aria-selected=true]{background:#302b42;border-color:#49405f;color:#ddd4ff}
-#settings-dialog .settings-content{padding:24px 26px;overflow-y:auto;overscroll-behavior:contain;min-width:0;min-height:0;scroll-padding:20px;scrollbar-gutter:stable}
-#settings-dialog [role=tabpanel]{min-width:0;outline-offset:4px}
-#settings-dialog .settings-section,#settings-dialog #service-controls{min-width:0;margin:0;padding:16px 18px 18px;border:1px solid #373b44;border-radius:10px;background:var(--panel)}
-#settings-dialog legend{padding:0 7px;color:var(--text);font-size:15px;font-weight:600;letter-spacing:0}
-#settings-dialog .field-note{font-size:12px;line-height:1.65}
-#settings-dialog .settings-section>p:first-of-type{margin:0 0 14px}
-#settings-dialog label{font-size:13px;line-height:1.5;margin:16px 0 7px}
-#settings-dialog input,#settings-dialog select{font-size:13px;min-height:42px}
-#settings-dialog .project-field-heading{gap:12px;flex-wrap:wrap}
-#settings-dialog .project-field-heading label{margin:0}
-#settings-dialog .display-field{grid-template-columns:minmax(0,1fr);gap:0;margin:0 0 12px}
-#settings-dialog .display-field label{margin:0 0 7px}
-#settings-dialog .workspace-check{display:flex;align-items:center;gap:10px;margin:14px 0;font-size:13px}
-#settings-dialog input[type=checkbox]{width:18px;height:18px;min-height:18px;flex:none;margin:0;accent-color:var(--accent)}
+:is(#settings-dialog,#host-settings-dialog){width:1080px;max-width:calc(100vw - 32px);max-height:90dvh;padding:0;overflow:hidden}
+:is(#settings-form,#host-settings-form){display:flex;flex-direction:column;height:min(760px,90dvh);max-height:90dvh;min-height:0}
+:is(#settings-dialog,#host-settings-dialog) .settings-header{padding:22px 26px 18px;border-bottom:1px solid var(--border);flex:none}
+:is(#settings-title,#host-settings-title){margin:0;font-size:24px}
+:is(#settings-description,#host-settings-description){margin:8px 0 0;font-size:13px;line-height:1.6}
+:is(#settings-dialog,#host-settings-dialog) .settings-body{display:grid;grid-template-columns:220px minmax(0,1fr);flex:1;min-height:0}
+:is(#settings-dialog,#host-settings-dialog) .settings-categories{display:flex;flex-direction:column;gap:6px;padding:20px 14px;background:#15171b;border-right:1px solid var(--border);overflow-y:auto}
+:is(#settings-dialog,#host-settings-dialog) .settings-categories button{flex:none;min-height:44px;padding:11px 14px;border:1px solid transparent;border-radius:7px;background:transparent;text-align:left;color:#aeb4bf;font-size:13px;line-height:1.5}
+:is(#settings-dialog,#host-settings-dialog) .settings-categories button:hover{background:#24262d;color:var(--text)}
+:is(#settings-dialog,#host-settings-dialog) .settings-categories button[aria-selected=true]{background:#302b42;border-color:#49405f;color:#ddd4ff}
+:is(#settings-dialog,#host-settings-dialog) .settings-content{padding:24px 26px;overflow-y:auto;overscroll-behavior:contain;min-width:0;min-height:0;scroll-padding:20px;scrollbar-gutter:stable}
+:is(#settings-dialog,#host-settings-dialog) [role=tabpanel]{min-width:0;outline-offset:4px}
+:is(#settings-dialog,#host-settings-dialog) .settings-section,:is(#settings-dialog,#host-settings-dialog) #service-controls{min-width:0;margin:0;padding:16px 18px 18px;border:1px solid #373b44;border-radius:10px;background:var(--panel)}
+:is(#settings-dialog,#host-settings-dialog) legend{padding:0 7px;color:var(--text);font-size:15px;font-weight:600;letter-spacing:0}
+:is(#settings-dialog,#host-settings-dialog) .field-note{font-size:12px;line-height:1.65}
+:is(#settings-dialog,#host-settings-dialog) .settings-section>p:first-of-type{margin:0 0 14px}
+:is(#settings-dialog,#host-settings-dialog) label{font-size:13px;line-height:1.5;margin:16px 0 7px}
+:is(#settings-dialog,#host-settings-dialog) input,:is(#settings-dialog,#host-settings-dialog) select{font-size:13px;min-height:42px}
+:is(#settings-dialog,#host-settings-dialog) .project-field-heading{gap:12px;flex-wrap:wrap}
+:is(#settings-dialog,#host-settings-dialog) .project-field-heading label{margin:0}
+:is(#settings-dialog,#host-settings-dialog) .display-field{grid-template-columns:minmax(0,1fr);gap:0;margin:0 0 12px}
+:is(#settings-dialog,#host-settings-dialog) .display-field label{margin:0 0 7px}
+:is(#settings-dialog,#host-settings-dialog) .workspace-check{display:flex;align-items:center;gap:10px;margin:14px 0;font-size:13px}
+:is(#settings-dialog,#host-settings-dialog) input[type=checkbox]{width:18px;height:18px;min-height:18px;flex:none;margin:0;accent-color:var(--accent)}
 #default-model-fields{display:grid;gap:12px;margin-bottom:24px}
-#settings-dialog .harness-heading{display:flex;align-items:center;gap:12px}
-#settings-dialog .harness-heading h3{margin:0;font-size:15px;font-weight:600;flex:1;min-width:0}
-#settings-dialog .harness-state{font-size:12px;color:var(--muted)}
-#settings-dialog .harness-body{margin-top:2px}
-#settings-dialog .harness-settings.is-off{background:transparent;border-style:dashed}
-#settings-dialog .harness-settings.is-off h3{color:var(--muted)}
+:is(#settings-dialog,#host-settings-dialog) .harness-heading{display:flex;align-items:center;gap:12px}
+:is(#settings-dialog,#host-settings-dialog) .harness-heading h3{margin:0;font-size:15px;font-weight:600;flex:1;min-width:0}
+:is(#settings-dialog,#host-settings-dialog) .harness-state{font-size:12px;color:var(--muted)}
+:is(#settings-dialog,#host-settings-dialog) .harness-body{margin-top:2px}
+:is(#settings-dialog,#host-settings-dialog) .harness-settings.is-off{background:transparent;border-style:dashed}
+:is(#settings-dialog,#host-settings-dialog) .harness-settings.is-off h3{color:var(--muted)}
 .harness-power{position:relative;flex:none;width:52px;height:30px;padding:0;border-radius:15px;border:1px solid #3a3d45;background:#111417;cursor:pointer;transition:background .15s,border-color .15s}
 .harness-power-knob{position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;line-height:1;background:#2a2d34;color:var(--muted);transition:transform .15s,background .15s,color .15s}
 .harness-power[aria-checked=true]{background:#302b42;border-color:#6d5f8c}
 .harness-power[aria-checked=true] .harness-power-knob{transform:translateX(22px);background:var(--accent);color:#211b36}
 .harness-power:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
-#settings-dialog #timeout-controls{display:block}
-#settings-dialog [data-timeout-scope]{min-width:0}
-#settings-dialog [data-timeout-scope] h3{font-size:14px;font-weight:500;margin:0 0 12px}
-#settings-dialog [data-timeout-scope=session]{border-left:1px solid var(--border);padding-left:22px}
-#settings-dialog #service-controls{grid-column:1/-1}
-#settings-dialog #service-controls label{margin:6px 0 0}
-#settings-dialog #service-controls button{align-self:flex-start;padding:10px 14px;border-radius:7px;background:#252830}
-#settings-dialog .settings-footer{padding:16px 26px 20px;border-top:1px solid var(--border);background:#1a1c20;flex:none}
-#settings-dialog .dialog-footer{margin:0;gap:20px}
-#settings-dialog .dialog-footer>span{font-size:12px;line-height:1.5;max-width:62%}
-#settings-dialog .dialog-footer button{flex:none;min-height:44px}
-#settings-dialog .settings-footer .error-text{margin:0 0 12px;max-height:80px;overflow:auto}
+:is(#settings-dialog,#host-settings-dialog) #timeout-controls{display:block}
+:is(#settings-dialog,#host-settings-dialog) [data-timeout-scope]{min-width:0}
+:is(#settings-dialog,#host-settings-dialog) [data-timeout-scope] h3{font-size:14px;font-weight:500;margin:0 0 12px}
+:is(#settings-dialog,#host-settings-dialog) [data-timeout-scope=session]{border-left:1px solid var(--border);padding-left:22px}
+:is(#settings-dialog,#host-settings-dialog) #service-controls{grid-column:1/-1}
+:is(#settings-dialog,#host-settings-dialog) #service-controls label{margin:6px 0 0}
+:is(#settings-dialog,#host-settings-dialog) #service-controls button{align-self:flex-start;padding:10px 14px;border-radius:7px;background:#252830}
+:is(#settings-dialog,#host-settings-dialog) .settings-footer{padding:16px 26px 20px;border-top:1px solid var(--border);background:#1a1c20;flex:none}
+:is(#settings-dialog,#host-settings-dialog) .dialog-footer{margin:0;gap:20px}
+:is(#settings-dialog,#host-settings-dialog) .dialog-footer>span{font-size:12px;line-height:1.5;max-width:62%}
+:is(#settings-dialog,#host-settings-dialog) .dialog-footer button{flex:none;min-height:44px}
+:is(#settings-dialog,#host-settings-dialog) .settings-footer .error-text{margin:0 0 12px;max-height:80px;overflow:auto}
 @media(max-width:900px){
-  #settings-dialog{max-width:calc(100vw - 20px);max-height:94dvh}
-  #settings-form{height:min(760px,94dvh);max-height:94dvh}
-  #settings-dialog .settings-body{display:flex;flex-direction:column}
-  #settings-dialog .settings-categories{flex-direction:row;flex:none;overflow-x:auto;border-right:0;border-bottom:1px solid var(--border);padding:10px 14px;gap:6px}
-  #settings-dialog .settings-categories button{white-space:nowrap}
-  #settings-dialog .settings-content{flex:1}
-  #settings-dialog .settings-header{padding:16px 18px 14px}
-  #settings-dialog .settings-content{padding:18px}
-  #settings-dialog .settings-section,#settings-dialog #service-controls{padding:14px}
-  #settings-dialog #timeout-controls{grid-template-columns:minmax(0,1fr)}
-  #settings-dialog [data-timeout-scope=session]{border-left:0;border-top:1px solid var(--border);padding:18px 0 0}
-  #settings-dialog input,#settings-dialog select{font-size:16px;min-height:44px}
-  #settings-dialog .icon-button{min-width:44px;min-height:44px}
-  #settings-dialog .settings-footer{padding:12px 18px}
-  #settings-dialog .dialog-footer{gap:12px}
-  #settings-dialog .dialog-footer>span{font-size:11px;max-width:none}
+  :is(#settings-dialog,#host-settings-dialog){max-width:calc(100vw - 20px);max-height:94dvh}
+  :is(#settings-form,#host-settings-form){height:min(760px,94dvh);max-height:94dvh}
+  :is(#settings-dialog,#host-settings-dialog) .settings-body{display:flex;flex-direction:column}
+  :is(#settings-dialog,#host-settings-dialog) .settings-categories{flex-direction:row;flex:none;overflow-x:auto;border-right:0;border-bottom:1px solid var(--border);padding:10px 14px;gap:6px}
+  :is(#settings-dialog,#host-settings-dialog) .settings-categories button{white-space:nowrap}
+  :is(#settings-dialog,#host-settings-dialog) .settings-content{flex:1}
+  :is(#settings-dialog,#host-settings-dialog) .settings-header{padding:16px 18px 14px}
+  :is(#settings-dialog,#host-settings-dialog) .settings-content{padding:18px}
+  :is(#settings-dialog,#host-settings-dialog) .settings-section,:is(#settings-dialog,#host-settings-dialog) #service-controls{padding:14px}
+  :is(#settings-dialog,#host-settings-dialog) #timeout-controls{grid-template-columns:minmax(0,1fr)}
+  :is(#settings-dialog,#host-settings-dialog) [data-timeout-scope=session]{border-left:0;border-top:1px solid var(--border);padding:18px 0 0}
+  :is(#settings-dialog,#host-settings-dialog) input,:is(#settings-dialog,#host-settings-dialog) select{font-size:16px;min-height:44px}
+  :is(#settings-dialog,#host-settings-dialog) .icon-button{min-width:44px;min-height:44px}
+  :is(#settings-dialog,#host-settings-dialog) .settings-footer{padding:12px 18px}
+  :is(#settings-dialog,#host-settings-dialog) .dialog-footer{gap:12px}
+  :is(#settings-dialog,#host-settings-dialog) .dialog-footer>span{font-size:11px;max-width:none}
 }
 
 /* Scoped session and inbox settings follow the global Settings form. */
@@ -407,7 +407,7 @@ dialog.image-viewer{width:96vw;max-width:96vw;height:92dvh;max-height:92dvh;padd
 .mermaid-status{padding:8px 14px;color:var(--muted);font-size:12px}
 .mermaid-error .mermaid-status{color:#ed9b9b}
 @media(hover:none),(pointer:coarse){.mermaid-toggle{opacity:1;min-height:36px}.markdown .mermaid-block{padding-top:44px}}
-#host-roots{width:100%;box-sizing:border-box;resize:vertical;background:#111417;color:var(--text);border:1px solid #3a3d45;border-radius:7px;padding:10px 12px;font:12px ui-monospace,monospace}
+
 
 #host-dialog:has(#host-terminal-wrap:not([hidden])){width:min(850px,calc(100vw - 24px));max-width:850px}
 #host-terminal{padding:10px;background:#101218;border-radius:8px;overflow:hidden;min-width:0}
@@ -477,7 +477,7 @@ dialog.image-viewer{width:96vw;max-width:96vw;height:92dvh;max-height:92dvh;padd
 
 .model-provider-card{display:flex;justify-content:space-between;gap:16px;padding:14px 0;border-bottom:1px solid var(--border);overflow-wrap:anywhere}.model-provider-card p{margin:5px 0}.model-provider-actions{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin-top:15px}#model-provider-editor{margin-top:20px;padding-top:15px;border-top:1px solid var(--border)}#model-provider-message{white-space:pre-wrap;margin-top:14px}
 
-.model-provider-availability{margin:18px 0;padding:10px 12px;border:1px solid var(--border);border-radius:8px}#model-provider-hosts{display:flex;flex-wrap:wrap;gap:8px 20px}#settings-dialog .model-provider-host-choice{display:flex;align-items:center;gap:9px;margin:0;min-height:42px}#settings-dialog .model-provider-host-choice input{width:17px;min-height:17px;height:17px;margin:0}
+.model-provider-availability{margin:18px 0;padding:10px 12px;border:1px solid var(--border);border-radius:8px}#model-provider-hosts{display:flex;flex-wrap:wrap;gap:8px 20px}:is(#settings-dialog,#host-settings-dialog) .model-provider-host-choice{display:flex;align-items:center;gap:9px;margin:0;min-height:42px}:is(#settings-dialog,#host-settings-dialog) .model-provider-host-choice input{width:17px;min-height:17px;height:17px;margin:0}
 .directory-field select{flex:0 1 auto;max-width:130px}
 .directory-crumbs{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center;margin:4px 0 8px}
 .directory-crumbs .text-button{overflow-wrap:anywhere;text-align:left}
@@ -574,4 +574,23 @@ body[data-code-theme=github-light] .source-line::before{color:#6e7781}
 .compaction-card{margin:4px 0 22px;font-size:11px;color:var(--muted)}.compaction-card>summary{list-style:none;display:flex;align-items:center;gap:12px;cursor:default}.compaction-card>summary::-webkit-details-marker{display:none}.compaction-card>summary::before,.compaction-card>summary::after{content:'';flex:1;border-top:1px dashed #3a3d45}.compaction-card.has-summary>summary{cursor:pointer}.compaction-card.has-summary>summary:hover{color:var(--text)}.compaction-card[data-status=in_progress]>summary{color:var(--accent);animation:pulse 1.6s infinite}.compaction-card[data-status=failed]>summary{color:#e8a1a5}.compaction-summary{white-space:pre-wrap;font-size:12px;line-height:1.7;color:#aab0ba;background:#171a1e;border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-top:10px;max-height:360px;overflow:auto;overflow-wrap:anywhere}
 /* Project tickets share the standard dialog and Markdown presentation. */
 #tasks-dialog{width:720px;max-height:90dvh;overflow:auto}#tasks-list{display:flex;flex-direction:column;gap:4px;max-height:220px;overflow:auto;border-bottom:1px solid var(--border);padding:12px 0}#tasks-list button{text-align:left;white-space:normal;overflow-wrap:anywhere;font-size:12px;padding:9px}#task-body{width:100%;box-sizing:border-box;resize:vertical;background:#111417;color:var(--text);border:1px solid #3a3d45;border-radius:7px;padding:11px 12px;line-height:1.6}#task-meta{overflow-wrap:anywhere}#task-preview{padding:12px 0;overflow-wrap:anywhere}#task-delete{color:#ed9b9b}#tasks-dialog details{margin-top:12px}#project-dialog{max-height:90dvh;overflow:auto}
-.host-worker-actions{display:flex;align-items:center;gap:10px;margin-top:8px}.host-worker-update{background:#222429;border:1px solid #3a3d45;border-radius:7px;color:var(--text);padding:7px 12px;font-size:12px;flex-shrink:0}.host-worker-update:hover:not(:disabled){background:#2a2c33;border-color:#555966}.host-worker-update:disabled{opacity:.55;cursor:default}
+/* Host settings share the Settings layout at a size for three categories. */
+#host-settings-dialog{width:880px}
+#host-settings-form{height:min(640px,90dvh)}
+#host-settings-dialog .settings-section+.settings-section{margin-top:18px}
+#host-settings-dialog code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#d1c7ed;overflow-wrap:anywhere}
+.settings-action{align-self:flex-start;padding:10px 14px;border:1px solid #3a3d45;border-radius:7px;background:#252830;color:var(--text);font-size:13px}
+.settings-action:hover:not(:disabled){background:#2d3039;border-color:#555966}
+.settings-action:disabled{opacity:.55;cursor:default}
+.settings-actions{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-top:18px}
+.host-facts{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:10px 18px;margin:0;font-size:13px;line-height:1.5}
+.host-facts dt{color:var(--muted)}
+.host-facts dd{margin:0;min-width:0;overflow-wrap:anywhere}
+.host-status{display:inline-flex;align-items:center;gap:8px}
+.host-tool{padding:14px 0;border-top:1px solid var(--border)}
+.host-tool:first-of-type{border-top:0;padding-top:4px}
+.host-tool h3{margin:0 0 6px;font-size:14px;font-weight:600}
+.host-tool .field-note{margin-top:6px}
+.host-action-result{font-size:12px;color:var(--muted)}
+.host-action-error{white-space:pre-wrap;max-height:160px;overflow:auto}
+@media(max-width:650px){.host-facts{grid-template-columns:minmax(0,1fr);gap:2px}.host-facts dd{margin-bottom:10px}}
