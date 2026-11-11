@@ -583,12 +583,24 @@ fn discovered_tools(env: &HashMap<String, String>) -> Value {
         ("codex", "CODEX_PATH"),
         ("claude", "CLAUDE_CODE_EXECUTABLE"),
         ("opencode", "AGENTWORKS_OPENCODE_PATH"),
+        ("antigravity", "AGENTWORKS_ANTIGRAVITY_PATH"),
     ] {
         let configured = env
             .get(override_var)
             .cloned()
             .or_else(|| std::env::var(override_var).ok());
-        let path = resolve(Path::new(configured.as_deref().unwrap_or(provider)), env);
+        let path = resolve(
+            Path::new(
+                configured
+                    .as_deref()
+                    .unwrap_or(if provider == "antigravity" {
+                        "agy"
+                    } else {
+                        provider
+                    }),
+            ),
+            env,
+        );
         tools.insert(provider.into(), json!(path));
     }
     Value::Object(tools)

@@ -98,3 +98,13 @@ Session permission modes advertised by the native harness appear beside the mode
 ## Goose · embedded
 
 Goose is linked into the Agentworks binary and runs through its `goose-acp` entry point. Use **Settings → Model providers** to add an OpenAI-compatible connection once and choose its **Available on hosts**, then select it when creating a Goose session. Host environment configuration remains available. See [embedded Goose setup](RUST-GOOSE-ACP.md) for OpenAI-compatible endpoints, storage, remote execution, and verification.
+
+## Antigravity (official ACP)
+
+Install the official Antigravity CLI on each execution host and sign in once with `agy`. Select **Antigravity · official ACP** when creating a session. Agentworks launches `agy acp`, reuses the native credential store, and saves the ACP session ID for resume. No conversation ID scraping is needed. Set `AGENTWORKS_ANTIGRAVITY_PATH` to select another CLI executable; remote hosts need an updated Agentworks worker.
+
+This harness uses your cached Antigravity account even when Agentworks is configured for API-key authentication for Claude/Codex. Inherited `GEMINI_API_KEY` and `GOOGLE_API_KEY` values are cleared for this launch. Models and thinking levels come from the ACP server. Sign-in UI, subscription quota display, and custom Agentworks roles are not wired for this harness yet.
+
+Google's current [ACP setup guide](https://antigravity.google/docs/ide/extensions/acp/) recommends `agy acp`. The [ACP registry](https://github.com/agentclientprotocol/registry/blob/main/antigravity-acp/agent.json) also distributes a standalone server; this integration uses the installed CLI rather than downloading a separate server.
+
+Opt-in integration check: `AGENTWORKS_TEST_BINARY=/path/to/agentworks node scripts/antigravity-acp-smoke.mjs`. Add `--prompt` to verify real Gemini replies and preserved conversation context after suspend/resume; this consumes account usage. The check uses isolated Agentworks state and port 4461.

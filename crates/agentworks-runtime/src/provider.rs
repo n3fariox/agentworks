@@ -48,6 +48,16 @@ pub fn opencode_path() -> Option<PathBuf> {
             .find(|p| p.is_file())
     })
 }
+pub fn antigravity_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("AGENTWORKS_ANTIGRAVITY_PATH") {
+        return Some(PathBuf::from(path)).filter(|p| p.is_file());
+    }
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|p| p.join("agy"))
+            .find(|p| p.is_file())
+    })
+}
 pub fn installed(provider: &str) -> bool {
     if matches!(cli_provider(provider), "codex" | "claude") {
         if acp_override().is_some() {
@@ -67,6 +77,7 @@ pub fn installed(provider: &str) -> bool {
     match provider {
         "demo" | "goose" => true,
         "opencode" => opencode_path().is_some(),
+        "antigravity" => antigravity_path().is_some(),
         _ => false,
     }
 }
@@ -88,6 +99,7 @@ pub const SERVICE_ENVIRONMENT: &[&str] = &[
     "AGENTWORKS_RELEASE_DIR",
     "AGENTWORKS_RESTART_REQUEST",
     "AGENTWORKS_OPENCODE_PATH",
+    "AGENTWORKS_ANTIGRAVITY_PATH",
     "AGENTWORKS_MCP_ENDPOINT",
     "AGENTWORKS_MCP_ENDPOINT_FILE",
     "AGENTWORKS_MCP_TOKEN",
@@ -139,6 +151,11 @@ pub fn agent_config(provider: &str, api_key_mode: bool, host_profile: bool) -> A
             config = config.env("GOOSE_PATH_ROOT", root.to_string_lossy());
         }
         config
+    } else if provider == "antigravity" {
+        AcpAgentConfig::new(antigravity_path().unwrap_or_else(|| "agy".into()))
+            .arg("acp")
+            .env("GEMINI_API_KEY", "")
+            .env("GOOGLE_API_KEY", "")
     } else if provider == "opencode" {
         let home = runtime_root().join(".agentworks/opencode");
         let mut config =
@@ -205,7 +222,7 @@ pub fn prepare(provider: &str) -> std::io::Result<()> {
         for dir in ["data", "cache", "state", "config"] {
             std::fs::create_dir_all(runtime_root().join(".agentworks/opencode").join(dir))?;
         }
-    } else if !matches!(provider, "demo" | "goose") && use_api_key() {
+    } else if !matches!(provider, "demo" | "goose" | "antigravity") && use_api_key() {
         std::fs::create_dir_all(
             runtime_root()
                 .join(".agentworks")
@@ -251,7 +268,13 @@ pub fn parse_model_config(config: &Value, free_only: bool) -> Option<Value> {
 // Never surface configured credentials through an adapter diagnostic.
 pub fn safe_error(message: &str) -> String {
     let mut safe = message.to_string();
-    for key in ["OPENAI_API_KEY", "CODEX_API_KEY", "ANTHROPIC_API_KEY"] {
+    for key in [
+        "OPENAI_API_KEY",
+        "CODEX_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+    ] {
         if let Ok(value) = std::env::var(key) {
             if !value.is_empty() {
                 safe = safe.replace(&value, "[redacted]");
@@ -265,8 +288,43 @@ pub fn safe_error(message: &str) -> String {
 mod tests {
     use super::*;
     #[test]
+    fn antigravity_uses_native_acp_and_cached_sign_in() {
+        for api_key_mode in [false, true] {
+            let config = agent_config("antigravity", api_key_mode, false);
+            assert_eq!(config.arguments(), &["acp"]);
+            assert_eq!(
+                config
+                    .environment()
+                    .get("GEMINI_API_KEY")
+                    .map(String::as_str),
+                Some("")
+            );
+            assert_eq!(
+                config
+                    .environment()
+                    .get("GOOGLE_API_KEY")
+                    .map(String::as_str),
+                Some("")
+            );
+            assert!(!config.environment().contains_key("HOME"));
+            assert!(!config.environment().contains_key("NO_BROWSER"));
+            assert!(
+                config
+                    .removed_environment()
+                    .contains("AGENTWORKS_ANTIGRAVITY_PATH")
+            );
+        }
+    }
+    #[test]
     fn every_harness_withholds_service_configuration() {
-        for provider in ["demo", "goose", "opencode", "claude", "codex-rust"] {
+        for provider in [
+            "demo",
+            "goose",
+            "opencode",
+            "antigravity",
+            "claude",
+            "codex-rust",
+        ] {
             let config = agent_config(provider, false, false);
             for name in [
                 "AGENTWORKS_DB_PATH",

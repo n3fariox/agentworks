@@ -36,10 +36,10 @@ import {setupDirectoryPicker,setupProjectDirectory} from './directory-picker.js'
 const $ = id => document.getElementById(id);
 // randomUUID is unavailable on plain HTTP remote origins; getRandomValues is supported.
 const uuid = () => globalThis.crypto.randomUUID?.() ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
-const labels = {goose:'Goose · embedded',demo:'Demo agent',claude:'Claude','claude-rust':'Claude',codex:'Codex','codex-rust':'Codex',opencode:'OpenCode'};
+const labels = {goose:'Goose · embedded',demo:'Demo agent',claude:'Claude','claude-rust':'Claude',codex:'Codex','codex-rust':'Codex',opencode:'OpenCode',antigravity:'Antigravity'};
 // Sessions saved under the retired npm adapter IDs now run the Rust bridges.
 const currentProvider=id=>({claude:'claude-rust',codex:'codex-rust'})[id]||id;
-const icons = {goose:'◉',demo:'◈',claude:'✳','claude-rust':'✳',codex:'⌘','codex-rust':'⌘',opencode:'▣'};
+const icons = {goose:'◉',demo:'◈',claude:'✳','claude-rust':'✳',codex:'⌘','codex-rust':'⌘',opencode:'▣',antigravity:'△'};
 function readStorage(storage,key,fallback){try{return JSON.parse(storage.getItem(key))??fallback;}catch{return fallback;}}
 let workspace;
 let projects=[],locations=[],hosts=[{id:'local',name:'Local',status:'connected'}];
@@ -119,7 +119,7 @@ function providerNote() {
     $('create-submit').disabled=!available||!remote.roots?.length||(p.id==='goose'&&$('create-model-provider').disabled)||creating||worktrees.blocked()||!!(forkSource?.role&&!p.roles);
     return;
   }
-  $('provider-note').textContent=p.id==='demo'?'Local test agent. No model calls, API key, or file changes.':p.id==='goose'?'Uses the model provider configured for Goose on this host.':p.id==='opencode'?(p.installed?'Native ACP. Choose an advertised free model. Availability and limits may change.':'Install OpenCode on this host or set AGENTWORKS_OPENCODE_PATH.'):!p.installed?(p.id==='codex-rust'?'Install native Codex on this host or set CODEX_PATH.':'Install native Claude Code on this host or set CLAUDE_CODE_EXECUTABLE.'):p.authMode==='existing'?'Uses the existing agent sign-in on this host. If it has expired, sign in with the CLI and try again.':!p.keyPresent?`Set ${['claude','claude-rust'].includes(p.id)?'ANTHROPIC_API_KEY':'OPENAI_API_KEY or CODEX_API_KEY'} before starting the server.`:'API key available on the host. Messages use your provider account.';
+  $('provider-note').textContent=p.id==='demo'?'Local test agent. No model calls, API key, or file changes.':p.id==='goose'?'Uses the model provider configured for Goose on this host.':p.id==='antigravity'?(p.installed?'Official ACP using your Antigravity sign-in. Sign in with agy on this host first.':'Install Antigravity CLI on this host or set AGENTWORKS_ANTIGRAVITY_PATH.'):p.id==='opencode'?(p.installed?'Native ACP. Choose an advertised free model. Availability and limits may change.':'Install OpenCode on this host or set AGENTWORKS_OPENCODE_PATH.'):!p.installed?(p.id==='codex-rust'?'Install native Codex on this host or set CODEX_PATH.':'Install native Claude Code on this host or set CLAUDE_CODE_EXECUTABLE.'):p.authMode==='existing'?'Uses the existing agent sign-in on this host. If it has expired, sign in with the CLI and try again.':!p.keyPresent?`Set ${['claude','claude-rust'].includes(p.id)?'ANTHROPIC_API_KEY':'OPENAI_API_KEY or CODEX_API_KEY'} before starting the server.`:'API key available on the host. Messages use your provider account.';
   $('create-submit').disabled=!p.installed||(p.authMode==='api_key'&&!p.keyPresent)||(p.id==='goose'&&$('create-model-provider').disabled)||creating||worktrees.blocked()||!!(forkSource?.role&&!p.roles);
 }
 // Roles add instructions to the agent's system prompt; they never change Agentworks access.

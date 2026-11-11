@@ -618,7 +618,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let provider = args.get(2).map(String::as_str).unwrap_or("demo");
         if !agentworks_runtime::remote::PROVIDERS.contains(&provider) {
             return Err(
-                "Use --probe claude|claude-rust|codex|codex-rust|goose|opencode|demo".into(),
+                "Use --probe claude|claude-rust|codex|codex-rust|goose|opencode|antigravity|demo"
+                    .into(),
             );
         }
         agentworks_runtime::acp::probe(provider).await?;
@@ -1558,6 +1559,7 @@ async fn status(State(app): State<App>) -> Json<Value> {
         {"id":"claude-rust","name":"Claude","installed":installed("claude-rust"),"keyPresent":key_present("claude-rust"),"authMode":auth},
         {"id":"codex-rust","name":"Codex","installed":installed("codex-rust"),"keyPresent":key_present("codex-rust"),"authMode":auth},
         {"id":"goose","name":"Goose · embedded","installed":true,"keyPresent":true,"authMode":"configured"},
+        {"id":"antigravity","name":"Antigravity · official ACP","installed":installed("antigravity"),"keyPresent":true,"authMode":"existing"},
         {"id":"opencode","name":"OpenCode · free models","installed":installed("opencode"),"keyPresent":true}
     ]});
     let hidden = defaults.hidden_providers.unwrap_or_default();
@@ -2665,6 +2667,9 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
         return Err(fail(
             StatusCode::CONFLICT,
             match req.provider.as_str() {
+                "antigravity" => {
+                    "Antigravity CLI is not installed on PATH. Install agy or set AGENTWORKS_ANTIGRAVITY_PATH, then sign in with agy."
+                }
                 "opencode" => {
                     "OpenCode is not installed on PATH. Set AGENTWORKS_OPENCODE_PATH if needed."
                 }
