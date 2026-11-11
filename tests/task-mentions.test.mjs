@@ -18,11 +18,11 @@ class Node {
   setSelectionRange(start,end){this.selectionStart=start;this.selectionEnd=end;}
 }
 globalThis.document={createElement:()=>new Node()};
-function fixture(){
-  let active={projectId:A};const requests=[],prompt=new Node(),list=new Node();
-  const mentions=setupTaskMentions({prompt,list,getActive:()=>active,api:path=>new Promise((resolve,reject)=>requests.push({path,resolve,reject}))});
+function fixture(enabled=true){
+  let active={projectId:A},tasksEnabled=enabled;const requests=[],prompt=new Node(),list=new Node();
+  const mentions=setupTaskMentions({prompt,list,getActive:()=>active,getProject:id=>id?{id,tasksEnabled}:null,api:path=>new Promise((resolve,reject)=>requests.push({path,resolve,reject}))});
   const draft=value=>{prompt.value=value;prompt.setSelectionRange(value.length,value.length);};
-  return {mentions,prompt,list,requests,draft,scope:projectId=>{active={projectId};}};
+  return {mentions,prompt,list,requests,draft,enable:value=>{tasksEnabled=value;},scope:projectId=>{active={projectId};}};
 }
 async function loaded(){const f=fixture(),pending=f.mentions.refresh();f.requests[0].resolve({tasks:[task()]});await pending;return f;}
 const link=(key='APP-1',project=A)=>`[#${key}](agentworks://projects/${project}/tasks/${key.split('-')[1]})`;
@@ -78,13 +78,14 @@ test('invalid keys and noncanonical or wrong-scope task URIs are never cached',a
   assert.equal(f.mentions.expand('#APP-01 #APP-2 #APP-3 #APP-1'),`#APP-01 #APP-2 #APP-3 ${link()}`);
 });
 
-for(const change of ['caret','selection','text','scope'])test(`stale ${change} cannot consume keys or choose a saved suggestion`,async()=>{
+for(const change of ['caret','selection','text','scope','disabled'])test(`stale ${change} cannot consume keys or choose a saved suggestion`,async()=>{
   for(const action of ['Enter','Tab','ArrowDown','click']){
     const f=await loaded();f.draft('#APP');f.mentions.update();const button=f.list.children[0];
     if(change==='caret')f.prompt.setSelectionRange(0,0);
     if(change==='selection')f.prompt.setSelectionRange(0,4);
     if(change==='text')f.draft('#XYZ');
     if(change==='scope')f.scope(B);
+    if(change==='disabled')f.enable(false);
     const before=f.prompt.value;
     if(action==='click')button.onclick();else{const event=key(action);assert.equal(f.mentions.keydown(event),false);assert.equal(event.prevented,false);}
     assert.equal(f.prompt.value,before);assert.equal(f.list.hidden,true);
@@ -94,4 +95,25 @@ for(const change of ['caret','selection','text','scope'])test(`stale ${change} c
 test('valid current picker still accepts Enter and emits a plain canonical token',async()=>{
   const f=await loaded();f.draft('Use #APP');f.mentions.update();const event=key('Enter');
   assert.equal(f.mentions.keydown(event),true);assert.equal(event.prevented,true);assert.equal(f.prompt.value,'Use #APP-1 ');
+});
+
+
+test('disabled projects do not fetch, show suggestions, or expand tokens',async()=>{
+  const f=fixture(false);f.draft('#APP');
+  await f.mentions.refresh();
+  assert.equal(f.requests.length,0);assert.equal(f.mentions.wants(),false);
+  assert.equal(f.mentions.update(),false);assert.equal(f.list.hidden,true);
+  assert.equal(f.mentions.expand('#APP-1'),'#APP-1');
+});
+
+test('disabling clears immediately and an in-flight response cannot restore cached tickets',async()=>{
+  const f=await loaded();f.draft('#APP');f.mentions.update();
+  const pending=f.mentions.refresh();f.enable(false);
+  await f.mentions.refresh();
+  assert.equal(f.requests.length,2);assert.equal(f.list.hidden,true);
+  assert.equal(f.list.children.length,0);assert.equal(f.mentions.expand('#APP-1'),'#APP-1');
+  f.requests[1].resolve({tasks:[task()]});await pending;
+  f.enable(true);
+  assert.equal(f.mentions.expand('#APP-1'),'#APP-1');
+  f.mentions.update();assert.equal(f.list.children[0].textContent,'No matching project tickets.');
 });

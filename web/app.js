@@ -95,7 +95,7 @@ const questions=setupQuestions({api,uuid:()=>uuid(),storage:localStorage,getActi
 const inputQueue=setupInputQueue({$,api,uuid:()=>uuid(),getActive:()=>active,getStatus:()=>status,toolActive:()=>[...tools.values()].some(t=>['pending','in_progress'].includes(t.status))});
 let permissionModes=null,sessionConfig=null;
 const mentions=setupMentions({prompt:$('prompt'),list:$('mention-list'),getActive:()=>active,getSessions:()=>sessions});
-const taskMentions=setupTaskMentions({prompt:$('prompt'),list:$('mention-list'),api,getActive:()=>active});
+const taskMentions=setupTaskMentions({prompt:$('prompt'),list:$('mention-list'),api,getActive:()=>active,getProject:id=>projects.find(p=>p.id===id)});
 const projectTasks=setupTasks({api,uuid,getProject:id=>projects.find(p=>p.id===id),decorate:node=>decorateMarkdown(node),onWrite:()=>taskMentions.refresh()});
 $('project-tasks').onclick=()=>{if(editingProject)projectTasks.open(editingProject);};
 $('session-tasks').onclick=()=>{if(active?.projectId){sessionMenu.close();projectTasks.open(active.projectId);}else toast('Assign this session to a project to view tickets.');};
@@ -441,6 +441,7 @@ $('import-form').onsubmit=async event=>{
 };
 function projectName(id){return projects.find(p=>p.id===id)?.name||'Ungrouped';}
 function updateProjectControls(){
+  $('session-tasks').hidden=!projects.find(p=>p.id===active?.projectId)?.tasksEnabled;
   for(const id of ['create-project','session-project','import-project']){
     const select=$(id), current=id==='session-project'?active?.projectId:select.value;
     const ordered=projects.filter(p=>!p.archived||p.id===current).sort((a,b)=>a.name.localeCompare(b.name)), signature=JSON.stringify(ordered);
@@ -597,7 +598,7 @@ async function refreshSessions(){
 function openProjectDialog(project=null){
   if(savingProject)return;
   editingProject=project?.id||null;$('project-dialog-title').textContent=project?'Project settings':'New project';
-  $('project-name').value=project?.name||'';$('project-slug').value=project?.slug||'';$('project-tasks').hidden=!project;$('project-communication-role').value=project?.defaultCommunicationRole||'';
+  $('project-name').value=project?.name||'';$('project-slug').value=project?.slug||'';$('project-tasks').hidden=!project?.tasksEnabled;$('project-tasks-enabled').checked=!!project?.tasksEnabled;updateProjectTicketFields();$('project-communication-role').value=project?.defaultCommunicationRole||'';
   $('project-communication-role').querySelector('option[value=""]').textContent='Use global default · '+communicationLabels[config.defaultCommunicationRole||'participant'];
   $('project-error').textContent='';$('delete-project').hidden=!project;$('archive-project').hidden=!project;$('open-controllers').hidden=!project;
   $('archive-project').textContent=project?.archived?'Unarchive project':'Archive project';
@@ -1279,21 +1280,23 @@ const enrollment=hostEnrollment({$,api,refresh:refreshSessions,directories:host=
 }});
 function openHostDialog(){enrollment.open();}
 $('dismiss-project').onclick=()=>{if(!savingProject)$('project-dialog').close();};
+function updateProjectTicketFields(){$('project-slug').disabled=savingProject||!$('project-tasks-enabled').checked;}
+$('project-tasks-enabled').onchange=updateProjectTicketFields;
 $('project-dialog').addEventListener('cancel',event=>{if(savingProject)event.preventDefault();});
 // Switching projects always moves the directory to the new project's root.
 $('create-project').onchange=()=>{const host=createHost(),projectId=$('create-project').value||null;$('directory').value=projectRoot(host?.id||'local',projectId)||(host?host.roots||[]:config.roots)[0]||'';$('directory').dispatchEvent(new Event('input'));worktrees.projectChanged();updateCommunicationDefault();};
 $('project-form').onsubmit=async event=>{
   event.preventDefault();if(savingProject)return;savingProject=true;
-  for(const id of ['save-project','project-name','project-slug','project-directory','project-directory-host','project-directory-browse','project-directory-clear','project-default-mode','project-require-worktree','project-communication-role','archive-project','delete-project','dismiss-project'])$(id).disabled=true;
+  for(const id of ['save-project','project-name','project-tasks-enabled','project-slug','project-directory','project-directory-host','project-directory-browse','project-directory-clear','project-default-mode','project-require-worktree','project-communication-role','archive-project','delete-project','dismiss-project'])$(id).disabled=true;
   $('project-error').textContent='';
   try{
     const policy=policyEditor.value(),directory=projectDirectory.value();
-    const project=await api(editingProject?`/api/projects/${editingProject}`:'/api/projects',{method:editingProject?'PATCH':'POST',body:JSON.stringify({name:$('project-name').value,...($('project-slug').value?{slug:$('project-slug').value}:{}),defaultCommunicationRole:$('project-communication-role').value||null,...(directory!==undefined?{defaultLocation:directory}:{})})});
-    editingProject=project.id;projectDirectory.commit();$('delete-project').hidden=false;$('archive-project').hidden=false;
+    const project=await api(editingProject?`/api/projects/${editingProject}`:'/api/projects',{method:editingProject?'PATCH':'POST',body:JSON.stringify({name:$('project-name').value,tasksEnabled:$('project-tasks-enabled').checked,...($('project-tasks-enabled').checked&&$('project-slug').value?{slug:$('project-slug').value}:{}),defaultCommunicationRole:$('project-communication-role').value||null,...(directory!==undefined?{defaultLocation:directory}:{})})});
+    editingProject=project.id;projects=projects.filter(p=>p.id!==project.id).concat(project);updateProjectControls();taskMentions.refresh();$('project-tasks').hidden=!project.tasksEnabled;projectDirectory.commit();$('delete-project').hidden=false;$('archive-project').hidden=false;
     try{await api(`/api/projects/${project.id}/workspace-policy`,{method:'PUT',body:JSON.stringify(policy)});}
     catch(error){throw new Error(`Project name saved. Workspace policy was not saved: ${error.message}. Retry Save project.`);}
     await refreshSessions();if($('create-dialog').open){$('create-project').value=project.id;const start=projectDirectoryOn($('create-host').value||'local',project.id);if(start){$('directory').value=start;$('directory').dispatchEvent(new Event('input'));$('directory').dispatchEvent(new Event('change'));}worktrees.projectChanged();updateCommunicationDefault();}$('project-dialog').close();
-  }catch(error){$('project-error').textContent=error.message;}finally{savingProject=false;for(const id of ['save-project','project-name','project-slug','project-directory','project-directory-host','project-directory-browse','project-directory-clear','project-default-mode','project-require-worktree','project-communication-role','archive-project','delete-project','dismiss-project'])$(id).disabled=false;}
+  }catch(error){$('project-error').textContent=error.message;}finally{savingProject=false;for(const id of ['save-project','project-name','project-tasks-enabled','project-slug','project-directory','project-directory-host','project-directory-browse','project-directory-clear','project-default-mode','project-require-worktree','project-communication-role','archive-project','delete-project','dismiss-project'])$(id).disabled=false;updateProjectTicketFields();}
 };
 // Archive and delete apply to the project's sessions too unless the user keeps them in Ungrouped.
 let removingProject=null;
@@ -1759,7 +1762,7 @@ setupContextMenu({onError:message=>toast(message),resolve(target){
     const project=projects.find(p=>p.id===heading.dataset.projectId);if(!project)return null;
     return {origin:heading,label:`Actions for ${project.name}`,actions:[
       {label:'Edit project…',run:()=>openProjectDialog(project)},
-      {label:'Tasks…',run:()=>projectTasks.open(project.id)},
+      ...(project.tasksEnabled?[{label:'Tasks…',run:()=>projectTasks.open(project.id)}]:[]),
       {label:project.archived?'Unarchive project':'Archive project…',run:()=>archiveProject(project)},
       {label:'Delete project…',danger:true,run:()=>openProjectRemove('delete',project)},
     ]};

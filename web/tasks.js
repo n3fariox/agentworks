@@ -1,14 +1,14 @@
 // Human project tickets. Identity is the immutable project UUID + task number.
 export function setupTasks({api,uuid,getProject,decorate,onWrite}){
   const $=id=>document.getElementById(id),dialog=$('tasks-dialog');
-  let project=null,selected=null,generation=0,busy=false,pending=null,loaded=false;
+  let project=null,selected=null,generation=0,busy=false,pending=null,loaded=false,loading=false;
   const node=(tag,text)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;return n;};
   function controls(){
     const readonly=!loaded||!!project?.archived;
     for(const id of ['task-title','task-body','task-status','task-save'])$(id).disabled=readonly||busy;
     $('task-delete').disabled=readonly||busy||!selected;
     $('task-new').disabled=readonly||busy;$('tasks-refresh').disabled=busy;$('tasks-show-done').disabled=busy;
-    $('tasks-note').textContent=readonly?'Archived project · tickets are read-only.':'Project tickets · changes are attributed to you (human).';
+    $('tasks-note').textContent=loading?'Loading project tickets…':!loaded?'Tickets unavailable · editing is disabled.':project?.archived?'Archived project · tickets are read-only.':'Project tickets · changes are attributed to you (human).';
   }
   async function preview(){
     const gen=generation,text=$('task-body').value;$('task-preview').textContent=text;
@@ -26,20 +26,20 @@ export function setupTasks({api,uuid,getProject,decorate,onWrite}){
     controls();preview();
   }
   async function refresh(number=null){
-    const gen=++generation,id=project.id;$('task-error').textContent='';
+    const gen=++generation,id=project.id;loaded=false;loading=true;controls();$('task-error').textContent='';
     try{const result=await api(`/api/projects/${encodeURIComponent(id)}/tasks?includeDone=${$('tasks-show-done').checked}`);
       if(gen!==generation||!dialog.open)return;
-      project={...project,...result.project};loaded=true;$('tasks-title').textContent=`${project.name} · Tasks`;
+      project={...project,...result.project};$('tasks-title').textContent=`${project.name} · Tasks`;
       $('tasks-list').replaceChildren();
-      for(const task of result.tasks){const b=node('button',`${task.key} · ${task.title} · ${task.status}`);b.type='button';b.className='text-button';b.onclick=()=>{if(!busy)edit(task);};$('tasks-list').append(b);}
+      for(const task of result.tasks){const b=node('button',`${task.key} · ${task.title} · ${task.status}`);b.type='button';b.className='text-button';b.onclick=()=>{if(!busy&&loaded)edit(task);};$('tasks-list').append(b);}
       if(!result.tasks.length)$('tasks-list').append(node('p',$('tasks-show-done').checked?'No tickets yet.':'No open tickets.'));
       if(number!==null){
         const detail=await api(`/api/projects/${encodeURIComponent(id)}/tasks/${number}`);
         if(gen!==generation||!dialog.open)return;
-        edit(detail.task||detail);
+        loaded=true;loading=false;edit(detail.task||detail);
       }
-      else edit(null);
-    }catch(e){if(gen===generation)$('task-error').textContent=e.message;}
+      else{loaded=true;loading=false;edit(null);}
+    }catch(e){if(gen===generation){loaded=false;loading=false;$('task-error').textContent=e.message;controls();}}
   }
   async function open(projectId,number=null){
     if(busy)return;
@@ -63,7 +63,7 @@ export function setupTasks({api,uuid,getProject,decorate,onWrite}){
   }
   $('task-form').onsubmit=e=>{e.preventDefault();mutate(selected?'PUT':'POST');};
   $('task-delete').onclick=()=>{if(selected&&confirm(`Delete ${selected.key}?`))mutate('DELETE');};
-  $('task-new').onclick=()=>edit(null);
+  $('task-new').onclick=()=>{if(!busy&&loaded)edit(null);};
   $('tasks-show-done').onchange=()=>refresh();
   $('tasks-refresh').onclick=()=>refresh(selected?.id??null);
   $('dismiss-tasks').onclick=()=>dialog.close();dialog.addEventListener('close',()=>{generation++;});

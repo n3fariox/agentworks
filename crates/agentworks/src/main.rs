@@ -2329,6 +2329,8 @@ async fn get_catalog(State(app): State<App>) -> Json<Value> {
 struct ProjectName {
     name: String,
     slug: Option<String>,
+    #[serde(default, rename = "tasksEnabled")]
+    tasks_enabled: Option<bool>,
     #[serde(
         default,
         rename = "defaultCommunicationRole",
@@ -2392,11 +2394,12 @@ fn save_project(
 ) -> ApiResult {
     let mut catalog = app.catalog.lock().unwrap();
     let mut project = catalog
-        .project_with_slug(
+        .project_with_options(
             id,
             &req.name,
             req.default_communication_role,
             req.slug.as_deref(),
+            req.tasks_enabled,
         )
         .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
     if let Some(location) = location {
@@ -4262,6 +4265,25 @@ fn autolink<'a>(text: &pulldown_cmark::CowStr<'a>) -> Vec<pulldown_cmark::Event<
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn project_request_ticket_opt_in_is_optional_and_camel_case() {
+        for (value, expected) in [
+            (json!({"name":"Rename"}), None),
+            (json!({"name":"Enabled","tasksEnabled":true}), Some(true)),
+            (json!({"name":"Disabled","tasksEnabled":false}), Some(false)),
+        ] {
+            let request: ProjectName = serde_json::from_value(value).unwrap();
+            assert_eq!(request.tasks_enabled, expected);
+        }
+        assert!(
+            serde_json::from_value::<ProjectName>(json!({"name":"Bad","tasks_enabled":true}))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ProjectName>(json!({"name":"Bad","tasksEnabled":"true"}))
+                .is_err()
+        );
+    }
     #[test]
     fn markdown_links_bare_urls_outside_code() {
         let html = render_markdown(

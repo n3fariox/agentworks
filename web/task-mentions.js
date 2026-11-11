@@ -1,22 +1,24 @@
 import {fuzzyScore} from './mentions.js';
 import {taskReference} from './chat-references.js';
 // Owns the shared picker only while a # query is active. app.js arbitrates @/#.
-export function setupTaskMentions({prompt,list,api,getActive}){
+export function setupTaskMentions({prompt,list,api,getActive,getProject}){
   let tasks=[],projectId=null,generation=0,range=null,items=[],index=0;
+  const enabled=()=>!!getProject(getActive()?.projectId)?.tasksEnabled;
+  function clear(){tasks=[];++generation;close();}
   function close(){if(range){list.hidden=true;list.replaceChildren();prompt.removeAttribute('aria-activedescendant');}range=null;items=[];}
   async function refresh(){
     const gen=++generation,id=getActive()?.projectId||null;
     if(id!==projectId){projectId=id;tasks=[];close();}
-    if(!projectId)return;
+    if(!projectId||!enabled()){clear();return;}
     try{const result=await api(`/api/projects/${encodeURIComponent(id)}/tasks`);
-      if(gen!==generation||getActive()?.projectId!==id)return;
+      if(gen!==generation||getActive()?.projectId!==id||!enabled())return;
       tasks=result.tasks.filter(t=>/^[A-Z][A-Z0-9]{1,19}-[1-9]\d*$/.test(t.key)&&taskReference(t.uri)?.projectId===id);
       if(wants())update();
     }catch{/* Keep the last successful cache only within the same project. */}
   }
-  function wants(){return prompt.selectionStart===prompt.selectionEnd&&/(^|\s)#([\w-]*)$/.test(prompt.value.slice(0,prompt.selectionStart));}
+  function wants(){return enabled()&&prompt.selectionStart===prompt.selectionEnd&&/(^|\s)#([\w-]*)$/.test(prompt.value.slice(0,prompt.selectionStart));}
   function validRange(){
-    return range&&projectId===(getActive()?.projectId||null)&&range.projectId===projectId&&
+    return enabled()&&range&&projectId===(getActive()?.projectId||null)&&range.projectId===projectId&&
       prompt.selectionStart===range.end&&prompt.selectionEnd===range.end&&
       prompt.value===range.value&&wants();
   }
@@ -32,6 +34,7 @@ export function setupTaskMentions({prompt,list,api,getActive}){
     prompt.setAttribute('aria-activedescendant','task-mention-'+index);list.querySelector('.active')?.scrollIntoView({block:'nearest'});
   }
   function update(){
+    if(!enabled()){clear();return false;}
     if(projectId!==(getActive()?.projectId||null)){tasks=[];projectId=getActive()?.projectId||null;++generation;close();}
     if(!wants()){close();return false;}
     const caret=prompt.selectionStart,m=/(^|\s)#([\w-]*)$/.exec(prompt.value.slice(0,caret));range={start:caret-m[2].length-1,end:caret,projectId,value:prompt.value};
@@ -46,6 +49,7 @@ export function setupTaskMentions({prompt,list,api,getActive}){
     if((e.key==='Enter'&&!e.shiftKey)||e.key==='Tab'){choose(items[index]);e.preventDefault();return true;}return false;
   }
   function expand(text){
+    if(!enabled()){clear();return text;}
     if(projectId!==getActive()?.projectId)return text;
     const known=new Map(tasks.map(t=>[t.key,t]));
     const protectedText=protectedMarkdown(text);

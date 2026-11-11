@@ -12,6 +12,8 @@ pub struct Project {
     pub name: String,
     #[serde(default)]
     pub slug: String,
+    #[serde(default, rename = "tasksEnabled")]
+    pub tasks_enabled: bool,
     #[serde(default, rename = "workspacePolicy")]
     pub workspace_policy: crate::worktrees::Policy,
     #[serde(
@@ -162,12 +164,24 @@ impl Catalog {
     ) -> Result<Project, String> {
         self.project_with_slug(id, name, role, None)
     }
+    #[cfg(test)]
     pub fn project_with_slug(
         &mut self,
         id: Option<&str>,
         name: &str,
         role: Option<Option<crate::communication::Role>>,
         slug: Option<&str>,
+    ) -> Result<Project, String> {
+        self.project_with_options(id, name, role, slug, None)
+    }
+    /// Save project identity and the optional ticket opt-in in one atomic write.
+    pub fn project_with_options(
+        &mut self,
+        id: Option<&str>,
+        name: &str,
+        role: Option<Option<crate::communication::Role>>,
+        slug: Option<&str>,
+        tasks_enabled: Option<bool>,
     ) -> Result<Project, String> {
         if let Some(slug) = slug {
             if !valid_slug(slug)
@@ -216,6 +230,7 @@ impl Catalog {
                 default_location_id: None,
                 workspace_policy: Default::default(),
                 archived: false,
+                tasks_enabled: false,
                 default_communication_role: role.flatten(),
             };
             data.projects.push(project.clone());
@@ -229,6 +244,14 @@ impl Catalog {
                 .find(|p| p.id == project.id)
                 .unwrap()
                 .slug = slug.into();
+        }
+        if let Some(enabled) = tasks_enabled {
+            project.tasks_enabled = enabled;
+            data.projects
+                .iter_mut()
+                .find(|p| p.id == project.id)
+                .unwrap()
+                .tasks_enabled = enabled;
         }
         self.save(data)
             .map_err(|_| "Could not save project metadata")?;
@@ -846,6 +869,47 @@ fn migrate_slugs(data: &mut CatalogData) -> io::Result<()> {
 #[cfg(test)]
 mod ticket_slug_tests {
     use super::*;
+    #[test]
+    fn tickets_opt_in_defaults_migrates_and_saves_atomically() {
+        let path = std::env::temp_dir().join(format!("opt-in-{}.json", Uuid::new_v4()));
+        let mut c = Catalog::open(path.clone()).unwrap();
+        let p = c.project(None, "Default", None).unwrap();
+        assert!(!p.tasks_enabled);
+        let mut legacy = serde_json::to_value(&c.data).unwrap();
+        legacy["projects"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("tasksEnabled");
+        std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        c = Catalog::open(path.clone()).unwrap();
+        assert!(!c.data.projects[0].tasks_enabled);
+        let enabled = c
+            .project_with_options(Some(&p.id), "Enabled", None, Some("ON"), Some(true))
+            .unwrap();
+        assert!(enabled.tasks_enabled);
+        c = Catalog::open(path.clone()).unwrap();
+        assert!(c.data.projects[0].tasks_enabled);
+        assert!(
+            c.project(Some(&p.id), "Renamed", None)
+                .unwrap()
+                .tasks_enabled
+        );
+        let before = serde_json::to_value(&c.data).unwrap();
+        assert!(
+            c.project_with_options(Some(&p.id), "Invalid", None, Some("bad"), Some(false))
+                .is_err()
+        );
+        assert_eq!(serde_json::to_value(&c.data).unwrap(), before);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(
+            c.project_with_options(Some(&p.id), "Unsaved", None, Some("OFF"), Some(false))
+                .is_err()
+        );
+        assert_eq!(serde_json::to_value(&c.data).unwrap(), before);
+        std::fs::remove_dir(&path).unwrap();
+        let _ = std::fs::remove_file(path.with_extension("json.tmp"));
+    }
     #[test]
     fn legacy_slugs_are_deterministic_unique_and_stable() {
         let path = std::env::temp_dir().join(format!("slugs-{}.json", Uuid::new_v4()));

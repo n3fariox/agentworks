@@ -1,6 +1,6 @@
 # Project tasks
 
-Tasks are small, persistent project tickets, separate from sessions, completion claims and the review queue. Open **Tasks…** from a project's editor or a project session's options. Create a ticket with a title, optional Markdown body and Open/Done status. Select an existing ticket to edit or delete it; **Refresh tickets** discards unsaved edits and loads the current revision. Archived projects allow reads only. Lists and the `#` picker show open tickets by default. Enable **Show done** in the task dialog to include completed tickets; direct links still open done tickets.
+Tasks are small, persistent project tickets, separate from sessions, completion claims and the review queue. Tickets are **off by default**, including for existing projects. Enable **Project settings → Enable tickets** and save first. Then open **Tasks…** from a project's editor or a project session's options. Create a ticket with a title, optional Markdown body and Open/Done status. Select an existing ticket to edit or delete it; **Refresh tickets** discards unsaved edits and loads the current revision. Archived projects allow reads only. Lists and the `#` picker show open tickets by default. Enable **Show done** in the task dialog to include completed tickets; direct links still open done tickets.
 
 Each project has a unique ticket prefix (slug): 2–20 uppercase ASCII letters/digits, starting with a letter. Set it when creating/editing a project or leave it blank on creation for a generated prefix. Renaming a project does not change its generated prefix. Explicitly changing the prefix changes displayed keys, not ticket identity.
 
@@ -26,7 +26,7 @@ Human requests use the normal same-origin API protections. All successful operat
 
 The list endpoint accepts `?includeDone=true` to include done tickets. Single-ticket reads are never filtered by status.
 
-Use the number in the URL, not a `taskId` body field. Project creation (`POST /api/projects`) and editing (`PATCH /api/projects/{id}`) accept optional `slug`.
+Use the number in the URL, not a `taskId` body field. Project creation (`POST /api/projects`) and editing (`PATCH /api/projects/{id}`) accept optional `slug` and `tasksEnabled`. Omitting `tasksEnabled` preserves its current value. Disabling tickets hides task UI, autocomplete and MCP tools, and rejects all ticket operations with 403 (including cached tool calls and direct reads). It does not delete tickets, numbers, or retry receipts; re-enabling restores access. Existing canonical links display a disabled-project error until enabled. An already-running agent may need a tool refresh or new turn to discover newly enabled tools.
 
 ## Native MCP tools and permissions
 

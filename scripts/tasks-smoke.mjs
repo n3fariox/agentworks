@@ -22,7 +22,10 @@ function denied(r,status=403){assert(r.isError,JSON.stringify(r));assert.equal(J
 async function controller(token){const file=join(dir,randomUUID()+'.token');await writeFile(file,token,{mode:0o600});const transport=new StdioClientTransport({command:binary,args:['mcp'],env:{PATH:process.env.PATH,AGENTWORKS_MCP_ENDPOINT_FILE:join(dir,'sessions.mcp-endpoint'),AGENTWORKS_MCP_TOKEN_FILE:file},stderr:'pipe'});const c=new Client({name:'tasks-smoke',version:'1'});await c.connect(transport);clients.push(c);return c;}
 try{
  await start();
- const p=await api('/api/projects',{name:'Tickets',slug:'TIX'}),q=await api('/api/projects',{name:'Other tickets'}),path=`/api/projects/${p.id}/tasks`;
+ const p=await api('/api/projects',{name:'Tickets',slug:'TIX'}),q=await api('/api/projects',{name:'Other tickets',tasksEnabled:true}),path=`/api/projects/${p.id}/tasks`;
+ assert.equal(p.tasksEnabled,false);
+ assert.match(await api(path,undefined,'GET',403),/Tickets are disabled/);
+ await api(`/api/projects/${p.id}`,{name:p.name,tasksEnabled:true},'PATCH');
  assert.match(q.slug,/^[A-Z][A-Z0-9]{1,19}$/);
  for(const slug of ['a','1ABC','lowercase','TIX'])await api('/api/projects',{name:'Invalid',slug},'POST',400);
  const req={title:'First ticket',body:'**Markdown**',status:'open',requestId:'human-create'};
@@ -49,6 +52,17 @@ try{
  denied(await call(outsider.id,'get_task',{taskId:first.task.uri}),400);
  for(const taskId of ['NEW-1','1',first.task.uri.replace('/1','/01'),0,-1])denied(await call(coordinator.id,'get_task',{taskId}),400);
  const tools=(await call(coordinator.id,'tools/list')).tools.map(t=>t.name);for(const name of ['list_tasks','get_task','create_task','update_task','delete_task'])assert(tools.includes(name),name);
+ await api(`/api/projects/${p.id}`,{name:'Renamed again',tasksEnabled:false},'PATCH');
+ assert(!(await call(coordinator.id,'tools/list')).tools.some(t=>t.name==='list_tasks'));
+ denied(await call(coordinator.id,'get_task',{taskId:first.task.uri}));
+ denied(await call(coordinator.id,'create_task',{title:'Disabled',requestId:'disabled'}));
+ await api(path,req,'POST',403);
+ await stopChild(server);await start();
+ assert.equal((await api('/api/catalog')).projects.find(x=>x.id===p.id).tasksEnabled,false);
+ await api(`/api/projects/${p.id}`,{name:'Renamed again',tasksEnabled:true},'PATCH');
+ assert.equal((await api(path+'/1')).task.uri,first.task.uri);
+ await api(`/api/sessions/${coordinator.id}/resume`,{});
+ await api(`/api/sessions/${participant.id}/resume`,{});
  const nativeReq={title:'Native ticket',body:'# Native',status:'open',requestId:'native-create'};
  const native=value(await call(coordinator.id,'create_task',nativeReq));assert.equal(native.task.id,2);assert.equal(native.task.createdBy,coordinator.id);assert.deepEqual(value(await call(coordinator.id,'create_task',nativeReq)),native);
  denied(await call(coordinator.id,'create_task',{...nativeReq,title:'Changed'}),409);

@@ -181,6 +181,12 @@ fn execute(
         .find(|p| p.id == project)
         .cloned()
         .ok_or_else(|| fail(StatusCode::NOT_FOUND, "Project not found"))?;
+    if !p.tasks_enabled {
+        return Err(fail(
+            StatusCode::FORBIDDEN,
+            "Tickets are disabled for this project. Enable them in Project settings.",
+        ));
+    }
     if operation == "list_tasks" {
         let filter: List = decode(args)?;
         let tasks: Vec<_> = c
@@ -433,8 +439,65 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("agentworks-tasks-{}.json", uuid::Uuid::new_v4()));
         let mut c = catalog::Catalog::open(path.clone()).unwrap();
-        let id = c.project(None, "Test project", None).unwrap().id;
+        let id = c
+            .project_with_options(None, "Test project", None, None, Some(true))
+            .unwrap()
+            .id;
         (c, id, path)
+    }
+    #[test]
+    fn disabling_blocks_reads_writes_and_retries_without_losing_state() {
+        let (mut c, p, path) = setup();
+        let req = json!({"title":"Keep me","requestId":"create"});
+        let first = execute(&mut c, &p, "human", req.clone(), "create_task").unwrap();
+        let state = serde_json::to_value(&c.data.tasks).unwrap();
+        c.project_with_options(Some(&p), "Disabled", None, None, Some(false))
+            .unwrap();
+        c = catalog::Catalog::open(path.clone()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        for (op, args) in [
+            ("list_tasks", json!({})),
+            ("get_task", json!({"taskId":1})),
+            ("create_task", req.clone()),
+            ("create_task", json!({"title":"No","requestId":"new"})),
+            (
+                "update_task",
+                json!({"taskId":1,"revision":1,"title":"No","requestId":"u"}),
+            ),
+            (
+                "delete_task",
+                json!({"taskId":1,"revision":1,"requestId":"d"}),
+            ),
+        ] {
+            let error = execute(&mut c, &p, "human", args, op).unwrap_err();
+            assert_eq!(error.0, StatusCode::FORBIDDEN);
+            assert_eq!(
+                error.1,
+                "Tickets are disabled for this project. Enable them in Project settings."
+            );
+        }
+        assert_eq!(serde_json::to_value(&c.data.tasks).unwrap(), state);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        c.project_with_options(Some(&p), "Enabled again", None, None, Some(true))
+            .unwrap();
+        assert_eq!(
+            execute(&mut c, &p, "human", req, "create_task").unwrap(),
+            first
+        );
+        let next = execute(
+            &mut c,
+            &p,
+            "human",
+            json!({"title":"Next","requestId":"next"}),
+            "create_task",
+        )
+        .unwrap();
+        assert_eq!(next["task"]["id"], 2);
+        assert_eq!(
+            execute(&mut c, &p, "human", json!({"taskId":1}), "get_task").unwrap()["task"]["title"],
+            "Keep me"
+        );
+        std::fs::remove_file(path).unwrap();
     }
     #[test]
     fn durable_retries_revisions_and_no_reuse() {
