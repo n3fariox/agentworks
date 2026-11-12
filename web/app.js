@@ -30,7 +30,21 @@ import {setupTimeoutControls} from './timeout-controls.js';
 import {setupParserScripts} from './parser-scripts.js';
 import {setupInputQueue,setupPromptRecovery,BUSY,STARTING} from './input-queue.js';
 import {setupNotifications} from './notifications.js';
-import {setupNotificationTray} from './notification-tray.js';
+import {setupNotificationTray, isAutoDismissEnabled} from './notification-tray.js';
+let notificationTray=null;
+function updateNotificationIndicators(alerts=notificationTray?.getAlerts?.()||[]){
+  if(isAutoDismissEnabled()&&active?.id&&document.hasFocus()){
+    const activeAlerts=alerts.filter(a=>a.sessionId===active.id);
+    if(activeAlerts.length){
+      notificationTray?.dismissSessionAlerts(active.id);
+      return;
+    }
+  }
+  const activeIds=new Set(alerts.map(a=>a.sessionId));
+  for(const row of document.querySelectorAll('#sessions .session-item[data-session-id]')){
+    row.classList.toggle('has-notifications',activeIds.has(row.dataset.sessionId));
+  }
+}
 import {setupQuestions} from './questions.js';
 import {setupMentions} from './mentions.js';
 import {setupTaskMentions} from './task-mentions.js';
@@ -529,7 +543,8 @@ function treeGroup(key,label,items,{host=null,projectId=null,level=0,archived=fa
   return {group,children};
 }
 function sessionButton(s){
-  const row=el('div','session-item'+(active?.id===s.id&&document.body.dataset.workspaceView!=='host-terminal'?' selected':''));row.dataset.sessionId=s.id;row.title=s.cwd;
+  const hasAlert=notificationTray?.hasSessionAlert?.(s.id);
+  const row=el('div','session-item'+(hasAlert?' has-notifications':'')+(active?.id===s.id&&document.body.dataset.workspaceView!=='host-terminal'?' selected':''));row.dataset.sessionId=s.id;row.title=s.cwd;
   row.append(el('span','session-icon',icons[s.provider]));
   const copy=el('span','session-copy'),select=el('button','session-select'),sessionBadges=el('span','session-badges');select.type='button';
   select.append(el('strong','',s.title),el('small','',`${s.archived?'Archived · ':''}${s.automation?'Automation · ':''}${labels[s.provider]}${s.model?' · '+s.model:''}`));
@@ -665,6 +680,7 @@ async function revealNotificationTarget(){
 }
 function selectSession(s) {
   notificationTarget=null;
+  if(isAutoDismissEnabled())notificationTray?.dismissSessionAlerts(s.id);
   document.body.classList.remove('menu-open');enterChat();
   if(active?.id===s.id){$('welcome').hidden=true;$('conversation').hidden=false;workspace?.sessionSelected(s);sidePanel?.sessionChanged();sessionTerminal?.sessionChanged();return;}
   if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));scrollPositions.set(active.id,$('messages').scrollTop);}
@@ -1757,7 +1773,8 @@ async function init(){
   if(params.has('settings')){params.delete('settings');history.replaceState(history.state,'',location.pathname+(params.size?'?'+params:'')+location.hash);openSettings();}
   setInterval(()=>refreshSessions().catch(()=>{}),5000);
   notifications.start();
-  setupNotificationTray({openAlert:openNotificationAlert});
+  notificationTray=setupNotificationTray({openAlert:openNotificationAlert,onAlertsChange:updateNotificationIndicators});
+  window.addEventListener('focus',()=>{if(isAutoDismissEnabled()&&active?.id)notificationTray?.dismissSessionAlerts(active.id);});
 }
 init().catch(error=>toast('Cannot reach the local server: '+error.message));
 

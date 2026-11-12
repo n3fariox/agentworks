@@ -480,6 +480,7 @@ async function clearInbox(){
 
 test('persistent tray works without browser permission; opening keeps alerts until dismissal and Undo restores them',async({page,context})=>{
   await clearInbox();
+  await context.addInitScript(()=>localStorage.setItem('agentworks-notification-auto-dismiss','false'));
   await captureNotifications(page,'denied');
   await page.goto('/');
   await run(background.id,'hello');
@@ -510,7 +511,9 @@ test('persistent tray works without browser permission; opening keeps alerts unt
 });
 
 test('tray groups approvals first and updates resolved requests without removing them',async({page})=>{
-  await clearInbox();await page.goto('/dashboard');
+  await clearInbox();
+  await page.addInitScript(()=>localStorage.setItem('agentworks-notification-auto-dismiss','false'));
+  await page.goto('/dashboard');
   await api(`/api/sessions/${background.id}/prompt`,{text:'approval',requestId:crypto.randomUUID()});
   await expect.poll(async()=> (await api(`/api/sessions/${background.id}`)).approvals.length).toBe(1);
   await page.locator('#nav-notifications').click();
@@ -636,4 +639,69 @@ test('full-screen mobile sessions keep the bell and live count accessible in Cha
   expect(await page.evaluate(()=>document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
   await page.setViewportSize({width:1280,height:800});
   await expect(bell).not.toBeVisible();await expect(page.locator('#nav-notifications')).toBeVisible();
+});
+
+test('Alt+N triggers notification tray with keyboard navigation, session browser indicates undismissed alerts, and auto-dismiss clears them on view',async({page})=>{
+  await clearInbox();
+  await page.goto('/');
+
+  // Create alerts for background and watched sessions
+  await run(background.id,'hello background');
+  await run(watched.id,'hello watched');
+
+  // Both sessions should be indicated with .has-notifications in the session browser
+  const bgItem=page.locator(`#sessions .session-item[data-session-id="${background.id}"]`);
+  const watchedItem=page.locator(`#sessions .session-item[data-session-id="${watched.id}"]`);
+  await expect(bgItem).toHaveClass(/has-notifications/);
+  await expect(watchedItem).toHaveClass(/has-notifications/);
+
+  // Alt+N opens the tray and focuses the top notification link
+  await page.keyboard.press('Alt+n');
+  const tray=page.locator('#notification-tray');
+  await expect(tray).toBeVisible();
+  const links=tray.locator('.notification-link');
+  await expect(links).toHaveCount(2);
+  await expect(links.first()).toBeFocused();
+
+  // ArrowDown focuses the second link
+  await page.keyboard.press('ArrowDown');
+  await expect(links.nth(1)).toBeFocused();
+
+  // ArrowUp focuses the first link again
+  await page.keyboard.press('ArrowUp');
+  await expect(links.first()).toBeFocused();
+
+  // Hitting Enter follows the link to the session
+  const focusedSessionId=await links.first().getAttribute('data-session-id');
+  await page.keyboard.press('Enter');
+  await expect(tray).not.toBeVisible();
+
+  // By default, viewing a session auto-dismisses its notifications
+  const targetItem=page.locator(`#sessions .session-item[data-session-id="${focusedSessionId}"]`);
+  await expect(targetItem).not.toHaveClass(/has-notifications/);
+
+  // The other session still has notifications
+  const otherSessionId=focusedSessionId===background.id?watched.id:background.id;
+  const otherItem=page.locator(`#sessions .session-item[data-session-id="${otherSessionId}"]`);
+  await expect(otherItem).toHaveClass(/has-notifications/);
+
+  // Settings allows turning off auto-dismiss
+  await page.locator('#nav-settings').click();
+  await page.locator('#settings-tab-notifications').click();
+  const autoDismissCheckbox=page.locator('#notifications-auto-dismiss');
+  await expect(autoDismissCheckbox).toBeVisible();
+  await expect(autoDismissCheckbox).toBeChecked();
+  await autoDismissCheckbox.uncheck();
+  await page.locator('#dismiss-settings').click();
+
+  // Trigger another alert for the dismissed session
+  await run(focusedSessionId,'hello again');
+  await expect(targetItem).toHaveClass(/has-notifications/);
+
+  // Switching to the other session and then clicking targetItem with auto-dismiss off does not dismiss its notification
+  await otherItem.click();
+  await targetItem.click();
+  await expect(targetItem).toHaveClass(/has-notifications/);
+  const remainingAlerts=(await api('/api/notifications/inbox')).alerts.filter(a=>a.sessionId===focusedSessionId);
+  expect(remainingAlerts.length).toBeGreaterThan(0);
 });

@@ -1,4 +1,7 @@
 import {appUrl, socketUrl} from './hosting.js';
+import {isAutoDismissEnabled, setAutoDismissEnabled} from './notifications.js';
+
+export {isAutoDismissEnabled, setAutoDismissEnabled};
 
 const labels={approval:'Approval needed',error:'Turn failed',turnEnd:'Turn finished',taskCompleted:'Task completed',taskBlocked:'Task blocked',automationIssue:'Automation needs attention'};
 export function notificationUrl(alert){
@@ -10,9 +13,10 @@ const element=(tag,className,text)=>{
 };
 const attention=alert=>!alert.resolved&&['approval','error','taskBlocked','automationIssue'].includes(alert.event);
 
-export function setupNotificationTray({openAlert}={}){
+export function setupNotificationTray({openAlert, onAlertsChange}={}){
   const nav=document.querySelector('#workspace-nav');if(!nav)return;
   const bell=element('button','workspace-nav-item notification-bell');bell.type='button';bell.id='nav-notifications';
+  bell.title='Notifications (Alt+N)';
   bell.innerHTML='<span aria-hidden="true"></span>Notifications';
   // An inline bell keeps the control independent of icon fonts.
   bell.firstChild.innerHTML='<svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9Z"/><path d="M10 21h4"/></svg>';
@@ -23,6 +27,7 @@ export function setupNotificationTray({openAlert}={}){
   const sessionHeader=document.querySelector('#conversation .session-bar');
   if(sessionHeader){
     const compact=bell.cloneNode(false);compact.id='session-notifications';compact.className='icon-button notification-bell session-notification-bell';
+    compact.title='Notifications (Alt+N)';
     const count=badge.cloneNode(true);compact.append(bell.firstChild.cloneNode(true),count);
     sessionHeader.insertBefore(compact,document.querySelector('#session-search'));
     bells.push(compact);badges.push(count);
@@ -40,6 +45,12 @@ export function setupNotificationTray({openAlert}={}){
   const undoBar=element('div','notification-undo'),undoText=element('span'),undo=element('button','','Undo');undo.type='button';undoBar.hidden=true;undoBar.append(undoText,undo);
   const list=element('div','notification-list');tray.append(head,toolbar,status,error,retry,undoBar,list);document.body.append(tray);
   let alerts=[],loaded=false,busy=false,lastDismissed=[],request=0,socket,reconnect=1000,connection='Connecting…',navigating=false;
+  function notifyChange(){try{onAlertsChange?.(alerts);}catch{}}
+  function focusFirstAlert(){
+    const firstLink=list.querySelector('.notification-link');
+    if(firstLink)firstLink.focus();
+    else close.focus();
+  }
   async function read(path,options){
     const response=await fetch(appUrl(path),{cache:'no-store',...options});
     if(!response.ok)throw new Error('Could not '+(options?'save changes.':'load notifications.'));
@@ -61,6 +72,7 @@ export function setupNotificationTray({openAlert}={}){
       for(const alert of items){
         const card=element('article','notification-card'+(attention(alert)?' needs-attention':''));card.dataset.id=alert.id;
         const link=element('a','notification-link');link.href=notificationUrl(alert);link.dataset.alertId=alert.id;link.dataset.action='open';
+        if(alert.sessionId)link.dataset.sessionId=alert.sessionId;
         link.append(element('strong','',alert.resolved?'Request resolved':alert.question?'Answer needed':labels[alert.event]||'Session activity'));
         const time=element('time');time.dateTime=new Date(alert.created).toISOString();time.textContent=new Date(alert.created).toLocaleString();link.append(time);
         link.append(element('span','notification-source',`${alert.title} · ${alert.projectName||'Ungrouped'}`),element('p','notification-body',alert.body),element('span','notification-destination',alert.automationId?'Open automation →':alert.event==='approval'&&!alert.resolved?'Open request →':'Open session →'));
@@ -68,7 +80,10 @@ export function setupNotificationTray({openAlert}={}){
           if(!openAlert||event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;
           event.preventDefault();
           navigating=true;tray.close();
-          try{await openAlert(alert);}catch(err){tray.showModal();for(const trigger of bells)trigger.setAttribute('aria-expanded','true');render();error.textContent=err.message||'Could not open this session.';}
+          try{
+            await openAlert(alert);
+            if(isAutoDismissEnabled()&&alert.sessionId)dismissSessionAlerts(alert.sessionId);
+          }catch(err){tray.showModal();for(const trigger of bells)trigger.setAttribute('aria-expanded','true');render();error.textContent=err.message||'Could not open this session.';}
           finally{navigating=false;}
         });
         const dismiss=element('button','notification-dismiss','×');dismiss.type='button';dismiss.disabled=busy;dismiss.dataset.alertId=alert.id;dismiss.dataset.action='dismiss';dismiss.setAttribute('aria-label',`Dismiss ${labels[alert.event]||'alert'} for ${alert.title}`);dismiss.onclick=()=>change([alert.id],true);
@@ -77,10 +92,11 @@ export function setupNotificationTray({openAlert}={}){
       list.append(section);
     }
     if(focusId){const target=[...list.querySelectorAll('[data-alert-id]')].find(n=>n.dataset.alertId===focusId&&n.dataset.action===focusAction);(target||close).focus();}
+    else if(tray.open&&(!document.activeElement||document.activeElement===close||document.activeElement===tray||!tray.contains(document.activeElement))){focusFirstAlert();}
   }
   async function refresh(){
     const generation=++request;
-    try{const data=await read('/api/notifications/inbox');if(generation!==request)return;alerts=Array.isArray(data?.alerts)?data.alerts:[];loaded=true;error.textContent='';retry.hidden=true;render();}
+    try{const data=await read('/api/notifications/inbox');if(generation!==request)return;alerts=Array.isArray(data?.alerts)?data.alerts:[];loaded=true;error.textContent='';retry.hidden=true;render();notifyChange();}
     catch(err){if(generation!==request)return;error.textContent=err.message;retry.hidden=false;}
   }
   async function change(ids,dismissed){
@@ -90,7 +106,22 @@ export function setupNotificationTray({openAlert}={}){
       if(dismissed){lastDismissed=ids;undoText.textContent=`${ids.length} alert${ids.length===1?'':'s'} dismissed.`;undoBar.hidden=false;}else{lastDismissed=[];undoBar.hidden=true;}
       await refresh();
     }catch(err){error.textContent=err.message;}
-    finally{busy=false;render();}
+    finally{busy=false;render();notifyChange();}
+  }
+  async function dismissSessionAlerts(sessionId){
+    if(!sessionId)return;
+    const sessionAlerts=alerts.filter(a=>a.sessionId===sessionId);
+    if(!sessionAlerts.length)return;
+    const ids=sessionAlerts.map(a=>a.id);
+    alerts=alerts.filter(a=>a.sessionId!==sessionId);
+    render();
+    notifyChange();
+    try{
+      for(let start=0;start<ids.length;start+=10000){
+        await read('/api/notifications/inbox/dismiss',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids:ids.slice(start,start+10000),dismissed:true})});
+      }
+    }catch(err){}
+    finally{await refresh();}
   }
   function connect(){
     socket=new WebSocket(socketUrl('/api/notifications/inbox/events'));
@@ -99,15 +130,63 @@ export function setupNotificationTray({openAlert}={}){
     socket.onclose=()=>{connection='Reconnecting…';render();setTimeout(connect,reconnect);reconnect=Math.min(15000,reconnect*2);};
     socket.onerror=()=>socket.close();
   }
-  for(const trigger of bells)trigger.onclick=()=>{opener=trigger;tray.showModal();for(const button of bells)button.setAttribute('aria-expanded','true');render();refresh();};
-  close.onclick=()=>tray.close();tray.addEventListener('close',()=>{
+  function openTray(fromTrigger){
+    if(tray.open)return;
+    opener=fromTrigger||(bells.find(b=>b.getClientRects().length)||bells[0]);
+    tray.showModal();
+    for(const trigger of bells)trigger.setAttribute('aria-expanded','true');
+    render();
+    focusFirstAlert();
+    refresh();
+  }
+  function closeTray(){
+    if(!tray.open)return;
+    tray.close();
+  }
+  function toggleTray(fromTrigger){
+    if(tray.open)closeTray();
+    else openTray(fromTrigger);
+  }
+  for(const trigger of bells)trigger.onclick=()=>{openTray(trigger);};
+  close.onclick=()=>closeTray();
+  tray.addEventListener('close',()=>{
     for(const trigger of bells)trigger.setAttribute('aria-expanded','false');
     if(!navigating)(opener.getClientRects().length?opener:bells.find(button=>button.getClientRects().length))?.focus();
   });
-  tray.addEventListener('click',event=>{if(event.target===tray&&event.clientX<tray.getBoundingClientRect().left)tray.close();});
+  tray.addEventListener('click',event=>{if(event.target===tray&&event.clientX<tray.getBoundingClientRect().left)closeTray();});
+  tray.addEventListener('keydown',event=>{
+    if(event.key==='ArrowDown'||event.key==='ArrowUp'){
+      const links=[...list.querySelectorAll('.notification-link')];
+      if(!links.length)return;
+      const currentIndex=links.indexOf(document.activeElement);
+      if(currentIndex!==-1){
+        event.preventDefault();
+        const nextIndex=event.key==='ArrowDown'
+          ?Math.min(links.length-1,currentIndex+1)
+          :Math.max(0,currentIndex-1);
+        links[nextIndex]?.focus();
+      }
+    }
+  });
+  document.addEventListener('keydown',event=>{
+    if(event.defaultPrevented||event.isComposing)return;
+    if(event.altKey&&!event.ctrlKey&&!event.metaKey&&(event.key==='n'||event.key==='N'||event.code==='KeyN')){
+      if(document.querySelector('dialog[open]:not(#notification-tray)'))return;
+      event.preventDefault();
+      toggleTray();
+    }
+  });
   dismissAll.onclick=()=>change(alerts.map(a=>a.id),true);undo.onclick=()=>change(lastDismissed,false);retry.onclick=refresh;
   document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
   setInterval(()=>{if(!document.hidden)refresh();},30000);
   refresh();connect();render();
-  return {refresh};
+  return {
+    refresh,
+    open:openTray,
+    close:closeTray,
+    toggle:toggleTray,
+    dismissSessionAlerts,
+    hasSessionAlert:sessionId=>alerts.some(a=>a.sessionId===sessionId),
+    getAlerts:()=>[...alerts],
+  };
 }

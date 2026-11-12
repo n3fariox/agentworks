@@ -3,19 +3,24 @@
 ## Persistent workspace tray
 
 The Notifications bell is available in the workspace navigation on every app page,
-including the dashboard. Full-screen mobile sessions also have a compact bell in
+including the dashboard. Press `Alt+N` anywhere to toggle the notification tray
+and focus the topmost alert, enabling quick `Enter` navigation to follow alerts
+or `ArrowDown`/`ArrowUp` to navigate between alerts. Full-screen mobile sessions also have a compact bell in
 the session header, shared by Chat and Terminal. Its count is the number of undismissed alerts across all
 projects. Approvals, questions, failures, blocked task reports and missed/skipped
 scheduled runs appear under Needs attention; turn endings, explicit task completion
 reports and resolved requests appear under Recent activity. A turn ending does not
 imply the task is complete. When a session produces a new turn ending, any previous
 turn ended alert for that session is automatically dismissed to keep only the latest
-turn ending per session.
+turn ending per session. Sessions with undismissed notifications are highlighted in
+bold with an unread indicator dot in the session browser.
 
 Alerts are saved in the catalog as events occur, even with no connected browser.
 They survive navigation, reloads and server restarts. Opening an alert takes you to
 its session and relevant history or pending request, or to its automation panel.
-Opening never dismisses it. Use the individual × or Dismiss all; Undo restores the
+By default, viewing a session automatically dismisses its notifications (which can
+be toggled in Settings → Notifications via "Dismiss session notifications on view").
+Use the individual × or Dismiss all; Undo restores the
 last dismissal. Resolution updates a request in place without dismissing it.
 Dismissals sync between tabs and browsers connected to the same server. All viewers
 of this workspace share the inbox and its dismissal state. Undismissed alerts do
