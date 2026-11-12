@@ -255,12 +255,18 @@ function fillCreateHosts(selected,cwd){
   createHostChanged(select.value===selected?(cwd||(select.value==='local'?$('directory').value:undefined)):undefined);
 }
 function createHost(){return hosts.find(h=>h.id===$('create-host').value&&h.kind==='remote')||null;}
-// A project's saved directory, when it is on this host. Sessions start there
-// unless the person chooses another directory.
+// A project's saved directory on this host. Sessions start there unless the
+// person chooses another directory.
 function projectDirectoryOn(hostId,projectId){
-  const id=projects.find(p=>p.id===projectId)?.defaultLocationId;
+  const id=projects.find(p=>p.id===projectId)?.defaultLocations?.[hostId];
   const location=id&&locations.find(l=>l.id===id);
   return location&&location.hostId===hostId?location.path:null;
+}
+// A project's saved directories, keyed by host id.
+function projectDirectories(project){
+  const paths={};
+  for(const [hostId,id] of Object.entries(project?.defaultLocations||{})){const location=locations.find(l=>l.id===id&&l.hostId===hostId);if(location)paths[hostId]=location.path;}
+  return paths;
 }
 // The last source directory chosen in this browser for a project on a host.
 function rememberedDirectory(host=$('create-host').value||'local',projectId=$('create-project').value||null){
@@ -635,8 +641,7 @@ function openProjectDialog(project=null){
   $('project-communication-role').querySelector('option[value=""]').textContent='Use global default · '+communicationLabels[config.defaultCommunicationRole||'participant'];
   $('project-error').textContent='';$('delete-project').hidden=!project;$('archive-project').hidden=!project;$('open-controllers').hidden=!project;
   $('archive-project').textContent=project?.archived?'Unarchive project':'Archive project';
-  const saved=project?.defaultLocationId&&locations.find(l=>l.id===project.defaultLocationId);
-  projectDirectory.open(saved||(!project&&$('create-dialog').open?{hostId:$('create-host').value||'local',path:''}:null));
+  projectDirectory.open({paths:projectDirectories(project),hostId:$('create-dialog').open?$('create-host').value||'local':undefined});
   policyEditor.open(editingProject);$('project-dialog').showModal();$('project-name').focus();
 }
 function resetTranscript(){eventSeq=null;backgroundJobs.reset();subagents.reset();transcript=[];tools=new Map();compactions=new Map();approvals=new Map();assistant=null;nodes.clear();turnEnds=new Map();workLogs?.reset();$('messages').replaceChildren();$('approval-area').replaceChildren();}
@@ -1442,7 +1447,7 @@ $('project-form').onsubmit=async event=>{
   $('project-error').textContent='';
   try{
     const policy=policyEditor.value(),directory=projectDirectory.value();
-    const project=await api(editingProject?`/api/projects/${editingProject}`:'/api/projects',{method:editingProject?'PATCH':'POST',body:JSON.stringify({name:$('project-name').value,tasksEnabled:$('project-tasks-enabled').checked,...($('project-tasks-enabled').checked&&$('project-slug').value?{slug:$('project-slug').value}:{}),defaultCommunicationRole:$('project-communication-role').value||null,...(directory!==undefined?{defaultLocation:directory}:{})})});
+    const project=await api(editingProject?`/api/projects/${editingProject}`:'/api/projects',{method:editingProject?'PATCH':'POST',body:JSON.stringify({name:$('project-name').value,tasksEnabled:$('project-tasks-enabled').checked,...($('project-tasks-enabled').checked&&$('project-slug').value?{slug:$('project-slug').value}:{}),defaultCommunicationRole:$('project-communication-role').value||null,...(directory!==undefined?{defaultLocations:directory}:{})})});
     editingProject=project.id;projects=projects.filter(p=>p.id!==project.id).concat(project);updateProjectControls();taskMentions.refresh();$('project-tasks').hidden=!project.tasksEnabled;projectDirectory.commit();$('delete-project').hidden=false;$('archive-project').hidden=false;
     try{await api(`/api/projects/${project.id}/workspace-policy`,{method:'PUT',body:JSON.stringify(policy)});}
     catch(error){throw new Error(`Project name saved. Workspace policy was not saved: ${error.message}. Retry Save project.`);}

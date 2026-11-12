@@ -77,34 +77,52 @@ export function setupDirectoryPicker({$,api}) {
 // Project directory field: optional, explicit, and only sent when changed,
 // so saving other project settings never moves an existing project.
 export function setupProjectDirectory({$,picker,hosts}) {
-  let original={hostId:'local',path:''};
+  // Saved and edited directories, keyed by host id. The field shows the
+  // selected host's directory; switching hosts keeps edits to the others.
+  let original={},edits={},shown='local';
+  const hostName=id=>id==='local'?'Local':hosts().find(h=>h.id===id)?.name||id;
+  const current=id=>id===shown?$('project-directory').value.trim():(edits[id]??original[id]??'');
   function fill(selected){
     const select=$('project-directory-host');select.replaceChildren(new Option('Local','local'));
     for(const host of hosts().filter(h=>h.kind==='remote'))select.append(new Option(host.name+(host.status==='connected'?'':' · offline'),host.id));
     select.value=[...select.options].some(o=>o.value===selected)?selected:'local';
+    shown=select.value;
   }
   function note(){
-    const changed=dirty();
-    $('project-directory-note').textContent=$('project-directory').value.trim()?(changed?'New sessions in this project will start here. Existing sessions keep their directories.':'New sessions in this project start here unless you choose another directory.'):(original.path&&changed?'The project directory will be cleared. Sessions keep their directories.':'Optional. Choose an existing folder or create one beneath an allowed root.');
+    const path=current(shown),saved=original[shown]||'',changed=path!==saved;
+    const text=path?(changed?'New sessions in this project on this host will start here. Existing sessions keep their directories.':'New sessions in this project on this host start here unless you choose another directory.'):(saved&&changed?'This host\'s project directory will be cleared. Sessions keep their directories.':'Optional. Choose an existing folder or create one beneath an allowed root.');
+    const others=[...new Set([...Object.keys(original),...Object.keys(edits)])].filter(id=>id!==shown&&current(id)).map(hostName);
+    $('project-directory-note').textContent=text+(others.length?' Also set on: '+others.join(', ')+'.':'');
   }
-  function open(location){
-    original={hostId:location?.hostId||'local',path:location?.path||''};
-    fill(original.hostId);$('project-directory').value=original.path;note();
+  // `paths` maps host ids to saved directories; `hostId` is the host to show first.
+  function open({paths={},hostId}={}){
+    original={...paths};edits={};
+    fill(hostId||(original.local||!Object.keys(original).length?'local':Object.keys(original)[0]));
+    $('project-directory').value=original[shown]||'';note();
   }
-  function dirty(){const path=$('project-directory').value.trim();return path!==original.path||(path&&$('project-directory-host').value!==original.hostId);}
-  // `undefined` leaves the saved directory unchanged; `null` clears it.
+  // `undefined` leaves every saved directory unchanged. Otherwise a map of
+  // the hosts that changed: a path sets that host's directory, `null` clears it.
   function value(){
-    if(!dirty())return undefined;
-    const path=$('project-directory').value.trim();
-    return path?{hostId:$('project-directory-host').value,path}:null;
+    const changes={};
+    for(const id of new Set([...Object.keys(original),...Object.keys(edits),shown])){
+      const path=current(id);if(path!==(original[id]||''))changes[id]=path||null;
+    }
+    return Object.keys(changes).length?changes:undefined;
   }
   $('project-directory').addEventListener('input',note);
-  $('project-directory-host').onchange=()=>{$('project-directory').value='';note();};
+  $('project-directory-host').onchange=()=>{
+    edits[shown]=$('project-directory').value.trim();shown=$('project-directory-host').value;
+    $('project-directory').value=edits[shown]??original[shown]??'';note();
+  };
   $('project-directory-clear').onclick=()=>{$('project-directory').value='';note();};
   $('project-directory-browse').onclick=async()=>{
     const hostId=$('project-directory-host').value,host=hosts().find(h=>h.id===hostId);
     const path=await picker.pick({hostId,hostName:host?.name||'Local',start:$('project-directory').value.trim()});
     if(path){$('project-directory').value=path;note();}
   };
-  return {open,value,saved:()=>({...original}),commit:()=>{original={hostId:$('project-directory-host').value,path:$('project-directory').value.trim()};note();}};
+  return {open,value,commit:()=>{
+    const saved={};
+    for(const id of new Set([...Object.keys(original),...Object.keys(edits),shown])){const path=current(id);if(path)saved[id]=path;}
+    original=saved;edits={};note();
+  }};
 }

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     io,
     path::{Path, PathBuf},
 };
@@ -24,14 +24,19 @@ pub struct Project {
     pub default_communication_role: Option<crate::communication::Role>,
     #[serde(default, rename = "locationIds")]
     pub location_ids: Vec<String>,
-    /// Where new sessions in this project start unless the request names a
-    /// directory. Set only explicitly; grouping never depends on it.
+    /// Where new sessions in this project start on each host, keyed by host
+    /// id, unless the request names a directory. Set only explicitly; grouping
+    /// never depends on it.
     #[serde(
         default,
-        rename = "defaultLocationId",
-        skip_serializing_if = "Option::is_none"
+        rename = "defaultLocations",
+        skip_serializing_if = "BTreeMap::is_empty"
     )]
-    pub default_location_id: Option<String>,
+    pub default_locations: BTreeMap<String, String>,
+    /// Pre-per-host catalogs saved one directory; `Catalog::open` moves it
+    /// into `default_locations` under its location's host.
+    #[serde(default, rename = "defaultLocationId", skip_serializing)]
+    legacy_default_location_id: Option<String>,
     #[serde(default)]
     pub archived: bool,
 }
@@ -123,6 +128,7 @@ impl Catalog {
             }
         }
         migrate_slugs(&mut data)?;
+        migrate_default_locations(&mut data);
         crate::tasks::validate_catalog(&data)?;
         Ok(Self { path, data })
     }
@@ -237,7 +243,8 @@ impl Catalog {
                 name: name.into(),
                 slug: unique_slug(&data, name),
                 location_ids: Vec::new(),
-                default_location_id: None,
+                default_locations: BTreeMap::new(),
+                legacy_default_location_id: None,
                 workspace_policy: Default::default(),
                 archived: false,
                 tasks_enabled: false,
@@ -304,15 +311,22 @@ impl Catalog {
         self.save(data)
             .map_err(|_| "Could not save project metadata".into())
     }
-    /// Sets or clears the project's default location, recording it as one of
-    /// the project's locations. `None` leaves the location list untouched.
+    /// Sets or clears the project's default location on one host, recording
+    /// a new location as one of the project's locations. Other hosts keep
+    /// theirs, and clearing leaves the location list untouched.
     pub fn set_default_location(
         &mut self,
         project_id: &str,
+        host_id: &str,
         location_id: Option<&str>,
     ) -> Result<Project, String> {
         let mut data = self.data.clone();
-        if location_id.is_some_and(|id| !data.locations.iter().any(|l| l.id == id)) {
+        if let Some(id) = location_id
+            && !data
+                .locations
+                .iter()
+                .any(|l| l.id == id && l.host_id == host_id)
+        {
             return Err("Directory not found".into());
         }
         let project = data
@@ -320,26 +334,35 @@ impl Catalog {
             .iter_mut()
             .find(|p| p.id == project_id)
             .ok_or("Project not found")?;
-        project.default_location_id = location_id.map(String::from);
-        if let Some(id) = location_id
-            && !project.location_ids.iter().any(|l| l == id)
-        {
-            project.location_ids.push(id.into());
+        match location_id {
+            Some(id) => {
+                project.default_locations.insert(host_id.into(), id.into());
+                if !project.location_ids.iter().any(|l| l == id) {
+                    project.location_ids.push(id.into());
+                }
+            }
+            None => {
+                project.default_locations.remove(host_id);
+            }
         }
         let project = project.clone();
         self.save(data)
             .map_err(|_| "Could not save project directory")?;
         Ok(project)
     }
-    /// The project's default location, if one is set.
-    pub fn default_location(&self, project_id: Option<&str>) -> Option<Location> {
+    /// The project's default location on a host, if one is set.
+    pub fn default_location(&self, project_id: Option<&str>, host_id: &str) -> Option<Location> {
         let project = self
             .data
             .projects
             .iter()
             .find(|p| Some(p.id.as_str()) == project_id)?;
-        let id = project.default_location_id.as_deref()?;
-        self.data.locations.iter().find(|l| l.id == id).cloned()
+        let id = project.default_locations.get(host_id)?;
+        self.data
+            .locations
+            .iter()
+            .find(|l| &l.id == id && l.host_id == host_id)
+            .cloned()
     }
     pub fn attach_location(&mut self, project_id: &str, location_id: &str) -> io::Result<()> {
         let mut data = self.data.clone();
@@ -557,16 +580,26 @@ impl Catalog {
         data.locations.retain(|l| l.host_id != id);
         for project in &mut data.projects {
             project.location_ids.retain(|l| !gone.contains(l));
-            if project
-                .default_location_id
-                .as_ref()
-                .is_some_and(|l| gone.contains(l))
-            {
-                project.default_location_id = None;
-            }
+            project.default_locations.remove(id);
         }
         data.hosts.retain(|h| h.id != id);
         self.save(data).map_err(|_| "Could not save host".into())
+    }
+}
+
+/// Moves a pre-per-host project directory under the host its location is on.
+/// A dangling legacy id is dropped, as the old lookup would have ignored it.
+fn migrate_default_locations(data: &mut CatalogData) {
+    for project in &mut data.projects {
+        let Some(id) = project.legacy_default_location_id.take() else {
+            continue;
+        };
+        if let Some(location) = data.locations.iter().find(|l| l.id == id) {
+            project
+                .default_locations
+                .entry(location.host_id.clone())
+                .or_insert(id);
+        }
     }
 }
 
@@ -579,22 +612,35 @@ mod tests {
         let mut catalog = Catalog::open(path.clone()).unwrap();
         let existing = catalog.project(None, "Existing", None).unwrap();
         let project = catalog.project(None, "Thing", None).unwrap();
-        assert!(catalog.default_location(Some(&project.id)).is_none());
+        assert!(
+            catalog
+                .default_location(Some(&project.id), "local")
+                .is_none()
+        );
         let location = catalog.location(Path::new("/srv/thing")).unwrap();
         assert!(
             catalog
-                .set_default_location(&project.id, Some("missing"))
+                .set_default_location(&project.id, "local", Some("missing"))
+                .is_err()
+        );
+        // A location is only a default on the host it lives on.
+        assert!(
+            catalog
+                .set_default_location(&project.id, "mac", Some(&location.id))
                 .is_err()
         );
         catalog
-            .set_default_location(&project.id, Some(&location.id))
+            .set_default_location(&project.id, "local", Some(&location.id))
             .unwrap();
         catalog
             .project(Some(&project.id), "Renamed thing", None)
             .unwrap();
         let mut catalog = Catalog::open(path.clone()).unwrap();
         assert_eq!(
-            catalog.default_location(Some(&project.id)).unwrap().path,
+            catalog
+                .default_location(Some(&project.id), "local")
+                .unwrap()
+                .path,
             Path::new("/srv/thing")
         );
         let saved = catalog
@@ -605,9 +651,96 @@ mod tests {
             .unwrap();
         assert_eq!(saved.location_ids, [location.id.clone()]);
         // Other projects are never changed by setting one project's directory.
-        assert!(catalog.default_location(Some(&existing.id)).is_none());
-        catalog.set_default_location(&project.id, None).unwrap();
-        assert!(catalog.default_location(Some(&project.id)).is_none());
+        assert!(
+            catalog
+                .default_location(Some(&existing.id), "local")
+                .is_none()
+        );
+        catalog
+            .set_default_location(&project.id, "local", None)
+            .unwrap();
+        assert!(
+            catalog
+                .default_location(Some(&project.id), "local")
+                .is_none()
+        );
+        let _ = std::fs::remove_file(path);
+    }
+    #[test]
+    fn default_locations_are_per_host() {
+        let path = std::env::temp_dir().join(format!("agentworks-hosts-{}.json", Uuid::new_v4()));
+        let mut catalog = Catalog::open(path.clone()).unwrap();
+        let project = catalog.project(None, "Thing", None).unwrap();
+        let linux = catalog.location(Path::new("/home/me/thing")).unwrap();
+        let mac = catalog
+            .location_on("mac", Path::new("/Users/me/src/thing"))
+            .unwrap();
+        catalog
+            .set_default_location(&project.id, "local", Some(&linux.id))
+            .unwrap();
+        catalog
+            .set_default_location(&project.id, "mac", Some(&mac.id))
+            .unwrap();
+        let catalog = Catalog::open(path.clone()).unwrap();
+        assert_eq!(
+            catalog
+                .default_location(Some(&project.id), "local")
+                .unwrap()
+                .id,
+            linux.id
+        );
+        assert_eq!(
+            catalog
+                .default_location(Some(&project.id), "mac")
+                .unwrap()
+                .id,
+            mac.id
+        );
+        assert!(
+            catalog
+                .default_location(Some(&project.id), "other")
+                .is_none()
+        );
+        let mut catalog = catalog;
+        // Clearing one host keeps the others.
+        catalog
+            .set_default_location(&project.id, "mac", None)
+            .unwrap();
+        assert!(catalog.default_location(Some(&project.id), "mac").is_none());
+        assert!(
+            catalog
+                .default_location(Some(&project.id), "local")
+                .is_some()
+        );
+        let _ = std::fs::remove_file(path);
+    }
+    #[test]
+    fn legacy_default_location_moves_under_its_host() {
+        let path = std::env::temp_dir().join(format!("agentworks-legacy-{}.json", Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            r#"{"projects":[
+                {"id":"a","name":"A","slug":"AA","locationIds":["l1"],"defaultLocationId":"l1"},
+                {"id":"b","name":"B","slug":"BB","locationIds":[],"defaultLocationId":"gone"}],
+              "locations":[{"id":"l1","hostId":"box","path":"/srv/a"}]}"#,
+        )
+        .unwrap();
+        let mut catalog = Catalog::open(path.clone()).unwrap();
+        assert_eq!(
+            catalog.default_location(Some("a"), "box").unwrap().path,
+            Path::new("/srv/a")
+        );
+        assert!(catalog.default_location(Some("a"), "local").is_none());
+        assert!(catalog.data.projects[1].default_locations.is_empty());
+        catalog.save(catalog.data.clone()).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("defaultLocationId"));
+        assert!(
+            Catalog::open(path.clone())
+                .unwrap()
+                .default_location(Some("a"), "box")
+                .is_some()
+        );
         let _ = std::fs::remove_file(path);
     }
     #[test]
@@ -906,10 +1039,28 @@ mod tests {
         );
         let project = catalog.project(None, "Spans hosts", None).unwrap();
         catalog.attach_location(&project.id, &remote.id).unwrap();
+        let local = catalog.location(Path::new("/srv/app")).unwrap();
+        catalog
+            .set_default_location(&project.id, &host.id, Some(&remote.id))
+            .unwrap();
+        catalog
+            .set_default_location(&project.id, "local", Some(&local.id))
+            .unwrap();
         catalog.remove_host(&host.id).unwrap();
+        // Only the removed host's project directory is cleared.
+        assert!(
+            catalog
+                .default_location(Some(&project.id), &host.id)
+                .is_none()
+        );
+        assert!(
+            catalog
+                .default_location(Some(&project.id), "local")
+                .is_some()
+        );
         assert!(catalog.remove_host(&host.id).is_err());
         assert!(catalog.data.locations.iter().all(|l| l.host_id != host.id));
-        assert!(catalog.data.projects[0].location_ids.is_empty());
+        assert_eq!(catalog.data.projects[0].location_ids, [local.id.as_str()]);
         assert_eq!(catalog.data.hosts.len(), 1);
         std::fs::remove_file(path).unwrap();
     }

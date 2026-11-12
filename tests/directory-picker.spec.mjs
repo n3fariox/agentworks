@@ -20,7 +20,7 @@ test.afterAll(async()=>{await new Promise(ok=>server.close(ok));});
 async function fixture(page,{remembered,sessions=[]}={}){
   const state={
     tree:{'/repo':['existing','other'],'/repo/existing':[],'/repo/other':[]},
-    projects:[{id:'a',name:'Alpha',locationIds:['loc-a'],defaultLocationId:'loc-a'},{id:'b',name:'Beta',locationIds:[]}],
+    projects:[{id:'a',name:'Alpha',locationIds:['loc-a'],defaultLocations:{local:'loc-a'}},{id:'b',name:'Beta',locationIds:[]}],
     locations:[{id:'loc-a',hostId:'local',path:'/repo/other'}],
     hosts:[{id:'local',name:'Local',status:'connected',kind:'local'},{id:'box',name:'Box',status:'connected',kind:'remote',roots:['~/work'],worker:{providers:['demo']}}],
     creates:[],projectWrites:[],folders:[],browses:[],
@@ -51,12 +51,12 @@ async function fixture(page,{remembered,sessions=[]}={}){
     if(path==='/api/projects'&&method==='POST'){
       state.projectWrites.push({method,body});
       const project={id:'new',name:body.name,locationIds:[]};
-      if(body.defaultLocation){const loc={id:'loc-new',...body.defaultLocation};state.locations.push(loc);project.defaultLocationId=loc.id;project.locationIds=[loc.id];}
+      for(const [hostId,path] of Object.entries(body.defaultLocations||{})){const loc={id:'loc-new-'+hostId,hostId,path};state.locations.push(loc);(project.defaultLocations??={})[hostId]=loc.id;project.locationIds.push(loc.id);}
       state.projects.push(project);return json(project);
     }
     if(path.startsWith('/api/projects/')&&method==='PATCH'){
       state.projectWrites.push({method,body});const project=state.projects.find(p=>p.id===path.split('/').at(-1));project.name=body.name;
-      if(body.defaultLocation===null)delete project.defaultLocationId;
+      for(const [hostId,path] of Object.entries(body.defaultLocations||{})){if(path===null){delete project.defaultLocations?.[hostId];continue;}const loc={id:'loc-'+hostId+'-'+state.locations.length,hostId,path};state.locations.push(loc);(project.defaultLocations??={})[hostId]=loc.id;project.locationIds.push(loc.id);}
       return json(project);
     }
     if(path==='/api/sessions'&&method==='POST'){
@@ -97,7 +97,7 @@ for(const mobile of [false,true]){
     await expect(page.locator('#directory-picker-dialog')).toBeHidden();
     await expect(page.locator('#project-directory')).toHaveValue('/repo/existing/thing');
     await page.locator('#save-project').click();await expect(page.locator('#project-dialog')).toBeHidden();
-    expect(s.projectWrites[0].body).toMatchObject({name:'Thing',defaultLocation:{hostId:'local',path:'/repo/existing/thing'}});
+    expect(s.projectWrites[0].body).toMatchObject({name:'Thing',defaultLocations:{local:'/repo/existing/thing'}});
     await expect(page.locator('#create-project')).toHaveValue('new');
     await expect(page.locator('#directory')).toHaveValue('/repo/existing/thing');
     await page.locator('#create-submit').click();
@@ -188,17 +188,45 @@ test('editing a project leaves its directory alone unless changed, and Clear sen
   await expect(page.locator('#project-directory-host')).toHaveValue('local');
   await page.locator('#project-name').fill('Alpha renamed');await page.locator('#save-project').click();
   await expect(page.locator('#project-dialog')).toBeHidden();
-  expect(s.projectWrites[0]).toMatchObject({method:'PATCH'});expect(s.projectWrites[0].body).not.toHaveProperty('defaultLocation');
+  expect(s.projectWrites[0]).toMatchObject({method:'PATCH'});expect(s.projectWrites[0].body).not.toHaveProperty('defaultLocations');
   // A project without a directory stays without one.
   await page.getByRole('button',{name:'Edit project Beta',exact:true}).click();
   await expect(page.locator('#project-directory')).toHaveValue('');
   await page.locator('#save-project').click();await expect(page.locator('#project-dialog')).toBeHidden();
-  expect(s.projectWrites[1].body).not.toHaveProperty('defaultLocation');
+  expect(s.projectWrites[1].body).not.toHaveProperty('defaultLocations');
   await page.getByRole('button',{name:'Edit project Alpha renamed',exact:true}).click();
   await page.locator('#project-directory-clear').click();
   await expect(page.locator('#project-directory-note')).toContainText('will be cleared');
   await page.locator('#save-project').click();await expect(page.locator('#project-dialog')).toBeHidden();
-  expect(s.projectWrites[2].body.defaultLocation).toBeNull();
+  expect(s.projectWrites[2].body.defaultLocations).toEqual({local:null});
+});
+test('each host keeps its own project directory',async({page})=>{
+  const s=await fixture(page);
+  await page.getByRole('button',{name:'Edit project Alpha',exact:true}).click();
+  await expect(page.locator('#project-directory')).toHaveValue('/repo/other');
+  // Switching hosts shows that host's directory and keeps the others.
+  await page.locator('#project-directory-host').selectOption('box');
+  await expect(page.locator('#project-directory')).toHaveValue('');
+  await expect(page.locator('#project-directory-note')).toContainText('Also set on: Local');
+  await page.locator('#project-directory').fill('~/work/alpha');
+  await page.locator('#project-directory-host').selectOption('local');
+  await expect(page.locator('#project-directory')).toHaveValue('/repo/other');
+  await expect(page.locator('#project-directory-note')).toContainText('Also set on: Box');
+  await page.locator('#save-project').click();await expect(page.locator('#project-dialog')).toBeHidden();
+  expect(s.projectWrites[0].body.defaultLocations).toEqual({box:'~/work/alpha'});
+  // New sessions on each host start in that host's directory.
+  await page.locator('#welcome-new').click();
+  await choosePlace(page,{project:'a'});await expect(page.locator('#directory')).toHaveValue('/repo/other');
+  await choosePlace(page,{project:'a',host:'box'});await expect(page.locator('#directory')).toHaveValue('~/work/alpha');
+  await page.locator('#dismiss-create').click();
+  // Clearing one host sends only that host.
+  await page.getByRole('button',{name:'Edit project Alpha',exact:true}).click();
+  await page.locator('#project-directory-host').selectOption('box');
+  await expect(page.locator('#project-directory')).toHaveValue('~/work/alpha');
+  await page.locator('#project-directory-clear').click();
+  await expect(page.locator('#project-directory-note')).toContainText('will be cleared');
+  await page.locator('#save-project').click();await expect(page.locator('#project-dialog')).toBeHidden();
+  expect(s.projectWrites[1].body.defaultLocations).toEqual({box:null});
 });
 test('session Browse uses the selected host and shows its limits',async({page})=>{
   const s=await fixture(page);

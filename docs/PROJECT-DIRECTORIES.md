@@ -1,10 +1,10 @@
 # Project directories and the folder picker
 
-Projects are logical groups. A project can also have one optional **project directory**, a host and a path, where new sessions in that project start. Grouping never depends on it: sessions in one project can still use different directories and hosts, and moving a session between projects never changes its directory.
+Projects are logical groups. A project can also have an optional **project directory** on each host, where new sessions in that project on that host start. The same project can point at `/home/me/src/app` on Linux and `/Users/me/src/app` on a Mac. Grouping never depends on it: sessions in one project can still use different directories and hosts, and moving a session between projects never changes its directory.
 
 ## Using it
 
-- **New project / Project settings → Project directory.** Choose the host, then either type an absolute path or use **Browse…**. The field is optional. Saving other project settings leaves the directory as it is; **Clear** removes it. Existing projects have no directory until you set one, and nothing sets one for them automatically.
+- **New project / Project settings → Project directory.** Choose the host, then either type an absolute path or use **Browse…**. The field shows the selected host's directory; switching hosts keeps edits made for the other hosts, and the note lists the other hosts that have one. The field is optional. Saving sends only the hosts whose directory changed, so other settings and other hosts' directories stay as they are; **Clear** removes the selected host's directory. Existing projects have no directory until you set one, and nothing sets one for them automatically.
 - **Browse…** opens the folder picker. It starts at the current path if that path is inside an allowed root, and otherwise at the list of allowed roots. Open folders to go deeper, and use the breadcrumbs or **↑ Up** to go back. Up stops at the root. **Create folder** makes one new folder inside the folder you are viewing and opens it. **Use this folder** selects the folder you are viewing. Breadcrumbs are built from the server's canonical paths using the host's own separator: `/` on Linux and macOS, and `\` on Windows (including `C:\` and `\\?\C:\` roots). The browser never joins a Windows path with `/`.
 - **New session → Working directory** has the same **Browse…** button. It uses the host selected in the dialog.
 
@@ -28,10 +28,10 @@ An API request to `POST /api/sessions` with an empty `cwd` uses the project's di
 | --- | --- | --- | --- |
 | `GET` | `/api/directories` | `hostId` (default `local`), `path` (absolute; omit for the roots), `hidden` | `{path, root, parent, entries:[{name, path}], truncated}`. With no `path`, `entries` are the canonical roots that exist. |
 | `POST` | `/api/directories` | `{hostId?, parent, name}` | `{path}`: the new folder's canonical path |
-| `POST` | `/api/projects` | `{name, defaultLocation?: {hostId, path}}` | Project, with `defaultLocationId` when set |
-| `PATCH` | `/api/projects/{id}` | `{name, defaultLocation?: {hostId, path} \| null}` | Omitted keeps the directory; `null` clears it |
+| `POST` | `/api/projects` | `{name, defaultLocations?: {[hostId]: path}}` | Project, with `defaultLocations: {[hostId]: locationId}` when any is set |
+| `PATCH` | `/api/projects/{id}` | `{name, defaultLocations?: {[hostId]: path \| null}}` | A host left out keeps its directory; `null` clears that host's |
 
-The project directory is stored as a catalog location. `defaultLocationId` points into `GET /api/catalog` `locations` and is also added to the project's `locationIds`. The directory is validated on its host before the project is created or renamed. A rejected directory saves nothing. Removing a host clears project directories on that host.
+Each project directory is stored as a catalog location. `defaultLocations` maps a host id to a location id in `GET /api/catalog` `locations`, and each one is also added to the project's `locationIds`. Every directory in a request is validated on its host before the project is created or renamed. A rejected directory saves nothing. Removing a host clears project directories on that host only. Catalogs saved before per-host directories had a single `defaultLocationId`; on load it moves into `defaultLocations` under its location's host.
 
 ## Security model
 

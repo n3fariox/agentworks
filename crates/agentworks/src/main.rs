@@ -75,7 +75,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     borrow::Cow,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     env,
     net::IpAddr,
     path::{Path as FsPath, PathBuf},
@@ -2411,60 +2411,47 @@ struct ProjectName {
         deserialize_with = "communication::role_patch"
     )]
     default_communication_role: Option<Option<communication::Role>>,
-    /// Omitted keeps the current directory; `null` clears it.
-    #[serde(
-        default,
-        rename = "defaultLocation",
-        deserialize_with = "location_patch"
-    )]
-    default_location: Option<Option<ProjectLocation>>,
+    /// Project directories by host id. A host left out keeps its directory;
+    /// `null` clears that host's directory.
+    #[serde(default, rename = "defaultLocations")]
+    default_locations: BTreeMap<String, Option<String>>,
 }
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProjectLocation {
-    #[serde(default)]
-    host_id: Option<String>,
-    path: String,
-}
-fn location_patch<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<Option<ProjectLocation>>, D::Error> {
-    Option::<ProjectLocation>::deserialize(deserializer).map(Some)
-}
-/// Validates a requested project directory on its host before anything is saved.
-async fn project_location(
+/// Validates each requested project directory on its host before anything is
+/// saved. `None` clears that host's directory.
+async fn project_locations(
     app: &App,
-    location: &Option<Option<ProjectLocation>>,
-) -> Result<Option<Option<(String, PathBuf)>>, (StatusCode, String)> {
-    let Some(location) = location else {
-        return Ok(None);
-    };
-    let Some(location) = location else {
-        return Ok(Some(None));
-    };
-    let host = location.host_id.as_deref().unwrap_or("local").to_string();
-    let path = if host == "local" {
-        checked_cwd(app, &location.path)?
-    } else {
-        tokio::time::timeout(
-            std::time::Duration::from_secs(12),
-            hosts::remote_directory(app, &host, &location.path),
-        )
-        .await
-        .map_err(|_| {
-            fail(
-                StatusCode::REQUEST_TIMEOUT,
-                "Remote directory validation timed out",
+    locations: &BTreeMap<String, Option<String>>,
+) -> Result<Vec<(String, Option<PathBuf>)>, (StatusCode, String)> {
+    let mut checked = Vec::with_capacity(locations.len());
+    for (host, path) in locations {
+        let Some(path) = path else {
+            checked.push((host.clone(), None));
+            continue;
+        };
+        let path = if host == "local" {
+            checked_cwd(app, path)?
+        } else {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(12),
+                hosts::remote_directory(app, host, path),
             )
-        })??
-    };
-    Ok(Some(Some((host, path))))
+            .await
+            .map_err(|_| {
+                fail(
+                    StatusCode::REQUEST_TIMEOUT,
+                    "Remote directory validation timed out",
+                )
+            })??
+        };
+        checked.push((host.clone(), Some(path)));
+    }
+    Ok(checked)
 }
 fn save_project(
     app: &App,
     id: Option<&str>,
     req: ProjectName,
-    location: Option<Option<(String, PathBuf)>>,
+    locations: Vec<(String, Option<PathBuf>)>,
 ) -> ApiResult {
     let mut catalog = app.catalog.lock().unwrap();
     let mut project = catalog
@@ -2476,9 +2463,9 @@ fn save_project(
             req.tasks_enabled,
         )
         .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
-    if let Some(location) = location {
-        let location = match location {
-            Some((host, path)) => Some(catalog.location_on(&host, &path).map_err(|_| {
+    for (host, path) in locations {
+        let location = match path {
+            Some(path) => Some(catalog.location_on(&host, &path).map_err(|_| {
                 fail(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Could not save project directory",
@@ -2487,24 +2474,24 @@ fn save_project(
             None => None,
         };
         project = catalog
-            .set_default_location(&project.id, location.as_ref().map(|l| l.id.as_str()))
+            .set_default_location(&project.id, &host, location.as_ref().map(|l| l.id.as_str()))
             .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
     Ok(Json(json!(project)))
 }
 async fn create_project(State(app): State<App>, Json(req): Json<ProjectName>) -> ApiResult {
-    let location = project_location(&app, &req.default_location).await?;
+    let locations = project_locations(&app, &req.default_locations).await?;
     let _gate = app.communication_lock.lock().await;
-    save_project(&app, None, req, location)
+    save_project(&app, None, req, locations)
 }
 async fn rename_project(
     State(app): State<App>,
     Path(id): Path<String>,
     Json(req): Json<ProjectName>,
 ) -> ApiResult {
-    let location = project_location(&app, &req.default_location).await?;
+    let locations = project_locations(&app, &req.default_locations).await?;
     let _gate = app.communication_lock.lock().await;
-    save_project(&app, Some(&id), req, location)
+    save_project(&app, Some(&id), req, locations)
 }
 /// What happens to a project's sessions when the project is archived or deleted.
 /// The default applies the same operation; `ungroup` moves them to Ungrouped instead.
@@ -3007,8 +2994,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
             .catalog
             .lock()
             .unwrap()
-            .default_location(req.project_id.as_deref())
-            .filter(|l| l.host_id == host)
+            .default_location(req.project_id.as_deref(), host)
             .map(|l| l.path.to_string_lossy().into_owned())
             .ok_or_else(|| {
                 fail(
