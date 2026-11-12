@@ -119,7 +119,7 @@ try{
  assert.equal(updated.status,'connected');assert(updated.worker.providers.includes('demo'));
  // Both ends report the same build, so the host is current.
  const {build}=await api('/api/status',undefined,'GET');
- assert.match(build,/^\d+\.\d+\.\d+\+[0-9a-f]{12}$|\+unknown$/);assert.equal(updated.worker.build,build);assert.equal(updated.outdated,build.endsWith('+unknown')?null:false);
+ assert.match(build,/^\d+\.\d+\.(\d+|0-dev)$/);assert.equal(updated.worker.build,build);assert.equal(updated.worker.version,build);assert.equal(updated.outdated,build.endsWith('-dev')?null:false);
  // Choosing roots browses the host's home directory through the real worker.
  const home_=await api(`/api/directories?hostId=${host.id}&scope=home`,undefined,'GET');
  assert.equal(home_.path,home);

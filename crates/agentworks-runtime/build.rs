@@ -1,9 +1,11 @@
-//! Bakes the build identity into `AGENTWORKS_BUILD`: the crate version and the
-//! git commit it was built from, e.g. `0.1.0+3f1c2d4e5a6b`. Server and worker
-//! both link this crate, so a host whose worker reports a different build than
-//! the server is out of date. Packagers without a git checkout can set
-//! `AGENTWORKS_BUILD_COMMIT`; otherwise the commit is `unknown`, which never
-//! counts as out of date.
+//! Bakes the build version into `AGENTWORKS_BUILD`: the crate's major and
+//! minor version with the commit count as the last digit, e.g. `0.1.376` for
+//! the 376th commit. Server and worker both link this crate, so a host whose
+//! worker reports a different version than the server is out of date.
+//!
+//! Packagers without a git checkout (or with a shallow one, whose count is
+//! wrong) set `AGENTWORKS_BUILD_NUMBER`. Otherwise the version ends in `-dev`,
+//! e.g. `0.1.0-dev`, which never counts as out of date.
 use std::{env, path::PathBuf, process::Command};
 
 fn git(args: &[&str]) -> Option<String> {
@@ -17,13 +19,20 @@ fn git(args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
+/// Commits reachable from HEAD; refused for shallow clones, which undercount.
+fn commit_count() -> Option<u64> {
+    if git(&["rev-parse", "--is-shallow-repository"]).as_deref() != Some("false") {
+        return None;
+    }
+    git(&["rev-list", "--count", "HEAD"])?.parse().ok()
+}
+
 fn main() {
-    println!("cargo:rerun-if-env-changed=AGENTWORKS_BUILD_COMMIT");
-    let commit = env::var("AGENTWORKS_BUILD_COMMIT")
+    println!("cargo:rerun-if-env-changed=AGENTWORKS_BUILD_NUMBER");
+    let number = env::var("AGENTWORKS_BUILD_NUMBER")
         .ok()
-        .filter(|c| !c.trim().is_empty())
-        .or_else(|| git(&["rev-parse", "--short=12", "HEAD"]))
-        .unwrap_or_else(|| "unknown".into());
+        .and_then(|n| n.trim().parse::<u64>().ok())
+        .or_else(commit_count);
     // Rebuild when HEAD moves: its file, the branch it names, and packed refs.
     for path in ["HEAD", "packed-refs"]
         .into_iter()
@@ -43,9 +52,13 @@ fn main() {
             }
         }
     }
-    println!(
-        "cargo:rustc-env=AGENTWORKS_BUILD={}+{}",
-        env::var("CARGO_PKG_VERSION").unwrap(),
-        commit.trim()
+    let (major, minor) = (
+        env::var("CARGO_PKG_VERSION_MAJOR").unwrap(),
+        env::var("CARGO_PKG_VERSION_MINOR").unwrap(),
     );
+    let version = match number {
+        Some(n) => format!("{major}.{minor}.{n}"),
+        None => format!("{major}.{minor}.0-dev"),
+    };
+    println!("cargo:rustc-env=AGENTWORKS_BUILD={version}");
 }

@@ -1394,12 +1394,8 @@ $('remove-host').onclick=async()=>{
   try{await api(`/api/hosts/${host.id}`,{method:'DELETE'});$('host-settings-dialog').close();await refreshSessions();}
   catch(error){$('host-settings-error').textContent=error.message;$('remove-host').disabled=false;}
 };
-// `0.1.0+3f1c2d4e5a6b` → `v0.1.0 (3f1c2d4e5a6b)`.
-function buildLabel(build){
-  if(!build)return '';
-  const [version,commit]=build.split('+');
-  return 'v'+version+(commit&&commit!=='unknown'?` (${commit})`:'');
-}
+// `0.1.376` → `v0.1.376`; the last digit is the commit count.
+function buildLabel(build){return build?'v'+build:'';}
 const enrollment=hostEnrollment({$,api,refresh:refreshSessions,directories:host=>{
   $('host-dialog').close();openHostSettings(host,'directories');
 }});

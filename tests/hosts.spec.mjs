@@ -148,7 +148,7 @@ test('host working directories enable remote sessions in the new-session dialog'
 
 test('host settings rename, repoint, browse for roots, flag outdated workers and remove',async({page})=>{
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
-  const s=await fixture(page,{build:'0.1.0+bbbbbbbbbbbb',r1:{outdated:true,worker:{...remote('r1','build-box','connected').worker,directories:true,build:'0.1.0+aaaaaaaaaaaa'}}});
+  const s=await fixture(page,{build:'0.1.376',r1:{outdated:true,worker:{...remote('r1','build-box','connected').worker,directories:true,build:'0.1.370'}}});
   page.on('dialog',d=>d.accept());
   await page.locator('#view-hosts').click();
   const box=page.locator('[data-group="host:r1"]');
@@ -157,13 +157,13 @@ test('host settings rename, repoint, browse for roots, flag outdated workers and
   await expect(box.locator('.tree-label').first()).toBeVisible();
   expect(await box.locator('.tree-label').first().evaluate(e=>e.getBoundingClientRect().width)).toBeGreaterThan(20);
   await expect(page.locator('[data-group="host:r2"] .host-update')).toHaveCount(0);
-  await expect(page.locator('#host-address')).toContainText('v0.1.0 (bbbbbbbbbbbb)');
+  await expect(page.locator('#host-address')).toContainText('v0.1.376');
   await box.getByRole('button',{name:'Settings for build-box'}).click();
   const dialog=page.locator('#host-settings-dialog');
   await dialog.getByRole('tab',{name:'Connection'}).click();
-  await expect(page.locator('#host-connection')).toContainText('v0.1.0 (aaaaaaaaaaaa)');
+  await expect(page.locator('#host-connection')).toContainText('v0.1.370');
   await expect(page.locator('#host-connection .update-badge')).toHaveText('Update available');
-  await expect(page.locator('#host-connection')).toContainText('v0.1.0 (bbbbbbbbbbbb)');
+  await expect(page.locator('#host-connection')).toContainText('v0.1.376');
   // Browse… starts in the host's home directory, not inside the current roots.
   await dialog.getByRole('tab',{name:'Directories'}).click();
   await page.locator('#host-roots').getByRole('button',{name:'Browse for working directory'}).click();

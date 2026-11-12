@@ -48,15 +48,16 @@ pub struct Host {
 }
 pub const DEFAULT_REMOTE_COMMAND: &str = "agentworks";
 pub const PROTOCOL: u64 = 3;
-/// This build's identity, `<crate version>+<git commit>`; see build.rs. Unlike
-/// the protocol, a different build still connects, but is shown as out of date.
+/// This build's version, `<major>.<minor>.<commit count>` (e.g. `0.1.376`), or
+/// `<major>.<minor>.0-dev` when the count is unknown; see build.rs. Unlike the
+/// protocol, a different version still connects, but is shown as out of date.
 pub const BUILD: &str = env!("AGENTWORKS_BUILD");
 
-/// Whether a worker reporting `build` is out of date with this server. Unknown
-/// commits on either side cannot be compared; a worker too old to report a
+/// Whether a worker reporting `build` is out of date with this server. A `-dev`
+/// version on either side cannot be compared; a worker too old to report a
 /// build is out of date.
 pub fn outdated(worker_build: Option<&str>) -> Option<bool> {
-    let known = |b: &str| !b.is_empty() && !b.ends_with("+unknown");
+    let known = |b: &str| !b.is_empty() && !b.ends_with("-dev");
     match worker_build.filter(|b| !b.is_empty()) {
         None => Some(true),
         Some(b) if known(b) && known(BUILD) => Some(b != BUILD),
@@ -1171,15 +1172,24 @@ mod tests {
 
     #[test]
     fn builds_compare_only_when_both_are_known() {
-        assert!(BUILD.starts_with(concat!(env!("CARGO_PKG_VERSION"), "+")));
+        let prefix = concat!(
+            env!("CARGO_PKG_VERSION_MAJOR"),
+            ".",
+            env!("CARGO_PKG_VERSION_MINOR"),
+            "."
+        );
+        let patch = BUILD.strip_prefix(prefix).unwrap();
+        assert!(patch == "0-dev" || patch.parse::<u64>().is_ok(), "{BUILD}");
         assert_eq!(outdated(None), Some(true));
         assert_eq!(outdated(Some("")), Some(true));
-        assert_eq!(outdated(Some("0.1.0+unknown")), None);
-        if BUILD.ends_with("+unknown") {
-            assert_eq!(outdated(Some("0.1.0+0123456789ab")), None);
+        assert_eq!(outdated(Some("0.1.0-dev")), None);
+        if BUILD.ends_with("-dev") {
+            assert_eq!(outdated(Some("0.1.12")), None);
         } else {
             assert_eq!(outdated(Some(BUILD)), Some(false));
-            assert_eq!(outdated(Some("0.0.1+0123456789ab")), Some(true));
+            assert_eq!(outdated(Some("0.0.1")), Some(true));
+            // Workers from before commit-count versions report a commit hash.
+            assert_eq!(outdated(Some("0.1.0+0123456789ab")), Some(true));
         }
     }
 

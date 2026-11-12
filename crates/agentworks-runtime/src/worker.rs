@@ -60,7 +60,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
     let hello = json!({
         "type": "hello",
         "protocol": PROTOCOL,
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": crate::remote::BUILD,
         "build": crate::remote::BUILD,
         "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         "hostname": hostname().unwrap_or_default(),
