@@ -141,6 +141,12 @@ export function setupNotifications({getSessions,getActive,selectSession,toast}={
     const state=support();
     fieldset.replaceChildren();
     const legend=document.createElement('legend');legend.textContent='Notifications';fieldset.append(legend);
+    const autoDismissRow=document.createElement('label');autoDismissRow.className='workspace-check';
+    const autoDismissToggle=document.createElement('input');autoDismissToggle.type='checkbox';autoDismissToggle.id='notifications-auto-dismiss';
+    autoDismissToggle.checked=isAutoDismissEnabled();
+    autoDismissToggle.onchange=()=>{setAutoDismissEnabled(autoDismissToggle.checked);};
+    autoDismissRow.append(autoDismissToggle,document.createTextNode('Automatically dismiss alerts when opening a session'));
+    fieldset.append(autoDismissRow);
     if(!state.ok){
       const note=document.createElement('p');note.className='field-note';note.setAttribute('role','status');note.textContent=state.reason;fieldset.append(note);return;
     }
@@ -157,12 +163,6 @@ export function setupNotifications({getSessions,getActive,selectSession,toast}={
       finally{toggle.disabled=false;}
     };
     row.append(toggle,document.createTextNode('Notify me about agent activity'));fieldset.append(row);
-    const autoDismissRow=document.createElement('label');autoDismissRow.className='workspace-check';
-    const autoDismissToggle=document.createElement('input');autoDismissToggle.type='checkbox';autoDismissToggle.id='notifications-auto-dismiss';
-    autoDismissToggle.checked=isAutoDismissEnabled();
-    autoDismissToggle.onchange=()=>{setAutoDismissEnabled(autoDismissToggle.checked);};
-    autoDismissRow.append(autoDismissToggle,document.createTextNode('Automatically dismiss alerts when opening a session'));
-    fieldset.append(autoDismissRow);
     const permission=document.createElement('div');fieldset.append(permission);renderPermission(permission);
     if(!settings?.enabled){
       const hint=document.createElement('p');hint.className='field-note';hint.textContent='Turn this on to be told about turn completion, approvals and failures from any session.';fieldset.append(hint);

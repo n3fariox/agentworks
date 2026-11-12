@@ -339,6 +339,7 @@ for(const mode of ['insecure','unsupported'])test(`${mode} origins/browsers expl
   const sockets=await harness(page,{[mode]:true,permission:'default'});
   await expect(page.locator('#controls')).toContainText(mode==='insecure'?'secure':'does not show notifications');
   await expect(page.locator('#notifications-enabled')).toHaveCount(0);
+  await expect(page.locator('#notifications-auto-dismiss')).toBeVisible();
   expect(sockets).toEqual([]);
   expect(await page.evaluate(()=>window.__permissionRequests)).toEqual([]);
 });
@@ -460,6 +461,7 @@ test('real insecure HTTP hostname is explained even when Notification exists',as
   });
   expect(await page.evaluate(()=>isSecureContext)).toBe(false);
   await expect(page.locator('#controls')).toContainText('HTTPS or localhost');
+  await expect(page.locator('#notifications-auto-dismiss')).toBeVisible();
   await expect(page.getByRole('button')).toHaveCount(0);
 });
 

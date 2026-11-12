@@ -19,7 +19,7 @@ Alerts are saved in the catalog as events occur, even with no connected browser.
 They survive navigation, reloads and server restarts. Opening an alert takes you to
 its session and relevant history or pending request, or to its automation panel.
 By default, viewing a session automatically dismisses its notifications (which can
-be toggled in Settings → Notifications via "Dismiss session notifications on view").
+be toggled in Settings → Notifications via "Automatically dismiss alerts when opening a session").
 Use the individual × or Dismiss all; Undo restores the
 last dismissal. Resolution updates a request in place without dismissing it.
 Dismissals sync between tabs and browsers connected to the same server. All viewers
