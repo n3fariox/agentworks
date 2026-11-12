@@ -44,6 +44,15 @@ function updateNotificationIndicators(alerts=notificationTray?.getAlerts?.()||[]
   for(const row of document.querySelectorAll('#sessions .session-item[data-session-id]')){
     row.classList.toggle('has-notifications',activeIds.has(row.dataset.sessionId));
   }
+  const boldProjectIds=new Set();
+  for(const s of sessions){
+    if(!s.archived&&activeIds.has(s.id)){
+      boldProjectIds.add(s.projectId||'ungrouped');
+    }
+  }
+  for(const heading of document.querySelectorAll('#sessions .tree-heading[data-project-group]')){
+    heading.classList.toggle('has-notifications',boldProjectIds.has(heading.dataset.projectGroup));
+  }
 }
 import {setupQuestions} from './questions.js';
 import {setupMentions} from './mentions.js';
@@ -505,7 +514,12 @@ function openHostTerminal(host){terminalHost=host;localStorage.setItem('agentwor
 function treeGroup(key,label,items,{host=null,projectId=null,level=0,archived=false}={}){
   const group=el('details','tree-group level-'+level);group.dataset.group=key;
   const stateKey=sidebarView+':'+key;group.open=!collapsedGroups.has(stateKey);
-  const heading=el('summary','tree-heading');if(!host&&projectId){heading.dataset.projectId=projectId;heading.setAttribute('aria-haspopup','menu');}heading.append(el('span','tree-chevron','›'));
+  const heading=el('summary','tree-heading');
+  if(!host&&(projectId!==undefined)){
+    if(projectId){heading.dataset.projectId=projectId;heading.setAttribute('aria-haspopup','menu');}
+    heading.dataset.projectGroup=projectId||'ungrouped';
+  }
+  heading.append(el('span','tree-chevron','›'));
   heading.append(el('span',host?'tree-icon host':'tree-icon',host?'▤':'◇'),el('span','tree-label',label),badges(items));
   if(archived)heading.append(el('span','group-total','Archived'));
   // An out-of-date worker rings the status dot; the row has no room for a badge.
@@ -605,7 +619,7 @@ function sidebar(){
       area.append(top.group);
     }
   }
-  area.scrollTop=scroll;updateProjectControls();github.refreshBadges();
+  area.scrollTop=scroll;updateProjectControls();github.refreshBadges();updateNotificationIndicators();
 }
 async function refreshSessions(){
   const [list,catalog]=await Promise.all([api('/api/sessions?archived=all'),api('/api/catalog')]);

@@ -707,3 +707,47 @@ test('Alt+N triggers notification tray with keyboard navigation, session browser
   const remainingAlerts=(await api('/api/notifications/inbox')).alerts.filter(a=>a.sessionId===focusedSessionId);
   expect(remainingAlerts.length).toBeGreaterThan(0);
 });
+
+test('project heading in session browser is bold when any of its non-archived sub-sessions are bold, and un-bolds when dismissed',async({page})=>{
+  await clearInbox();
+  const project=await api('/api/projects',{name:'Alpha Project'});
+  const s1=await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Alpha Session 1',projectId:project.id});
+  const s2=await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Alpha Session 2',projectId:project.id});
+  const s3=await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Alpha Archived',projectId:project.id});
+
+  // Generate an alert on s3, then archive s3
+  await run(s3.id,'alert on s3');
+  await api(`/api/sessions/${s3.id}`,{archived:true},'PATCH');
+
+  await page.goto('/');
+  const projectHeading=page.locator(`#sessions .tree-heading[data-project-group="${project.id}"]`);
+  await expect(projectHeading).toBeVisible();
+  // Project heading should NOT be bold because s3 is archived
+  await expect(projectHeading).not.toHaveClass(/has-notifications/);
+
+  // Trigger an alert on non-archived s1: project heading should become bold
+  await run(s1.id,'alert on s1');
+  await expect(projectHeading).toHaveClass(/has-notifications/);
+  const s1Item=page.locator(`#sessions .session-item[data-session-id="${s1.id}"]`);
+  await expect(s1Item).toHaveClass(/has-notifications/);
+
+  // Trigger an alert on non-archived s2 as well
+  await run(s2.id,'alert on s2');
+  await expect(projectHeading).toHaveClass(/has-notifications/);
+
+  // View s1: s1 auto-dismisses, but s2 still has an active alert, so project heading remains bold
+  await s1Item.click();
+  await expect(s1Item).not.toHaveClass(/has-notifications/);
+  await expect(projectHeading).toHaveClass(/has-notifications/);
+
+  // View s2: s2 auto-dismisses, leaving no non-archived sessions with alerts
+  const s2Item=page.locator(`#sessions .session-item[data-session-id="${s2.id}"]`);
+  await s2Item.click();
+  await expect(s2Item).not.toHaveClass(/has-notifications/);
+
+  // Project heading should now un-bold
+  await expect(projectHeading).not.toHaveClass(/has-notifications/);
+
+  for(const id of [s1.id,s2.id,s3.id])await api(`/api/sessions/${id}`,undefined,'DELETE').catch(()=>{});
+  await api(`/api/projects/${project.id}`,undefined,'DELETE').catch(()=>{});
+});
