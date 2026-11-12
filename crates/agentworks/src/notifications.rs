@@ -326,6 +326,13 @@ impl Hub {
                         ),
                     ),
                 };
+                if event == "turnEnd" {
+                    for alert in &mut alerts {
+                        if alert.session_id == context.session_id && alert.event == "turnEnd" {
+                            alert.dismissed = true;
+                        }
+                    }
+                }
                 alerts.push(Alert {
                     id,
                     session_id: context.session_id.into(),
@@ -642,6 +649,64 @@ mod tests {
         assert_eq!(reopened.list()[1].event, "taskCompleted");
         assert_eq!(reopened.list()[1].body, "Done");
         assert_eq!(reopened.list()[2].event, "turnEnd");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn new_turn_ended_dismisses_previous_turn_ended_for_same_session() {
+        let root =
+            std::env::temp_dir().join(format!("turn-end-dismiss-{}", uuid::Uuid::new_v4()));
+        let catalog = Arc::new(Mutex::new(
+            Catalog::open(root.join("catalog.json")).unwrap(),
+        ));
+        let hub = Hub::new(catalog);
+        let s1 = Context {
+            session_id: "s1",
+            title: "Session 1",
+            provider: "demo",
+            project_id: None,
+        };
+        let s2 = Context {
+            session_id: "s2",
+            title: "Session 2",
+            provider: "demo",
+            project_id: None,
+        };
+        hub.observe(&s1, 1, 100, "turn_end", &json!({}));
+        hub.observe(&s2, 1, 101, "turn_end", &json!({}));
+        hub.observe(
+            &s1,
+            2,
+            102,
+            "approval",
+            &json!({"id":"approval-1","kind":"question"}),
+        );
+        let list = hub.list();
+        assert_eq!(list.len(), 3);
+
+        // A new turn_end for s1 dismisses s1's previous turn_end (seq 1),
+        // but keeps s1's approval and s2's turn_end.
+        hub.observe(&s1, 3, 103, "turn_end", &json!({}));
+        let list = hub.list();
+        assert_eq!(list.len(), 3);
+        let s1_turns: Vec<_> = list
+            .iter()
+            .filter(|a| a.session_id == "s1" && a.event == "turnEnd")
+            .collect();
+        assert_eq!(s1_turns.len(), 1);
+        assert_eq!(s1_turns[0].seq, 3);
+
+        // s2's turn_end is still present
+        let s2_turns: Vec<_> = list
+            .iter()
+            .filter(|a| a.session_id == "s2" && a.event == "turnEnd")
+            .collect();
+        assert_eq!(s2_turns.len(), 1);
+        assert_eq!(s2_turns[0].seq, 1);
+
+        // s1's approval is still present
+        assert!(list.iter().any(|a| a.session_id == "s1" && a.event == "approval"));
+
         std::fs::remove_dir_all(root).unwrap();
     }
 

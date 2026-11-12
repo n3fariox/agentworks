@@ -531,6 +531,31 @@ test('tray groups approvals first and updates resolved requests without removing
   expect((await api('/api/notifications/inbox')).alerts.length).toBe(count);
 });
 
+test('subsequent turn ended event dismisses previous ones for the same session',async({page})=>{
+  await clearInbox();
+  await run(background.id,'hello');
+  let {alerts}=await api('/api/notifications/inbox');
+  expect(alerts).toHaveLength(1);
+  const firstId=alerts[0].id;
+  expect(alerts[0].sessionId).toBe(background.id);
+  expect(alerts[0].event).toBe('turnEnd');
+
+  // Running another turn in background session should dismiss the previous turnEnd alert
+  await run(background.id,'hello again');
+  ({alerts}=await api('/api/notifications/inbox'));
+  expect(alerts).toHaveLength(1);
+  expect(alerts[0].id).not.toBe(firstId);
+  expect(alerts[0].sessionId).toBe(background.id);
+  expect(alerts[0].event).toBe('turnEnd');
+
+  // A turn in a different session does not dismiss background's turnEnd alert
+  await run(watched.id,'hello watched');
+  ({alerts}=await api('/api/notifications/inbox'));
+  expect(alerts).toHaveLength(2);
+  expect(alerts.some(a=>a.sessionId===background.id&&a.event==='turnEnd')).toBe(true);
+  expect(alerts.some(a=>a.sessionId===watched.id&&a.event==='turnEnd')).toBe(true);
+});
+
 test('tray inbox and dismissal survive a server restart',async({page})=>{
   await clearInbox();await run(background.id,'hello');await run(watched.id,'hello');
   const {alerts}=await api('/api/notifications/inbox');expect(alerts).toHaveLength(2);

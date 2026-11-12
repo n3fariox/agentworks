@@ -8,7 +8,9 @@ the session header, shared by Chat and Terminal. Its count is the number of undi
 projects. Approvals, questions, failures, blocked task reports and missed/skipped
 scheduled runs appear under Needs attention; turn endings, explicit task completion
 reports and resolved requests appear under Recent activity. A turn ending does not
-imply the task is complete.
+imply the task is complete. When a session produces a new turn ending, any previous
+turn ended alert for that session is automatically dismissed to keep only the latest
+turn ending per session.
 
 Alerts are saved in the catalog as events occur, even with no connected browser.
 They survive navigation, reloads and server restarts. Opening an alert takes you to
