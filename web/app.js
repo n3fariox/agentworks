@@ -1834,7 +1834,7 @@ setupPalettes({
     sessionFiles:()=>sidePanel.open('files'),
     lifecycle:()=>{if(active){$('lifecycle-menu').open=true;[...$('lifecycle-menu').querySelectorAll('.lifecycle-actions :is(button,select)')].find(c=>c.offsetParent)?.focus();}},
     forkSession:()=>{if(active)openFork();},
-    rename:()=>{if(active)$('rename-session').click();},
+    rename:()=>{if(active)openRename(active);},
     sessionSettings:()=>{if(active)$('session-settings').click();},
     archive:()=>{if(active)archiveSession(active);},
     suspend:()=>{if(active&&!$('suspend-session').disabled)$('suspend-session').click();},
@@ -1898,11 +1898,19 @@ setInterval(()=>{if(active?.continuation?.dueAt)renderContinuation();},1000);
 
 $('session-filter').value=readStorage(localStorage,'agentworks-session-filter','active');
 $('session-filter').onchange=()=>{localStorage.setItem('agentworks-session-filter',JSON.stringify($('session-filter').value));sidebar();};
-$('rename-session').onclick=()=>{$('rename-title').value=active.title;$('rename-error').textContent='';$('rename-dialog').showModal();$('rename-title').focus();};
+// The rename dialog edits the session it was opened for; browser menus can
+// target sessions other than the active one.
+let renameTarget=null;
+function openRename(session){
+  renameTarget=session;
+  $('rename-title').value=session.title;$('rename-error').textContent='';
+  $('rename-dialog').showModal();$('rename-title').focus();
+}
+$('rename-session').onclick=()=>{if(active)openRename(active);};
 $('rename-dismiss').onclick=()=>$('rename-dialog').close();
 $('rename-form').onsubmit=async event=>{
-  event.preventDefault();const id=active?.id;if(!id)return;
-  try{const updated=await api(`/api/sessions/${id}`,{method:'PATCH',body:JSON.stringify({title:$('rename-title').value})});if(active?.id===id){Object.assign(active,updated);setTitle(updated.title);}await refreshSessions();$('rename-dialog').close();}catch(e){$('rename-error').textContent=e.message;}
+  event.preventDefault();const id=renameTarget?.id;if(!id)return;
+  try{const updated=await api(`/api/sessions/${id}`,{method:'PATCH',body:JSON.stringify({title:$('rename-title').value})});if(active?.id===id){Object.assign(active,updated);setTitle(updated.title);}await refreshSessions();renameTarget=null;$('rename-dialog').close();}catch(e){$('rename-error').textContent=e.message;}
 };
 async function archiveSession(session){
   if(!session)return;
@@ -1922,6 +1930,7 @@ setupContextMenu({onError:message=>toast(message),resolve(target){
     const session=sessions.find(s=>s.id===row.dataset.sessionId);if(!session)return null;
     return {origin:row,focus:row.querySelector('.session-select')||row,label:`Actions for ${session.title}`,actions:[
       {label:'Fork session…',run:()=>openFork(session)},
+      {label:'Rename session…',run:()=>openRename(session)},
       {label:session.archived?'Unarchive session':'Archive session',run:()=>archiveSession(session)},
       ...(session.archived&&session.worktree?.owned&&!session.worktree.removed?[{label:'Remove worktree…',danger:true,run:()=>removeRetainedWorktree(session)}]:[]),
       {label:'Delete history…',danger:true,run:()=>deleteSession(session)},

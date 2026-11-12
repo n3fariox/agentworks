@@ -77,6 +77,29 @@ test('keyboard navigation forks the pressed session',async({page})=>{
   await expect(page.locator('#session-title')).toHaveValue('Other session (fork)');
   await expect(page.locator('#header-title')).toHaveText('Current session');
 });
+test('right-click menu renames the pressed session without switching chats',async({page})=>{
+  const writes=await fixture(page);
+  await row(page).click({button:'right'});
+  await menu(page).getByRole('menuitem',{name:'Rename session…',exact:true}).click();
+  await expect(page.locator('#rename-dialog')).toBeVisible();
+  await expect(page.locator('#rename-title')).toHaveValue('Other session');
+  await page.locator('#rename-title').fill('Other session (renamed)');
+  await page.locator('#rename-form').getByRole('button',{name:'Save name'}).click();
+  await expect.poll(()=>writes.length).toBe(1);
+  expect(writes[0]).toMatchObject({path:'/api/sessions/two',method:'PATCH',body:{title:'Other session (renamed)'}});
+  await expect(row(page)).toContainText('Other session (renamed)');
+  await expect(page.locator('#header-title')).toHaveText('Current session');
+  await expect(page.locator('#rename-dialog')).toBeHidden();
+});
+test('keyboard menu navigation renames the pressed session',async({page})=>{
+  const writes=await fixture(page);
+  await row(page).locator('.session-select').focus();
+  await page.keyboard.press('Shift+F10');await page.keyboard.press('ArrowDown');
+  await expect(menu(page).getByRole('menuitem',{name:'Rename session…',exact:true})).toBeFocused();
+  await page.keyboard.press('Enter');await expect(page.locator('#rename-dialog')).toBeVisible();
+  await page.locator('#rename-title').fill('Other session (renamed)');await page.keyboard.press('Enter');
+  await expect(writes).toHaveLength(1);expect(writes[0]).toMatchObject({path:'/api/sessions/two',method:'PATCH',body:{title:'Other session (renamed)'}});
+});
 test('long press opens on mobile, suppresses activation, and movement cancels it',async({page})=>{
   await page.setViewportSize({width:390,height:844});await fixture(page);await page.locator('#session-home').click();
   await row(page).dispatchEvent('pointerdown',{pointerType:'touch',isPrimary:true,button:0,pointerId:5,clientX:240,clientY:800});
