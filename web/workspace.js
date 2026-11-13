@@ -24,10 +24,9 @@ export function createWorkspace(hooks){
   function contextControls(){
     if(state.projectId&&!catalog.projects.some(p=>p.id===state.projectId))state.projectId=null;
     projectOptions($('workspace-project'),state.projectId);
-    const project=catalog.projects.find(p=>p.id===state.projectId);
     const normalized=path=>path.replaceAll('\\','/').replace(/\/$/,'');
     const allowed=l=>(hooks.getConfig()?.roots||[]).some(root=>normalized(l.path)===normalized(root)||normalized(l.path).startsWith(normalized(root)+'/'));
-    const locations=catalog.locations.filter(l=>l.hostId==='local'&&allowed(l)&&(!project||project.locationIds?.includes(l.id)||sessions.some(s=>s.projectId===project.id&&s.locationId===l.id)));
+    const locations=catalog.locations.filter(l=>l.hostId==='local'&&allowed(l));
     const items=locations.map(l=>[l.id,'Local · '+shortPath(l.path)]);
     for(const root of hooks.getConfig()?.roots||[])if(!locations.some(l=>l.path===root))items.push(['root:'+root,'Local · '+shortPath(root)]);
     if(!items.some(([id])=>id===state.locationKey))state.locationKey=items[0]?.[0]||'';
@@ -324,7 +323,7 @@ export function createWorkspace(hooks){
     try{const list=await api('/api/automations');if(gen!==automationGeneration)return;definitions=list;renderAutomations();}
     catch(error){if(gen===automationGeneration)$('automation-list').replaceChildren(el('p','error-text',error.message));}
   }
-  function visibleDefinitions(){return definitions.filter(d=>(d.projectId||null)===state.projectId);}
+  function visibleDefinitions(){return definitions;}
   function renderAutomations(){
     const list=$('automation-list');list.replaceChildren();const visible=visibleDefinitions();
     if(!visible.some(d=>d.id===state.automationId))state.automationId=visible[0]?.id||null;
