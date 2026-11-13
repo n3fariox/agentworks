@@ -215,9 +215,27 @@ export function activeAntigravityWindows(state,model,now=Date.now()){
   const effort='(?:-(?:low|medium|high|xhigh|max))?';
   let ids=[];
   if(new RegExp('^gemini-4-argon'+effort+'$').test(model||''))ids=['gemini-argon-wtu-weekly'];
+  // Hydrogen has no dedicated bucket in /usage (agy 1.5.8), so it draws on the
+  // shared Gemini buckets; a hydrogen-specific bucket wins if one appears.
+  else if(new RegExp('^gemini-4-hydrogen'+effort+'$').test(model||'')){
+    const own=windows.filter(w=>/(^|-)hydrogen(-|$)/.test(w.id)).map(w=>w.id);
+    ids=own.length?own:['gemini-weekly','gemini-5h'];
+  }
+  // The Argon orchestrator draws on both Argon and the shared Gemini buckets;
+  // Argon is listed first and leads the label (see leadAntigravityWindow).
+  else if(new RegExp('^gemini-pro-orchestrator-g1-pro'+effort+'$').test(model||''))ids=['gemini-argon-wtu-weekly','gemini-weekly','gemini-5h'];
   else if(new RegExp('^gemini-3\\.8-flash'+effort+'$').test(model||''))ids=['gemini-weekly','gemini-5h'];
   else if(new RegExp('^(?:claude-(?:opus|sonnet)-5-5|gpt-oss-120b)'+effort+'$').test(model||''))ids=['3p-weekly','3p-5h'];
-  return windows.filter(w=>ids.includes(w.id));
+  return windows.filter(w=>ids.includes(w.id)).sort((a,b)=>ids.indexOf(a.id)-ids.indexOf(b.id));
+}
+
+// Models that draw on several groups lead with a fixed bucket; others show
+// whichever mapped bucket is tightest.
+const ANTIGRAVITY_LEAD={'gemini-pro-orchestrator-g1-pro':'gemini-argon-wtu-weekly'};
+function leadAntigravityWindow(windows,model){
+  const lead=ANTIGRAVITY_LEAD[(model||'').replace(/-(?:low|medium|high|xhigh|max)$/,'')];
+  const fixed=lead&&windows.find(w=>w.id===lead&&w.percent!==null);
+  return fixed||windows.filter(w=>w.percent!==null).sort((a,b)=>a.percent-b.percent)[0]||windows[0];
 }
 
 export function usageView(state,{now=Date.now(),provider,model}={}){
@@ -233,7 +251,7 @@ export function usageView(state,{now=Date.now(),provider,model}={}){
     return `${k} quota (reported): ${pct(100-w.usedPercent)}% remaining${w.status?' · status '+w.status:''} · ${w.resetsAt?`${resetText(w.resetsAt,now)} (${new Date(w.resetsAt).toLocaleString()})`:'reset unknown'} · ${freshness(w,now).text}`;});
   const codex=codexWindows(state,now);
   const antigravity=activeAntigravityWindows(state,model,now);
-  const tightest=antigravity.filter(w=>w.percent!==null).sort((a,b)=>a.percent-b.percent)[0]||antigravity[0];
+  const tightest=leadAntigravityWindow(antigravity,model);
   const quotaDetails=provider==='antigravity'?(antigravity.length?antigravity.map(w=>w.detail):[state.antigravityQuota?'Quota mapping unavailable for the active model. All account quotas remain on the dashboard.':'Antigravity quota: not reported yet']):codex.length?codex.map(w=>w.detail):['codex','codex-rust'].includes(provider)?['Subscription quota: not reported']:quota;
   const details=[
     c?`Context occupancy (current window): ${c.used!==undefined?c.used.toLocaleString():'unknown'} of ${c.size!==undefined?c.size.toLocaleString():'unknown'} tokens${c.percent!==undefined?` (${c.percent.toFixed(1)}%)`:''} · ${cf.text}`:'Context occupancy: not reported yet',

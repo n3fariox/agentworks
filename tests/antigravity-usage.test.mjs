@@ -14,6 +14,19 @@ assert.match(view.short,/Argon · weekly 20% left/);
 const flash=usageView(state,{now:at,provider:'antigravity',model:'gemini-3.8-flash-high'});
 assert.match(flash.label,/75% left/);assert(!flash.details.some(s=>s.includes('Argon')));
 assert(flash.details.some(s=>s.includes('resets in 4h')));
+for(const model of ['gemini-4-hydrogen','gemini-4-hydrogen-xhigh']){
+  const hydrogen=usageView(state,{now:at,provider:'antigravity',model});
+  assert.match(hydrogen.label,/75% left/);assert(!hydrogen.details.some(s=>s.includes('Argon')));
+}
+const ownHydrogen=applyUsageEvent(emptyUsage(),{kind:'antigravity_quota',data:{...report,windows:[...report.windows,{id:'gemini-hydrogen-wtu-weekly',group:'Gemini 4 Hydrogen',window:'weekly',remainingFraction:0.4,resetTime:null}]}});
+const hv=usageView(ownHydrogen,{now:at,provider:'antigravity',model:'gemini-4-hydrogen-high'});
+assert.match(hv.label,/Hydrogen · weekly 40% left/);assert(!hv.details.some(s=>s.includes('Gemini Models')));
+// Orchestrator draws on Argon and shared Gemini; label leads with Argon even when Gemini is tighter.
+const orchState=applyUsageEvent(emptyUsage(),{kind:'antigravity_quota',data:{...report,windows:[{...report.windows[0],remainingFraction:0.05},report.windows[1]]}});
+const orch=usageView(orchState,{now:at,provider:'antigravity',model:'gemini-pro-orchestrator-g1-pro'});
+assert.match(orch.label,/Argon · weekly 20% left/);assert.match(orch.short,/Argon · weekly 20% left/);
+assert(orch.details.some(s=>s.includes('Argon'))&&orch.details.some(s=>s.includes('Gemini Models')));
+assert(orch.details.findIndex(s=>s.includes('Argon'))<orch.details.findIndex(s=>s.includes('Gemini Models')));
 assert(usageView(state,{now:at,provider:'antigravity',model:'unknown-model'}).details.some(s=>s.includes('mapping unavailable')));
 assert(!usageView(state,{now:at,provider:'antigravity',model:'gemini-4-argon'}).details.some(s=>s.includes('Gemini Models')));
 assert(view.details.some(s=>s.includes('reset unknown')));
