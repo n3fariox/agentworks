@@ -1950,7 +1950,7 @@ async fn get_settings(State(app): State<App>) -> Json<Value> {
     let roots = effective_roots(&app);
     let settings = app.catalog.lock().unwrap().data.settings.clone();
     Json(
-        json!({"git":settings.git.unwrap_or_default(),"roots":roots,"maxActiveSessions":settings.max_active_sessions.unwrap_or(catalog::DEFAULT_ACTIVE_SESSIONS),"idleSleepMinutes":settings.idle_sleep_minutes.unwrap_or(catalog::DEFAULT_IDLE_SLEEP_MINUTES),"defaultModels":settings.default_models,"claudeDefaultPermissionMode":settings.claude_default_permission_mode.unwrap_or_default(),"codexDefaultPermissionMode":settings.codex_default_permission_mode.unwrap_or_default(),"defaultCommunicationRole":settings.default_communication_role.unwrap_or_default(),"hiddenProviders":settings.hidden_providers.unwrap_or_default()}),
+        json!({"git":settings.git.unwrap_or_default(),"roots":roots,"maxActiveSessions":settings.max_active_sessions.unwrap_or(catalog::DEFAULT_ACTIVE_SESSIONS),"idleSleepMinutes":settings.idle_sleep_minutes.unwrap_or(catalog::DEFAULT_IDLE_SLEEP_MINUTES),"defaultModels":settings.default_models,"claudeDefaultPermissionMode":settings.claude_default_permission_mode.unwrap_or_default(),"codexDefaultPermissionMode":settings.codex_default_permission_mode.unwrap_or_default(),"antigravityDefaultPermissionMode":settings.antigravity_default_permission_mode.unwrap_or_default(),"defaultCommunicationRole":settings.default_communication_role.unwrap_or_default(),"hiddenProviders":settings.hidden_providers.unwrap_or_default()}),
     )
 }
 
@@ -2097,6 +2097,9 @@ async fn save_settings(State(app): State<App>, Json(mut settings): Json<Settings
         settings.codex_default_permission_mode = settings
             .codex_default_permission_mode
             .or(current.codex_default_permission_mode);
+        settings.antigravity_default_permission_mode = settings
+            .antigravity_default_permission_mode
+            .or(current.antigravity_default_permission_mode);
         settings.default_communication_role = settings
             .default_communication_role
             .or(current.default_communication_role);
@@ -3246,6 +3249,11 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
                 &req.provider,
                 req.external_id.is_some(),
                 catalog.data.settings.codex_default_permission_mode,
+            ),
+            initial_antigravity_permission_mode: permission_modes::initial_antigravity_default(
+                &req.provider,
+                req.external_id.is_some(),
+                catalog.data.settings.antigravity_default_permission_mode,
             ),
             available_commands: json!([]),
             turn_active: false,

@@ -4,7 +4,7 @@ use crate::{
     lifecycle::Metadata,
     lineage::Lineage,
     origins::{AutomationOrigin, ControlOrigin, InboxTurn},
-    permissions::{ClaudeDefault, CodexDefault},
+    permissions::{AntigravityDefault, ClaudeDefault, CodexDefault},
     queue, timeouts,
 };
 use agentworks_workspace::cleanup::Owned;
@@ -56,6 +56,8 @@ pub struct SessionData {
     pub initial_claude_permission_mode: Option<ClaudeDefault>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_codex_permission_mode: Option<CodexDefault>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_antigravity_permission_mode: Option<AntigravityDefault>,
     pub available_commands: Value,
     pub turn_active: bool,
     pub project_id: Option<String>,

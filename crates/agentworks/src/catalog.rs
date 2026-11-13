@@ -62,6 +62,8 @@ pub struct Settings {
     pub claude_default_permission_mode: Option<crate::permission_modes::ClaudeDefault>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_default_permission_mode: Option<crate::permission_modes::CodexDefault>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub antigravity_default_permission_mode: Option<crate::permission_modes::AntigravityDefault>,
     /// L-07 saved default; absent keeps the built-in default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeouts: Option<crate::timeouts::Policy>,
@@ -906,6 +908,7 @@ mod tests {
                 timeouts: None,
                 claude_default_permission_mode: None,
                 codex_default_permission_mode: None,
+                antigravity_default_permission_mode: None,
                 default_communication_role: None,
                 notifications: Default::default(),
                 max_active_sessions: Some(48),

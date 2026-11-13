@@ -1728,6 +1728,16 @@ async function openSettings(){
         const note=el('div','field-note',"Applies only to new Claude sessions. Auto uses Claude’s normal Auto mode. If the adapter does not advertise your choice, its current permission mode is kept and a note appears in Session options. Reconnected sessions keep their saved mode.");
         body.append(modeLabel,mode,note);
       }
+      if(provider.id==='antigravity'){
+        const modeLabel=el('label','','Default permission mode');modeLabel.htmlFor='antigravity-default-permission-mode';
+        const mode=el('select');mode.id='antigravity-default-permission-mode';
+        for(const [value,name] of [['auto','Auto'],['default','Default'],['accept-edits','Accept edits'],['plan','Plan']]){
+          const option=el('option','',name);option.value=value;mode.append(option);
+        }
+        mode.value=settings.antigravityDefaultPermissionMode||'auto';
+        const note=el('div','field-note',"Applies only to new Antigravity sessions. Auto approves edits and safe commands and asks before irreversible actions. If the adapter does not advertise your choice, its current mode is kept and a note appears in Session options. Reconnected sessions keep their saved mode.");
+        body.append(modeLabel,mode,note);
+      }
       fields.append(section);
     }
     await timeoutsReady;
@@ -1743,7 +1753,7 @@ $('settings-form').onsubmit=async event=>{
     const defaultModels={};for(const input of $('default-model-fields').querySelectorAll('input[data-provider]')){if(input.value.trim())defaultModels[input.dataset.provider]=input.value.trim();}
     const hiddenProviders=[...$('default-model-fields').querySelectorAll('[data-visible]')].filter(power=>power.getAttribute('aria-checked')!=='true').map(power=>power.dataset.visible);
     const timeouts=timeoutControls.pendingDefault();
-    const settings=await api('/api/settings',{method:'PUT',body:JSON.stringify({git:gitSettings.value(),roots:rootValues().filter(Boolean),defaultModels,claudeDefaultPermissionMode:$('claude-default-permission-mode')?.value,codexDefaultPermissionMode:$('codex-default-permission-mode')?.value,hiddenProviders,defaultCommunicationRole:$('default-communication-role').value,maxActiveSessions:Number.isInteger($('max-active-sessions').valueAsNumber)?$('max-active-sessions').valueAsNumber:undefined,idleSleepMinutes:Number.isFinite($('idle-sleep-hours').valueAsNumber)?Math.round($('idle-sleep-hours').valueAsNumber*60):undefined,...(timeouts?{timeouts}:{})})});
+    const settings=await api('/api/settings',{method:'PUT',body:JSON.stringify({git:gitSettings.value(),roots:rootValues().filter(Boolean),defaultModels,claudeDefaultPermissionMode:$('claude-default-permission-mode')?.value,codexDefaultPermissionMode:$('codex-default-permission-mode')?.value,antigravityDefaultPermissionMode:$('antigravity-default-permission-mode')?.value,hiddenProviders,defaultCommunicationRole:$('default-communication-role').value,maxActiveSessions:Number.isInteger($('max-active-sessions').valueAsNumber)?$('max-active-sessions').valueAsNumber:undefined,idleSleepMinutes:Number.isFinite($('idle-sleep-hours').valueAsNumber)?Math.round($('idle-sleep-hours').valueAsNumber*60):undefined,...(timeouts?{timeouts}:{})})});
     if(timeouts)timeoutControls.acceptDefault(timeouts);
     config.roots=settings.roots;config.defaultModels=settings.defaultModels;for(const p of config.providers)p.hidden=settings.hiddenProviders.includes(p.id);config.defaultCommunicationRole=settings.defaultCommunicationRole||'participant';applyRoots();
     $('settings-dialog').close();toast('Settings saved. They apply to new sessions.','success');
