@@ -149,7 +149,7 @@ export function setupGitSettings({$,api,picker,getHosts,getLocations,getActive})
       if(current!==generation)return;
       loaded={...result,hostId,cwd};$('git-repo-text').value=result.text||'version = 1\n\n[git.worktrees]\ncopy = "prefer-cow"\n';
       $('git-repo-editor').hidden=false;
-      $('git-repo-effective').textContent=`Saved effective settings: ${result.effective.copy}; shared directories: ${result.effective.share.join(', ')||'none'}; hooks ${result.effective.runHooks?'enabled':'disabled'}.`;
+      $('git-repo-effective').textContent=`Saved effective settings: ${result.effective.copy}; shared directories: ${result.effective.share.join(', ')||'none'}; submodules ${result.effective.localSubmodules===false?'cloned from remotes':'from the main checkout'}; hooks ${result.effective.runHooks?'enabled':'disabled'}.`;
       $('git-repo-status').textContent=result.path;
     }catch(error){if(current===generation)$('git-repo-status').textContent=error.message;}
   }
@@ -163,18 +163,18 @@ export function setupGitSettings({$,api,picker,getHosts,getLocations,getActive})
       if(current!==generation)return;
       loaded={...result,hostId:selected.hostId,cwd:selected.cwd};
       $('git-repo-status').textContent=`Saved ${result.path}. Applies to newly created session worktrees.`;
-      $('git-repo-effective').textContent=`Saved effective settings: ${result.effective.copy}; shared directories: ${result.effective.share.join(', ')||'none'}; hooks ${result.effective.runHooks?'enabled':'disabled'}.`;
+      $('git-repo-effective').textContent=`Saved effective settings: ${result.effective.copy}; shared directories: ${result.effective.share.join(', ')||'none'}; submodules ${result.effective.localSubmodules===false?'cloned from remotes':'from the main checkout'}; hooks ${result.effective.runHooks?'enabled':'disabled'}.`;
     }catch(error){if(current===generation)$('git-repo-status').textContent=error.message;}
     finally{$('git-repo-save').disabled=false;}
   };
   return {
     populate(settings){
-      $('git-copy').value=settings?.copy||'plain';$('git-share').value=(settings?.share||[]).join('\n');$('git-run-hooks').checked=!!settings?.runHooks;
+      $('git-copy').value=settings?.copy||'plain';$('git-share').value=(settings?.share||[]).join('\n');$('git-run-hooks').checked=!!settings?.runHooks;$('git-local-submodules').checked=settings?.localSubmodules!==false;
       const active=getActive();$('git-repo-host').replaceChildren(new Option('Local','local'));
       for(const host of getHosts().filter(h=>h.id!=='local'))$('git-repo-host').append(new Option(host.name,host.id));
       $('git-repo-host').value=active?.hostId||'local';$('git-repo-cwd').value=active?.cwd||'';invalidate();clearSuggestions();complete();
     },
-    value(){return {copy:$('git-copy').value,share:$('git-share').value.split('\n').map(s=>s.trim()).filter(Boolean),runHooks:$('git-run-hooks').checked};},
+    value(){return {copy:$('git-copy').value,share:$('git-share').value.split('\n').map(s=>s.trim()).filter(Boolean),runHooks:$('git-run-hooks').checked,localSubmodules:$('git-local-submodules').checked};},
     repository(cwd,hostId='local'){$('git-repo-cwd').value=cwd;$('git-repo-host').value=hostId;invalidate();clearSuggestions();complete();if(cwd)return load();},
   };
 }

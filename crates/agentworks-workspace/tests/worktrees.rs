@@ -872,3 +872,220 @@ async fn pr_worktree_fetches_missing_pinned_head_from_matching_origin_only() {
         "main"
     );
 }
+
+const COMMIT: [&str; 4] = ["-c", "user.name=Test", "-c", "user.email=test@localhost"];
+
+impl Fixture {
+    fn commit(&self, dir: &str, message: &str) {
+        let mut args = COMMIT.to_vec();
+        args.extend(["-C", dir, "commit", "-q", "--allow-empty", "-m", message]);
+        self.git(&args);
+    }
+    fn dependency(&self) -> String {
+        let dep = self.root.join("dep");
+        std::fs::create_dir(&dep).unwrap();
+        std::fs::write(dep.join("lib.txt"), "lib\n").unwrap();
+        let dir = dep.to_str().unwrap().to_owned();
+        self.git(&["-C", &dir, "init", "-q", "-b", "main"]);
+        self.git(&["-C", &dir, "add", "."]);
+        self.commit(&dir, "dep");
+        dir
+    }
+    async fn prepare(&self, name: &str) -> (PathBuf, cleanup::Owned) {
+        let mut workspace = self.workspace();
+        workspace.branch = Some(format!("feature/{name}"));
+        workspace.path = Some(self.root.join(name).to_str().unwrap().into());
+        let (path, owned) = worktrees::prepare_in(
+            self,
+            Some(&workspace),
+            Policy::default(),
+            false,
+            self.repo.clone(),
+            Some("creation"),
+        )
+        .await
+        .unwrap();
+        (path, owned.unwrap())
+    }
+}
+
+fn output(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+struct Daemon(std::process::Child);
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Git refuses file transport for submodules, so serve the fixture over git://.
+fn serve(root: &std::path::Path) -> Option<(Daemon, u16)> {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .ok()?
+        .local_addr()
+        .ok()?
+        .port();
+    let exec_path = Command::new("git").arg("--exec-path").output().ok()?.stdout;
+    let exec_path = String::from_utf8(exec_path).ok()?;
+    let daemon = Daemon(
+        // The `git daemon` wrapper would outlive a kill as a parent of the real server.
+        Command::new(PathBuf::from(exec_path.trim()).join("git-daemon"))
+            .args(["--listen=127.0.0.1", "--reuseaddr", "--export-all"])
+            .arg(format!("--port={port}"))
+            .arg(format!("--base-path={}", root.display()))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?,
+    );
+    for _ in 0..100 {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return Some((daemon, port));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    None
+}
+
+#[tokio::test]
+async fn submodules_come_from_the_main_checkout_and_guard_only_unpushed_work_on_removal() {
+    let mut fixture = Fixture::new();
+    fixture.dependency();
+    let (upstream, away) = (fixture.root.join("dep"), fixture.root.join("dep-away"));
+    let Some((_daemon, port)) = serve(&fixture.root) else {
+        eprintln!("git daemon unavailable; skipping submodule integration test");
+        return;
+    };
+    fixture.git(&[
+        "submodule",
+        "add",
+        &format!("git://127.0.0.1:{port}/dep"),
+        "dep",
+    ]);
+    fixture.commit(".", "add submodule");
+    let url = format!("git://127.0.0.1:{port}/dep");
+
+    // Unreachable upstream: only the main checkout's copy can supply it.
+    std::fs::rename(&upstream, &away).unwrap();
+    let (path, mut owned) = fixture.prepare("local").await;
+    assert!(path.join("dep/lib.txt").is_file());
+    assert_eq!(
+        output(&path.join("dep"), &["remote", "get-url", "origin"]),
+        url
+    );
+    assert!(
+        !owned
+            .population
+            .as_ref()
+            .unwrap()
+            .contains("not initialized")
+    );
+    let clean = cleanup::inspect_in(&fixture, Some(owned.clone())).await;
+    assert!(!clean.dirty.as_ref().unwrap().any());
+    let removed = cleanup::remove_in(&fixture, &owned, clean.fingerprint.as_deref(), false)
+        .await
+        .unwrap();
+    assert_eq!(removed["forced"], false);
+    assert!(!path.exists());
+
+    owned.removed = Some(1);
+    cleanup::restore_in(&fixture, &owned).await.unwrap();
+    owned.removed = None;
+    assert!(path.join("dep/lib.txt").is_file());
+
+    // HEAD returns to the recorded commit, so status alone looks clean.
+    let submodule = path.join("dep");
+    let submodule = submodule.to_str().unwrap();
+    fixture.git(&["-C", submodule, "checkout", "-q", "-b", "local"]);
+    fixture.commit(submodule, "only here");
+    fixture.git(&["-C", submodule, "checkout", "-q", "--detach", "HEAD~1"]);
+    let stranded = cleanup::inspect_in(&fixture, Some(owned.clone())).await;
+    assert!(stranded.dirty.as_ref().unwrap().any());
+    assert!(
+        cleanup::remove_in(&fixture, &owned, stranded.fingerprint.as_deref(), false)
+            .await
+            .is_err()
+    );
+    assert!(path.exists());
+    cleanup::remove_in(&fixture, &owned, stranded.fingerprint.as_deref(), true)
+        .await
+        .unwrap();
+    assert!(!path.exists());
+
+    // The main checkout's copy lacks the newly recorded commit: fetch just that.
+    std::fs::rename(&away, &upstream).unwrap();
+    std::fs::write(upstream.join("new.txt"), "new\n").unwrap();
+    let dir = upstream.to_str().unwrap();
+    fixture.git(&["-C", dir, "add", "."]);
+    fixture.commit(dir, "newer");
+    let newer = output(&upstream, &["rev-parse", "HEAD"]);
+    fixture.git(&[
+        "update-index",
+        "--cacheinfo",
+        &format!("160000,{newer},dep"),
+    ]);
+    fixture.commit(".", "bump submodule");
+    let (path, owned) = fixture.prepare("fallback").await;
+    assert!(path.join("dep/new.txt").is_file(), "{:?}", owned.population);
+    assert_eq!(
+        output(&path.join("dep"), &["remote", "get-url", "origin"]),
+        url
+    );
+
+    // Disabled, the local copy is never used.
+    std::fs::rename(&upstream, &away).unwrap();
+    fixture.settings.local_submodules = false;
+    let (path, owned) = fixture.prepare("remote").await;
+    assert!(!path.join("dep/lib.txt").exists());
+    assert!(
+        owned
+            .population
+            .unwrap()
+            .contains("submodules not initialized")
+    );
+}
+
+#[tokio::test]
+async fn failed_submodule_clone_keeps_a_removable_checkout() {
+    let mut fixture = Fixture::new();
+    fixture.settings.local_submodules = false;
+    let dep = fixture.dependency();
+    fixture.git(&[
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        &dep,
+        "dep",
+    ]);
+    fixture.commit(".", "add submodule");
+
+    let (path, owned) = fixture.prepare("failed").await;
+    assert!(path.join("tracked.txt").is_file());
+    assert!(
+        owned
+            .population
+            .as_ref()
+            .unwrap()
+            .contains("submodules not initialized")
+    );
+    let clean = cleanup::inspect_in(&fixture, Some(owned.clone())).await;
+    assert!(clean.blocker.is_none());
+    cleanup::remove_in(&fixture, &owned, clean.fingerprint.as_deref(), false)
+        .await
+        .unwrap();
+    assert!(!path.exists());
+}

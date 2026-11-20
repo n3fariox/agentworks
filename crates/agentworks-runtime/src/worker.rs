@@ -68,6 +68,8 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         "mcpRelay": {"endpoint":mcp.address,"command":std::env::current_exe().map_err(|e| e.to_string())?},
         "workspace": true,
         "gitSettings": true,
+        // Accepts `gitSettings.localSubmodules`; older workers reject unknown fields.
+        "localSubmodules": true,
         "gitContext": true,
         // `prepare` can reserve a new worktree for `populateWorktree` to fill later.
         "deferredWorktree": true,

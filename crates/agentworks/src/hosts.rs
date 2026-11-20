@@ -335,6 +335,7 @@ pub(crate) async fn worktree_operation(
             "Update this host's worker to enable Git settings and worktree hooks",
         ));
     }
+    worker_git_settings(live.worker(), &mut request["gitSettings"]);
     request["operation"] = json!(operation);
     request["roots"] = json!(roots);
     live.workspace(request)
@@ -430,6 +431,8 @@ pub(crate) async fn prepare_workspace(
         .git
         .clone()
         .unwrap_or_default();
+    let mut git_settings = json!(git_settings);
+    worker_git_settings(live.worker(), &mut git_settings);
     // Reserve durably before the worker can mutate Git. Never replay a lost mutation.
     if mode == crate::worktrees::Mode::NewWorktree {
         crate::worktrees::arm_creation(app, key)?;
@@ -505,4 +508,14 @@ pub(crate) async fn git_context(
     live.workspace(json!({"operation":"gitContext","cwd":cwd,"roots":roots}))
         .await
         .map_err(|_| fail(StatusCode::CONFLICT, "Remote Git context is unavailable"))
+}
+
+/// An older worker fails to parse `localSubmodules` and silently falls back to
+/// default copy and hook settings; leave it out so those still apply there.
+fn worker_git_settings(worker: &serde_json::Value, settings: &mut serde_json::Value) {
+    if worker["localSubmodules"] != true {
+        if let Some(settings) = settings.as_object_mut() {
+            settings.remove("localSubmodules");
+        }
+    }
 }

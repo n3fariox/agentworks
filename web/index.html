@@ -85,6 +85,8 @@
           <p class="field-note">Copy-on-write shares unchanged file blocks. Prefer falls back when unsupported; Require stops creation instead. Applies on the session's host.</p>
           <label for="git-share">Shared build directories</label><textarea id="git-share" rows="3" spellcheck="false" placeholder="target&#10;node_modules"></textarea>
           <p class="field-note">One relative ignored directory per line. Only copied with copy-on-write; use caches that support relocation.</p>
+          <label class="workspace-check"><input id="git-local-submodules" type="checkbox"> Initialize submodules from the main checkout</label>
+          <p class="field-note">New worktrees clone submodules from the main checkout's copies, without network access, and fetch only commits those lack. Turn off to clone every submodule from its remote. Repositories can override this with <code>local_submodules</code>.</p>
           <label class="workspace-check"><input id="git-run-hooks" type="checkbox"> Enable repository worktree hooks</label>
           <p class="field-note">Runs configured commands on the session's host: enter after worktree creation, exit on archive/delete. Existing worktrees selected for sessions do not run hooks. Defaults apply to new sessions; existing sessions keep their captured commands.</p>
         </fieldset>

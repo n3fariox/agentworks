@@ -603,18 +603,144 @@ pub(crate) async fn populate(
     match crate::cow::populate(app, repo, path, commit, branch, new, settings).await? {
         None => Ok("cow".into()),
         Some(reason) => {
-            let path = path
+            let text = path
                 .to_str()
                 .ok_or_else(|| bad("Worktree path must be UTF-8"))?;
             let mut args = vec!["worktree", "add"];
             if new {
                 args.extend(["--no-track", "-b", branch]);
             }
-            args.extend(["--", path, if new { commit } else { branch }]);
+            args.extend(["--", text, if new { commit } else { branch }]);
             git_checkout(app, &repo.top, &args).await?;
-            Ok(reason)
+            Ok(
+                match init_submodules(app, repo, path, settings.local_submodules).await {
+                    Ok(()) => reason,
+                    Err((_, message)) => format!(
+                        "{reason}; submodules not initialized: {}",
+                        message.chars().take(300).collect::<String>()
+                    ),
+                },
+            )
         }
     }
+}
+
+/// Git leaves submodules empty in a new worktree. The checkout already exists by
+/// now and cannot be recreated by a retry, so callers report a failed clone
+/// (network, credentials) instead of losing the session to it.
+async fn init_submodules(
+    app: &(impl Context + ?Sized),
+    repo: &Repository,
+    path: &FsPath,
+    local: bool,
+) -> Result<(), Error> {
+    if !path.join(".gitmodules").is_file() {
+        return Ok(());
+    }
+    if local {
+        clone_local_submodules(app, repo, path).await?;
+    }
+    // Fetches only what the local copies lacked, and initializes nested submodules.
+    git_checkout(app, path, &["submodule", "update", "--init", "--recursive"])
+        .await
+        .map(drop)
+}
+
+/// Clones each top-level submodule from the main checkout's copy instead of its
+/// remote. The URL override applies to this one command, so shared config keeps
+/// the real URL; `origin` is pointed back at it before anything else fetches.
+/// A copy without the recorded commit is fetched normally afterwards.
+async fn clone_local_submodules(
+    app: &(impl Context + ?Sized),
+    repo: &Repository,
+    path: &FsPath,
+) -> Result<(), Error> {
+    let modules = repo.common.join("modules");
+    // Exits 1 when no submodule has a path, which leaves nothing to do here.
+    let Ok(listing) = git(
+        app,
+        path,
+        &[
+            "config",
+            "--file",
+            ".gitmodules",
+            "-z",
+            "--get-regexp",
+            r"^submodule\..*\.path$",
+        ],
+    )
+    .await
+    else {
+        return Ok(());
+    };
+    for entry in listing.split('\0').filter(|e| !e.is_empty()) {
+        let Some((key, subpath)) = entry.split_once('\n') else {
+            continue;
+        };
+        let Some(name) = key
+            .strip_prefix("submodule.")
+            .and_then(|k| k.strip_suffix(".path"))
+        else {
+            continue;
+        };
+        let source = modules.join(name);
+        // The main checkout never initialized it, or the name escapes its modules directory.
+        let Ok(url) = git(
+            app,
+            path,
+            &["config", "--get", &format!("submodule.{name}.url")],
+        )
+        .await
+        else {
+            continue;
+        };
+        if !source.is_dir()
+            || !source.starts_with(&modules)
+            || !FsPath::new(name)
+                .components()
+                .all(|c| matches!(c, Component::Normal(_)))
+            || allowed(app, &source).is_err()
+        {
+            continue;
+        }
+        let Some(source) = source.to_str() else {
+            continue;
+        };
+        let checkout = path.join(subpath);
+        if checkout.join(".git").exists() {
+            continue;
+        }
+        // A failure here is retried from the real remote by the caller.
+        let _ = git_checkout(
+            app,
+            path,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "-c",
+                &format!("submodule.{name}.url={source}"),
+                "submodule",
+                "update",
+                "--init",
+                "--",
+                subpath,
+            ],
+        )
+        .await;
+        if checkout.join(".git").exists() {
+            git(app, &checkout, &["remote", "set-url", "origin", &url])
+                .await
+                .map_err(|(code, message)| {
+                    (
+                        code,
+                        format!(
+                            "{subpath} was cloned from the main checkout but its origin still points there: {message}"
+                        ),
+                    )
+                })?;
+        }
+    }
+    Ok(())
 }
 
 pub async fn configuration_in(

@@ -23,6 +23,7 @@ pub enum CopyMode {
 pub struct Worktrees {
     pub copy: Option<CopyMode>,
     pub share: Option<Vec<String>>,
+    pub local_submodules: Option<bool>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -86,12 +87,29 @@ struct Document {
     #[serde(default)]
     git: Git,
 }
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct Settings {
     pub copy: CopyMode,
     pub share: Vec<String>,
     pub run_hooks: bool,
+    /// Clone submodules from the main checkout's copies before their remotes.
+    /// Omitted while on, so older servers and workers still parse saved settings.
+    #[serde(skip_serializing_if = "is_true")]
+    pub local_submodules: bool,
+}
+fn is_true(value: &bool) -> bool {
+    *value
+}
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            copy: CopyMode::default(),
+            share: Vec::new(),
+            run_hooks: false,
+            local_submodules: true,
+        }
+    }
 }
 impl Settings {
     pub fn validate(&self) -> Result<(), String> {
@@ -106,6 +124,10 @@ impl Settings {
                 .clone()
                 .unwrap_or_else(|| self.share.clone()),
             run_hooks: self.run_hooks,
+            local_submodules: git
+                .worktrees
+                .local_submodules
+                .unwrap_or(self.local_submodules),
         }
     }
 }

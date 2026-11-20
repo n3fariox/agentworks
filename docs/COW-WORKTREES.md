@@ -10,7 +10,7 @@
 - **Prefer copy-on-write**: share unchanged file blocks when the filesystem supports reflinks; otherwise use ordinary checkout.
 - **Require copy-on-write**: fail creation when reflinks or the repository's checkout format are unsupported.
 
-Shared build directories are an explicit list of relative ignored directories, one per line. They are copied only on the CoW path. **Enable repository worktree hooks** enables commands for newly created session-owned worktrees; it defaults off. Existing sessions retain their captured hook definitions and enablement.
+Shared build directories are an explicit list of relative ignored directories, one per line. They are copied only on the CoW path. **Initialize submodules from the main checkout** (default on) clones each top-level submodule of a new or restored worktree from the main checkout's copy in `.git/modules`, without network access or credentials. Object files are hard-linked, so this is fast and uses little extra disk. The clone's `origin` is then reset to the submodule's real URL. Anything the local copy lacks (a recorded commit it hasn't fetched, a submodule the main checkout never initialized, nested submodules) is fetched from the remote afterwards. Turn it off to clone every submodule from its remote. Until the next fetch, the clone's remote-tracking branches mirror the main checkout's local branches. **Enable repository worktree hooks** enables commands for newly created session-owned worktrees; it defaults off. Existing sessions retain their captured hook definitions and enablement.
 
 **Project settings → Git settings…** opens the same category with the project's directory and host. The repository editor can also load any allowed repository location. Type a path for folder suggestions from the selected host, or use **Browse…** to select a folder and load its configuration automatically. It reads and saves one `.agentworks/config.toml` in the repository's main checkout, including when opened from a linked worktree. Global **Save settings** saves defaults; **Save repository configuration** explicitly writes the file. Saving either does not implicitly save the other. The repository save rejects a stale fingerprint instead of overwriting a concurrently edited file.
 
@@ -20,6 +20,7 @@ version = 1
 [git.worktrees]
 copy = "prefer-cow"
 share = ["target"]
+local_submodules = false
 
 [[git.hooks.enter]]
 name = "Refresh compile commands"
@@ -32,7 +33,7 @@ command = ["bazel", "shutdown"]
 timeout_seconds = 30
 ```
 
-Repository `git.worktrees.copy` and `share` override their global defaults. Omitted values inherit; an explicit empty `share = []` disables cache sharing for that repository. Hook definitions come from the repository file, and run only if enabled in Git settings when the session is created. Other top-level sections are allowed and preserved by the editor; unknown Git fields and unsupported configuration versions are rejected. Future features should use sections of this same file.
+Repository `git.worktrees.copy`, `share` and `local_submodules` override their global defaults. Omitted values inherit; an explicit empty `share = []` disables cache sharing for that repository. Hook definitions come from the repository file, and run only if enabled in Git settings when the session is created. Other top-level sections are allowed and preserved by the editor; unknown Git fields and unsupported configuration versions are rejected. Future features should use sections of this same file.
 
 The file need not be committed to apply on the current host. Commit it if other checkouts/hosts should receive the settings. Agentworks' own repository ignores `.agentworks/` runtime state; tracking its config file may require an explicit ignore exception or `git add -f .agentworks/config.toml`. Never commit runtime catalogs, credentials, or databases alongside it.
 
@@ -88,7 +89,7 @@ CoW support is probed between the actual cache and destination locations. Prefer
 
 Directory/index metadata and subsequent writes still consume space. Explicitly shared caches can contain absolute paths, symlinks, or files being written by build tools; cloning does not establish cache portability or build consistency. Templates currently have no automatic eviction: retained commits and their blocks remain until deliberate maintenance. Do not remove or prune a template during an active creation operation. There is no overlay mount, daemon, external utility installation, or automatic branch deletion.
 
-Both local and remote sessions use the shared workspace library. Remote workers advertise `gitSettings`; older workers must be updated before creating worktrees with this feature. Hooks execute on the worker and wait for stopped worker processes before accessing the checkout. A lost response is not treated as proof of command completion.
+Both local and remote sessions use the shared workspace library. Remote workers advertise `gitSettings`; older workers must be updated before creating worktrees with this feature. Workers that predate local submodule initialization receive the other settings and clone submodules from their remotes. Hooks execute on the worker and wait for stopped worker processes before accessing the checkout. A lost response is not treated as proof of command completion.
 
 ## Investigation and validation
 
