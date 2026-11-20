@@ -934,7 +934,13 @@ fn poll_use(app: &App, s: &Session, id: &str) -> mail::Result<Value> {
                     .or_default()
                     .extend(names.iter().cloned());
             }
-            release(app, s, &names)
+            let mut released = release(app, s, &names)?;
+            released["approval"] = json!(if option == "allow-session" {
+                "The user approved this use, and further uses of these secrets in this session."
+            } else {
+                "The user approved this use."
+            });
+            Ok(released)
         }
         Ok(Some(_)) => {
             record("denied")?;

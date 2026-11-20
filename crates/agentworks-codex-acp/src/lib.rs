@@ -929,6 +929,11 @@ fn system_prompt(p: &Value) -> Result<Option<String>> {
     Ok(Some(text))
 }
 
+/// Codex cancels an MCP tool call after its default timeout (300 s observed with Codex
+/// 0.165). Agentworks' `run_with_secrets` can wait up to 600 s for the user's approval and
+/// then run a command for up to 3600 s, so the servers Agentworks passes in get room for both.
+const MCP_TOOL_TIMEOUT_SECONDS: u64 = 600 + 3600 + 60;
+
 fn session_config(p: &Value) -> Result<Value> {
     let mut config = match std::env::var("CODEX_CONFIG") {
         Ok(s) if !s.is_empty() => {
@@ -940,10 +945,10 @@ fn session_config(p: &Value) -> Result<Value> {
     for server in p["mcpServers"].as_array().into_iter().flatten() {
         let value = match server["type"].as_str() {
             None | Some("stdio") => {
-                json!({"command":field(server,"command")?,"args":server["args"].as_array().cloned().unwrap_or_default(),"env":name_values(&server["env"])})
+                json!({"command":field(server,"command")?,"args":server["args"].as_array().cloned().unwrap_or_default(),"env":name_values(&server["env"]),"tool_timeout_sec":MCP_TOOL_TIMEOUT_SECONDS})
             }
             Some("http") => {
-                json!({"url":field(server,"url")?,"http_headers":name_values(&server["headers"])})
+                json!({"url":field(server,"url")?,"http_headers":name_values(&server["headers"]),"tool_timeout_sec":MCP_TOOL_TIMEOUT_SECONDS})
             }
             _ => return Err(invalid("Unsupported MCP transport")),
         };
@@ -1174,4 +1179,24 @@ pub async fn run() -> Result<()> {
     let _ = child.kill().await;
     let _ = child.wait().await;
     result
+}
+
+#[cfg(test)]
+mod session_config_tests {
+    use super::*;
+
+    #[test]
+    fn acp_mcp_servers_get_room_for_approval_and_long_commands() {
+        let config = session_config(&json!({"mcpServers":[
+            {"name":"agentworks","command":"/bin/agentworks","args":["mcp"],"env":[{"name":"K","value":"v"}]},
+            {"name":"remote","type":"http","url":"http://127.0.0.1:1/mcp","headers":[]}]}))
+        .unwrap();
+        for name in ["agentworks", "remote"] {
+            assert_eq!(
+                config["mcp_servers"][name]["tool_timeout_sec"], 4260,
+                "{name}"
+            );
+        }
+        assert_eq!(config["mcp_servers"]["agentworks"]["env"]["K"], "v");
+    }
 }

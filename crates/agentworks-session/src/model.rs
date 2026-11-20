@@ -102,3 +102,72 @@ pub struct RoleSnapshot {
     pub hash: String,
     pub instructions: String,
 }
+
+impl SessionData {
+    /// True when no prompt was ever sent and nothing else gave the harness history for this
+    /// session (import, fork, or message and tool events). Some harnesses keep no record of
+    /// such a session, so it is started fresh rather than resumed.
+    pub fn never_prompted(&self) -> bool {
+        never_prompted(
+            &self.requests,
+            &self.events,
+            self.import_pending,
+            &self.lineage,
+        )
+    }
+}
+fn never_prompted(
+    requests: &HashSet<String>,
+    events: &VecDeque<Value>,
+    import_pending: bool,
+    lineage: &crate::lineage::Lineage,
+) -> bool {
+    requests.is_empty()
+        && !import_pending
+        && lineage.parent_id.is_none()
+        && !lineage.native_used
+        && !events.iter().any(|e| {
+            e["kind"] == "acp"
+                && matches!(
+                    e["data"]["sessionUpdate"].as_str(),
+                    Some("user_message_chunk" | "agent_message_chunk" | "tool_call")
+                )
+        })
+}
+
+#[cfg(test)]
+mod never_prompted_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn only_sessions_without_any_conversation_count_as_never_prompted() {
+        let lineage = crate::lineage::Lineage::default();
+        let status = VecDeque::from([
+            json!({"kind":"status","data":{"status":"idle"}}),
+            json!({"kind":"acp","data":{"sessionUpdate":"available_commands_update"}}),
+        ]);
+        assert!(never_prompted(&HashSet::new(), &status, false, &lineage));
+        assert!(!never_prompted(
+            &HashSet::from(["r1".into()]),
+            &status,
+            false,
+            &lineage
+        ));
+        assert!(
+            !never_prompted(&HashSet::new(), &status, true, &lineage),
+            "import pending"
+        );
+        let imported =
+            VecDeque::from([json!({"kind":"acp","data":{"sessionUpdate":"agent_message_chunk"}})]);
+        assert!(
+            !never_prompted(&HashSet::new(), &imported, false, &lineage),
+            "imported history"
+        );
+        let fork = crate::lineage::Lineage {
+            parent_id: Some("parent".into()),
+            ..Default::default()
+        };
+        assert!(!never_prompted(&HashSet::new(), &status, false, &fork));
+    }
+}

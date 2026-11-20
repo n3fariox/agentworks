@@ -161,6 +161,24 @@ class HarnessTests(unittest.TestCase):
         text=self.native_lifecycle()[-1]["params"]["developerInstructions"]
         self.assertIn("agentworks://sessions/"+created["id"],text)
         self.assertNotIn("# Agentworks role:",text)
+        self.assertIn("call list_session_secrets",text)
+
+    def test_secret_restart_before_the_first_prompt_starts_a_new_thread(self):
+        # Codex keeps no thread until its first turn, so resuming it would fail.
+        created=self.request("/api/sessions","POST",dict(provider="codex-rust",cwd=str(self.cwd)))
+        path="/api/sessions/"+created["id"]
+        self.until(lambda:self.request(path)["session"]["status"]=="idle")
+        secret=self.request("/api/secrets","POST",dict(name="FIXTURE_TOKEN",value="fixture-value"))
+        changed=self.request(path+"/secrets","PUT",dict(assignments=[dict(secretId=secret["id"],delivery="environment")]))
+        self.assertTrue(changed["environmentChanged"])
+        self.until(lambda:len(self.native_lifecycle())==2 and self.request(path)["session"]["status"]=="idle")
+        self.assertEqual([c["method"] for c in self.native_lifecycle()],["thread/start","thread/start"])
+        # Once a prompt was sent, a restart resumes the same thread.
+        self.request(path+"/prompt","POST",dict(text="hello",requestId=str(uuid4())))
+        self.until(lambda:any(e["kind"]=="turn_end" for e in self.request(path)["events"]))
+        self.request(path+"/secrets","PUT",dict(assignments=[]))
+        self.until(lambda:len(self.native_lifecycle())==3 and self.request(path)["session"]["status"]=="idle")
+        self.assertEqual(self.native_lifecycle()[-1]["method"],"thread/resume")
 
     def test_import_load_receives_shared_context(self):
         created=self.request("/api/sessions/import","POST",dict(provider="codex-rust",providerSessionId="thread-1",cwd=str(self.cwd)))

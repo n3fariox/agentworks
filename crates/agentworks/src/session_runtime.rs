@@ -155,7 +155,14 @@ async fn open_session(
     s.data.lock().unwrap().prompt_capabilities = if caps.is_object() { caps } else { json!({}) };
     s.emit("attachment_policy", crate::attachments::session_policy(s));
     let system_prompt = role_prompt(s, &init)?;
-    let saved = s.data.lock().unwrap().provider_session_id.clone();
+    let saved = {
+        let data = s.data.lock().unwrap();
+        // Codex keeps no thread until its first turn, so a restart before any prompt
+        // (after an access or secrets change) has nothing to resume.
+        data.provider_session_id
+            .clone()
+            .filter(|_| !data.never_prompted())
+    };
     let Some(id) = saved else {
         let lineage = s.data.lock().unwrap().lineage.clone();
         if lineage.native_attempted {

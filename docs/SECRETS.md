@@ -70,7 +70,7 @@ Assignment is the authorization: a session can never name, use or discover a sec
 
 Only humans create or widen assignments. Project settings may hold a default assignment set applied to new human-created sessions in that project.
 
-`tool` delivery is the default because environment variables reach everything in the harness process, including harness-owned subagents and every shell command, and harnesses may persist them (Codex writes shell snapshots under `$CODEX_HOME/shell_snapshots/`).
+`tool` delivery is the default because environment variables reach everything in the harness process, including harness-owned subagents and every shell command, and harnesses may persist them (Codex writes shell snapshots under `$CODEX_HOME/shell_snapshots/`). Claude Code also passes its environment to every MCP server in the user's configuration, not only Agentworks; Codex does not pass it to MCP servers (both checked with Claude Code 2.1.319 and Codex 0.165).
 
 ### Delegation
 
@@ -109,7 +109,7 @@ At harness start, `environment` assignments are decrypted and added to the harne
 
 Changing a session's `environment` assignments restarts an idle harness automatically, as changing its Agentworks access already does; a busy one restarts when its turn ends. The UI also offers **Restart with secrets**. It stops the harness process and starts a new one with the current assignments, resuming the native conversation through the existing resume/load path in `session_runtime.rs`. Harnesses that support neither cannot use this; the UI offers a new session instead. Once passwords exist, the same action applies to sessions that started while secrets were locked.
 
-Codex passes the harness environment to its commands by default (checked with Codex 0.165 via `codex sandbox`). If a user's Codex configuration sets `shell_environment_policy.ignore_default_excludes = false`, Codex drops variables whose names contain `KEY`, `SECRET` or `TOKEN`, including assigned secrets; use `tool` delivery for those. Agentworks does not override the policy: `include_only` would remove every other variable, and `set` would put values on the command line.
+A restart before the session's first prompt starts a new harness session instead of resuming, because Codex keeps no thread until its first turn and resuming it fails. Codex passes the harness environment to its commands by default (checked with Codex 0.165 via `codex sandbox`). If a user's Codex configuration sets `shell_environment_policy.ignore_default_excludes = false`, Codex drops variables whose names contain `KEY`, `SECRET` or `TOKEN`, including assigned secrets; use `tool` delivery for those. Agentworks does not override the policy: `include_only` would remove every other variable, and `set` would put values on the command line.
 
 ## Delivery 2: templated tool
 
@@ -129,7 +129,7 @@ run_with_secrets {
 - The command runs without a shell. The agent can call `sh -c` itself; placeholders are still replaced only after the command is fixed, so the model never sees the value.
 - The command always runs on the session's host, never on the server for a remote session. See [Where the tool runs](#where-the-tool-runs).
 - Output (stdout and stderr, 1 MiB cap each) is returned with every value used replaced by `[REDACTED:NAME]`, along with its base64, base64url, URL-encoded and JSON-escaped forms. This prevents accidental disclosure; it is not a boundary against a command that deliberately transforms the value.
-- `approval: eachUse` assignments raise a normal approval card during the turn, showing the templated command (never values). Answers: allow once, allow for this session, or deny. "Allow for this session" lasts until the session's assignments change or the server restarts. An unanswered approval is withdrawn after 10 minutes.
+- `approval: eachUse` assignments raise a normal approval card during the turn, showing the templated command (never values). Answers: allow once, allow for this session, or deny. "Allow for this session" lasts until the session's assignments change or the server restarts. An unanswered approval is withdrawn after 10 minutes. The tool result tells the agent when the user approved a use. Codex cancels an MCP call after 300 seconds by default (Codex 0.165), so the Codex adapter gives the MCP servers Agentworks passes in a 4260-second limit (approval plus the longest command). Claude Code 2.1.319 waited the full 10 minutes without a setting.
 - Once passwords exist, a call while secrets are locked shows the **Unlock secrets** banner and waits instead of failing.
 - The tool runs outside the harness's own sandbox and permission system. Assignments and `approval` are its only controls, which is why assignment is human-only.
 

@@ -189,7 +189,12 @@ pub async fn call(
     let session = release.get("cwd").and_then(Value::as_str).unwrap_or("");
     Ok(
         match execute(&call, &parsed, &values, Path::new(session)).await {
-            Ok(result) => CallToolResult::success(vec![ContentBlock::text(result.to_string())]),
+            Ok(mut result) => {
+                if let Some(approval) = release.get("approval") {
+                    result["approval"] = approval.clone();
+                }
+                CallToolResult::success(vec![ContentBlock::text(result.to_string())])
+            }
             Err(message) => error(message),
         },
     )

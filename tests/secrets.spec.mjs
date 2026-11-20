@@ -247,6 +247,7 @@ test('agents discover secrets and use them through the facade without seeing val
     await send(run(['echo','once-run','{{secret:API_TOKEN}}']));
     await answer('Allow once');
     await expect(conversation).toContainText('once-run [redacted:API_TOKEN]');
+    await expect(conversation).toContainText('The user approved this use.');
     await expect(page.locator('#session-state')).toHaveText('Ready');
     await send(run(['echo','session-run','{{secret:API_TOKEN}}']));
     await answer('Allow for this session');
