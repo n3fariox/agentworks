@@ -1,7 +1,7 @@
 //! Idle sleep: releases a harness that has sat idle between turns for the saved
 //! number of minutes. Like a restart, it keeps the transcript, native context,
-//! workspace and terminal. Opening the session, a prompt, queued input or peer
-//! mail wakes it; an explicit suspend does not count as sleep.
+//! workspace and terminal. A prompt, queued input or peer mail wakes it;
+//! opening it only loads the transcript; an explicit suspend does not count as sleep.
 use crate::{ApiResult, App, Session, fail};
 use agentworks_session::{async_tasks, timeouts::now_ms};
 use axum::http::StatusCode;
@@ -27,6 +27,18 @@ pub fn asleep(s: &Session) -> bool {
     // The flag is set before stopping the worker. Treat that transition as
     // asleep too, so a prompt racing the sweep will wake after it gets run_lock.
     d.lifecycle.asleep && !d.lifecycle.suspended
+}
+
+/// Released but not deliberately stopped: asleep, or suspended by a server
+/// shutdown or a host disconnect. Opening such a session leaves it released;
+/// a human prompt resumes it.
+pub fn dormant(s: &Session) -> bool {
+    let d = s.data.lock().unwrap();
+    d.status == "suspended"
+        && !d.lifecycle.suspended
+        && !d.lifecycle.archived
+        && !d.provider_history_deleted
+        && !d.provider_history_delete_pending
 }
 
 /// Idle with nothing in flight that a harness restart would interrupt or lose.
@@ -76,11 +88,17 @@ pub async fn start_waking(app: &App, s: &Arc<Session>) -> Result<(), (StatusCode
     Ok(())
 }
 
-/// Wakes a sleeping session for a prompt and waits until it can take a turn.
-/// Never called with `communication_lock` held: the waking harness needs it
+/// Wakes a dormant session for a human prompt and waits until it can take a
+/// turn. Never called with `communication_lock` held: the waking harness needs it
 /// for its own MCP connection.
 pub async fn wake_for_prompt(app: &App, s: &Arc<Session>) -> Result<(), (StatusCode, String)> {
-    start_waking(app, s).await?;
+    {
+        let _run = app.run_lock.lock().await;
+        crate::service_restart::allow_start(app)?;
+        if dormant(s) {
+            let _ = crate::resume_locked(app, s).await?;
+        }
+    }
     let deadline = std::time::Instant::now() + Duration::from_secs(120);
     loop {
         match s.data.lock().unwrap().status.as_str() {
