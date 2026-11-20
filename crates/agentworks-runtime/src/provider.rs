@@ -230,6 +230,8 @@ pub fn prepare(provider: &str) -> std::io::Result<()> {
         for dir in ["data", "cache", "state", "config"] {
             std::fs::create_dir_all(runtime_root().join(".agentworks/opencode").join(dir))?;
         }
+    } else if provider == "antigravity" {
+        crate::antigravity::allow_agentworks_mcp();
     } else if !matches!(provider, "demo" | "goose" | "antigravity") && use_api_key() {
         std::fs::create_dir_all(
             runtime_root()
