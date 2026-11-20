@@ -498,7 +498,7 @@ pub async fn configure(
         (
             d.project_id.clone(),
             d.provider_session_id.clone(),
-            s.cwd.to_string_lossy().into_owned(),
+            s.cwd().to_string_lossy().into_owned(),
         )
     };
     if input.enabled {
@@ -753,7 +753,7 @@ fn hold_reason(app: &App, s: &Session) -> Option<&'static str> {
         return Some("communication grant is off");
     }
     if s.host_id == "local"
-        && !crate::checked_cwd(app, &s.cwd.to_string_lossy()).is_ok_and(|cwd| cwd == s.cwd)
+        && !crate::checked_cwd(app, &s.cwd().to_string_lossy()).is_ok_and(|cwd| cwd == s.cwd())
     {
         return Some("working directory unavailable");
     }
@@ -771,7 +771,7 @@ fn rebind(
     project: Option<String>,
     native: Option<String>,
 ) -> Result<()> {
-    let cwd = s.cwd.to_string_lossy().into_owned();
+    let cwd = s.cwd().to_string_lossy().into_owned();
     if p.project == project
         && p.native == native
         && p.cwd == cwd
@@ -1211,12 +1211,11 @@ mod tests {
                 let s = Arc::new(Session {
                     id: id.into(),
                     provider: "demo".into(),
-                    cwd: root.clone(),
                     title: id.into(),
                     initial_model: None,
                     created: now(),
                     host_id: "local".into(),
-                    location_id: "fixture".into(),
+                    place: crate::Place::at(root.clone(), "fixture".into()),
                     data: Mutex::new(d),
                     tx: tokio::sync::broadcast::channel(128).0,
                     commands: Mutex::new(Some(commands)),

@@ -612,7 +612,7 @@ async fn tick(app: &App) -> Result<(), (StatusCode, String)> {
                     })
                     .count();
                 if capacity >= 12
-                    || crate::checked_cwd(app, &s.cwd.to_string_lossy()).is_err()
+                    || crate::checked_cwd(app, &s.cwd().to_string_lossy()).is_err()
                     || !crate::installed(&s.provider)
                 {
                     r.handoff_phase = "cancelled".into();

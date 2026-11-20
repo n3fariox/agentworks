@@ -1,7 +1,7 @@
 import {serverReady,stopChild} from './support/cleanup.mjs';
 import {test,expect} from '@playwright/test';
 import {spawn} from 'node:child_process';
-import {mkdtemp,mkdir,rm} from 'node:fs/promises';
+import {mkdtemp,mkdir,rm,readdir,readFile} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 import {fuzzyScore,rankItems,sessionItems,sessionRanking,actionItems,commandText,statusLabel} from '../web/palettes.js';
 
@@ -23,7 +23,7 @@ test.beforeAll(async()=>{
   server=spawn(resolve('target/debug/agentworks'),[],{env:{...process.env,
     AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:'4431',AGENTWORKS_ROOTS:fixture,
     AGENTWORKS_CATALOG_PATH:join(fixture,'catalog.json'),AGENTWORKS_DB_PATH:join(fixture,'sessions.sqlite3'),
-    AGENTWORKS_DEMO_STATE_DIR:join(fixture,'demo')},stdio:['ignore','pipe','pipe']});
+    AGENTWORKS_DEMO_STATE_DIR:join(fixture,'demo'),AGENTWORKS_DEMO_ADDITIONAL_DIRECTORIES:'1'},stdio:['ignore','pipe','pipe']});
   server.on('error',e=>{log+=e.message;exited=true;});
   server.on('exit',()=>exited=true);
   for(const stream of [server.stdout,server.stderr])stream.on('data',chunk=>{log+=chunk.toString();});
@@ -231,6 +231,22 @@ test('actions expose existing UI work and refuse commands until the session is r
   const bare=actionItems({active:{id:'a'},status:'suspended',connected:true},menus).map(i=>i.id);
   expect(bare).not.toContain('project-edit');expect(bare).not.toContain('session-delete-everywhere');
   expect(actionItems({active:{id:'a'},status:'suspended',connected:true},menus).find(i=>i.id==='session-suspend')).toMatchObject({disabled:true,reason:'Already suspended'});
+  // Change directory follows the menu's availability: between turns, connected and not archived.
+  const moves={changeDirectory:()=>called.push('directory')};
+  const move=(state)=>actionItems({active:{id:'a'},connected:true,status:'idle',...state},moves).find(i=>i.id==='session-directory');
+  expect(move({})).toMatchObject({label:'Change directory',disabled:false});
+  move({}).run();expect(called).toContain('directory');
+  expect(move({status:'running'})).toMatchObject({disabled:true,reason:'Wait for the turn to finish'});
+  expect(move({connected:false})).toMatchObject({disabled:true,reason:'Not connected to this session yet'});
+  expect(move({active:{id:'a',archived:true}})).toMatchObject({disabled:true,reason:'Unarchive the session first'});
+  expect(rankItems('cd dir',actionItems({active:{id:'a'},connected:true,status:'idle'},moves))[0]?.id).toBe('session-directory');
+  // Additional directories need the harness capability once it is known.
+  const extras={addDirectory:()=>called.push('add-directory'),additionalDirectories:()=>{}};
+  const extra=(active,id='session-add-directory')=>actionItems({active:{id:'a',...active},connected:true,status:'idle'},extras).find(i=>i.id===id);
+  expect(extra({})).toMatchObject({label:'Add directory',disabled:false});
+  expect(extra({providerCapabilities:{additionalDirectories:{}}},'session-additional-directories')).toMatchObject({disabled:false});
+  expect(extra({providerCapabilities:{resume:{}}})).toMatchObject({disabled:true,reason:'This harness does not support additional directories'});
+  extra({}).run();expect(called).toContain('add-directory');
   expect(commandText({name:'\$demo-skill'})).toBe('$demo-skill');
   expect(commandText({name:'/usage'})).toBe('/usage');
 });
@@ -241,6 +257,118 @@ async function seedSessions(){
   const create=(title,cwd,projectId)=>api('/api/sessions',{provider:'demo',cwd,title,projectId,hostId:'local'});
   return {project,second,sessions:[await create('Alpha chat',alpha(),project.id),await create('Beta chat',zeta(),second.id),await create('Beta chat',omega(),second.id)]};
 }
+
+// Demo state files record what the agent was last opened with.
+async function demoState(cwd){
+  for(const name of await readdir(join(fixture,'demo')).catch(()=>[])){
+    if(!name.endsWith('.json'))continue;
+    const state=JSON.parse(await readFile(join(fixture,'demo',name),'utf8'));
+    if(state.cwd===cwd)return state;
+  }
+  return null;
+}
+async function settled(id,want='idle'){
+  for(let i=0;i<100;i++){const s=await api(`/api/sessions/${id}`);if(s.session.status===want)return s;await new Promise(r=>setTimeout(r,100));}
+  throw new Error('Session never became '+want+': '+log);
+}
+async function refused(path,body){
+  const response=await fetch(base+path,{method:'POST',headers:{Origin:base,'Content-Type':'application/json'},body:JSON.stringify(body)});
+  expect(response.ok,await response.clone().text()).toBe(false);
+}
+
+test('change directory reopens the saved conversation within allowed roots and tells the agent',async()=>{
+  const {id}=await api('/api/sessions',{provider:'demo',cwd:alpha(),title:'Mover',hostId:'local'});
+  await settled(id);
+  // A finished turn means the harness must resume its saved session, not start a fresh one.
+  await api(`/api/sessions/${id}/prompt`,{text:'hello',requestId:'mover-1'});await settled(id);
+  const moved=await api(`/api/sessions/${id}/directory`,{cwd:zeta()});
+  expect(moved).toMatchObject({accepted:true,restarted:true});
+  const after=await settled(id);
+  expect(after.session.cwd).toBe(moved.cwd);
+  expect(after.events.find(e=>e.kind==='directory_changed')?.data).toMatchObject({to:moved.cwd,restarted:true});
+  expect(after.events.filter(e=>e.kind==='error')).toEqual([]);
+  expect((await demoState(moved.cwd))?.turn).toBe(1);
+  expect(await api(`/api/sessions/${id}/directory`,{cwd:zeta()})).toMatchObject({unchanged:true});
+  // Outside the allowed roots and missing folders are refused; the session stays where it is.
+  for(const cwd of [resolve('.'),join(fixture,'missing')])await refused(`/api/sessions/${id}/directory`,{cwd});
+  expect((await api(`/api/sessions/${id}`)).session.cwd).toBe(moved.cwd);
+  await api(`/api/sessions/${id}`,null,'DELETE');
+});
+
+test('additional directories reach the harness on every reopen and follow directory changes',async()=>{
+  const {id}=await api('/api/sessions',{provider:'demo',cwd:alpha(),title:'Wider',hostId:'local'});
+  const opened=await settled(id);
+  const cwd=opened.session.cwd;
+  await api(`/api/sessions/${id}/prompt`,{text:'hello',requestId:'wider-1'});await settled(id);
+  // Duplicates and the working directory itself are dropped; order is kept.
+  const set=await api(`/api/sessions/${id}/additional-directories`,{directories:[zeta(),omega(),zeta(),alpha()]});
+  expect(set).toMatchObject({accepted:true,restarted:true});
+  expect(set.directories.map(d=>d.split('/').at(-1))).toEqual(['zeta','omega']);
+  const after=await settled(id);
+  expect(after.session.additionalDirectories).toEqual(set.directories);
+  expect(after.events.find(e=>e.kind==='additional_directories_changed')?.data).toMatchObject({directories:set.directories,previous:[]});
+  expect((await demoState(cwd))?.additionalDirectories).toEqual(set.directories);
+  // A plain restart re-sends them, because harnesses do not keep them.
+  await api(`/api/sessions/${id}/restart`,{});await settled(id);
+  expect((await demoState(cwd))?.additionalDirectories).toEqual(set.directories);
+  expect(await api(`/api/sessions/${id}/additional-directories`,{directories:[zeta(),omega()]})).toMatchObject({unchanged:true});
+  await refused(`/api/sessions/${id}/additional-directories`,{directories:[resolve('.')]});
+  await refused(`/api/sessions/${id}/additional-directories`,{directories:Array.from({length:17},()=>zeta())});
+  // Moving into one of them makes it the working directory and drops it from the extras.
+  const moved=await api(`/api/sessions/${id}/directory`,{cwd:zeta()});
+  const relocated=await settled(id);
+  expect(relocated.session.additionalDirectories.map(d=>d.split('/').at(-1))).toEqual(['omega']);
+  expect((await demoState(moved.cwd))?.additionalDirectories?.map(d=>d.split('/').at(-1))).toEqual(['omega']);
+  const cleared=await api(`/api/sessions/${id}/additional-directories`,{directories:[]});
+  expect(cleared.directories).toEqual([]);await settled(id);
+  expect((await demoState(moved.cwd))?.additionalDirectories).toEqual([]);
+  await api(`/api/sessions/${id}`,null,'DELETE');
+});
+
+test('browser: change directory from the palette updates the header and transcript',async({page})=>{
+  const created=await api('/api/sessions',{provider:'demo',cwd:alpha(),title:'Browser mover',hostId:'local'});
+  await page.goto(base+'/');await page.evaluate(id=>localStorage.setItem('agentworks-session',id),created.id);await page.reload();
+  await expect(page.locator('#session-state')).toHaveText('Ready');
+  await page.keyboard.press('Control+k');await page.locator('#palette-input').fill('change dir');await page.keyboard.press('Enter');
+  await expect(page.locator('#directory-picker-dialog')).toBeVisible();
+  await page.locator('#directory-picker-list button',{hasText:'Up'}).click();
+  await page.locator('#directory-picker-list button',{hasText:/^zeta$/}).click();
+  await expect(page.locator('#directory-picker-current')).toHaveText(/zeta$/);
+  await page.locator('#directory-picker-select').click();
+  // The restart reconnects the stream; the header must follow the snapshot as well as the live event.
+  await expect(page.locator('#project-path')).toHaveText(/zeta$/);
+  await expect(page.getByText(/Working directory changed from .*alpha to .*zeta/)).toBeVisible();
+  await expect(page.locator('#session-state')).toHaveText('Ready');
+  await api(`/api/sessions/${created.id}`,null,'DELETE');
+});
+
+test('browser: additional directories dialog adds, saves and removes folders',async({page})=>{
+  const created=await api('/api/sessions',{provider:'demo',cwd:alpha(),title:'Browser wider',hostId:'local'});
+  await page.goto(base+'/');await page.evaluate(id=>localStorage.setItem('agentworks-session',id),created.id);await page.reload();
+  await expect(page.locator('#session-state')).toHaveText('Ready');
+  await page.keyboard.press('Control+k');await page.locator('#palette-input').fill('additional dir');await page.keyboard.press('Enter');
+  await expect(page.locator('#additional-directories-dialog')).toBeVisible();
+  await expect(page.locator('#additional-directories-save')).toBeDisabled();
+  // Same rows as allowed roots: Add directory adds a row, and its Browse… opens the shared picker.
+  await page.locator('#additional-directories-add').click();
+  await page.locator('#additional-directories-list').getByRole('button',{name:'Browse for additional directory'}).click();
+  await page.locator('#directory-picker-list button',{hasText:'Up'}).click();
+  await page.locator('#directory-picker-list button',{hasText:/^omega$/}).click();
+  await page.locator('#directory-picker-select').click();
+  await expect(page.locator('#additional-directories-list .root-item input')).toHaveValue(/omega$/);
+  await page.locator('#additional-directories-save').click();
+  await expect(page.locator('#additional-directories-dialog')).toBeHidden();
+  await expect(page.locator('#project-extra')).toHaveText('+1 directory');
+  await expect(page.getByText(/Additional directories: .*omega/)).toBeVisible();
+  await expect(page.locator('#session-state')).toHaveText('Ready');
+  await page.locator('#session-menu-toggle, #lifecycle-menu summary').first().click().catch(()=>{});
+  await page.evaluate(()=>document.getElementById('additional-directories').click());
+  await expect(page.locator('#additional-directories-list .root-item input')).toHaveValue(/omega$/);
+  await page.locator('#additional-directories-list').getByRole('button',{name:'Remove additional directory'}).click();
+  await page.locator('#additional-directories-save').click();
+  await expect(page.locator('#project-extra')).toHaveText('');
+  await api(`/api/sessions/${created.id}`,null,'DELETE');
+});
 
 test('desktop: shortcuts, fuzzy session switching, drafts, running turns and composer-only commands',async({page})=>{
   const {project,second,sessions:[one,two,three]}=await seedSessions();

@@ -174,6 +174,12 @@ export function actionItems(state={},handlers={}){
       !connected?{disabled:true,reason:'Not connected to this session yet'}:['suspended','closed'].includes(status)?{disabled:true,reason:'Already suspended'}:{});
     if(handlers.restart)add('session-restart','Restart harness','Current session','Fresh harness process with the current shell environment; the conversation continues',handlers.restart,
       !connected?{disabled:true,reason:'Not connected to this session yet'}:!['idle','suspended','error'].includes(status)?{disabled:true,reason:'Wait for the turn to finish'}:{});
+    // Directory changes reopen the harness, so they share its between-turns availability.
+    const reopen=active.archived?{disabled:true,reason:'Unarchive the session first'}:!connected?{disabled:true,reason:'Not connected to this session yet'}:!['idle','suspended','error'].includes(status)?{disabled:true,reason:'Wait for the turn to finish'}:{};
+    const extra=active.providerCapabilities&&typeof active.providerCapabilities==='object'&&!active.providerCapabilities.additionalDirectories?{disabled:true,reason:'This harness does not support additional directories'}:null;
+    if(handlers.changeDirectory)add('session-directory','Change directory','Current session','Move this session to another folder; the conversation continues there',handlers.changeDirectory,reopen);
+    if(handlers.addDirectory)add('session-add-directory','Add directory','Current session','Let the agent also work in another folder; the working directory stays the same',handlers.addDirectory,extra||reopen);
+    if(handlers.additionalDirectories)add('session-additional-directories','Additional directories','Current session','Review or remove the extra folders this session can work in',handlers.additionalDirectories,extra||reopen);
     if(handlers.editProject&&active.projectId)add('project-edit','Edit project','Current session','Name, default location and communication role of this session’s project',handlers.editProject);
     add('session-agents','Agents and inbox','Current session','Access, messages and control activity',()=>handlers.agents?.());
     add('session-workspace','Workspace info','Current session','Directory, branch and commit',()=>handlers.workspaceInfo?.());

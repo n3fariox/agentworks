@@ -33,7 +33,7 @@ async fn view_inner(app: App, id: String, req: Request) -> ApiResult {
             json!({"context":context,"unavailable":"Diff requires an available Git worktree"}),
         ));
     }
-    let cwd = tokio::fs::canonicalize(&s.cwd)
+    let cwd = tokio::fs::canonicalize(&s.cwd())
         .await
         .map_err(|_| fail(StatusCode::BAD_REQUEST, "Session directory is unavailable"))?;
     let roots = effective_roots(&app);

@@ -1946,7 +1946,9 @@ impl Bridge {
                     }
                     return Ok(session_response(&live));
                 }
-                if !project_dir(&cwd).join(format!("{id}.jsonl")).is_file() {
+                if !project_dir(&cwd).join(format!("{id}.jsonl")).is_file()
+                    && !move_transcript(&config_dir().join("projects"), &id, &project_dir(&cwd))?
+                {
                     return Err(Error::resource_not_found(Some(id)));
                 }
                 (id, true)
@@ -2653,14 +2655,33 @@ fn radix36(mut n: u32) -> String {
     digits.iter().rev().collect()
 }
 fn find_transcript(id: &str) -> Option<PathBuf> {
+    find_transcript_in(&config_dir().join("projects"), id)
+}
+fn find_transcript_in(projects: &Path, id: &str) -> Option<PathBuf> {
     if id.is_empty() || id.contains(['/', '\\']) || id.starts_with('.') {
         return None;
     }
-    std::fs::read_dir(config_dir().join("projects"))
+    std::fs::read_dir(projects)
         .ok()?
         .flatten()
         .map(|d| d.path().join(format!("{id}.jsonl")))
         .find(|p| p.is_file())
+}
+/// Claude Code resumes only from the project directory of its working directory, so a
+/// session reopened in another directory brings its transcript, and then its subagent
+/// sidecar, along. Moving rather than copying keeps one live history, so a session that
+/// later moves back resumes from the newest one. False when no transcript exists.
+fn move_transcript(projects: &Path, id: &str, to: &Path) -> Result<bool> {
+    let Some(from) = find_transcript_in(projects, id) else {
+        return Ok(false);
+    };
+    std::fs::create_dir_all(to).map_err(failure)?;
+    std::fs::rename(&from, to.join(format!("{id}.jsonl"))).map_err(failure)?;
+    let sidecar = from.with_extension("");
+    if sidecar.is_dir() && !to.join(id).exists() {
+        std::fs::rename(&sidecar, to.join(id)).map_err(failure)?;
+    }
+    Ok(true)
 }
 fn read_entries(path: &Path) -> Result<Vec<Value>> {
     Ok(std::fs::read_to_string(path)
@@ -3166,6 +3187,20 @@ mod tests {
             .into_owned();
         assert!(name.len() > 201);
         assert!(name.starts_with(&format!("-{}", "x".repeat(199))));
+    }
+    #[test]
+    fn resuming_elsewhere_moves_the_transcript_and_its_subagents() {
+        let projects = std::env::temp_dir().join(format!("claude-move-{}", uuid::Uuid::new_v4()));
+        let (old, new) = (projects.join("-repo-old"), projects.join("-repo-new"));
+        std::fs::create_dir_all(old.join("s1/subagents")).unwrap();
+        std::fs::write(old.join("s1.jsonl"), "{}\n").unwrap();
+        std::fs::write(old.join("s1/subagents/agent-a.jsonl"), "{}\n").unwrap();
+        assert!(move_transcript(&projects, "s1", &new).unwrap());
+        assert!(new.join("s1.jsonl").is_file() && !old.join("s1.jsonl").exists());
+        assert!(new.join("s1/subagents/agent-a.jsonl").is_file());
+        assert!(!move_transcript(&projects, "missing", &new).unwrap());
+        assert!(!move_transcript(&projects, "../s1", &new).unwrap());
+        std::fs::remove_dir_all(&projects).unwrap();
     }
     #[test]
     fn dates_are_rfc3339() {

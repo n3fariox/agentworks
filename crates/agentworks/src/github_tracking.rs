@@ -206,7 +206,7 @@ async fn deliver(s: &Arc<Session>) -> Result<(), String> {
             s.progress.clone(),
             s.id.clone(),
             s.provider.clone(),
-            s.cwd.to_string_lossy().into_owned(),
+            s.cwd().to_string_lossy().into_owned(),
         );
         let accepted =
             tokio::task::spawn_blocking(move || hub.github_event(&session, &provider, &cwd, event))
@@ -783,7 +783,7 @@ agent.register_github(changed, events = ["pr.status_changed"])
             f.app.progress.clone(),
             f.s.id.clone(),
             f.s.provider.clone(),
-            f.s.cwd.to_string_lossy().into_owned(),
+            f.s.cwd().to_string_lossy().into_owned(),
             other.id.clone(),
         );
         assert!(

@@ -10,14 +10,15 @@ use axum::{
 pub async fn workspace(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     let s = session(&app, &id)?;
     if s.host_id != "local" {
-        return crate::hosts::git_context(&app, &s.host_id, &s.cwd.to_string_lossy())
+        return crate::hosts::git_context(&app, &s.host_id, &s.cwd().to_string_lossy())
             .await
             .map(Json);
     }
     let roots = effective_roots(&app);
+    let saved = s.cwd();
     // Recheck current roots and symlinks without rejecting a removed saved directory.
-    let cwd = tokio::fs::canonicalize(&s.cwd).await.ok();
-    let path = cwd.as_deref().unwrap_or(&s.cwd);
+    let cwd = tokio::fs::canonicalize(&saved).await.ok();
+    let path = cwd.as_deref().unwrap_or(&saved);
     let root = roots
         .iter()
         .filter(|r| path.starts_with(r))
@@ -28,6 +29,6 @@ pub async fn workspace(State(app): State<App>, Path(id): Path<String>) -> ApiRes
                 "Project must be inside an allowed root directory",
             )
         })?;
-    let context = inspect(&s.cwd, root).await;
+    let context = inspect(&saved, root).await;
     Ok(Json(context))
 }

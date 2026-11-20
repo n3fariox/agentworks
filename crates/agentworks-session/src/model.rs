@@ -90,6 +90,9 @@ pub struct SessionData {
     /// L-08 fork context held until the first prompt hands it to the harness.
     #[serde(default)]
     pub carried_context: Option<String>,
+    /// ACP `additionalDirectories`: extra workspace roots, re-sent on every open request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_directories: Vec<std::path::PathBuf>,
     /// ACP `promptCapabilities` advertised at the last initialization.
     #[serde(default)]
     pub prompt_capabilities: Value,

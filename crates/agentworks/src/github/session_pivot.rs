@@ -124,7 +124,7 @@ mod tests {
             "Issue only",
         ] {
             let req =
-                serde_json::from_value(json!({"provider":"demo","cwd":f.s.cwd,"title":title}))
+                serde_json::from_value(json!({"provider":"demo","cwd":f.s.cwd(),"title":title}))
                     .unwrap();
             let Json(created) = crate::create_session(State(f.app.clone()), Json(req))
                 .await

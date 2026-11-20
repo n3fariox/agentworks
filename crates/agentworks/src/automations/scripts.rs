@@ -533,7 +533,7 @@ mod tests {
         title: &str,
         instructions: &str,
     ) -> String {
-        let form=serde_json::from_value(json!({"host":"github.com","repo":"team/repo","account":"fixture","settings":{"provider":"demo","cwd":f.s.cwd,"projectId":"p","hostId":"local","title":title},"steps":[{"kind":"agent","text":instructions}]})).unwrap();
+        let form=serde_json::from_value(json!({"host":"github.com","repo":"team/repo","account":"fixture","settings":{"provider":"demo","cwd":f.s.cwd(),"projectId":"p","hostId":"local","title":title},"steps":[{"kind":"agent","text":instructions}]})).unwrap();
         super::super::generator::generate(&form).unwrap()
     }
     async fn fixture() -> crate::github_tracking::tests::Fixture {

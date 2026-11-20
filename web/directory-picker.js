@@ -74,6 +74,28 @@ export function setupDirectoryPicker({$,api}) {
   return {pick};
 }
 
+// One editable folder in a list: path, Browse… (the shared picker) and remove. Allowed
+// roots, host working directories and session additional directories all use it.
+// `browse.unavailable` returns why browsing is off, or '' when it is usable; an empty row
+// starts browsing at `browse.start`, when given.
+export function directoryRow(picker,{value='',label,removeLabel='Remove '+label.toLowerCase(),placeholder='',required=false,browse,onRemove}){
+  const row=document.createElement('div');row.className='root-item';
+  const input=document.createElement('input');input.value=value;input.placeholder=placeholder;input.required=required;
+  input.setAttribute('aria-label',label);input.autocomplete='off';input.spellcheck=false;
+  const find=document.createElement('button');find.type='button';find.className='text-button';find.textContent='Browse…';
+  find.setAttribute('aria-label','Browse for '+label.toLowerCase());
+  const why=browse.unavailable?.()||'';
+  if(why){find.disabled=true;find.title=why;}
+  find.onclick=async()=>{
+    const path=await picker.pick({hostId:browse.hostId,hostName:browse.hostName(),start:input.value.trim()||browse.start||'',scope:browse.scope});
+    if(path){input.value=path;input.dispatchEvent(new Event('input',{bubbles:true}));input.focus();}
+  };
+  const remove=document.createElement('button');remove.type='button';remove.className='icon-button';remove.textContent='×';
+  remove.setAttribute('aria-label',removeLabel);remove.onclick=()=>{row.remove();onRemove?.();};
+  row.append(input,find,remove);
+  return row;
+}
+
 // Project directory field: optional, explicit, and only sent when changed,
 // so saving other project settings never moves an existing project.
 export function setupProjectDirectory({$,picker,hosts}) {
