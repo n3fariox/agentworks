@@ -3616,13 +3616,14 @@ async fn prompt(
     }
     let s = session(&app, &id)?;
     let _run = loop {
-        if idle_sleep::asleep(&s) {
+        // Opening a dormant session leaves it released; the first prompt resumes it.
+        if idle_sleep::dormant(&s) {
             idle_sleep::wake_for_prompt(&app, &s).await?;
         }
         let run = app.run_lock.lock().await;
         service_restart::allow_start(&app)?;
         // The idle sweep may have won run_lock after the first check.
-        if idle_sleep::asleep(&s) {
+        if idle_sleep::dormant(&s) {
             drop(run);
             continue;
         }

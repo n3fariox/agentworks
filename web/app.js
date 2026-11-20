@@ -717,9 +717,10 @@ function selectSession(s) {
   setTitle(s.title);$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;
   $('session-notice').hidden=true;document.body.classList.remove('menu-open');sidebarPin.close();sidebar();updateControls();connect(generation);
   workspace?.sessionSelected(s);sidePanel?.sessionChanged();sessionTerminal?.sessionChanged();promptResize.size();renderComposer();
-  // Opening wakes a sleeping session; a reconnecting tab leaves it asleep.
-  if(s.status==='suspended'&&!s.explicitlySuspended&&!s.archived)resumeSession(s.id);
+  // Opening a dormant session only loads its transcript; the first message resumes it.
 }
+// Released but not deliberately stopped (asleep, or suspended by a server restart): sending resumes it.
+function dormant(){return status==='suspended'&&!!active&&!active.explicitlySuspended&&!active.archived&&!active.providerHistoryDeletion;}
 function connect(gen){
   if(gen!==generation||!active)return;
   $('connection').textContent='Connecting';
@@ -766,7 +767,7 @@ function connect(gen){
       for(const [id,view] of Object.entries(e.toolProgress||{}))applyToolProgress(tools.get(id),view,view.seq);
       Object.assign(active,e.session);setTitle(active.title);renderUnread();
       active.continuation=e.session.continuation;
-      approvals=new Map(e.approvals.map(a=>[a.id,a]));status=e.session.status;modelConfig=e.models;syncModelLabel();permissionModes=e.permissionModes;sessionConfig=e.sessionConfig;active.providerCapabilities=e.providerCapabilities;attachments.setPolicy(e.attachments);if(status==='suspended'&&!e.session.explicitlySuspended&&!e.session.asleep&&!e.session.archived&&!active.providerHistoryDeletion)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();inputQueue.set(e.session.inputQueue);inputQueue.observe(status,{live:false});
+      approvals=new Map(e.approvals.map(a=>[a.id,a]));status=e.session.status;modelConfig=e.models;syncModelLabel();permissionModes=e.permissionModes;sessionConfig=e.sessionConfig;active.providerCapabilities=e.providerCapabilities;attachments.setPolicy(e.attachments);availableCommands=e.commands||[];renderCommands();inputQueue.set(e.session.inputQueue);inputQueue.observe(status,{live:false});
       if(active.providerHistoryDeletion){$('session-notice').textContent=active.providerHistoryDeletion==='deleted'?'Provider history was deleted. This Agentworks transcript remains because local cleanup did not finish; retry Delete everywhere or delete this transcript.':'Provider-history deletion was not confirmed. This transcript is retained and resume is blocked; inspect provider history, then retry Delete everywhere or delete only this transcript.';$('session-notice').hidden=false;}
       if(e.storageError){$('session-notice').textContent=e.storageError;$('session-notice').hidden=false;}
     }else{
@@ -1165,12 +1166,12 @@ function updateControls(){
   const busy=['running','waiting','cancelling'].includes(status);
   $('session-state').textContent=status==='waiting'?([...approvals.values()].some(a=>a.kind==='question')?'Needs your answer':'Needs your approval'):status==='idle'?'Ready':status==='suspended'&&active?.asleep?'Asleep':status[0]?.toUpperCase()+status.slice(1);
   // Busy and starting sessions keep the composer usable so input can be queued without losing the draft.
-  const asleep=status==='suspended'&&!!active?.asleep,starting=STARTING.includes(status),queues=busy||starting;
+  const asleep=dormant(),starting=STARTING.includes(status),queues=busy||starting;
   $('prompt').disabled=!connected||!(status==='idle'||queues||asleep);$('send').disabled=!connected||status==='cancelling'||!(status==='idle'||queues||asleep);
   $('send').setAttribute('aria-label',queues?'Queue message':'Send message');$('send').textContent=queues?'＋':'↑';$('send').title=starting?'Queue to send once the session is ready':busy?'Queue to send after this turn ends':'';
   inputQueue.render();inputQueue.renderActivity();$('stop').hidden=!busy&&!['starting','resuming','configuring'].includes(status)&&!active?.continuation?.enabled;$('stop').disabled=!connected||status==='cancelling';
   attachments.render();
-  $('prompt').placeholder=starting?`${status==='starting'?'Starting':'Resuming'} your agent… type to queue a message`:status==='waiting'?'Respond to the permission request above…':busy?'Your agent is working… type to queue a follow-up':status==='error'?'Session unavailable. Use Resume session to try again.':asleep?'Asleep. Send a message to wake it.':'What would you like to work on?';
+  $('prompt').placeholder=starting?`${status==='starting'?'Starting':'Resuming'} your agent… type to queue a message`:status==='waiting'?'Respond to the permission request above…':busy?'Your agent is working… type to queue a follow-up':status==='error'?'Session unavailable. Use Resume session to try again.':asleep?(active.asleep?'Asleep. Send a message to wake it.':'Suspended. Send a message to resume it.'):'What would you like to work on?';
   if(subagents.viewingChild())$('prompt').placeholder=busy?'Queue a message for the main agent…':'Message the main agent…';
   renderComposer();
 }
@@ -1582,8 +1583,8 @@ $('composer').onsubmit=async event=>{
     if(BUSY.includes(status)||STARTING.includes(status)){toast('Attachments can’t be queued. Send once the agent is idle; your draft is kept.');return;}
   }
   if(!text.trim())return;
-  // A sleeping session wakes for the prompt on the server.
-  const asleep=status==='suspended'&&!!active.asleep,queues=BUSY.includes(status)||STARTING.includes(status);
+  // A dormant session resumes for the prompt on the server.
+  const asleep=dormant(),queues=BUSY.includes(status)||STARTING.includes(status);
   if(status==='cancelling'||(!queues&&status!=='idle'&&!asleep))return;
   const submission={...pendingFor(sid,taskMentions.expand(mentions.expand(text)),attached)};
   promptRecovery.submitted(sid,submission,text);
