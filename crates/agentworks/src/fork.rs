@@ -232,7 +232,7 @@ pub fn seed(
                 data.remove("initiatedBy");
                 data.remove("inboxDelivery");
                 data.remove("continuationState");
-                data.entry("forkSourceCwd").or_insert(json!(parent.cwd));
+                data.entry("forkSourceCwd").or_insert(json!(parent.cwd()));
             }
             event
         })
@@ -259,7 +259,7 @@ pub fn seed(
         parent_host_id: Some(parent.host_id.clone()),
         boundary_seq: boundary,
         boundary_turn,
-        parent_cwd: Some(parent.cwd.to_string_lossy().into_owned()),
+        parent_cwd: Some(parent.cwd().to_string_lossy().into_owned()),
         context: context.to_owned(),
         source_session_id: data.provider_session_id.clone(),
         source_message_id: window

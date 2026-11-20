@@ -228,6 +228,21 @@ impl Store {
         }
         Ok(())
     }
+    /// Metadata and state in one write, so a moved directory and its handoff note agree.
+    pub fn save_session(&mut self, metadata: &Metadata, state: &SessionData) -> Result<()> {
+        if self.connection.execute(
+            "UPDATE sessions SET metadata=?2,state=?3 WHERE id=?1",
+            params![
+                metadata.id,
+                serde_json::to_string(metadata)?,
+                serde_json::to_string(state)?
+            ],
+        )? != 1
+        {
+            return Err("Session no longer exists".into());
+        }
+        Ok(())
+    }
     pub fn event(&mut self, id: &str, state: &SessionData, event: &Value) -> Result<()> {
         let transaction = self.connection.transaction()?;
         // A late callback after deletion must never recreate a session.
@@ -704,6 +719,7 @@ impl Store {
                 timeouts: None,
                 lineage: Default::default(),
                 carried_context: None,
+                additional_directories: Vec::new(),
                 prompt_capabilities: serde_json::Value::Null,
                 worktree: None,
                 role: None,
@@ -1040,6 +1056,7 @@ mod tests {
             timeouts: None,
             lineage: Default::default(),
             carried_context: None,
+            additional_directories: Vec::new(),
             prompt_capabilities: serde_json::Value::Null,
             worktree: None,
             role: None,

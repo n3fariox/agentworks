@@ -152,12 +152,12 @@ pub async fn open(
     }
     crate::service_restart::allow_start(&app)?;
     let handle = if session.host_id == "local" {
-        spawn(session.cwd.clone())
+        spawn(session.cwd().clone())
     } else {
         app.hosts
             .live(&session.host_id)
             .ok_or_else(|| "The host is offline.".to_string())
-            .and_then(|host| host.terminal(&session.cwd.to_string_lossy()))
+            .and_then(|host| host.terminal(&session.cwd().to_string_lossy()))
     }
     .map_err(|error| fail(StatusCode::BAD_REQUEST, error))?;
     session

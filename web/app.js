@@ -61,6 +61,7 @@ import {setupTasks} from './tasks.js';
 import {setupAttachments} from './attachments.js';
 import {setupModelProviders} from './model-providers.js';
 import {setupDirectoryPicker,setupProjectDirectory} from './directory-picker.js';
+import {setupAdditionalDirectories} from './additional-directories.js';
 import {setupCreateSections} from './create-sections.js';
 import {setupCreatePlace} from './create-place.js';
 const $ = id => document.getElementById(id);
@@ -148,6 +149,8 @@ const createSections=setupCreateSections({$,storage:localStorage});
 const createPlace=setupCreatePlace({$,el,used:(hostId,projectId)=>!!(projectDirectoryOn(hostId,projectId)||rememberedDirectory(hostId,projectId)||sessions.some(s=>(s.projectId||null)===projectId&&(s.hostId||'local')===hostId))});
 const policyEditor=setupPolicyEditor({$,api});
 const directoryPicker=setupDirectoryPicker({$,api});
+const additionalDirectories=setupAdditionalDirectories({$,api,picker:directoryPicker,getActive:()=>active,toast:(...a)=>toast(...a),
+  host:session=>{const id=session.hostId||'local';return {id,name:hosts.find(h=>h.id===id)?.name||'Local'};}});
 const projectDirectory=setupProjectDirectory({$,picker:directoryPicker,hosts:()=>hosts});
 const display=setupDisplayPreferences({onChange:()=>{draw();renderComposer();}});display.mount($('display-preferences'));
 workLogs=setupWorkLogs({el});workLogs.mount($('display-preferences'),()=>scheduleDraw());
@@ -697,6 +700,16 @@ async function revealNotificationTarget(){
   }catch(error){toast('Could not locate the alert in session history: '+error.message);notificationTarget=null;}
   finally{revealingNotification=false;if(notificationTarget&&notificationTarget!==target)requestAnimationFrame(revealNotificationTarget);}
 }
+// A moved session shows its new directory, whether it arrives live or in a reconnect snapshot.
+function showPlace(){
+  if(!active?.cwd)return;
+  const extra=active.additionalDirectories||[];
+  $('project-path').title=extra.length?'Also: '+extra.join(', '):'';
+  $('project-extra').textContent=extra.length?`+${extra.length} director${extra.length===1?'y':'ies'}`:'';
+  if($('project-path').textContent===active.cwd)return;
+  $('project-path').textContent=active.cwd;
+  if(sidePanel?.isOpen)sidePanel.open(sidePanel.tab,{history:false});
+}
 function selectSession(s) {
   notificationTarget=null;
   if(isAutoDismissEnabled())notificationTray?.dismissSessionAlerts(s.id);
@@ -708,7 +721,7 @@ function selectSession(s) {
   active=s;storedEvents=[];older={mode:'none',loading:false,error:''};currentUserSeq=null;promptRecovery.render();status=s.status;modelConfig=null;permissionModes=null;sessionConfig=null;availableCommands=[];commandsOpen=false;renderCommands();mentions.close();taskMentions.close();taskMentions.refresh();composerMenu.close();sessionMenu.close();resetTranscript();usageStatus.reset();inputQueue.reset();
   localStorage.setItem('agentworks-session',s.id);$('welcome').hidden=true;$('conversation').hidden=false;
   github.sessionChanged();
-  setTitle(s.title);$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;
+  setTitle(s.title);$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;showPlace();
   $('session-notice').hidden=true;document.body.classList.remove('menu-open');sidebarPin.close();sidebar();updateControls();connect(generation);
   workspace?.sessionSelected(s);sidePanel?.sessionChanged();sessionTerminal?.sessionChanged();promptResize.size();renderComposer();
   // Opening wakes a sleeping session; a reconnecting tab leaves it asleep.
@@ -738,14 +751,14 @@ function connect(gen){
       // A full snapshot replaces the transcript; a resumed one adds only newer events.
       if(e.resumed===null||e.resumed===undefined){
         resetTranscript();usageStatus.reset();
-        currentUserSeq=e.session.lastUserSeq??null;status=e.session.status;Object.assign(active,e.session);
+        currentUserSeq=e.session.lastUserSeq??null;status=e.session.status;Object.assign(active,e.session);showPlace();
         // Keep loaded earlier pages when they meet the current retained window without a gap.
         const first=e.events[0]?.seq,last=storedEvents.at(-1)?.seq;
         const kept=Number.isSafeInteger(first)&&Number.isSafeInteger(last)&&last>=first-1?storedEvents.filter(item=>item.seq<first):[];
         storedEvents=[...kept,...e.events];if(!kept.length)older={mode:e.truncated?'more':'none',loading:false,error:''};
         replay(e.session.lastUserSeq);
       }else{
-        eventSeq=e.seq;currentUserSeq=e.session.lastUserSeq??null;status=e.session.status;Object.assign(active,e.session);
+        eventSeq=e.seq;currentUserSeq=e.session.lastUserSeq??null;status=e.session.status;Object.assign(active,e.session);showPlace();
         const last=storedEvents.at(-1)?.seq??0;
         storedEvents.push(...e.events.filter(item=>Number.isSafeInteger(item.seq)&&item.seq>last));
         replaying=true;try{const latestUser=e.events.findLast(item=>item.kind==='user');for(const item of e.events)if(item.kind!=='session_updated'&&(item.kind!=='stop_requested'||item.data.userSeq===(e.session.lastUserSeq??latestUser?.seq)||(!e.session.lastUserSeq&&!latestUser)))consume(item);}finally{replaying=false;}
@@ -1006,7 +1019,7 @@ function consume(e,live=false){
   {const t=timeoutControls?.notice(e.kind,d);if(t){transcript.push({id:itemId(),type:'notice',text:t});assistant=null;}}
   if(rebuilding&&['session_updated','continuation','models','permission_modes','attachment_policy','commands','status','storage_error'].includes(e.kind)){}
   else if(e.kind==='session_updated'){
-    Object.assign(active,d);sessionTerminal?.sessionUpdated();setTitle(active.title);const row=sessions.find(s=>s.id===active.id);if(row)Object.assign(row,d);sidebar();
+    Object.assign(active,d);showPlace();sessionTerminal?.sessionUpdated();setTitle(active.title);const row=sessions.find(s=>s.id===active.id);if(row)Object.assign(row,d);sidebar();
   }
   else if(e.kind==='continuation'){renderContinuation();}
   else if(e.kind==='models'){modelConfig=d;syncModelLabel();}
@@ -1042,6 +1055,9 @@ function consume(e,live=false){
       text:`Forked from “${d.parentTitle}” after ${d.boundaryTurn===1?'its first finished turn':`turn ${d.boundaryTurn}`}${d.parentProvider?` (${labels[d.parentProvider]||d.parentProvider})`:''}. The conversation below is recorded history. Context handoff uses the chosen native or fresh-session method.`});
     assistant=null;
   }
+  else if(e.kind==='directory_changed'){assistant=null;transcript.push({id:itemId(),type:'notice',text:`Working directory changed from ${d.from} to ${d.to}. The agent is told with its next message.`});}
+  else if(e.kind==='additional_directories_changed'){assistant=null;transcript.push({id:itemId(),type:'notice',text:d.directories.length?`Additional directories: ${d.directories.join(', ')}. The agent is told with its next message.`:'Additional directories removed. The agent is told with its next message.'});}
+  else if(e.kind==='additional_directories_ignored'){assistant=null;transcript.push({id:itemId(),type:'notice',text:`This harness does not support additional directories, so it was started without ${d.directories.join(', ')}.`});}
   else if(e.kind==='fork_mode'){assistant=null;transcript.push({id:itemId(),type:'notice',text:d.mode==='native'?'Provider native fork created at the recorded boundary.':`${d.detail}${d.truncated?' Available source history is truncated.':''}`});}
   else if(e.kind==='carried_context'){assistant=null;transcript.push({id:itemId(),type:'notice',text:'Context handoff dispatched with this message; interrupted delivery requires inspection.'});}
   else if(e.kind==='acp'){
@@ -1128,6 +1144,8 @@ function updateControls(){
   $('archive-session').disabled=!active?.archived&&['running','waiting','cancelling'].includes(status);
   $('suspend-session').disabled=!connected||status==='suspended'||status==='closed';
   $('restart-session').disabled=!connected||!['idle','suspended','error'].includes(status)||!!active?.providerHistoryDeletion;
+  $('change-directory').disabled=!connected||!['idle','suspended','error'].includes(status)||!!active?.providerHistoryDeletion||!!active?.archived;
+  $('additional-directories').disabled=$('change-directory').disabled||!supportsAdditional();
   $('resume-session').hidden=!['suspended','error'].includes(status);
   $('resume-session').disabled=!connected||!!active?.providerHistoryDeletion;
   $('show-commands').disabled=!connected||status!=='idle';
@@ -1849,6 +1867,9 @@ setupPalettes({
     archive:()=>{if(active)archiveSession(active);},
     suspend:()=>{if(active&&!$('suspend-session').disabled)$('suspend-session').click();},
     restart:()=>{if(active&&!$('restart-session').disabled)$('restart-session').click();},
+    changeDirectory:()=>{if(active&&!$('change-directory').disabled)$('change-directory').click();},
+    additionalDirectories:()=>{if(active&&!$('additional-directories').disabled)additionalDirectories.open();},
+    addDirectory:()=>{if(active&&!$('additional-directories').disabled)additionalDirectories.add();},
     editProject:()=>{const project=projects.find(p=>p.id===active?.projectId);if(project)openProjectDialog(project);},
     deleteEverywhere:()=>{if(active)deleteSession(active,true);},
     resume:()=>{if(active&&connected&&['suspended','error'].includes(status))resumeSession(active.id);},
@@ -1977,6 +1998,21 @@ $('suspend-session').onclick=async()=>{
 $('restart-session').onclick=async()=>{
   const id=active?.id;if(!id)return;
   try{await api(`/api/sessions/${id}/restart`,{method:'POST',body:'{}'});$('lifecycle-menu').open=false;toast('Restarting harness…','success');}catch(e){toast(e.message);}
+};
+$('additional-directories').onclick=()=>{$('lifecycle-menu').open=false;additionalDirectories.open();};
+// Unknown until the harness first initializes; the server checks again when it starts.
+function supportsAdditional(){const caps=active?.providerCapabilities;return !caps||typeof caps!=='object'||!!caps.additionalDirectories;}
+// The conversation stays; the harness reopens it in the chosen folder.
+$('change-directory').onclick=async()=>{
+  const session=active;if(!session)return;
+  $('lifecycle-menu').open=false;
+  const hostId=session.hostId||'local',host=hosts.find(h=>h.id===hostId);
+  const path=await directoryPicker.pick({hostId,hostName:host?.name||'Local',start:session.cwd});
+  if(!path||active?.id!==session.id)return;
+  try{
+    const result=await api(`/api/sessions/${session.id}/directory`,{method:'POST',body:JSON.stringify({cwd:path})});
+    toast(result.unchanged?'Already in that directory':result.restarted?'Moving the session and restarting its harness…':'Directory changed; it applies when the harness resumes','success');
+  }catch(e){toast(e.message);}
 };
 
 $('dismiss-lifecycle').onclick=()=>{$('lifecycle-menu').open=false;$('lifecycle-menu').querySelector('summary').focus();};

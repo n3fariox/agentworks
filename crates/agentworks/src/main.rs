@@ -36,6 +36,7 @@ mod notifications;
 mod pam;
 mod permission_modes;
 mod recovery;
+mod relocation;
 mod roles;
 mod service_restart;
 mod service_unit;
@@ -169,12 +170,12 @@ struct App {
 struct Session {
     id: String,
     provider: String,
-    cwd: PathBuf,
+    /// Working directory and its catalog location; `relocate` changes both together.
+    place: std::sync::RwLock<Place>,
     title: String,
     initial_model: Option<String>,
     created: u64,
     host_id: String,
-    location_id: String,
     data: Mutex<SessionData>,
     tx: broadcast::Sender<Value>,
     commands: Mutex<Option<mpsc::Sender<session_runtime::Command>>>,
@@ -192,6 +193,17 @@ struct Session {
     progress: tool_progress::Hub,
     /// Account quota shared with every session on the same host and family.
     account_quota: Arc<account_quota::Hub>,
+}
+
+#[derive(Clone)]
+struct Place {
+    cwd: PathBuf,
+    location_id: String,
+}
+impl Place {
+    fn at(cwd: PathBuf, location_id: String) -> std::sync::RwLock<Self> {
+        std::sync::RwLock::new(Self { cwd, location_id })
+    }
 }
 
 struct Approval {
@@ -342,7 +354,7 @@ impl Session {
         if kind == "acp" {
             self.progress.update(
                 &self.id,
-                (&self.provider, &self.cwd),
+                (&self.provider, &self.cwd()),
                 &self.tx,
                 state.seq,
                 &event["data"],
@@ -417,9 +429,9 @@ impl Session {
                 .unwrap_or(value)
                 .to_owned()
         });
-        json!({"id":self.id,"provider":self.provider,"cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"model":model,
+        json!({"id":self.id,"provider":self.provider,"cwd":self.cwd(),"additionalDirectories":data.additional_directories,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"model":model,
             "archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"asleep":data.lifecycle.asleep,"created":self.created,"status":data.status,"turnRunning":data.turn_active,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"]),
-            "projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"modelProvider":data.model_provider,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"providerCapabilities":data.agent_capabilities["sessionCapabilities"],"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None}})
+            "projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id(),"modelProvider":data.model_provider,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"providerCapabilities":data.agent_capabilities["sessionCapabilities"],"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None}})
     }
     /// Full snapshot for the HTTP API, with every retained event as stored.
     fn snapshot(&self) -> Value {
@@ -461,7 +473,7 @@ impl Session {
         let window = self.window(&data);
         let (events, resumed) = events(&window, data.seq);
         json!({"kind":"snapshot","seq":data.seq,"resumed":resumed,"session":{"id":self.id,"provider":self.provider,
-            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"asleep":data.lifecycle.asleep,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"modelProvider":data.model_provider,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None},"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"]),"unacknowledged":unacknowledged,"startup":data.startup} ,"events":events,
+            "cwd":self.cwd(),"additionalDirectories":data.additional_directories,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"asleep":data.lifecycle.asleep,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id(),"modelProvider":data.model_provider,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None},"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"]),"unacknowledged":unacknowledged,"startup":data.startup} ,"events":events,
             "truncated":window.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
             "asyncTasks":data.async_tasks.snapshot(),"providerCapabilities":data.agent_capabilities["sessionCapabilities"],"sessionConfig":data.session_config,"permissionModes":data.permission_modes,"models":data.models,"attachments":attachments::policy(&self.provider,&data.prompt_capabilities),"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|a.event(id)).collect::<Vec<_>>(),
@@ -518,16 +530,23 @@ impl Session {
             .clone()
             .unwrap_or_else(|| self.title.clone())
     }
+    fn cwd(&self) -> PathBuf {
+        self.place.read().unwrap().cwd.clone()
+    }
+    fn location_id(&self) -> String {
+        self.place.read().unwrap().location_id.clone()
+    }
     fn metadata(&self) -> store::Metadata {
+        let place = self.place.read().unwrap().clone();
         store::Metadata {
             id: self.id.clone(),
             provider: self.provider.clone(),
-            cwd: self.cwd.clone(),
+            cwd: place.cwd,
             title: self.title.clone(),
             initial_model: self.initial_model.clone(),
             created: self.created,
             host_id: self.host_id.clone(),
-            location_id: self.location_id.clone(),
+            location_id: place.location_id,
         }
     }
     fn send_command(&self, command: session_runtime::Command) -> Result<(), (StatusCode, String)> {
@@ -896,12 +915,11 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         let s = Arc::new(Session {
             id: metadata.id,
             provider: metadata.provider,
-            cwd: metadata.cwd,
             title: metadata.title,
             initial_model: metadata.initial_model,
             created: metadata.created,
             host_id: metadata.host_id,
-            location_id: metadata.location_id,
+            place: Place::at(metadata.cwd, metadata.location_id),
             data: Mutex::new(data),
             tx,
             commands: Mutex::new(None),
@@ -918,7 +936,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         });
         for (seq, data) in &replay {
             app.progress
-                .replay(&s.id, (&s.provider, &s.cwd), &s.tx, *seq, data);
+                .replay(&s.id, (&s.provider, &s.cwd()), &s.tx, *seq, data);
         }
         if interrupted {
             s.emit("interrupted",json!({"message":"The server stopped during this turn. It was not automatically retried. Check the last tool result before continuing."}));
@@ -1091,6 +1109,15 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 (
                     [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
                     include_str!("../../../web/model-providers.js"),
+                )
+            }),
+        )
+        .route(
+            "/additional-directories.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/additional-directories.js"),
                 )
             }),
         )
@@ -1611,6 +1638,11 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/{id}/suspend", post(lifecycle::suspend))
         .route("/api/sessions/{id}/resume", post(resume))
         .route("/api/sessions/{id}/restart", post(restart))
+        .route("/api/sessions/{id}/directory", post(relocation::change))
+        .route(
+            "/api/sessions/{id}/additional-directories",
+            post(relocation::set_additional),
+        )
         .route("/api/sessions/{id}/model", post(set_model))
         .route(
             "/api/sessions/{id}/configuration",
@@ -2653,7 +2685,7 @@ async fn assign_project(
     }
     if let Some(project) = req.project_id.as_deref() {
         catalog
-            .attach_location(project, &s.location_id)
+            .attach_location(project, &s.location_id())
             .map_err(|_| {
                 fail(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -2885,7 +2917,7 @@ async fn fork_session(
             provider: provider.clone(),
             cwd: req
                 .cwd
-                .unwrap_or_else(|| parent.cwd.to_string_lossy().into_owned()),
+                .unwrap_or_else(|| parent.cwd().to_string_lossy().into_owned()),
             title: Some(
                 req.title
                     .unwrap_or_else(|| format!("{title} (fork)"))
@@ -3099,7 +3131,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
             })
             .cloned();
         if let Some(existing) = existing {
-            if existing.cwd != source {
+            if existing.cwd() != source {
                 return Err(fail(
                     StatusCode::CONFLICT,
                     "This harness session is already registered with a different directory",
@@ -3197,8 +3229,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
         id: Uuid::new_v4().to_string(),
         provider: req.provider.clone(),
         host_id: location.host_id,
-        location_id: location.id,
-        cwd,
+        place: Place::at(cwd, location.id),
         title,
         initial_model: if let Some(profile) = &model_profile {
             req.model
@@ -3273,6 +3304,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
             timeouts: None,
             lineage: Default::default(),
             carried_context: None,
+            additional_directories: Vec::new(),
             prompt_capabilities: Value::Null,
             worktree: owned_worktree,
             role,
@@ -3310,7 +3342,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
                 data.opencode_host == req.external_host
                     && data.provider_session_id.as_ref() == Some(id)
             }) {
-                if existing.cwd != s.cwd {
+                if existing.cwd() != s.cwd() {
                     return Err(fail(
                         StatusCode::CONFLICT,
                         "This harness session is already registered with a different directory",
@@ -3338,7 +3370,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
             ));
         }
         if let Some(seed) = fork {
-            fork::apply(&s, seed, &s.cwd)?;
+            fork::apply(&s, seed, &s.cwd())?;
         }
         worktrees::arm_creation(app, creation_key)?;
         app.store
@@ -3528,7 +3560,7 @@ async fn resume_locked(app: &App, s: &Arc<Session>) -> ApiResult {
         ));
     }
     if s.host_id == "local" {
-        if !installed(&s.provider) || !s.cwd.is_dir() {
+        if !installed(&s.provider) || !s.cwd().is_dir() {
             return Err(fail(
                 StatusCode::CONFLICT,
                 "Harness or working directory is unavailable on this host",
@@ -4079,8 +4111,8 @@ async fn file(
     local_only(&s)?;
     // Canonicalize before checking roots: traversal and symlinks cannot escape
     // the workspace roots currently allowed for this session's host.
-    checked_cwd(&app, &s.cwd.to_string_lossy())?;
-    let path = tokio::fs::canonicalize(s.cwd.join(&req.path))
+    checked_cwd(&app, &s.cwd().to_string_lossy())?;
+    let path = tokio::fs::canonicalize(s.cwd().join(&req.path))
         .await
         .map_err(|_| fail(StatusCode::NOT_FOUND, "File or directory not found"))?;
     let roots = effective_roots(&app);
@@ -4126,7 +4158,7 @@ async fn markdown(State(app): State<App>, Json(req): Json<Markdown>) -> Json<Val
                 } else {
                     chat_format::apply_in_session
                 };
-                apply(&hub, &s.id, &s.provider, &s.cwd.to_string_lossy(), &text)
+                apply(&hub, &s.id, &s.provider, &s.cwd().to_string_lossy(), &text)
             })
             .await
             .unwrap_or(req.text)
@@ -4152,7 +4184,7 @@ async fn format_user(
 ) -> ApiResult {
     let s = session(&app, &id)?;
     let hub = app.progress.clone();
-    let (provider, cwd) = (s.provider.clone(), s.cwd.to_string_lossy().into_owned());
+    let (provider, cwd) = (s.provider.clone(), s.cwd().to_string_lossy().into_owned());
     let lines = tokio::task::spawn_blocking(move || {
         chat_format::format_in_session(&hub, Some(&s.id), "chat.user", &provider, &cwd, &req.text)
     })

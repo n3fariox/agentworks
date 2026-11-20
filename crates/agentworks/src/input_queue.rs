@@ -524,12 +524,11 @@ mod tests {
             let session = Session {
                 id: meta.id,
                 provider: meta.provider,
-                cwd: root.clone(),
                 title: meta.title,
                 initial_model: None,
                 created: 1,
                 host_id: meta.host_id,
-                location_id: meta.location_id,
+                place: crate::Place::at(root.clone(), meta.location_id),
                 data: Mutex::new(data),
                 tx: tokio::sync::broadcast::channel(128).0,
                 commands: Mutex::new(Some(commands)),

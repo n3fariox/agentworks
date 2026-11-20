@@ -245,8 +245,9 @@ async fn open_initialized(
                 json!({"air":{"fork":{"version":1,"messageId":lineage.source_message_id}}});
             let response = connection
                 .send_request(
-                    ForkSessionRequest::new(lineage.source_session_id.unwrap(), s.cwd.clone())
+                    ForkSessionRequest::new(lineage.source_session_id.unwrap(), s.cwd())
                         .mcp_servers(crate::mcp::configuration(s))
+                        .additional_directories(crate::relocation::additional(s, &init))
                         .system_prompt(system_prompt.clone())
                         .meta(meta.as_object().unwrap().clone()),
                 )
@@ -266,7 +267,7 @@ async fn open_initialized(
                     "Native fork at recorded parent boundary {}. Original transcript directory: {}. Current directory: {}. Relative references in inherited history mean the original directory; verify files before retargeting them.",
                     lineage.boundary_seq,
                     lineage.parent_cwd.unwrap_or_default(),
-                    s.cwd.display()
+                    s.cwd().display()
                 ));
                 s.store
                     .lock()
@@ -293,8 +294,9 @@ async fn open_initialized(
         return Ok(serde_json::to_value(
             connection
                 .send_request(
-                    NewSessionRequest::new(s.cwd.clone())
+                    NewSessionRequest::new(s.cwd())
                         .mcp_servers(crate::mcp::configuration(s))
+                        .additional_directories(crate::relocation::additional(s, &init))
                         .system_prompt(system_prompt.clone())
                         .meta(open_meta.clone()),
                 )
@@ -311,8 +313,9 @@ async fn open_initialized(
         }
         connection
             .send_request(
-                LoadSessionRequest::new(id.clone(), s.cwd.clone())
+                LoadSessionRequest::new(id.clone(), s.cwd())
                     .mcp_servers(crate::mcp::configuration(s))
+                    .additional_directories(crate::relocation::additional(s, &init))
                     .system_prompt(system_prompt.clone())
                     .meta(open_meta.clone()),
             )
@@ -322,8 +325,9 @@ async fn open_initialized(
     } else if init["agentCapabilities"]["sessionCapabilities"]["resume"].is_object() {
         connection
             .send_request(
-                ResumeSessionRequest::new(id.clone(), s.cwd.clone())
+                ResumeSessionRequest::new(id.clone(), s.cwd())
                     .mcp_servers(crate::mcp::configuration(s))
+                    .additional_directories(crate::relocation::additional(s, &init))
                     .system_prompt(system_prompt.clone())
                     .meta(open_meta.clone()),
             )
@@ -333,8 +337,9 @@ async fn open_initialized(
     } else if init["agentCapabilities"]["loadSession"] == true {
         connection
             .send_request(
-                LoadSessionRequest::new(id.clone(), s.cwd.clone())
+                LoadSessionRequest::new(id.clone(), s.cwd())
                     .mcp_servers(crate::mcp::configuration(s))
+                    .additional_directories(crate::relocation::additional(s, &init))
                     .system_prompt(system_prompt.clone())
                     .meta(open_meta.clone()),
             )
@@ -357,8 +362,9 @@ async fn open_initialized(
             return Ok(serde_json::to_value(
                 connection
                     .send_request(
-                        NewSessionRequest::new(s.cwd.clone())
+                        NewSessionRequest::new(s.cwd())
                             .mcp_servers(crate::mcp::configuration(s))
+                            .additional_directories(crate::relocation::additional(s, &init))
                             .system_prompt(system_prompt.clone())
                             .meta(open_meta.clone()),
                     )
@@ -506,7 +512,7 @@ pub async fn run(
             let fresh = s.fresh_environment.swap(false, Ordering::SeqCst);
             s.startup("Reading the login environment");
             let step = Instant::now();
-            let login = crate::login_env::changes(&s.cwd, fresh).await;
+            let login = crate::login_env::changes(&s.cwd(), fresh).await;
             tracing::info!(elapsed_ms = ms(step), "Read the login environment");
             login
         };
@@ -536,7 +542,7 @@ pub async fn run(
         s.startup("Starting the agent on the host");
         let (lines, guard) = live.spawn_profile(
             &s.provider,
-            &s.cwd.to_string_lossy(),
+            &s.cwd().to_string_lossy(),
             host_profile,
             connection.as_ref(),
             Some(&s.id),
@@ -1007,12 +1013,11 @@ mod fork_tests {
             let session = Arc::new(Session {
                 id: Uuid::new_v4().to_string(),
                 provider: "codex".into(),
-                cwd: dir.clone(),
                 title: "Child".into(),
                 initial_model: None,
                 created: 1,
                 host_id: host_id.into(),
-                location_id: "local".into(),
+                place: crate::Place::at(dir.clone(), "local".into()),
                 data: Mutex::new(data),
                 tx,
                 commands: Mutex::new(None),
@@ -1143,12 +1148,11 @@ for line in sys.stdin:
             let session = Arc::new(Session {
                 id: Uuid::new_v4().to_string(),
                 provider: provider.into(),
-                cwd: dir.clone(),
                 title: "Role".into(),
                 initial_model: None,
                 created: 1,
                 host_id: "local".into(),
-                location_id: "local".into(),
+                place: crate::Place::at(dir.clone(), "local".into()),
                 data: Mutex::new(data),
                 tx,
                 commands: Mutex::new(None),
@@ -1269,7 +1273,7 @@ pub async fn delete_provider_history(
             .transpose()?;
         let (lines, guard) = host.spawn_profile(
             &s.provider,
-            &s.cwd.to_string_lossy(),
+            &s.cwd().to_string_lossy(),
             host_profile,
             connection.as_ref(),
             Some(&s.id),

@@ -257,7 +257,7 @@ mod tests {
             .data
             .projects
             .push(serde_json::from_value(json!({"id":"p","name":"Reviews"})).unwrap());
-        let source = generate(&form(&f.s.cwd.to_string_lossy())).unwrap();
+        let source = generate(&form(&f.s.cwd().to_string_lossy())).unwrap();
         let builtin = f
             .app
             .store
@@ -275,7 +275,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(saved["provider"], "demo");
-        assert_eq!(saved["cwd"], f.s.cwd.to_string_lossy().as_ref());
+        assert_eq!(saved["cwd"], f.s.cwd().to_string_lossy().as_ref());
         assert_eq!(saved["projectId"], "p");
         let id = saved["id"].as_str().unwrap();
         let Json(file) = get(State(f.app.clone()), Path(id.into())).await.unwrap();

@@ -607,7 +607,7 @@ mod tests {
     }
     fn configure(f: &crate::github_tracking::tests::Fixture) -> Definition {
         let mut def = definition();
-        def.cwd = f.s.cwd.to_string_lossy().into_owned();
+        def.cwd = f.s.cwd().to_string_lossy().into_owned();
         f.app
             .catalog
             .lock()
@@ -895,10 +895,10 @@ mod tests {
         let target = runs[0]["sessionId"].as_str().unwrap();
         assert_ne!(target, f.s.id);
         let s = crate::session(&f.app, target).unwrap();
-        assert_ne!(s.cwd, f.s.cwd);
+        assert_ne!(s.cwd(), f.s.cwd());
         let actual = std::process::Command::new("git")
             .args(["rev-parse", "HEAD"])
-            .current_dir(&s.cwd)
+            .current_dir(s.cwd())
             .output()
             .unwrap();
         assert_eq!(String::from_utf8(actual.stdout).unwrap().trim(), sha);
@@ -1265,7 +1265,7 @@ agent.register_github_trigger(custom, host="github.com", repo="team/repo", accou
     async fn generated_file_settings_and_instructions_drive_dispatch() {
         let f = crate::github_tracking::tests::Fixture::new().await;
         configure(&f);
-        let form=serde_json::from_value(json!({"host":"github.com","repo":"team/repo","account":"fixture","settings":{"provider":"demo","cwd":f.s.cwd,"projectId":"p","hostId":"local","title":"From the file"},"steps":[{"kind":"agent","text":"The file owns this prompt."}]})).unwrap();
+        let form=serde_json::from_value(json!({"host":"github.com","repo":"team/repo","account":"fixture","settings":{"provider":"demo","cwd":f.s.cwd(),"projectId":"p","hostId":"local","title":"From the file"},"steps":[{"kind":"agent","text":"The file owns this prompt."}]})).unwrap();
         let source = super::super::generator::generate(&form).unwrap();
         let Json(created) = crate::automations::create(
             State(f.app.clone()),
@@ -1289,7 +1289,7 @@ agent.register_github_trigger(custom, host="github.com", repo="team/repo", accou
         let sha = String::from_utf8(
             std::process::Command::new("git")
                 .args(["rev-parse", "HEAD"])
-                .current_dir(&f.s.cwd)
+                .current_dir(f.s.cwd())
                 .output()
                 .unwrap()
                 .stdout,

@@ -485,6 +485,11 @@ dialog.image-viewer{width:96vw;max-width:96vw;height:92dvh;max-height:92dvh;padd
 .directory-crumbs [aria-current]{color:var(--text)}
 .directory-list{list-style:none;margin:0;padding:4px;max-height:min(42vh,320px);overflow:auto;border:1px solid var(--border);border-radius:8px}
 .directory-list:empty{display:none}
+.project-extra:not(:empty){margin-left:6px;color:var(--muted,#8b93a1);font-size:.85em;white-space:nowrap}
+.additional-directories{list-style:none;margin:0 0 8px;padding:0}
+.additional-directories:empty{display:none}
+.additional-directories li{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)}
+.additional-directories li span{flex:1;min-width:0;overflow-wrap:anywhere;font-family:var(--mono,monospace);font-size:.85em}
 .directory-list button{display:block;width:100%;text-align:left;background:transparent;border:0;border-radius:6px;padding:8px 9px;overflow-wrap:anywhere}
 .directory-list button:hover,.directory-list button:focus-visible{background:#252a32}
 .directory-current{min-width:0;overflow-wrap:anywhere;color:var(--muted);font-size:12px}

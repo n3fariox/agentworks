@@ -42,7 +42,9 @@ pub(crate) async fn inspect(app: &App, s: &Session) -> Inspection {
                 .unwrap()
                 .values()
                 .filter(|other| {
-                    other.id != s.id && other.host_id == s.host_id && other.cwd.starts_with(&o.path)
+                    other.id != s.id
+                        && other.host_id == s.host_id
+                        && other.cwd().starts_with(&o.path)
                 })
                 .map(|other| json!({"id":other.id,"title":other.display_title()}))
                 .collect()
@@ -89,7 +91,7 @@ fn view(s: &Session, i: &Inspection) -> Value {
     json!({
         "owned": i.owned.is_some(),
         "state": i.state,
-        "path": i.owned.as_ref().map_or(&s.cwd, |o| &o.path),
+        "path": i.owned.as_ref().map_or(&s.cwd(), |o| &o.path),
         "branch": i.owned.as_ref().map(|o| &o.branch),
         "baseCommit": i.owned.as_ref().map(|o| &o.base_commit),
         "removedAt": i.owned.as_ref().and_then(|o| o.removed),
@@ -449,12 +451,11 @@ mod tests {
             let s = Arc::new(Session {
                 id: id.into(),
                 provider: "demo".into(),
-                cwd: self.worktree.clone(),
                 title: id.into(),
                 initial_model: None,
                 created: now(),
                 host_id: "local".into(),
-                location_id: "fixture".into(),
+                place: crate::Place::at(self.worktree.clone(), "fixture".into()),
                 data: Mutex::new(d),
                 tx: tokio::sync::broadcast::channel(16).0,
                 commands: Mutex::new(None),

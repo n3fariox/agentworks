@@ -208,8 +208,8 @@ pub(crate) async fn validate_session(
     if s.host_id == "local" && !crate::installed(&s.provider) {
         return Err(fail(StatusCode::CONFLICT, "Harness is unavailable"));
     }
-    let cwd = directory_on(app, &s.host_id, &s.provider, &s.cwd.to_string_lossy()).await?;
-    if cwd != s.cwd {
+    let cwd = directory_on(app, &s.host_id, &s.provider, &s.cwd().to_string_lossy()).await?;
+    if cwd != s.cwd() {
         return Err(fail(
             StatusCode::CONFLICT,
             "Session directory no longer resolves to its saved location",
