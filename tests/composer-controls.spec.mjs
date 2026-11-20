@@ -11,8 +11,8 @@ test.beforeAll(async()=>{
   });await new Promise(ok=>server.listen(4523,'127.0.0.1',ok));
 });
 test.afterAll(async()=>{await new Promise(ok=>server.close(ok));});
-async function fixture(page,{delaySend=false,finishFirst=false,commands=[]}={}){
-  const sessions=['one','two'].map(id=>({id,title:id,provider:'demo',cwd:'/fixture',status:'idle',hostId:'local'}));
+async function fixture(page,{delaySend=false,finishFirst=false,commands=[],provider='demo'}={}){
+  const sessions=['one','two'].map(id=>({id,title:id,provider,cwd:'/fixture',status:'idle',hostId:'local'}));
   const history=new Map(sessions.map(s=>[s.id,[]])),sockets=new Map(),writes=[];let release,seq=0;
   const send=(kind,data,id='one')=>{const event={kind,data,seq:++seq};history.get(id).push(event);if(kind==='status')sessions.find(s=>s.id===id).status=data.status;sockets.get(id)?.send(JSON.stringify(event));return event;};
   const snapshot=s=>({kind:'snapshot',session:s,events:history.get(s.id),approvals:[],commands});
@@ -128,6 +128,15 @@ test('native textarea drag retains the chosen height when typing resumes',async(
   await prompt(page).fill('Writing after a manual drag');await expect.poll(()=>prompt(page).evaluate(n=>n.getBoundingClientRect().height)).toBe(height);
 });
 
+for(const provider of ['claude-rust','antigravity'])test(`${provider} slash skills complete mid-text, but paths and non-matches stay closed`,async({page})=>{
+  await page.addInitScript(()=>localStorage.setItem('agentworks-composer-source','true'));
+  await fixture(page,{provider,commands:[{name:'review'},{name:'deploy-app'}]});
+  const area=prompt(page),list=page.locator('#command-list');
+  await area.fill('Please run /dep');await expect(list.getByRole('button')).toHaveText('/deploy-app');
+  await list.getByRole('button').click();await expect(area).toHaveValue('Please run /deploy-app ');
+  await area.fill('First line\n/rev');await expect(list.getByRole('button')).toHaveText('/review');
+  for(const text of ['Look at /tmp/x','Look at /zzz','word/rev']){await area.fill(text);await expect(list).toBeHidden();}
+});
 for(const source of [true,false])test(`skills complete at the caret while slash commands stay at the start (${source?'source':'formatted'})`,async({page})=>{
   await page.addInitScript(source=>localStorage.setItem('agentworks-composer-source',String(source)),source);
   const f=await fixture(page,{commands:[{name:'help'},{name:'$demo-skill'},{name:'$other-skill'}]});

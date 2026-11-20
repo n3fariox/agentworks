@@ -367,14 +367,20 @@ function commandRange(){
   if(caret!==prompt.selectionEnd)return null;
   const before=prompt.value.slice(0,caret);
   const match=/(?:^|\s)(\$[^\s$]*)$/.exec(before)||/^(\/\S*)$/.exec(before);
-  return match?{start:caret-match[1].length,end:caret,query:match[1].toLowerCase()}:null;
+  if(match)return {start:caret-match[1].length,end:caret,query:match[1].toLowerCase()};
+  // Claude and Antigravity skills are `/name` and work anywhere in the prompt,
+  // so complete them after whitespace too. Paths (`/a/b`) and non-matches never open the picker.
+  const inline=midTextSlash()&&/\s(\/[^\s/]*)$/.exec(before);
+  return inline?{start:caret-inline[1].length,end:caret,query:inline[1].toLowerCase(),inline:true}:null;
 }
-function updateCommands(){commandsOpen=!!commandRange();renderCommands();}
+function midTextSlash(){const provider=currentProvider(active?.provider||'');return provider.startsWith('claude')||provider==='antigravity';}
+function matchingCommands(range){return availableCommands.filter(c=>!range||commandText(c).toLowerCase().includes(range.query)||range.query.startsWith('/')&&c.name.startsWith('$')&&('/'+c.name.slice(1)).toLowerCase().includes(range.query));}
+function updateCommands(){const range=commandRange();commandsOpen=!!range&&(!range.inline||matchingCommands(range).length>0);renderCommands();}
 function renderCommands(){
   const list=$('command-list');list.replaceChildren();list.hidden=!commandsOpen;
   if(!commandsOpen)return;
   const range=commandRange();
-  const items=availableCommands.filter(c=>!range||commandText(c).toLowerCase().includes(range.query)||range.query.startsWith('/')&&c.name.startsWith('$')&&('/'+c.name.slice(1)).toLowerCase().includes(range.query));
+  const items=matchingCommands(range);
   if(!items.length)list.append(el('p','field-note','No matching commands advertised by this harness.'));
   for(const command of items){
     const button=el('button','',commandText(command));button.type='button';button.append(el('small','',command.description||''));
