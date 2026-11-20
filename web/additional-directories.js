@@ -1,24 +1,22 @@
+import {directoryRow} from './directory-picker.js';
+
 // ACP additionalDirectories: folders the agent may also work in, beside its working directory.
-// The list is edited here and saved in one request, because each save reopens a running harness.
+// Edited with the same rows as allowed roots and saved in one request, because each save
+// reopens a running harness. The server canonicalizes paths and drops duplicates.
 export function setupAdditionalDirectories({$,api,picker,getActive,host,toast}){
   const dialog=$('additional-directories-dialog'),list=$('additional-directories-list');
-  let session=null,saved=[],draft=[];
+  let session=null,saved=[];
+  const values=()=>[...list.querySelectorAll('input')].map(input=>input.value.trim()).filter(Boolean);
   const same=(a,b)=>a.length===b.length&&a.every((d,i)=>d===b[i]);
-  function render(){
-    list.replaceChildren();
-    for(const path of draft){
-      const item=document.createElement('li'),label=document.createElement('span'),remove=document.createElement('button');
-      label.textContent=path;label.title=path;
-      remove.type='button';remove.className='text-button';remove.textContent='Remove';remove.setAttribute('aria-label','Remove '+path);
-      remove.onclick=()=>{draft=draft.filter(d=>d!==path);render();$('additional-directories-add').focus();};
-      item.append(label,remove);list.append(item);
-    }
-    $('additional-directories-empty').hidden=draft.length>0;
-    $('additional-directories-save').disabled=same(draft,saved);
+  function refresh(){
+    $('additional-directories-empty').hidden=list.children.length>0;
+    $('additional-directories-save').disabled=same(values(),saved);
   }
-  async function choose(start){
+  function addRow(value=''){
     const where=host(session);
-    return picker.pick({hostId:where.id,hostName:where.name,start:start||session.cwd});
+    const row=directoryRow(picker,{value,label:'Additional directory',placeholder:'/path/to/another/folder',onRemove:refresh,
+      browse:{hostId:where.id,hostName:()=>where.name,scope:'roots',start:session.cwd}});
+    list.append(row);refresh();return row.querySelector('input');
   }
   async function save(directories){
     const result=await api(`/api/sessions/${session.id}/additional-directories`,{method:'POST',body:JSON.stringify({directories})});
@@ -27,30 +25,27 @@ export function setupAdditionalDirectories({$,api,picker,getActive,host,toast}){
   }
   function open(){
     session=getActive();if(!session)return;
-    saved=[...(session.additionalDirectories||[])];draft=[...saved];
-    $('additional-directories-error').textContent='';render();dialog.showModal();
+    saved=[...(session.additionalDirectories||[])];
+    list.replaceChildren();for(const path of saved)addRow(path);
+    $('additional-directories-error').textContent='';refresh();dialog.showModal();
   }
   // Palette shortcut: pick one folder and save it straight away.
   async function add(){
     session=getActive();if(!session)return;
-    const id=session.id,path=await choose();
+    const id=session.id,where=host(session);
+    const path=await picker.pick({hostId:where.id,hostName:where.name,start:session.cwd});
     if(!path||getActive()?.id!==id)return;
     const current=session.additionalDirectories||[];
     if(path===session.cwd||current.includes(path)){toast('That folder is already available to this session','success');return;}
     try{await save([...current,path]);}catch(error){toast(error.message);}
   }
-  $('additional-directories-add').onclick=async()=>{
-    const path=await choose(draft.at(-1));
-    if(!path||!dialog.open)return;
-    if(path===session.cwd){$('additional-directories-error').textContent='That is the working directory.';return;}
-    if(!draft.includes(path))draft.push(path);
-    $('additional-directories-error').textContent='';render();
-  };
+  list.addEventListener('input',refresh);
+  $('additional-directories-add').onclick=()=>addRow().focus();
   $('dismiss-additional-directories').onclick=()=>dialog.close();
   $('additional-directories-form').onsubmit=async event=>{
     event.preventDefault();
     const button=$('additional-directories-save');button.disabled=true;$('additional-directories-error').textContent='';
-    try{await save(draft);dialog.close();}
+    try{await save(values());dialog.close();}
     catch(error){$('additional-directories-error').textContent=error.message;button.disabled=false;}
   };
   return {open,add};

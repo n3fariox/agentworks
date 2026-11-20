@@ -60,7 +60,7 @@ import {setupTaskMentions} from './task-mentions.js';
 import {setupTasks} from './tasks.js';
 import {setupAttachments} from './attachments.js';
 import {setupModelProviders} from './model-providers.js';
-import {setupDirectoryPicker,setupProjectDirectory} from './directory-picker.js';
+import {setupDirectoryPicker,setupProjectDirectory,directoryRow} from './directory-picker.js';
 import {setupAdditionalDirectories} from './additional-directories.js';
 import {setupCreateSections} from './create-sections.js';
 import {setupCreatePlace} from './create-place.js';
@@ -1367,19 +1367,12 @@ function openHostSettings(host,category='general'){
   selectHostSettings(category);$('host-settings-dialog').showModal();
   (category==='directories'?$('host-roots').querySelector('input'):category==='general'?$('host-edit-name'):null)?.focus();
 }
-// Browse… picks a folder under the host's home directory, so new roots can be found.
-function browseButton(input,{hostId,hostName,usable=()=>true,why=''}){
-  const browse=el('button','text-button','Browse…');browse.type='button';browse.setAttribute('aria-label','Browse for '+(input.getAttribute('aria-label')||'directory').toLowerCase());
-  if(!usable()){browse.disabled=true;browse.title=why;}
-  browse.onclick=async()=>{const path=await directoryPicker.pick({hostId,hostName:hostName(),start:input.value.trim(),scope:'home'});if(path){input.value=path;input.focus();}};
-  return browse;
-}
+// Roots are browsed under the host's home directory, so new roots can be found.
 function addHostRoot(value=''){
-  const row=el('div','root-item'),input=el('input');input.value=value;input.placeholder='~/projects';input.setAttribute('aria-label','Working directory');input.autocomplete='off';input.spellcheck=false;
   const host=editingHostView;
-  const browse=browseButton(input,{hostId:host?.id,hostName:()=>host?.name,usable:()=>host?.status==='connected'&&host.worker?.directories,why:host?.status==='connected'?'Update this host’s worker to browse folders.':'Connect this host to browse folders.'});
-  const remove=el('button','icon-button','×');remove.type='button';remove.setAttribute('aria-label','Remove working directory');remove.onclick=()=>{row.remove();if(!$('host-roots').children.length)addHostRoot();};
-  row.append(input,browse,remove);$('host-roots').append(row);return input;
+  const row=directoryRow(directoryPicker,{value,label:'Working directory',placeholder:'~/projects',onRemove:()=>{if(!$('host-roots').children.length)addHostRoot();},
+    browse:{hostId:host?.id,hostName:()=>host?.name,scope:'home',unavailable:()=>host?.status!=='connected'?'Connect this host to browse folders.':!host.worker?.directories?'Update this host’s worker to browse folders.':''}});
+  $('host-roots').append(row);return row.querySelector('input');
 }
 $('add-host-root').onclick=()=>addHostRoot().focus();
 function renderHostTools(host){
@@ -1644,10 +1637,9 @@ function applyRoots(){
 }
 function rootValues(){return [...$('settings-roots').querySelectorAll('input')].map(input=>input.value.trim());}
 function addRoot(value=''){
-  const row=el('div','root-item'),input=el('input');input.value=value;input.placeholder='/home/you/projects';input.setAttribute('aria-label','Allowed root directory');input.autocomplete='off';input.spellcheck=false;input.required=true;
-  const browse=browseButton(input,{hostId:'local',hostName:()=>'Local'});
-  const remove=el('button','icon-button','×');remove.type='button';remove.setAttribute('aria-label','Remove root directory');remove.onclick=()=>{row.remove();if(!$('settings-roots').children.length)addRoot();};
-  row.append(input,browse,remove);$('settings-roots').append(row);return input;
+  const row=directoryRow(directoryPicker,{value,label:'Allowed root directory',removeLabel:'Remove root directory',placeholder:'/home/you/projects',required:true,
+    onRemove:()=>{if(!$('settings-roots').children.length)addRoot();},browse:{hostId:'local',hostName:()=>'Local',scope:'home'}});
+  $('settings-roots').append(row);return row.querySelector('input');
 }
 // Keep category contents mounted so switching sections preserves unsaved edits.
 // Shared by Settings and Host settings; returns the dialog's category selector.

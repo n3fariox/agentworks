@@ -349,11 +349,13 @@ test('browser: additional directories dialog adds, saves and removes folders',as
   await page.keyboard.press('Control+k');await page.locator('#palette-input').fill('additional dir');await page.keyboard.press('Enter');
   await expect(page.locator('#additional-directories-dialog')).toBeVisible();
   await expect(page.locator('#additional-directories-save')).toBeDisabled();
+  // Same rows as allowed roots: Add directory adds a row, and its Browse… opens the shared picker.
   await page.locator('#additional-directories-add').click();
+  await page.locator('#additional-directories-list').getByRole('button',{name:'Browse for additional directory'}).click();
   await page.locator('#directory-picker-list button',{hasText:'Up'}).click();
   await page.locator('#directory-picker-list button',{hasText:/^omega$/}).click();
   await page.locator('#directory-picker-select').click();
-  await expect(page.locator('#additional-directories-list li')).toHaveCount(1);
+  await expect(page.locator('#additional-directories-list .root-item input')).toHaveValue(/omega$/);
   await page.locator('#additional-directories-save').click();
   await expect(page.locator('#additional-directories-dialog')).toBeHidden();
   await expect(page.locator('#project-extra')).toHaveText('+1 directory');
@@ -361,7 +363,8 @@ test('browser: additional directories dialog adds, saves and removes folders',as
   await expect(page.locator('#session-state')).toHaveText('Ready');
   await page.locator('#session-menu-toggle, #lifecycle-menu summary').first().click().catch(()=>{});
   await page.evaluate(()=>document.getElementById('additional-directories').click());
-  await page.getByRole('button',{name:/^Remove .*omega$/}).click();
+  await expect(page.locator('#additional-directories-list .root-item input')).toHaveValue(/omega$/);
+  await page.locator('#additional-directories-list').getByRole('button',{name:'Remove additional directory'}).click();
   await page.locator('#additional-directories-save').click();
   await expect(page.locator('#project-extra')).toHaveText('');
   await api(`/api/sessions/${created.id}`,null,'DELETE');
