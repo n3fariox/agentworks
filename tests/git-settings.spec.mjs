@@ -28,6 +28,7 @@ for(const mobile of [false,true])test(`Git defaults and explicit repository save
   await page.goto('/');await page.locator('#nav-settings').click();await page.locator('#settings-tab-git').click();
   await expect(page.locator('#settings-panel-git')).toBeVisible();
   await page.locator('#git-copy').selectOption('prefer-cow');await page.locator('#git-run-hooks').check();
+  await expect(page.locator('#git-local-submodules')).toBeChecked();await page.locator('#git-local-submodules').uncheck();
   await page.locator('#git-repo-cwd').fill(dir+'/re');
   await expect(page.locator('#git-repo-paths option')).toHaveAttribute('value',repo);
   await page.locator('#git-repo-cwd').fill(dir+'/');await page.locator('#git-repo-browse').click();
@@ -37,14 +38,14 @@ for(const mobile of [false,true])test(`Git defaults and explicit repository save
   await expect(page.locator('#directory-picker-dialog')).toBeHidden();
   await expect(page.locator('#git-repo-cwd')).toHaveValue(repo);
   await expect(page.locator('#git-repo-editor')).toBeVisible();
-  const text=`version = 1\n[future]\nlabel = "${mobile?'mobile':'desktop'}"\n[git.worktrees]\ncopy = "require-cow"\n`;
+  const text=`version = 1\n[future]\nlabel = "${mobile?'mobile':'desktop'}"\n[git.worktrees]\ncopy = "require-cow"\nlocal_submodules = true\n`;
   await page.locator('#git-repo-text').fill(text);await page.locator('#git-repo-save').click();await expect(page.locator('#git-repo-status')).toContainText('Saved');
   expect(await readFile(join(repo,'.agentworks/config.toml'),'utf8')).toBe(text);
   expect((await api('/api/settings')).git.runHooks).toBe(false,'Repository save must not also save global defaults');
   await page.locator('#save-settings').click();await expect(page.locator('#settings-dialog')).toBeHidden();
-  expect((await api('/api/settings')).git).toMatchObject({copy:'prefer-cow',runHooks:true});
+  expect((await api('/api/settings')).git).toMatchObject({copy:'prefer-cow',runHooks:true,localSubmodules:false});
   await page.locator('#nav-settings').click();await page.locator('#settings-tab-git').click();await expect(page.locator('#git-copy')).toHaveValue('prefer-cow');
-  await page.locator('#git-repo-cwd').fill(repo);await page.locator('#git-repo-load').click();await expect(page.locator('#git-repo-editor')).toBeVisible();await expect(page.locator('#git-repo-text')).toHaveValue(text);await expect(page.locator('#git-repo-effective')).toContainText('require-cow');
+  await page.locator('#git-repo-cwd').fill(repo);await page.locator('#git-repo-load').click();await expect(page.locator('#git-repo-editor')).toBeVisible();await expect(page.locator('#git-repo-text')).toHaveValue(text);await expect(page.locator('#git-repo-effective')).toContainText('require-cow');await expect(page.locator('#git-repo-effective')).toContainText('submodules from the main checkout');await expect(page.locator('#git-local-submodules')).not.toBeChecked();
   const external=text+'\n# concurrent edit\n';await writeFile(join(repo,'.agentworks/config.toml'),external);
   await page.locator('#git-repo-text').fill(text+'\n# stale edit\n');await page.locator('#git-repo-save').click();await expect(page.locator('#git-repo-status')).toContainText('changed');
   expect(await readFile(join(repo,'.agentworks/config.toml'),'utf8')).toBe(external);

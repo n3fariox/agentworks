@@ -70,6 +70,11 @@ pub struct Inspection {
     pub in_use: bool,
 }
 
+/// Submodule git directories are deleted with the worktree, so commits reachable
+/// only from their local branches or stash would be lost without showing in status.
+const STRANDED_SUBMODULE_COMMITS: &str = r#"c=$(git rev-list -n1 --branches --glob=refs/stash --not --remotes); test -z "$c" || echo "$c $displaypath""#;
+const SUBMODULE_REMOVAL_REFUSED: &str = "working trees containing submodules cannot be";
+
 fn conflict(message: impl Into<String>) -> Error {
     fail(StatusCode::CONFLICT, message)
 }
@@ -186,8 +191,35 @@ pub async fn inspect_in(
         .await
         .map_err(|e| format!("Could not inspect changes: {}", e.1))?;
         // Size/mtime catch later edits to a path that was already dirty when confirmed.
-        let (dirty, paths) = parse_status(&raw);
-        let mut material = format!("{head}\0{raw}");
+        let (mut dirty, paths) = parse_status(&raw);
+        let stranded = worktrees::git(
+            app,
+            &o.path,
+            &[
+                "submodule",
+                "foreach",
+                "--quiet",
+                "--recursive",
+                STRANDED_SUBMODULE_COMMITS,
+            ],
+        )
+        .await
+        .map_err(|e| format!("Could not inspect submodules: {}", e.1))?;
+        for submodule in stranded
+            .lines()
+            .filter_map(|l| l.split_once(' '))
+            .map(|l| l.1)
+        {
+            dirty.unstaged += 1;
+            if dirty.paths.len() < 20 {
+                dirty
+                    .paths
+                    .push(format!("{submodule} (unpushed submodule commits)"));
+            } else {
+                dirty.truncated = true;
+            }
+        }
+        let mut material = format!("{head}\0{raw}\0{stranded}");
         for path in paths {
             if let Ok(meta) = std::fs::symlink_metadata(o.path.join(path)) {
                 let modified = meta
@@ -246,12 +278,24 @@ pub async fn remove_in(
         ));
     }
     let path = utf8(&o.path)?;
-    let mut args = vec!["worktree", "remove"];
+    let forced = ["worktree", "remove", "--force", "--", path];
     if dirty {
-        args.push("--force");
+        worktrees::git(app, &o.main_top, &forced).await?;
+    } else if let Err(error) =
+        worktrees::git(app, &o.main_top, &["worktree", "remove", "--", path]).await
+    {
+        if !error.1.contains(SUBMODULE_REMOVAL_REFUSED) {
+            return Err(error);
+        }
+        // Git demands --force for any initialized submodule, even a clean one.
+        let again = inspect_in(app, Some(o.clone())).await;
+        if again.blocker.is_some() || again.fingerprint != current.fingerprint {
+            return Err(conflict(
+                "Worktree changed while preparing removal; inspect it and retry",
+            ));
+        }
+        worktrees::git(app, &o.main_top, &forced).await?;
     }
-    args.extend(["--", path]);
-    worktrees::git(app, &o.main_top, &args).await?;
     Ok(json!({"outcome":"removed","forced":dirty,"path":o.path,"branch":o.branch}))
 }
 
