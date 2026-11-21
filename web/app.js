@@ -2126,6 +2126,55 @@ function openRename(session){
   $('rename-dialog').showModal();$('rename-title').focus();
 }
 $('rename-session').onclick=()=>{if(active)openRename(active);};
+// Codex keeps its own rollout file per conversation and never shortens it; every
+// context compaction appends a checkpoint. Compacting keeps the latest one onward.
+const codexProviders=['codex','codex-rust'];
+const fileSize=b=>b<1048576?`${Math.max(1,Math.round(b/1024))} KB`:b<1073741824?`${(b/1048576).toFixed(b<10485760?1:0)} MB`:`${(b/1073741824).toFixed(1)} GB`;
+let codexTranscript=null;
+async function loadCodexTranscript(){
+  const button=$('codex-transcript'),session=active;
+  if(!session||!codexProviders.includes(session.provider)||session.hostId!=='local'){button.hidden=true;return null;}
+  try{
+    const info=await api(`/api/sessions/${encodeURIComponent(session.id)}/codex-transcript`);
+    if(active!==session)return null;
+    button.hidden=!info.available;if(info.available)button.textContent=`Codex transcript · ${fileSize(info.bytes)}…`;
+    codexTranscript={sessionId:session.id,...info};return codexTranscript;
+  }catch{button.hidden=true;return null;}
+}
+function renderCodexTranscript(info){
+  const n=info.checkpoints;
+  $('codex-transcript-size').textContent=`${fileSize(info.bytes)} on disk · ${n} compaction checkpoint${n===1?'':'s'}.`;
+  const worthwhile=info.compactedBytes!=null&&info.compactedBytes<info.bytes;
+  $('codex-transcript-plan').textContent=info.running?'Suspend the harness first: Codex writes to this file while it runs.'
+    :worthwhile?`Compacting keeps the latest checkpoint and what follows: about ${fileSize(info.compactedBytes)}.`
+    :info.compactedBytes==null?'Codex has not compacted this conversation yet, so there is nothing to remove.':'The file already starts at its latest checkpoint.';
+  $('codex-transcript-compact').disabled=info.running||!worthwhile;
+  const backups=info.backups||[],kept=backups.reduce((sum,b)=>sum+b.bytes,0);
+  $('codex-transcript-backup').hidden=$('codex-transcript-delete-backup').hidden=!backups.length;
+  $('codex-transcript-backup').textContent=backups.length?`The original is kept beside it as a backup (${fileSize(kept)}). Delete it once the session resumes normally.`:'';
+}
+$('lifecycle-menu').addEventListener('toggle',()=>{if($('lifecycle-menu').open)loadCodexTranscript();});
+$('codex-transcript').onclick=async()=>{
+  $('lifecycle-menu').open=false;sessionMenu.close();$('codex-transcript-error').textContent='';
+  const info=await loadCodexTranscript();if(!info)return;
+  renderCodexTranscript(info);$('codex-transcript-dialog').showModal();
+};
+$('codex-transcript-dismiss').onclick=()=>$('codex-transcript-dialog').close();
+async function codexTranscriptAction(path,method,busy){
+  const id=codexTranscript?.sessionId;if(!id)return;
+  for(const b of $('codex-transcript-dialog').querySelectorAll('button'))b.disabled=true;
+  $('codex-transcript-error').textContent='';$('codex-transcript-plan').textContent=busy;
+  try{
+    const info=await api(`/api/sessions/${encodeURIComponent(id)}/codex-transcript${path}`,{method,body:method==='POST'?'{}':undefined});
+    codexTranscript={sessionId:id,...info};
+    if(info.result)toast(`Codex transcript compacted: ${fileSize(info.result.before)} → ${fileSize(info.result.after)}`,'success');
+    if(active?.id===id)$('codex-transcript').textContent=`Codex transcript · ${fileSize(info.bytes)}…`;
+    renderCodexTranscript(info);
+  }catch(error){$('codex-transcript-error').textContent=error.message;if(codexTranscript)renderCodexTranscript(codexTranscript);}
+  finally{for(const b of $('codex-transcript-dialog').querySelectorAll('button:not(#codex-transcript-compact)'))b.disabled=false;}
+}
+$('codex-transcript-form').onsubmit=event=>{event.preventDefault();codexTranscriptAction('/compact','POST','Compacting…');};
+$('codex-transcript-delete-backup').onclick=()=>codexTranscriptAction('','DELETE','Deleting the backup…');
 $('rename-dismiss').onclick=()=>$('rename-dialog').close();
 $('rename-form').onsubmit=async event=>{
   event.preventDefault();const id=renameTarget?.id;if(!id)return;

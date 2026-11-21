@@ -6,6 +6,7 @@ mod browser_origin;
 mod catalog;
 mod chat_format;
 mod codex_oauth;
+mod codex_transcript;
 mod communication;
 mod completion;
 mod controllers;
@@ -1654,6 +1655,14 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/{id}/suspend", post(lifecycle::suspend))
         .route("/api/sessions/{id}/resume", post(resume))
         .route("/api/sessions/{id}/restart", post(restart))
+        .route(
+            "/api/sessions/{id}/codex-transcript",
+            get(codex_transcript::info).delete(codex_transcript::delete_backups),
+        )
+        .route(
+            "/api/sessions/{id}/codex-transcript/compact",
+            post(codex_transcript::compact_now),
+        )
         .route("/api/sessions/{id}/directory", post(relocation::change))
         .route(
             "/api/sessions/{id}/additional-directories",
