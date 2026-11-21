@@ -11,6 +11,7 @@ members = [
     "crates/agentworks-session",
     "crates/agentworks-workspace",
     "crates/agentworks-starlark",
+    "crates/agentworks-tool-headers",
     "crates/agentworks-goose-acp",
     "crates/agentworks-worker",
 ]

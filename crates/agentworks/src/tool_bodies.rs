@@ -8,7 +8,7 @@
 //! from `GET /api/sessions/{id}/tools/{toolCallId}`. Live events are unchanged,
 //! and nothing is removed from storage or from `GET /api/sessions/{id}`.
 
-use crate::tool_headers;
+use agentworks_tool_headers as tool_headers;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;

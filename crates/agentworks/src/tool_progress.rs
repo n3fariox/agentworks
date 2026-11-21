@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, mpsc};
 use tokio::sync::broadcast;
 
-use crate::tool_headers::{HeaderTracker, Headers};
+use agentworks_tool_headers::{HeaderTracker, Headers};
 
 /// `script_order` holds human-set routing priorities. It is an additive table;
 /// older binaries ignore it and retain filename ordering.

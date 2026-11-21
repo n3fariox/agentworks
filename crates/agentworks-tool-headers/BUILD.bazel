@@ -1,0 +1,34 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "agentworks-tool-headers",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    crate_name = "agentworks_tool_headers",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    version = "0.1.0",
+    deps = ["//crates/agentworks-starlark"] + all_crate_deps(normal = True),
+)
+
+rust_test(
+    name = "unit_test",
+    crate = ":agentworks-tool-headers",
+)
+
+rust_test(
+    name = "reload_test",
+    srcs = ["tests/reload.rs"],
+    aliases = aliases(normal = True, normal_dev = True),
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    deps = [
+        ":agentworks-tool-headers",
+        "//crates/agentworks-starlark",
+    ] + all_crate_deps(normal = True, normal_dev = True),
+)

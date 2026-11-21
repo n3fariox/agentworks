@@ -1,7 +1,7 @@
 //! Tool card headers from Starlark `register_tool_header` hooks.
 //!
-//! Runs on the tool-progress interpreter thread. The latest title, kind and
-//! `rawInput` of each tool are summarized into a bounded `ToolCall` record; when
+//! The caller runs this tracker on its interpreter thread. Each tool's latest
+//! title, kind and `rawInput` are summarized into a bounded `ToolCall` record; when
 //! that summary changes, the first matching hook that returns text supplies the
 //! header. Headers are display only: they are published as unsequenced
 //! `tool_header` events, attached to compacted snapshot events, never stored,
@@ -104,16 +104,21 @@ impl Tool {
     }
 }
 
+/// Evaluates tool header hooks and caches their bounded display text.
+///
+/// Scheduling and event persistence belong to the caller. Start with [`Self::new`],
+/// install hooks with [`Self::reload`], then feed updates with [`Self::update`].
+/// Call [`Self::forget`] when a session is removed.
 pub struct HeaderTracker {
     engine: Arc<Engine>,
-    pub scripts: Vec<Arc<Compiled>>,
+    scripts: Vec<Arc<Compiled>>,
     tools: HashMap<String, HashMap<String, Tool>>,
     senders: HashMap<String, broadcast::Sender<Value>>,
     /// `session -> (provider, cwd)` for re-evaluation after a reload.
     contexts: HashMap<String, (String, String)>,
     /// Script versions whose failure was already logged.
     failed: HashSet<String>,
-    pub headers: Headers,
+    headers: Headers,
 }
 
 impl HeaderTracker {

@@ -48,7 +48,6 @@ mod tasks;
 mod terminal;
 mod tls;
 mod tool_bodies;
-mod tool_headers;
 mod tool_progress;
 mod transcript_history;
 mod web_auth;

@@ -120,6 +120,7 @@ dependencies = [
  "agentworks-session",
  "agentworks-starlark",
  "agentworks-terminal",
+ "agentworks-tool-headers",
  "agentworks-worker",
  "agentworks-workspace",
  "ammonia",
@@ -246,6 +247,15 @@ dependencies = [
  "serde",
  "tokio",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "agentworks-tool-headers"
+version = "0.1.0"
+dependencies = [
+ "agentworks-starlark",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
