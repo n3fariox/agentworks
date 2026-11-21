@@ -31,7 +31,7 @@ test('a compaction shows as a divider that fills in, expands to its summary and 
     if(path==='/api/catalog')return json({projects:[],hosts:[{id:'local',name:'Local',status:'connected'}],locations:[]});
     if(path==='/api/sessions')return json([session]);
     if(path==='/api/automations')return json([]);
-    if(path==='/api/markdown')return json({html:`<p>${route.request().postDataJSON().text}</p>`});
+    if(path==='/api/markdown/batch')return json({results:route.request().postDataJSON().items.map(i=>({html:`<p>${i.text}</p>`}))});
     if(path===`/api/sessions/${session.id}`)return json(snapshot());
     return json({});
   });

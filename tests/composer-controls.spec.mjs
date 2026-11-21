@@ -34,7 +34,7 @@ async function fixture(page,{delaySend=false,finishFirst=false,commands=[],provi
       send('stop_requested',{userSeq:user.seq,...user.data,alreadyFinished:finishFirst,historyRewound:false});return json({ok:true});
     }
     const s=sessions.find(s=>path===`/api/sessions/${s.id}`);if(s)return json(snapshot(s));
-    if(path==='/api/markdown')return json({html:'<p>Partial answer</p>'});return json({});
+    if(path==='/api/markdown/batch')return json({results:route.request().postDataJSON().items.map(()=>({html:'<p>Partial answer</p>'}))});return json({});
   });
   await page.goto(base);await expect(page.locator('#session-state')).toHaveText('Ready');
   return {send,writes,release:()=>release?.()};

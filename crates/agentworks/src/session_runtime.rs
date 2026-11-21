@@ -810,6 +810,7 @@ pub async fn run(
                                         (Err(error),None)=>{let raw=serde_json::to_value(&error).unwrap_or(Value::Null);crate::limit_resume::enrich_codex(&s,&raw).await;crate::limit_resume::finish(&s,None,Some(&raw));s.emit("error",json!({"message":safe_error(&error.to_string())}));},
                                     }
                                     crate::account_quota::refresh_session(&s);
+                                    crate::event_compaction::schedule(&s);
                                     crate::inbox_delivery::finished(&s,inbox_owner.as_ref());
                                     crate::input_queue::record_outcome(&s,outcome);
                                     s.status("idle");

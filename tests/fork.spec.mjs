@@ -173,7 +173,7 @@ test('carried Markdown references retain their original directory',async({page})
   await fixture(page);
   const s=snapshot();s.events=[{seq:1,kind:'acp',data:{sessionUpdate:'agent_message_chunk',forkSourceCwd:'/repo/original',content:{type:'text',text:'[Inspect file](src/config.rs)'}}}];
   await page.routeWebSocket('**/api/sessions/*/events',socket=>socket.send(JSON.stringify(s)));
-  await page.route('**/api/markdown',route=>route.fulfill({json:{html:'<p><a href="src/config.rs">Inspect file</a></p>'}}));
+  await page.route('**/api/markdown/batch',route=>route.fulfill({json:{results:route.request().postDataJSON().items.map(()=>({html:'<p><a href="src/config.rs">Inspect file</a></p>'}))}}));
   let filePath;
   await page.route('**/api/sessions/*/file?*',route=>{filePath=new URL(route.request().url()).searchParams.get('path');return route.fulfill({body:'source file',contentType:'text/plain'});});
   await page.reload();await page.locator('#messages a').filter({hasText:'Inspect file'}).click();
