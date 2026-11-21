@@ -48,8 +48,8 @@ try{
     if(ready)break;await delay(100);
   }
   assert(ready,'Server readiness timed out');
-  // U-05 progress: embedded Starlark crate, browser view logic and the running service.
-  await run('cargo',['test','--locked','-p','agentworks-starlark']);
+  // Presentation projections, installed hooks and the interpreter engine.
+  await run('cargo',['test','--locked','-p','agentworks-presentation','-p','agentworks-scripting','-p','agentworks-starlark']);
   await run('node',['--test','tests/bazel-progress.test.mjs']);
   await run('node',['--test','tests/fixture-cleanup.test.mjs']);
   await runLanes(smokeLanes);

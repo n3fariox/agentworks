@@ -401,7 +401,7 @@ mod tests {
                 account_quota: Arc::default(),
                 github: Arc::new(crate::github::Hub::default()),
                 web_auth: Default::default(),
-                progress: crate::tool_progress::Hub::empty(),
+                scripts: agentworks_scripting::Hub::empty(),
             };
             let f = Self {
                 app,
@@ -467,7 +467,7 @@ mod tests {
                 mcp_refresh_pending: Default::default(),
                 fresh_environment: Default::default(),
                 notifications: self.app.notifications.clone(),
-                progress: self.app.progress.clone(),
+                scripts: self.app.scripts.clone(),
                 account_quota: self.app.account_quota.clone(),
             });
             self.app

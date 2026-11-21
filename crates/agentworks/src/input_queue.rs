@@ -540,7 +540,7 @@ mod tests {
                 mcp_refresh_pending: Default::default(),
                 fresh_environment: Default::default(),
                 notifications: crate::notifications::Hub::new(catalog),
-                progress: crate::tool_progress::Hub::empty(),
+                scripts: agentworks_scripting::Hub::empty(),
                 account_quota: Arc::default(),
             };
             Self {

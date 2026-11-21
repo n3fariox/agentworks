@@ -111,7 +111,7 @@ impl Store {
             "BEGIN; {} {} {} {} {} {} PRAGMA user_version={SCHEMA_VERSION}; COMMIT;",
             crate::inbox_delivery::SCHEMA,
             crate::controllers::SCHEMA,
-            crate::tool_progress::SCHEMA,
+            agentworks_scripting::SCHEMA,
             crate::roles::SCHEMA,
             crate::automations::SCHEMA,
             crate::github_tracking::SCHEMA

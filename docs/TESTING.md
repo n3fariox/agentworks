@@ -4,6 +4,37 @@
 
 Run commands from the repository root.
 
+## Rust library loops
+
+Use `scripts/mise-cargo.sh test --locked --workspace` for every Rust crate.
+Plain `cargo test` selects the server's default workspace member and does not run
+dependency crates' unit tests. For focused loops:
+
+```sh
+scripts/mise-cargo.sh test --locked -p agentworks-presentation
+scripts/mise-cargo.sh test --locked -p agentworks-scripting
+scripts/mise-cargo.sh test --locked -p agentworks
+```
+
+`npm run test:presentation` and `npm run test:scripting` run the first two commands.
+`npm run verify` includes both libraries alongside the Starlark engine tests.
+With the Bazel baseline available, the corresponding targets are
+`//crates/agentworks-presentation:unit_test`,
+`//crates/agentworks-presentation:chat_test`,
+`//crates/agentworks-scripting:unit_test`, and
+`//crates/agentworks-scripting:reload_test`; `bazel test //crates/...` covers the
+whole workspace.
+
+If machine-local Cargo configuration shares intermediates across worktrees,
+override **both** paths for branch-specific checks:
+
+```sh
+scripts/mise-cargo.sh --config 'build.build-dir=".cache/rust-build"' test --locked \
+  --target-dir .cache/rust-target -p agentworks-presentation -p agentworks-scripting
+```
+
+`--target-dir` alone does not override a configured `build.build-dir`.
+
 ## Checks
 
 Use `mise exec --` before direct Cargo commands to select the pinned Rust and Zig toolchains. For example, `mise exec -- cargo test --locked`.

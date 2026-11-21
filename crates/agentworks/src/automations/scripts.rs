@@ -19,7 +19,7 @@ fn default_handler() -> String {
 }
 impl ScriptTrigger {
     pub fn validate(&self) -> Result<(), &'static str> {
-        if !crate::tool_progress::valid_name(&self.script)
+        if !agentworks_scripting::valid_name(&self.script)
             || self.handler.is_empty()
             || self.handler.len() > 32
             || self.parameters.len() > 32
@@ -320,7 +320,7 @@ pub(crate) fn migrate(db: &Connection, engine: &Engine) -> Result<(), String> {
 /// Rebuild only the operational index. Valid source supplies every display
 /// field; missing files remove entries and cancel pending work, keeping history.
 pub(super) fn reconcile(app: &App) -> Result<(), (StatusCode, String)> {
-    let engine = app.progress.engine();
+    let engine = app.scripts.engine();
     let files: Vec<(String, String, String, bool, u64)> = {
         let store = app.store.lock().unwrap();
         let mut q=store.connection.prepare("SELECT name,source,hash,enabled,updated FROM scripts WHERE capability='automation' ORDER BY name").map_err(storage)?;
@@ -583,7 +583,7 @@ mod tests {
         assert_eq!(page[0]["id"], id);
         assert_eq!(page[0]["name"], "Changed in source");
         assert_eq!(page[0]["prompt"], "Edited instructions");
-        let hooks = crate::tool_progress::list(&f.app.store.lock().unwrap().connection).unwrap();
+        let hooks = agentworks_scripting::list(&f.app.store.lock().unwrap().connection).unwrap();
         assert!(!hooks.iter().any(|s| s.name == "handwritten.star"));
         f.app.store.lock().unwrap().connection.execute("UPDATE automations SET definition=json_set(definition,'$.name','cached form memory','$.prompt','stale form instructions') WHERE id=?1",[&id]).unwrap();
         let Json(page) = crate::automations::list(State(f.app.clone()))
@@ -664,25 +664,25 @@ mod tests {
         let source = source(&f, "Owned", "Review");
         add(&f.app, "owned.star", &source);
         for result in [
-            crate::tool_progress::put_script(
+            crate::scripting::put_script(
                 State(f.app.clone()),
                 Path("owned.star".into()),
                 Json(serde_json::from_value(json!({"source":"invalid"})).unwrap()),
             )
             .await,
-            crate::tool_progress::put_enabled(
+            crate::scripting::put_enabled(
                 State(f.app.clone()),
                 Path("owned.star".into()),
                 Json(serde_json::from_value(json!({"enabled":true})).unwrap()),
             )
             .await,
-            crate::tool_progress::put_priority(
+            crate::scripting::put_priority(
                 State(f.app.clone()),
                 Path("owned.star".into()),
                 Json(serde_json::from_value(json!({"priority":1})).unwrap()),
             )
             .await,
-            crate::tool_progress::delete_script(State(f.app.clone()), Path("owned.star".into()))
+            crate::scripting::delete_script(State(f.app.clone()), Path("owned.star".into()))
                 .await,
         ] {
             assert_eq!(result.err().unwrap().0, StatusCode::CONFLICT);
@@ -714,7 +714,7 @@ mod tests {
                 .unwrap(),
             source
         );
-        let result = crate::tool_progress::put_script(
+        let result = crate::scripting::put_script(
             State(f.app.clone()),
             Path("sneaky.star".into()),
             Json(serde_json::from_value(json!({"source":source})).unwrap()),
@@ -729,7 +729,7 @@ mod tests {
         f.app.store.lock().unwrap().connection.execute("INSERT INTO scripts(name,capability,source,hash,enabled,builtin,updated) VALUES ('older.star','hooks',?1,?2,0,0,1)",rusqlite::params![source,agentworks_starlark::engine::content_hash(&source)]).unwrap();
         migrate(
             &f.app.store.lock().unwrap().connection,
-            &f.app.progress.engine(),
+            &f.app.scripts.engine(),
         )
         .unwrap();
         assert_eq!(

@@ -8,100 +8,24 @@
 //! and rebuilt from the retained event window after a restart. Without a header
 //! the browser shows the harness title.
 
+use agentworks_presentation::tool_call::{ToolCall, header, key};
 use agentworks_starlark::engine::{Compiled, Engine};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
 /// Tools remembered per session; the oldest are dropped first.
 const MAX_TOOLS_PER_SESSION: usize = 1000;
-const MAX_HEADER_CHARS: usize = 200;
 
 /// `session -> tool key -> (seq, header)`, read by snapshots.
 pub type Headers = Arc<Mutex<HashMap<String, HashMap<String, (u64, String)>>>>;
 
-/// Root tools are keyed by `toolCallId`; child-session tools by their ACP
-/// session as well, because IDs are only unique within one ACP session.
-pub fn key(data: &Value) -> Option<String> {
-    let tool = data["toolCallId"].as_str()?;
-    Some(match data["parentSessionId"].as_str() {
-        Some(_) => format!(
-            "{}\u{1f}{tool}",
-            data["acpSessionId"].as_str().unwrap_or_default()
-        ),
-        None => tool.to_owned(),
-    })
-}
-
-fn bounded(text: &str, max: usize) -> String {
-    match text.char_indices().nth(max) {
-        Some((end, _)) => text[..end].to_owned(),
-        None => text.to_owned(),
-    }
-}
-
-/// Shell argv as one command line; `sh -c script` forms show only the script.
-fn command(raw: &Value) -> Option<String> {
-    match raw {
-        Value::String(s) => Some(s.clone()),
-        Value::Array(parts) => {
-            let parts: Vec<&str> = parts.iter().filter_map(Value::as_str).collect();
-            match parts.as_slice() {
-                [shell, flag, .., script]
-                    if shell.ends_with("sh") && matches!(*flag, "-c" | "-lc") =>
-                {
-                    Some((*script).to_owned())
-                }
-                [] => None,
-                _ => Some(parts.join(" ")),
-            }
-        }
-        _ => None,
-    }
-}
-
 struct Tool {
     seq: u64,
-    title: Option<String>,
-    kind: Option<String>,
-    raw_input: Value,
-    /// The `ToolCall` JSON last evaluated, so unchanged updates run nothing.
+    call: ToolCall,
     evaluated: Option<Value>,
     parent: Option<(String, String)>,
-}
-
-impl Tool {
-    fn summary(&self) -> Value {
-        let raw = self.raw_input.as_object();
-        let text = |name: &str, max: usize| {
-            raw.and_then(|r| r.get(name))
-                .and_then(Value::as_str)
-                .map(|s| bounded(s, max))
-        };
-        let mut input = Map::new();
-        for (name, value) in raw.into_iter().flatten() {
-            if input.len() >= 24 || matches!(name.as_str(), "command" | "description") {
-                continue;
-            }
-            match value {
-                Value::String(s) => {
-                    input.insert(bounded(name, 64), json!(bounded(s, 200)));
-                }
-                Value::Number(_) | Value::Bool(_) => {
-                    input.insert(bounded(name, 64), value.clone());
-                }
-                _ => {}
-            }
-        }
-        json!({
-            "kind": self.kind.as_deref().unwrap_or("other"),
-            "title": bounded(self.title.as_deref().unwrap_or(""), 2048),
-            "command": raw.and_then(|r| r.get("command")).and_then(command).map(|c| bounded(&c, 2048)),
-            "description": text("description", 512),
-            "input": input,
-        })
-    }
 }
 
 /// Evaluates tool header hooks and caches their bounded display text.
@@ -156,9 +80,11 @@ impl HeaderTracker {
         let tools = self.tools.entry(session.to_owned()).or_default();
         let tool = tools.entry(key.clone()).or_insert_with(|| Tool {
             seq,
-            title: None,
-            kind: None,
-            raw_input: Value::Null,
+            call: ToolCall {
+                title: None,
+                kind: None,
+                raw_input: Value::Null,
+            },
             evaluated: None,
             parent: None,
         });
@@ -171,13 +97,13 @@ impl HeaderTracker {
             return None;
         }
         if let Some(title) = data["title"].as_str() {
-            tool.title = Some(title.to_owned());
+            tool.call.title = Some(title.to_owned());
         }
         if let Some(kind) = data["kind"].as_str() {
-            tool.kind = Some(kind.to_owned());
+            tool.call.kind = Some(kind.to_owned());
         }
         if !data["rawInput"].is_null() {
-            tool.raw_input = data["rawInput"].clone();
+            tool.call.raw_input = data["rawInput"].clone();
         }
         if let (Some(acp), Some(parent)) = (
             data["acpSessionId"].as_str(),
@@ -208,7 +134,7 @@ impl HeaderTracker {
         tool_call: &str,
     ) -> Option<Value> {
         let tool = self.tools.get_mut(session)?.get_mut(key)?;
-        let summary = tool.summary();
+        let summary = tool.call.summary();
         let context = json!({"provider": provider, "cwd": cwd.trim_end_matches('/'), "state": {}});
         if tool.evaluated.as_ref() == Some(&json!([context, summary])) {
             return None;
@@ -227,11 +153,7 @@ impl HeaderTracker {
             match self.engine.call(script, &context, &summary) {
                 Ok((value, _)) => {
                     self.engine.publish_badges(script, &value);
-                    value["result"]
-                        .as_str()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(|s| bounded(s, MAX_HEADER_CHARS))
+                    value["result"].as_str().and_then(header)
                 }
                 Err(error) => {
                     if self

@@ -6,19 +6,23 @@ package(default_visibility = ["//visibility:public"])
 exports_files(["Cargo.toml"])
 
 rust_library(
-    name = "agentworks-tool-headers",
+    name = "agentworks-scripting",
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
-    crate_name = "agentworks_tool_headers",
+    crate_name = "agentworks_scripting",
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
     version = "0.1.0",
-    deps = ["//crates/agentworks-starlark"] + all_crate_deps(normal = True),
+    deps = ["//crates/agentworks-presentation", "//crates/agentworks-starlark"] + all_crate_deps(normal = True),
 )
 
 rust_test(
     name = "unit_test",
-    crate = ":agentworks-tool-headers",
+    crate = ":agentworks-scripting",
+    compile_data = [
+        "//tests:fixtures/bazel-events.json",
+        "//tests:fixtures/bazel-progress-events.json",
+    ],
 )
 
 rust_test(
@@ -28,7 +32,8 @@ rust_test(
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     deps = [
-        ":agentworks-tool-headers",
+        ":agentworks-scripting",
+        "//crates/agentworks-presentation",
         "//crates/agentworks-starlark",
     ] + all_crate_deps(normal = True, normal_dev = True),
 )
