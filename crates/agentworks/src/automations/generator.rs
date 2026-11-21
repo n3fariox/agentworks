@@ -129,17 +129,13 @@ pub async fn get(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     let def = existing(&app, &id)?;
     let bound = scripts::binding(&def)
         .ok_or_else(|| fail(StatusCode::BAD_REQUEST, "This automation has no script"))?;
-    let source: String = app
+    let source = app
         .store
         .lock()
         .unwrap()
-        .connection
-        .query_row(
-            "SELECT source FROM scripts WHERE name=?1",
-            [&bound.script],
-            |r| r.get(0),
-        )
-        .map_err(storage)?;
+        .script_source(&bound.script)
+        .map_err(storage)?
+        .ok_or_else(|| storage("Missing script"))?;
     let descriptor = match descriptor(&app, &bound.script, &source) {
         Ok(d) => d,
         Err((_, error)) => {
@@ -263,7 +259,7 @@ mod tests {
             .store
             .lock()
             .unwrap()
-            .connection
+            .test_connection()
             .query_row(
                 "SELECT source FROM scripts WHERE name='bazel_progress.star'",
                 [],
@@ -299,7 +295,7 @@ mod tests {
                 .store
                 .lock()
                 .unwrap()
-                .connection
+                .test_connection()
                 .query_row(
                     "SELECT source FROM scripts WHERE name='bazel_progress.star'",
                     [],
@@ -313,10 +309,10 @@ mod tests {
             .store
             .lock()
             .unwrap()
-            .connection
+            .test_connection()
             .query_row("SELECT count(*) FROM scripts", [], |r| r.get(0))
             .unwrap();
-        f.app.store.lock().unwrap().connection.execute_batch("CREATE TRIGGER reject_generated BEFORE INSERT ON automations BEGIN SELECT RAISE(ABORT,'fixture storage failure'); END;").unwrap();
+        f.app.store.lock().unwrap().test_connection().execute_batch("CREATE TRIGGER reject_generated BEFORE INSERT ON automations BEGIN SELECT RAISE(ABORT,'fixture storage failure'); END;").unwrap();
         let input = serde_json::from_value(
             json!({"name":"Must roll back","source":source,"enabled":false}),
         )
@@ -331,7 +327,7 @@ mod tests {
                 .store
                 .lock()
                 .unwrap()
-                .connection
+                .test_connection()
                 .query_row("SELECT count(*) FROM scripts", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
             count

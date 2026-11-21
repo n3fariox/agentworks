@@ -1,8 +1,8 @@
 //! The application observes hook execution through the public scripting API.
+use agentworks_database::Store;
 use agentworks_presentation::tool_call::key;
-use agentworks_scripting::{Hub, SCHEMA, seed, set_enabled};
+use agentworks_scripting::{Hub, seed, set_enabled};
 use agentworks_starlark::engine::Engine;
-use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 use tokio::sync::broadcast;
@@ -15,8 +15,7 @@ fn flush(hub: &Hub) {
 
 #[test]
 fn reload_publishes_changes_and_forget_releases_session_state() {
-    let db = Connection::open_in_memory().unwrap();
-    db.execute_batch(SCHEMA).unwrap();
+    let db = Store::memory().unwrap();
     seed(&db).unwrap();
     set_enabled(&db, "tool_header.star", false).unwrap();
     let hub = Hub::new(Arc::new(Engine::new().unwrap()), Vec::new());

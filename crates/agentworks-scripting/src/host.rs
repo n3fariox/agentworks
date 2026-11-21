@@ -1,16 +1,14 @@
 //! Interpreter scheduling, hook evaluation, and ephemeral derived results.
 use crate::headers::{HeaderTracker, Headers};
 use crate::{Script, list};
+use agentworks_database::Store;
 use agentworks_starlark::engine::{Capability, Compiled, Diagnostic, Engine, content_hash};
 use agentworks_starlark::progress::{StarlarkParser, ToolProgress};
-use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, mpsc};
 use tokio::sync::broadcast;
 
-#[cfg(test)]
-use crate::SCHEMA;
 #[cfg(test)]
 use crate::registry::BUILTIN;
 #[cfg(test)]
@@ -564,7 +562,7 @@ impl Hub {
     }
 
     /// Recompile enabled scripts from the store and swap them in.
-    pub fn reload(&self, db: &Connection) -> rusqlite::Result<Vec<Diagnostic>> {
+    pub fn reload(&self, db: &Store) -> agentworks_database::StorageResult<Vec<Diagnostic>> {
         let (hooks, errors) = compile_hooks(&self.engine, db)?;
         *self.chat.lock().unwrap() = hooks
             .chat
@@ -643,8 +641,8 @@ fn format_line(
 /// to any hook.
 fn compile_hooks(
     engine: &Arc<Engine>,
-    db: &Connection,
-) -> rusqlite::Result<(Hooks, Vec<Diagnostic>)> {
+    db: &Store,
+) -> agentworks_database::StorageResult<(Hooks, Vec<Diagnostic>)> {
     let (mut hooks, mut errors) = (Hooks::default(), Vec::new());
     for script in list(db)?.into_iter().filter(|s| s.enabled) {
         match engine.compile_registered(&script.name, &script.source) {
@@ -672,15 +670,15 @@ fn compile_hooks(
 #[cfg(test)]
 fn compile_enabled(
     engine: &Arc<Engine>,
-    db: &Connection,
-) -> rusqlite::Result<(Vec<StarlarkParser>, Vec<Diagnostic>)> {
+    db: &Store,
+) -> agentworks_database::StorageResult<(Vec<StarlarkParser>, Vec<Diagnostic>)> {
     let (hooks, errors) = compile_hooks(engine, db)?;
     Ok((hooks.parsers, errors))
 }
 
 impl Hub {
     /// Installed script metadata with registrations and current compile errors.
-    pub fn scripts(&self, db: &Connection) -> rusqlite::Result<Vec<Script>> {
+    pub fn scripts(&self, db: &Store) -> agentworks_database::StorageResult<Vec<Script>> {
         let mut scripts = list(db)?;
         for script in &mut scripts {
             let compiled = if script.enabled {
@@ -716,7 +714,7 @@ impl agentworks_presentation::chat::LineFormatter for Hub {
 /// Seed and load standalone hook execution. Application-specific migrations
 /// must be coordinated by the caller before constructing a hub with its engine.
 #[cfg(test)]
-fn start(db: &Connection) -> Result<Hub, String> {
+fn start(db: &Store) -> Result<Hub, String> {
     seed(db).map_err(|e| e.to_string())?;
     let hub = Hub::new(Arc::new(Engine::new()?), Vec::new());
     hub.reload(db).map_err(|e| e.to_string())?;
@@ -726,14 +724,13 @@ fn start(db: &Connection) -> Result<Hub, String> {
 mod tests {
     use super::*;
 
-    fn db() -> Connection {
-        let db = Connection::open_in_memory().unwrap();
-        db.execute_batch(SCHEMA).unwrap();
+    fn db() -> Store {
+        let db = Store::memory().unwrap();
         seed(&db).unwrap();
         db
     }
 
-    fn tracker(db: &Connection) -> ProgressTracker {
+    fn tracker(db: &Store) -> ProgressTracker {
         let engine = Arc::new(Engine::new().unwrap());
         let (parsers, errors) = compile_enabled(&engine, db).unwrap();
         assert!(errors.is_empty());
@@ -828,12 +825,12 @@ mod tests {
             .next()
             .unwrap()
             .replace("DISPLAY_NAME = \"Bazel\"", "DISPLAY_NAME = \"Custom\"");
-        db.execute("INSERT INTO scripts(name,capability,source,hash,enabled,builtin,updated) VALUES ('legacy.star','parser',?1,?2,0,0,123)", params![source, content_hash(&source)]).unwrap();
+        db.test_connection().execute("INSERT INTO scripts(name,capability,source,hash,enabled,builtin,updated) VALUES ('legacy.star','parser',?1,?2,0,0,123)", params![source, content_hash(&source)]).unwrap();
         let formatter_source = agentworks_starlark::INBOX_MESSAGE_SCRIPT
             .split("\nagent.register_formatter")
             .next()
             .unwrap();
-        db.execute("INSERT INTO scripts(name,capability,source,hash,enabled,builtin,updated) VALUES ('old_formatter.star','message_formatter',?1,?2,1,0,456)", params![formatter_source, content_hash(formatter_source)]).unwrap();
+        db.test_connection().execute("INSERT INTO scripts(name,capability,source,hash,enabled,builtin,updated) VALUES ('old_formatter.star','message_formatter',?1,?2,1,0,456)", params![formatter_source, content_hash(formatter_source)]).unwrap();
         seed(&db).unwrap();
         seed(&db).unwrap();
         let scripts = list(&db).unwrap();
@@ -1052,7 +1049,7 @@ agent.register_formatter(format_line, message_type = "chat.agent")
         let hub = start(&db).unwrap();
         let message = [json!({"id":1,"sender":"peer","senderTitle":"Peer","text":"hi"})];
         let winner = |hub: &Hub| hub.format_inbox(&message).remove(0).unwrap();
-        let order = |db: &Connection| {
+        let order = |db: &Store| {
             list(db)
                 .unwrap()
                 .into_iter()
@@ -1118,6 +1115,7 @@ agent.register_formatter(format_line, message_type = "chat.agent")
         // Setting 0 clears the explicit entry; unknown scripts are not created.
         set_priority(&db, "b_fmt.star", 0).unwrap();
         let rows: i64 = db
+            .test_connection()
             .query_row(
                 "SELECT COUNT(*) FROM script_order WHERE name='b_fmt.star'",
                 [],
@@ -1137,7 +1135,7 @@ agent.register_formatter(format_line, message_type = "chat.agent")
         assert_ne!(other, agentworks_starlark::BAZEL_PROGRESS_SCRIPT);
         save(&db, "z_bazel.star", &other).unwrap();
         let engine = Arc::new(Engine::new().unwrap());
-        let first = |db: &Connection| {
+        let first = |db: &Store| {
             compile_enabled(&engine, db).unwrap().0[0]
                 .script
                 .display_name
@@ -1208,7 +1206,8 @@ agent.register_formatter(format_line, message_type = "chat.agent")
         let rows = list(&db).unwrap();
         assert_eq!(rows.len(), BUILTIN.len());
         assert!(rows[0].builtin && rows[0].enabled);
-        db.execute("UPDATE scripts SET source='old',hash='old'", [])
+        db.test_connection()
+            .execute("UPDATE scripts SET source='old',hash='old'", [])
             .unwrap();
         seed(&db).unwrap();
         assert_eq!(

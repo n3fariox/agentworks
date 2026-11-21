@@ -16,7 +16,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use rusqlite::{OptionalExtension, params};
+
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -43,15 +43,12 @@ fn db(error: impl std::fmt::Display) -> (StatusCode, String) {
     )
 }
 
-/// Module-owned table, created at startup (no schema version change).
+/// Initialize durable input bindings at startup (no schema version change).
 pub fn initialize(app: &App) -> Result<(), String> {
     app.store
         .lock()
         .unwrap()
-        .connection
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS input_queue_bindings(session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,request_id TEXT NOT NULL,payload TEXT NOT NULL,item_id TEXT NOT NULL,created INTEGER NOT NULL,PRIMARY KEY(session_id,request_id));",
-        )
+        .initialize_input_queue()
         .map_err(|e| e.to_string())
 }
 
@@ -64,15 +61,7 @@ pub enum Bound {
 /// Exact-payload check of a request ID against the durable bindings.
 pub fn check_binding(s: &Session, request_id: &str, text: &str) -> Res<Bound> {
     let store = s.store.lock().unwrap();
-    let row: Option<(String, String)> = store
-        .connection
-        .query_row(
-            "SELECT payload,item_id FROM input_queue_bindings WHERE session_id=?1 AND request_id=?2",
-            params![s.id, request_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()
-        .map_err(db)?;
+    let row = store.input_binding(&s.id, request_id).map_err(db)?;
     Ok(match row {
         Some((payload, item)) if payload == text => Bound::Duplicate(item),
         Some(_) => Bound::Conflict,
@@ -129,36 +118,14 @@ fn transact_session<T>(
                 .map(|i| i.id.clone())
                 .unwrap_or_default();
             let mut store = s.store.lock().unwrap();
-            let saved = match store.connection.execute_batch("BEGIN IMMEDIATE") {
-                Err(e) => Err(e.to_string()),
-                Ok(()) => {
-                    let inner = (|| -> Result<(), String> {
-                        if let Some((request_id, text)) = bind {
-                            store
-                                .connection
-                                .execute(
-                                    "INSERT INTO input_queue_bindings(session_id,request_id,payload,item_id,created) VALUES (?1,?2,?3,?4,?5)",
-                                    params![s.id, request_id, text, item, crate::timeouts::now_ms() as i64],
-                                )
-                                .map_err(|e| e.to_string())?;
-                        }
-                        store.save_state(&s.id, &data).map_err(|e| e.to_string())
-                    })();
-                    match inner {
-                        Ok(()) => match store.connection.execute_batch("COMMIT") {
-                            Ok(()) => Ok(()),
-                            Err(e) => {
-                                let _ = store.connection.execute_batch("ROLLBACK");
-                                Err(e.to_string())
-                            }
-                        },
-                        Err(e) => {
-                            let _ = store.connection.execute_batch("ROLLBACK");
-                            Err(e)
-                        }
-                    }
-                }
-            };
+            let saved = store
+                .save_input_queue(
+                    &s.id,
+                    &data,
+                    bind.map(|(request, text)| (request, text, item.as_str())),
+                    crate::timeouts::now_ms() as i64,
+                )
+                .map_err(|e| e.to_string());
             drop(store);
             if let Err(error) = saved {
                 data.input_queue = before;
@@ -389,16 +356,11 @@ pub(crate) fn enqueue_locked(
         Bound::Conflict => return Err(conflict()),
         Bound::New => {}
     }
-    let (count, bytes): (i64, i64) = s
+    let (count, bytes) = s
         .store
         .lock()
         .unwrap()
-        .connection
-        .query_row(
-            "SELECT COUNT(*),COALESCE(SUM(length(CAST(payload AS BLOB))),0) FROM input_queue_bindings WHERE session_id=?1",
-            params![s.id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
+        .input_binding_usage(&s.id)
         .map_err(db)?;
     if count >= MAX_BINDINGS || bytes + req.text.len() as i64 > MAX_BINDING_BYTES {
         return Err(fail(
@@ -694,7 +656,7 @@ mod tests {
     fn failed_handoff_persistence_keeps_delivery_uncertain() {
         let mut f = Fixture::new();
         let (text, id) = f.claim();
-        f.session.store.lock().unwrap().connection.execute_batch(
+        f.session.store.lock().unwrap().test_connection().execute_batch(
             "CREATE TRIGGER reject_sent BEFORE UPDATE ON sessions WHEN NEW.state LIKE '%\"sent\"%' BEGIN SELECT RAISE(ABORT,'injected handoff persistence failure'); END;"
         ).unwrap();
         assert!(!dispatch_claimed(&f.session, text, id));

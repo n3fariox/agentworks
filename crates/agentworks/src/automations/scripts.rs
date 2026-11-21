@@ -1,7 +1,7 @@
 //! Resolve a script-owned subscription and validate its proposed effects.
 use super::*;
+use agentworks_database::Store;
 use agentworks_starlark::engine::{Compiled, Engine};
-use rusqlite::{Connection, OptionalExtension};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -42,17 +42,12 @@ pub(super) fn binding(def: &Definition) -> Option<&ScriptTrigger> {
     }
 }
 pub(super) fn resolve(
-    db: &Connection,
+    db: &Store,
     engine: &Engine,
     binding: &ScriptTrigger,
 ) -> Result<Resolved, String> {
-    let source: Option<String> = db
-        .query_row(
-            "SELECT source FROM scripts WHERE name=?1 AND enabled=1 AND capability='automation'",
-            [&binding.script],
-            |r| r.get(0),
-        )
-        .optional()
+    let source = db
+        .enabled_automation_source(&binding.script)
         .map_err(|e| e.to_string())?;
     let source = source.ok_or("The automation script is missing or disabled")?;
     resolve_source(engine, binding, &source)
@@ -226,17 +221,14 @@ pub(super) fn resolve_all_source(
         .collect()
 }
 pub(super) fn resolve_all(
-    db: &Connection,
+    db: &Store,
     engine: &Engine,
     binding: &ScriptTrigger,
 ) -> Result<Vec<Resolved>, String> {
-    let source: String = db
-        .query_row(
-            "SELECT source FROM scripts WHERE name=?1 AND capability='automation' AND enabled=1",
-            [&binding.script],
-            |r| r.get(0),
-        )
-        .map_err(|_| "The automation script is missing or disabled")?;
+    let source = db
+        .enabled_automation_source(&binding.script)
+        .map_err(|_| "The automation script is missing or disabled")?
+        .ok_or("The automation script is missing or disabled")?;
     resolve_all_source(engine, binding, &source)
 }
 pub(super) fn manifest(
@@ -282,36 +274,14 @@ pub(super) fn manifest(
 
 /// Migrate the earlier mixed script list without dropping user edits. The
 /// shipped template is now code for the generator, not a global hook script.
-pub(crate) fn migrate(db: &Connection, engine: &Engine) -> Result<(), String> {
-    let has_definitions: bool = db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='automations')",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(|e| e.to_string())?;
-    if has_definitions {
-        db.execute("DELETE FROM scripts WHERE name='github_review.star' AND builtin=1 AND NOT EXISTS(SELECT 1 FROM automations WHERE json_extract(definition,'$.workflow.trigger.script')='github_review.star')",[]).map_err(|e|e.to_string())?;
-    } else {
-        db.execute(
-            "DELETE FROM scripts WHERE name='github_review.star' AND builtin=1",
-            [],
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    let mut q=db.prepare("SELECT name,source FROM scripts WHERE capability='hooks' AND instr(source,'register_github_trigger')>0").map_err(|e|e.to_string())?;
-    let candidates = q
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-        .map_err(|e| e.to_string())?
-        .collect::<rusqlite::Result<Vec<_>>>()
+pub(crate) fn migrate(db: &Store, engine: &Engine) -> Result<(), String> {
+    let candidates = db
+        .automation_migration_candidates()
         .map_err(|e| e.to_string())?;
     for (name, source) in candidates {
         if engine.compile_automation(&name, &source).is_ok() {
-            db.execute(
-                "UPDATE scripts SET capability='automation',builtin=0 WHERE name=?1",
-                [name],
-            )
-            .map_err(|e| e.to_string())?;
+            db.classify_automation_script(&name)
+                .map_err(|e| e.to_string())?;
         }
     }
     Ok(())
@@ -321,22 +291,12 @@ pub(crate) fn migrate(db: &Connection, engine: &Engine) -> Result<(), String> {
 /// field; missing files remove entries and cancel pending work, keeping history.
 pub(super) fn reconcile(app: &App) -> Result<(), (StatusCode, String)> {
     let engine = app.scripts.engine();
-    let files: Vec<(String, String, String, bool, u64)> = {
-        let store = app.store.lock().unwrap();
-        let mut q=store.connection.prepare("SELECT name,source,hash,enabled,updated FROM scripts WHERE capability='automation' ORDER BY name").map_err(storage)?;
-        q.query_map([], |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get::<_, i64>(4)? as u64,
-            ))
-        })
-        .map_err(storage)?
-        .collect::<rusqlite::Result<_>>()
-        .map_err(storage)?
-    };
+    let files = app
+        .store
+        .lock()
+        .unwrap()
+        .automation_scripts()
+        .map_err(storage)?;
     let definitions = app
         .store
         .lock()
@@ -376,11 +336,7 @@ pub(super) fn reconcile(app: &App) -> Result<(), (StatusCode, String)> {
             app.store
                 .lock()
                 .unwrap()
-                .connection
-                .execute(
-                    "UPDATE scripts SET hash=?2 WHERE name=?1",
-                    rusqlite::params![name, actual_hash],
-                )
+                .repair_script_hash(&name, &actual_hash)
                 .map_err(storage)?;
         }
         let hash = actual_hash;
@@ -392,8 +348,7 @@ pub(super) fn reconcile(app: &App) -> Result<(), (StatusCode, String)> {
                 app.store
                     .lock()
                     .unwrap()
-                    .connection
-                    .execute("UPDATE scripts SET enabled=0 WHERE name=?1", [&name])
+                    .disable_automation_script(&name)
                     .map_err(storage)?;
                 if let Some(old) = old {
                     if old.script_error.as_deref() == Some(&error)
@@ -458,8 +413,7 @@ pub(super) fn reconcile(app: &App) -> Result<(), (StatusCode, String)> {
             app.store
                 .lock()
                 .unwrap()
-                .connection
-                .execute("UPDATE scripts SET enabled=0 WHERE name=?1", [&name])
+                .disable_automation_script(&name)
                 .map_err(storage)?;
         }
         let prompt = descriptor["instructions"].as_str().unwrap().to_owned();
@@ -548,7 +502,7 @@ mod tests {
         f
     }
     fn add(app: &App, name: &str, source: &str) {
-        app.store.lock().unwrap().connection.execute("INSERT INTO scripts(name,capability,source,hash,enabled,builtin,updated) VALUES (?1,'automation',?2,?3,0,0,1)",rusqlite::params![name,source,agentworks_starlark::engine::content_hash(source)]).unwrap();
+        app.store.lock().unwrap().test_connection().execute("INSERT INTO scripts(name,capability,source,hash,enabled,builtin,updated) VALUES (?1,'automation',?2,?3,0,0,1)",rusqlite::params![name,source,agentworks_starlark::engine::content_hash(source)]).unwrap();
     }
     #[tokio::test]
     async fn files_populate_entries_and_source_edits_refresh_the_display_without_a_form() {
@@ -571,7 +525,7 @@ mod tests {
             .store
             .lock()
             .unwrap()
-            .connection
+            .test_connection()
             .execute(
                 "UPDATE scripts SET source=?1 WHERE name='handwritten.star'",
                 [&second],
@@ -583,9 +537,9 @@ mod tests {
         assert_eq!(page[0]["id"], id);
         assert_eq!(page[0]["name"], "Changed in source");
         assert_eq!(page[0]["prompt"], "Edited instructions");
-        let hooks = agentworks_scripting::list(&f.app.store.lock().unwrap().connection).unwrap();
+        let hooks = agentworks_scripting::list(&f.app.store.lock().unwrap()).unwrap();
         assert!(!hooks.iter().any(|s| s.name == "handwritten.star"));
-        f.app.store.lock().unwrap().connection.execute("UPDATE automations SET definition=json_set(definition,'$.name','cached form memory','$.prompt','stale form instructions') WHERE id=?1",[&id]).unwrap();
+        f.app.store.lock().unwrap().test_connection().execute("UPDATE automations SET definition=json_set(definition,'$.name','cached form memory','$.prompt','stale form instructions') WHERE id=?1",[&id]).unwrap();
         let Json(page) = crate::automations::list(State(f.app.clone()))
             .await
             .unwrap();
@@ -607,10 +561,10 @@ mod tests {
         let id = page[0]["id"].as_str().unwrap();
         {
             let store = f.app.store.lock().unwrap();
-            store.connection.execute("INSERT INTO automation_events(id,automation_id,revision,payload,created,status) VALUES ('old',?1,1,'{\"number\":17}',1,'completed'),('pending',?1,1,'{\"number\":18}',2,'pending')",[id]).unwrap();
-            store.connection.execute("INSERT INTO automation_event_actions(event_id,action_key,payload) VALUES ('pending','start','{}')",[]).unwrap();
+            store.test_connection().execute("INSERT INTO automation_events(id,automation_id,revision,payload,created,status) VALUES ('old',?1,1,'{\"number\":17}',1,'completed'),('pending',?1,1,'{\"number\":18}',2,'pending')",[id]).unwrap();
+            store.test_connection().execute("INSERT INTO automation_event_actions(event_id,action_key,payload) VALUES ('pending','start','{}')",[]).unwrap();
             store
-                .connection
+                .test_connection()
                 .execute("DELETE FROM scripts WHERE name='owned.star'", [])
                 .unwrap();
         }
@@ -627,7 +581,7 @@ mod tests {
                 .store
                 .lock()
                 .unwrap()
-                .connection
+                .test_connection()
                 .query_row(
                     "SELECT status FROM automation_event_actions WHERE event_id='pending'",
                     [],
@@ -649,7 +603,7 @@ mod tests {
                 .store
                 .lock()
                 .unwrap()
-                .connection
+                .test_connection()
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM scripts WHERE name='owned.star')",
                     [],
@@ -682,8 +636,7 @@ mod tests {
                 Json(serde_json::from_value(json!({"priority":1})).unwrap()),
             )
             .await,
-            crate::scripting::delete_script(State(f.app.clone()), Path("owned.star".into()))
-                .await,
+            crate::scripting::delete_script(State(f.app.clone()), Path("owned.star".into())).await,
         ] {
             assert_eq!(result.err().unwrap().0, StatusCode::CONFLICT);
         }
@@ -705,7 +658,7 @@ mod tests {
                 .store
                 .lock()
                 .unwrap()
-                .connection
+                .test_connection()
                 .query_row(
                     "SELECT source FROM scripts WHERE name='owned.star'",
                     [],
@@ -726,18 +679,14 @@ mod tests {
     async fn migration_classifies_older_automation_sources_without_losing_user_edits() {
         let f = fixture().await;
         let source = source(&f, "Migrated", "Preserve my instructions");
-        f.app.store.lock().unwrap().connection.execute("INSERT INTO scripts(name,capability,source,hash,enabled,builtin,updated) VALUES ('older.star','hooks',?1,?2,0,0,1)",rusqlite::params![source,agentworks_starlark::engine::content_hash(&source)]).unwrap();
-        migrate(
-            &f.app.store.lock().unwrap().connection,
-            &f.app.scripts.engine(),
-        )
-        .unwrap();
+        f.app.store.lock().unwrap().test_connection().execute("INSERT INTO scripts(name,capability,source,hash,enabled,builtin,updated) VALUES ('older.star','hooks',?1,?2,0,0,1)",rusqlite::params![source,agentworks_starlark::engine::content_hash(&source)]).unwrap();
+        migrate(&f.app.store.lock().unwrap(), &f.app.scripts.engine()).unwrap();
         assert_eq!(
             f.app
                 .store
                 .lock()
                 .unwrap()
-                .connection
+                .test_connection()
                 .query_row(
                     "SELECT capability,source,enabled FROM scripts WHERE name='older.star'",
                     [],
@@ -761,14 +710,14 @@ mod tests {
         let path = std::env::temp_dir().join(format!("automation-v14-{}.sqlite3", Uuid::new_v4()));
         {
             let store = crate::store::Store::open(&path).unwrap();
-            store.connection.execute_batch("DROP TABLE automation_trigger_baselines; INSERT INTO automation_github_baselines VALUES ('old','scope','{\"17\":{\"assigned\":true}}'); PRAGMA user_version=14;").unwrap();
+            store.test_connection().execute_batch("DROP TABLE automation_trigger_baselines; INSERT INTO automation_github_baselines VALUES ('old','scope','{\"17\":{\"assigned\":true}}'); PRAGMA user_version=14;").unwrap();
         }
         {
             let store = crate::store::Store::open(&path).unwrap();
-            assert_eq!(store.connection.query_row("SELECT trigger_name,snapshot FROM automation_trigger_baselines WHERE automation_id='old'",[],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).unwrap(),("default".into(),"{\"17\":{\"assigned\":true}}".into()));
+            assert_eq!(store.test_connection().query_row("SELECT trigger_name,snapshot FROM automation_trigger_baselines WHERE automation_id='old'",[],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).unwrap(),("default".into(),"{\"17\":{\"assigned\":true}}".into()));
             assert_eq!(
                 store
-                    .connection
+                    .test_connection()
                     .query_row(
                         "SELECT count(*) FROM automation_github_baselines",
                         [],
@@ -777,11 +726,11 @@ mod tests {
                     .unwrap(),
                 0
             );
-            store.connection.execute("UPDATE automation_trigger_baselines SET snapshot='new snapshot' WHERE automation_id='old'",[]).unwrap();
+            store.test_connection().execute("UPDATE automation_trigger_baselines SET snapshot='new snapshot' WHERE automation_id='old'",[]).unwrap();
         }
         {
             let store = crate::store::Store::open(&path).unwrap();
-            assert_eq!(store.connection.query_row("SELECT snapshot FROM automation_trigger_baselines WHERE automation_id='old'",[],|r|r.get::<_,String>(0)).unwrap(),"new snapshot");
+            assert_eq!(store.test_connection().query_row("SELECT snapshot FROM automation_trigger_baselines WHERE automation_id='old'",[],|r|r.get::<_,String>(0)).unwrap(),"new snapshot");
         }
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
@@ -801,6 +750,16 @@ mod tests {
             .unwrap();
         assert_eq!(page.as_array().unwrap().len(), 1);
         assert_eq!(page[0]["enabled"], false);
+        // Automatic pausing is not a user edit and must retain its timestamp.
+        let files = f.app.store.lock().unwrap().automation_scripts().unwrap();
+        assert_eq!(
+            files
+                .iter()
+                .find(|(name, ..)| name == "unfinished.star")
+                .unwrap()
+                .4,
+            1
+        );
         assert!(page[0]["scriptError"].as_str().is_some());
         let Json(file) = crate::automations::get_script(
             State(f.app.clone()),

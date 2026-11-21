@@ -1,0 +1,40 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+exports_files(["Cargo.toml"])
+
+_DEPS = ["//crates/agentworks-session"] + all_crate_deps(normal = True)
+
+rust_library(
+    name = "agentworks-database",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    crate_name = "agentworks_database",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    version = "0.1.0",
+    deps = _DEPS,
+)
+
+# Fault injection and legacy-schema fixtures can access SQLite only in tests.
+# Production targets depend on the library above, which has no connection API.
+rust_library(
+    name = "test_support",
+    testonly = True,
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    crate_features = ["test-support"],
+    crate_name = "agentworks_database",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    version = "0.1.0",
+    deps = _DEPS,
+)
+
+rust_test(
+    name = "unit_test",
+    crate = ":agentworks-database",
+    aliases = aliases(normal = True, normal_dev = True),
+    deps = all_crate_deps(normal_dev = True),
+)

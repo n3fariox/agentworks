@@ -1,6 +1,6 @@
 use crate::{
-    ApiResult, App, Create, SessionData, communication as mail, create_session, fail, installed,
-    key_present, use_api_key,
+    ApiResult, App, Create, communication as mail, create_session, fail, installed, key_present,
+    use_api_key,
 };
 use axum::{
     Json,
@@ -366,25 +366,6 @@ pub fn due(plan: &Plan, missed: Missed, cursor: i64, now: i64) -> Option<Due> {
         (true, Missed::Skip) => Due::Missed { slot, earlier },
     })
 }
-/// Durable scheduler state. `automation_schedules.cursor` is the instant up to
-/// which occurrences are handled; `automation_slots` records each handled
-/// occurrence once. Started runs are keyed `schedule:<slot>` in
-/// `automation_runs`, so a crash between starting and recording cannot start
-/// the same occurrence twice. `automation_agent_requests` makes agent
-/// mutations idempotent per `(actor, requestId)` (schema v12).
-pub const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS automation_schedules(automation_id TEXT PRIMARY KEY,cursor INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS automation_slots(automation_id TEXT NOT NULL,slot INTEGER NOT NULL,request_id TEXT NOT NULL,outcome TEXT NOT NULL,detail TEXT,created INTEGER NOT NULL,PRIMARY KEY(automation_id,slot));
-CREATE TABLE IF NOT EXISTS automation_agent_requests(actor TEXT NOT NULL,request_id TEXT NOT NULL,operation TEXT NOT NULL,payload TEXT NOT NULL,result TEXT NOT NULL,created INTEGER NOT NULL,PRIMARY KEY(actor,request_id));
-CREATE TABLE IF NOT EXISTS automation_github_baselines(automation_id TEXT PRIMARY KEY,scope TEXT NOT NULL,snapshot TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS automation_events(id TEXT PRIMARY KEY,automation_id TEXT NOT NULL,revision INTEGER NOT NULL,payload TEXT NOT NULL,created INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'pending',action TEXT,target TEXT,detail TEXT);
-CREATE TABLE IF NOT EXISTS automation_github_polls(automation_id TEXT PRIMARY KEY,checked_at INTEGER NOT NULL,error TEXT);
-CREATE TABLE IF NOT EXISTS automation_event_actions(event_id TEXT NOT NULL,action_key TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',target TEXT,detail TEXT,PRIMARY KEY(event_id,action_key));
-CREATE TABLE IF NOT EXISTS automation_trigger_baselines(automation_id TEXT NOT NULL,trigger_name TEXT NOT NULL,scope TEXT NOT NULL,snapshot TEXT NOT NULL,PRIMARY KEY(automation_id,trigger_name));
-INSERT OR IGNORE INTO automation_trigger_baselines SELECT automation_id,'default',scope,snapshot FROM automation_github_baselines;
-DELETE FROM automation_github_baselines;
-CREATE INDEX IF NOT EXISTS automation_events_pending ON automation_events(automation_id,status);
-";
 impl Definition {
     /// The trigger when it is timed (weekly or one-time), which gives the
     /// definition a scheduler cursor.
@@ -467,16 +448,11 @@ async fn definition(
                 "Use a lowercase .star filename",
             ));
         }
-        let collision: bool = app
+        let collision = app
             .store
             .lock()
             .unwrap()
-            .connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM scripts WHERE name=?1)",
-                [&name],
-                |r| r.get(0),
-            )
+            .script_exists(&name)
             .map_err(storage)?;
         if collision
             && !previous.is_some_and(|d| scripts::binding(d).is_some_and(|b| b.script == name))
@@ -542,11 +518,7 @@ async fn definition(
         let resolved = if let Some(source) = &source {
             scripts::resolve_source(&app.scripts.engine(), binding, source)
         } else {
-            scripts::resolve(
-                &app.store.lock().unwrap().connection,
-                &app.scripts.engine(),
-                binding,
-            )
+            scripts::resolve(&app.store.lock().unwrap(), &app.scripts.engine(), binding)
         }
         .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
         script_hash = Some(resolved.script.hash.clone());
@@ -554,11 +526,7 @@ async fn definition(
             let recipes = if let Some(source) = &source {
                 scripts::resolve_all_source(&app.scripts.engine(), binding, source)
             } else {
-                scripts::resolve_all(
-                    &app.store.lock().unwrap().connection,
-                    &app.scripts.engine(),
-                    binding,
-                )
+                scripts::resolve_all(&app.store.lock().unwrap(), &app.scripts.engine(), binding)
             }
             .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
             for recipe in recipes {
@@ -723,17 +691,13 @@ pub async fn list(State(app): State<App>) -> ApiResult {
                 ) {
                     value["githubPolling"] = github_review::poll_status(&app, &d.id);
                     let binding = scripts::binding(d).unwrap();
-                    let source: Option<String> = app
+                    let source = app
                         .store
                         .lock()
                         .unwrap()
-                        .connection
-                        .query_row(
-                            "SELECT source FROM scripts WHERE name=?1 AND capability='automation'",
-                            [&binding.script],
-                            |r| r.get(0),
-                        )
-                        .ok();
+                        .automation_source(&binding.script)
+                        .ok()
+                        .flatten();
                     if let Some(source) = source
                         && let Ok((_, recipes)) =
                             scripts::manifest(&app.scripts.engine(), &binding.script, &source)
@@ -754,13 +718,7 @@ pub async fn list(State(app): State<App>) -> ApiResult {
 /// An agent's mutation request, recorded in the same transaction as its
 /// effect so a retry with the same request ID replays `result` instead of
 /// acting twice.
-pub struct Ledger<'a> {
-    pub actor: &'a str,
-    pub request_id: &'a str,
-    pub operation: &'a str,
-    pub payload: &'a str,
-    pub result: &'a str,
-}
+pub use agentworks_database::Ledger;
 /// Saves a definition and (re)arms its schedule at the current instant when
 /// it is new, changed or resumed, so occurrences before saving or while paused
 /// never start. Unchanged enabled schedules keep their cursor, which is what
@@ -803,7 +761,7 @@ fn save(
             store
                 .save_automation_source(def, rearm.then_some(now), ledger.as_ref(), Some(source))
                 .map_err(storage)?;
-            app.scripts.reload(&store.connection).map_err(storage)?;
+            app.scripts.reload(&store).map_err(storage)?;
         } else {
             store
                 .save_automation(def, rearm.then_some(now), ledger.as_ref())
@@ -1467,17 +1425,6 @@ pub async fn agent(
         )),
     }
 }
-pub fn run_status(data: &SessionData) -> &str {
-    data.automation
-        .as_ref()
-        .and_then(|a| a.outcome.as_deref())
-        .unwrap_or(match data.status.as_str() {
-            "idle" => "starting",
-            "suspended" => "interrupted",
-            "error" => "failed",
-            other => other,
-        })
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1940,7 +1887,7 @@ mod tests {
             assert_eq!(saved.name, "first");
             assert_eq!(saved.created_by.unwrap().title, "Bot");
             store
-                .connection
+                .test_connection()
                 .execute("INSERT INTO automations VALUES ('b','{}')", [])
                 .unwrap();
             // Restore validation stays strict; the runtime skips the bad row.

@@ -1,6 +1,6 @@
 //! Event runs finish at durable dispatch, independently of the review session.
 use super::*;
-use rusqlite::{Connection, OptionalExtension, params};
+use agentworks_database::Store;
 use serde_json::Value;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -51,7 +51,7 @@ fn trigger(def: &Definition) -> Option<&scripts::ScriptTrigger> {
 
 /// Persist transport facts and the exact script version that will handle them.
 fn observe(
-    db: &mut Connection,
+    db: &mut Store,
     def: &Definition,
     recipe: &scripts::Resolved,
     snapshot: &Value,
@@ -62,13 +62,7 @@ fn observe(
         .as_str()
         .unwrap();
     let tx = db.transaction()?;
-    let old: Option<(String, String)> = tx
-        .query_row(
-            "SELECT scope,snapshot FROM automation_trigger_baselines WHERE automation_id=?1 AND trigger_name=?2",
-            params![def.id,trigger_name],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
+    let old = tx.reviews().baseline(&def.id, trigger_name)?;
     let previous: Option<Value> = old
         .filter(|(s, _)| *s == scope)
         .map(|(_, s)| serde_json::from_str(&s))
@@ -96,10 +90,17 @@ fn observe(
             ));
             let payload = json!({"number":number.parse::<u64>()?,"pr":pr,"assigned":assigned,"reviewRequested":requested,"initial":initial,
                 "subscription":recipe.scope,"recipe":{"script":recipe.script.name,"hash":recipe.script.hash,"source":recipe.source,"handler":trigger_name}});
-            tx.execute("INSERT INTO automation_events(id,automation_id,revision,payload,created) VALUES (?1,?2,?3,?4,?5)",params![Uuid::new_v4().to_string(),def.id,def.revision as i64,payload.to_string(),at as i64])?;
+            tx.reviews().append_event(
+                &Uuid::new_v4().to_string(),
+                &def.id,
+                def.revision,
+                &payload.to_string(),
+                at,
+            )?;
         }
     }
-    tx.execute("INSERT INTO automation_trigger_baselines(automation_id,trigger_name,scope,snapshot) VALUES (?1,?2,?3,?4) ON CONFLICT(automation_id,trigger_name) DO UPDATE SET scope=excluded.scope,snapshot=excluded.snapshot",params![def.id,trigger_name,scope,snapshot.to_string()])?;
+    tx.reviews()
+        .save_baseline(&def.id, trigger_name, &scope, &snapshot.to_string())?;
     tx.commit()?;
     Ok(())
 }
@@ -131,7 +132,7 @@ async fn tick(app: &App) -> Result<()> {
             return Ok(());
         }
         let recipes = scripts::resolve_all(
-            &app.store.lock().unwrap().connection,
+            &app.store.lock().unwrap(),
             &app.scripts.engine(),
             trigger(&def).unwrap(),
         );
@@ -157,7 +158,7 @@ async fn tick(app: &App) -> Result<()> {
                     }
                     match fetched {
                         Ok(snapshot) => observe(
-                            &mut app.store.lock().unwrap().connection,
+                            &mut app.store.lock().unwrap(),
                             &def,
                             &recipe,
                             &snapshot,
@@ -187,19 +188,16 @@ async fn tick(app: &App) -> Result<()> {
         {
             continue;
         }
-        app.store.lock().unwrap().connection.execute("INSERT INTO automation_github_polls(automation_id,checked_at,error) VALUES (?1,?2,?3) ON CONFLICT(automation_id) DO UPDATE SET checked_at=excluded.checked_at,error=excluded.error",params![def.id,now() as i64,(!errors.is_empty()).then(||errors.join("; "))])?;
-        let pending: Vec<(String, Value)> = {
-            let store = app.store.lock().unwrap();
-            let mut q=store.connection.prepare("SELECT id,payload FROM automation_events WHERE automation_id=?1 AND revision=?2 AND status='pending' ORDER BY created,id LIMIT 100")?;
-            q.query_map(params![def.id, def.revision as i64], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })?
-            .map(|r| {
-                let (id, p) = r?;
-                Ok((id, serde_json::from_str(&p)?))
-            })
-            .collect::<Result<_>>()?
-        };
+        app.store.lock().unwrap().record_review_poll(
+            &def.id,
+            now() as i64,
+            (!errors.is_empty()).then(|| errors.join("; ")).as_deref(),
+        )?;
+        let pending = app
+            .store
+            .lock()
+            .unwrap()
+            .pending_review_events(&def.id, def.revision)?;
         for (id, payload) in pending {
             dispatch(app, &def, &id, &payload).await?;
         }
@@ -207,14 +205,10 @@ async fn tick(app: &App) -> Result<()> {
     Ok(())
 }
 fn finish(app: &App, id: &str, status: &str, detail: &str, target: Option<&str>) -> Result<()> {
-    let mut store = app.store.lock().unwrap();
-    let tx = store.connection.transaction()?;
-    tx.execute("UPDATE automation_events SET status=?2,detail=?3,target=COALESCE(?4,target) WHERE id=?1 AND status='pending'",params![id,status,detail,target])?;
-    if status == "skipped" {
-        tx.execute("UPDATE automation_event_actions SET status='skipped',detail=?2 WHERE event_id=?1 AND status='pending'",params![id,detail])?;
-    }
-    tx.commit()?;
-    Ok(())
+    app.store
+        .lock()
+        .unwrap()
+        .finish_review_event(id, status, detail, target)
 }
 async fn decide(app: &App, def: &Definition, id: &str, payload: &Value) -> Result<()> {
     let source = payload["recipe"]["source"]
@@ -264,21 +258,15 @@ async fn decide(app: &App, def: &Definition, id: &str, payload: &Value) -> Resul
     for effect in &effects {
         validate_effect(app, def, effect)?;
     }
-    let mut store = app.store.lock().unwrap();
-    let tx = store.connection.transaction()?;
-    for effect in &effects {
-        tx.execute(
-            "INSERT INTO automation_event_actions(event_id,action_key,payload) VALUES (?1,?2,?3)",
-            params![id, effect.key, serde_json::to_string(effect)?],
-        )?;
-    }
+    let actions = effects
+        .iter()
+        .map(|effect| Ok((effect.key.clone(), serde_json::to_string(effect)?)))
+        .collect::<Result<Vec<_>>>()?;
     let decision = json!({"script":recipe.script.name,"hash":recipe.script.hash,"state":value["state"],"actions":effects});
-    tx.execute(
-        "UPDATE automation_events SET action=?2 WHERE id=?1",
-        params![id, decision.to_string()],
-    )?;
-    tx.commit()?;
-    Ok(())
+    app.store
+        .lock()
+        .unwrap()
+        .prepare_review_actions(id, &actions, &decision.to_string())
 }
 fn validate_effect(
     app: &App,
@@ -348,13 +336,16 @@ async fn dispatch(app: &App, def: &Definition, id: &str, payload: &Value) -> Res
             None,
         );
     }
-    let enabled: bool = app.store.lock().unwrap().connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM scripts WHERE name=?1 AND enabled=1 AND capability='automation')",
-        [payload["recipe"]["script"]
-            .as_str()
-            .ok_or("Missing script name")?],
-        |r| r.get(0),
-    )?;
+    let enabled = app
+        .store
+        .lock()
+        .unwrap()
+        .enabled_automation_source(
+            payload["recipe"]["script"]
+                .as_str()
+                .ok_or("Missing script name")?,
+        )?
+        .is_some();
     if !enabled {
         return finish(
             app,
@@ -364,11 +355,7 @@ async fn dispatch(app: &App, def: &Definition, id: &str, payload: &Value) -> Res
             None,
         );
     }
-    let prepared: bool = app.store.lock().unwrap().connection.query_row(
-        "SELECT action IS NOT NULL FROM automation_events WHERE id=?1",
-        [id],
-        |r| r.get(0),
-    )?;
+    let prepared = app.store.lock().unwrap().review_prepared(id)?;
     if !prepared && let Err(e) = decide(app, def, id, payload).await {
         return finish(
             app,
@@ -378,23 +365,8 @@ async fn dispatch(app: &App, def: &Definition, id: &str, payload: &Value) -> Res
             None,
         );
     }
-    let actions: Vec<(String, scripts::Effect, String, Option<String>)> = {
-        let store = app.store.lock().unwrap();
-        let mut q=store.connection.prepare("SELECT action_key,payload,status,target FROM automation_event_actions WHERE event_id=?1 ORDER BY rowid")?;
-        q.query_map([id], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, Option<String>>(3)?,
-            ))
-        })?
-        .map(|r| {
-            let (k, p, s, t) = r?;
-            Ok((k, serde_json::from_str(&p)?, s, t))
-        })
-        .collect::<Result<_>>()?
-    };
+    let actions: Vec<(String, scripts::Effect, String, Option<String>)> =
+        app.store.lock().unwrap().review_actions(id)?;
     let mut target = None;
     let mut count = 0;
     for (key, effect, status, previous_target) in actions {
@@ -414,15 +386,18 @@ async fn dispatch(app: &App, def: &Definition, id: &str, payload: &Value) -> Res
         }
         match perform(app, def, id, &key, &effect).await {
             Ok(session) => {
-                app.store.lock().unwrap().connection.execute("UPDATE automation_event_actions SET status='completed',target=?3 WHERE event_id=?1 AND action_key=?2",params![id,key,session])?;
+                app.store
+                    .lock()
+                    .unwrap()
+                    .complete_review_action(id, &key, &session)?;
                 target = Some(session);
                 count += 1;
             }
             Err(error) => {
                 if error.retry {
-                    app.store.lock().unwrap().connection.execute(
-                        "UPDATE automation_events SET detail=?2 WHERE id=?1",
-                        params![id, format!("Dispatch will retry: {}", error.reason)],
+                    app.store.lock().unwrap().review_retry_detail(
+                        id,
+                        &format!("Dispatch will retry: {}", error.reason),
                     )?;
                     return Ok(());
                 }
@@ -560,13 +535,7 @@ pub(super) fn poll_status(app: &App, id: &str) -> Value {
     app.store
         .lock()
         .unwrap()
-        .connection
-        .query_row(
-            "SELECT checked_at,error FROM automation_github_polls WHERE automation_id=?1",
-            [id],
-            |r| Ok(json!({"checkedAt":r.get::<_,i64>(0)?,"error":r.get::<_,Option<String>>(1)?})),
-        )
-        .optional()
+        .review_poll_status(id)
         .ok()
         .flatten()
         .unwrap_or(Value::Null)
@@ -581,7 +550,7 @@ mod tests {
     fn snapshot(number: u64, assigned: bool, requested: bool, sha: &str) -> Value {
         json!({number.to_string():{"assigned":assigned,"requested":requested,"pr":{"number":number,"headSha":sha}}})
     }
-    fn events(db: &Connection) -> Vec<(String, Value)> {
+    fn events(db: &rusqlite::Connection) -> Vec<(String, Value)> {
         let mut q = db
             .prepare("SELECT id,payload FROM automation_events ORDER BY created,id")
             .unwrap();
@@ -629,13 +598,9 @@ mod tests {
     }
     fn observe_app(app: &App, def: &Definition, value: &Value, at: u64) {
         let mut store = app.store.lock().unwrap();
-        let recipe = scripts::resolve(
-            &store.connection,
-            &app.scripts.engine(),
-            trigger(def).unwrap(),
-        )
-        .unwrap();
-        super::observe(&mut store.connection, def, &recipe, value, at).unwrap();
+        let recipe =
+            scripts::resolve(&store, &app.scripts.engine(), trigger(def).unwrap()).unwrap();
+        super::observe(&mut store, def, &recipe, value, at).unwrap();
     }
     fn recipe(def: &Definition) -> scripts::Resolved {
         let form=serde_json::from_value(json!({"host":"github.com","repo":"team/repo","account":"fixture","settings":{"provider":def.provider,"cwd":def.cwd,"projectId":"p","hostId":"local","title":def.name},"steps":[{"kind":"agent","text":def.prompt}]})).unwrap();
@@ -647,7 +612,7 @@ mod tests {
         )
         .unwrap()
     }
-    fn observe(db: &mut Connection, def: &Definition, value: &Value, at: u64) -> Result<()> {
+    fn observe(db: &mut Store, def: &Definition, value: &Value, at: u64) -> Result<()> {
         super::observe(db, def, &recipe(def), value, at)
     }
     #[test]
@@ -667,82 +632,40 @@ mod tests {
         let mut def = definition();
         {
             let mut store = crate::store::Store::open(&path).unwrap();
-            observe(
-                &mut store.connection,
-                &def,
-                &snapshot(17, true, true, "a"),
-                1,
-            )
-            .unwrap();
-            assert!(events(&store.connection).is_empty()); // baseline does not sweep backlog
-            observe(
-                &mut store.connection,
-                &def,
-                &snapshot(17, true, true, "b"),
-                2,
-            )
-            .unwrap();
-            assert!(events(&store.connection).is_empty()); // pushes are not new requests
-            observe(
-                &mut store.connection,
-                &def,
-                &snapshot(17, true, false, "b"),
-                3,
-            )
-            .unwrap();
+            observe(&mut store, &def, &snapshot(17, true, true, "a"), 1).unwrap();
+            assert!(events(&store.test_connection()).is_empty()); // baseline does not sweep backlog
+            observe(&mut store, &def, &snapshot(17, true, true, "b"), 2).unwrap();
+            assert!(events(&store.test_connection()).is_empty()); // pushes are not new requests
+            observe(&mut store, &def, &snapshot(17, true, false, "b"), 3).unwrap();
         }
         {
             let mut store = crate::store::Store::open(&path).unwrap();
-            observe(
-                &mut store.connection,
-                &def,
-                &snapshot(17, true, true, "b"),
-                4,
-            )
-            .unwrap();
-            let rows = events(&store.connection);
+            observe(&mut store, &def, &snapshot(17, true, true, "b"), 4).unwrap();
+            let rows = events(&store.test_connection());
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].1["reviewRequested"], true);
             assert_eq!(rows[0].1["assigned"], false);
-            observe(
-                &mut store.connection,
-                &def,
-                &snapshot(17, true, true, "b"),
-                5,
-            )
-            .unwrap();
-            assert_eq!(events(&store.connection).len(), 1);
+            observe(&mut store, &def, &snapshot(17, true, true, "b"), 5).unwrap();
+            assert_eq!(events(&store.test_connection()).len(), 1);
             // An invalid/failed observation cannot erase membership.
-            assert!(observe(&mut store.connection, &def, &Value::Null, 6).is_err());
-            observe(
-                &mut store.connection,
-                &def,
-                &snapshot(17, true, true, "b"),
-                7,
-            )
-            .unwrap();
-            assert_eq!(events(&store.connection).len(), 1);
-            observe(&mut store.connection, &def, &json!({}), 8).unwrap();
-            observe(
-                &mut store.connection,
-                &def,
-                &snapshot(17, true, true, "c"),
-                9,
-            )
-            .unwrap();
-            assert_eq!(events(&store.connection).len(), 2); // removed then re-added
+            assert!(observe(&mut store, &def, &Value::Null, 6).is_err());
+            observe(&mut store, &def, &snapshot(17, true, true, "b"), 7).unwrap();
+            assert_eq!(events(&store.test_connection()).len(), 1);
+            observe(&mut store, &def, &json!({}), 8).unwrap();
+            observe(&mut store, &def, &snapshot(17, true, true, "c"), 9).unwrap();
+            assert_eq!(events(&store.test_connection()).len(), 2); // removed then re-added
             def.id = "include-existing".into();
             let mut backlog = recipe(&def);
             backlog.scope.include_existing = true;
             super::observe(
-                &mut store.connection,
+                &mut store,
                 &def,
                 &backlog,
                 &snapshot(18, true, true, "d"),
                 10,
             )
             .unwrap();
-            assert_eq!(events(&store.connection).len(), 3);
+            assert_eq!(events(&store.test_connection()).len(), 3);
         }
         for suffix in ["", "-wal", "-shm", ".lock"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
@@ -756,7 +679,7 @@ mod tests {
         attach(&f.app, &f.s.id, 17);
         observe_app(&f.app, &def, &json!({}), 1);
         observe_app(&f.app, &def, &snapshot(17, true, true, &"a".repeat(40)), 2);
-        let (id, payload) = events(&f.app.store.lock().unwrap().connection).remove(0);
+        let (id, payload) = events(&f.app.store.lock().unwrap().test_connection()).remove(0);
         f.s.data.lock().unwrap().status = "idle".into();
         dispatch(&f.app, &def, &id, &payload).await.unwrap();
         assert_eq!(f.s.data.lock().unwrap().input_queue.items.len(), 1);
@@ -779,7 +702,7 @@ mod tests {
             .store
             .lock()
             .unwrap()
-            .connection
+            .test_connection()
             .execute(
                 "UPDATE automation_events SET status='pending' WHERE id=?1",
                 [&id],
@@ -789,7 +712,7 @@ mod tests {
         assert_eq!(f.s.data.lock().unwrap().input_queue.items.len(), 1);
         observe_app(&f.app, &def, &json!({}), 3);
         observe_app(&f.app, &def, &snapshot(17, true, true, &"b".repeat(40)), 4);
-        let (id, payload) = events(&f.app.store.lock().unwrap().connection).remove(1);
+        let (id, payload) = events(&f.app.store.lock().unwrap().test_connection()).remove(1);
         {
             let mut d = f.s.data.lock().unwrap();
             d.status = "running".into();
@@ -830,7 +753,7 @@ mod tests {
         attach(&f.app, other_id, 17);
         observe_app(&f.app, &def, &json!({}), 1);
         observe_app(&f.app, &def, &snapshot(17, true, true, &"a".repeat(40)), 2);
-        let (id, payload) = events(&f.app.store.lock().unwrap().connection).remove(0);
+        let (id, payload) = events(&f.app.store.lock().unwrap().test_connection()).remove(0);
         dispatch(&f.app, &def, &id, &payload).await.unwrap();
         let runs = f
             .app
@@ -860,7 +783,7 @@ mod tests {
             .archived = true;
         observe_app(&f.app, &def, &json!({}), 3);
         observe_app(&f.app, &def, &snapshot(17, true, true, &"a".repeat(40)), 4);
-        let (id, payload) = events(&f.app.store.lock().unwrap().connection).remove(1);
+        let (id, payload) = events(&f.app.store.lock().unwrap().test_connection()).remove(1);
         dispatch(&f.app, &def, &id, &payload).await.unwrap();
         assert_eq!(f.s.data.lock().unwrap().input_queue.items.len(), 1);
     }
@@ -881,7 +804,7 @@ mod tests {
         .to_owned();
         observe_app(&f.app, &def, &json!({}), 1);
         observe_app(&f.app, &def, &snapshot(17, false, true, &sha), 2);
-        let (id, payload) = events(&f.app.store.lock().unwrap().connection).remove(0);
+        let (id, payload) = events(&f.app.store.lock().unwrap().test_connection()).remove(0);
         dispatch(&f.app, &def, &id, &payload).await.unwrap();
         let runs = f
             .app
@@ -918,7 +841,7 @@ mod tests {
             .store
             .lock()
             .unwrap()
-            .connection
+            .test_connection()
             .execute(
                 "UPDATE automation_events SET status='pending' WHERE id=?1",
                 [&id],
@@ -929,7 +852,7 @@ mod tests {
         // Another PR starts while this review is still alive.
         observe_app(&f.app, &def, &json!({}), 3);
         observe_app(&f.app, &def, &snapshot(18, true, false, &sha), 4);
-        let (id, payload) = events(&f.app.store.lock().unwrap().connection).remove(1);
+        let (id, payload) = events(&f.app.store.lock().unwrap().test_connection()).remove(1);
         dispatch(&f.app, &def, &id, &payload).await.unwrap();
         assert_eq!(f.app.sessions.lock().unwrap().len(), n + 1);
         assert!(
@@ -980,7 +903,10 @@ mod tests {
             .save_automation(&def, None, None)
             .unwrap();
         observe_app(&f.app, &def, &snapshot(17, true, true, "a"), 3);
-        assert_eq!(events(&f.app.store.lock().unwrap().connection).len(), 1);
+        assert_eq!(
+            events(&f.app.store.lock().unwrap().test_connection()).len(),
+            1
+        );
     }
     #[tokio::test]
     async fn background_ticks_preserve_baseline_on_failure_and_share_cached_membership() {
@@ -993,7 +919,7 @@ mod tests {
             .seed_review_requests(scope, snapshot(17, true, true, &"a".repeat(40)))
             .await;
         tick(&f.app).await.unwrap();
-        assert!(events(&f.app.store.lock().unwrap().connection).is_empty());
+        assert!(events(&f.app.store.lock().unwrap().test_connection()).is_empty());
         // Disabled account is an unavailable poll, never an empty membership.
         f.app.catalog.lock().unwrap().data.github.connections[0].enabled = false;
         tick(&f.app).await.unwrap();
@@ -1007,7 +933,7 @@ mod tests {
             .seed_review_requests(scope, snapshot(17, true, true, &"a".repeat(40)))
             .await;
         tick(&f.app).await.unwrap();
-        assert!(events(&f.app.store.lock().unwrap().connection).is_empty());
+        assert!(events(&f.app.store.lock().unwrap().test_connection()).is_empty());
         f.app
             .github
             .seed_review_requests(scope, snapshot(17, true, false, &"a".repeat(40)))
@@ -1053,7 +979,7 @@ mod tests {
             .unwrap();
         observe_app(&f.app, &def, &json!({}), 1);
         observe_app(&f.app, &def, &snapshot(17, true, true, &"a".repeat(40)), 2);
-        let (id, payload) = events(&f.app.store.lock().unwrap().connection).remove(0);
+        let (id, payload) = events(&f.app.store.lock().unwrap().test_connection()).remove(0);
         dispatch(&f.app, &def, &id, &payload).await.unwrap();
         let runs = f
             .app
@@ -1079,7 +1005,7 @@ mod tests {
             .unwrap();
         observe_app(&f.app, &def, &json!({}), 3);
         observe_app(&f.app, &def, &snapshot(17, true, true, &"b".repeat(40)), 4);
-        let (id, payload) = events(&f.app.store.lock().unwrap().connection).remove(1);
+        let (id, payload) = events(&f.app.store.lock().unwrap().test_connection()).remove(1);
         dispatch(&f.app, &def, &id, &payload).await.unwrap();
         assert_eq!(f.s.data.lock().unwrap().input_queue.items.len(), 1);
     }
@@ -1166,9 +1092,9 @@ agent.register_github_trigger(custom, host="github.com", repo="team/repo", accou
         save_recipe(&f.app, &source);
         observe_app(&f.app, &def, &json!({}), 1);
         observe_app(&f.app, &def, &snapshot(17, true, false, &"a".repeat(40)), 2);
-        assert!(events(&f.app.store.lock().unwrap().connection).is_empty()); // subscription is script-owned
+        assert!(events(&f.app.store.lock().unwrap().test_connection()).is_empty()); // subscription is script-owned
         observe_app(&f.app, &def, &snapshot(17, true, true, &"a".repeat(40)), 3);
-        let (id, payload) = events(&f.app.store.lock().unwrap().connection).remove(0);
+        let (id, payload) = events(&f.app.store.lock().unwrap().test_connection()).remove(0);
         // Editing the recipe affects future events, not an already observed one.
         save_recipe(
             &f.app,
@@ -1195,7 +1121,7 @@ agent.register_github_trigger(custom, host="github.com", repo="team/repo", accou
             .store
             .lock()
             .unwrap()
-            .connection
+            .test_connection()
             .execute(
                 "UPDATE automation_event_actions SET status='pending' WHERE event_id=?1",
                 [&id],
@@ -1205,7 +1131,7 @@ agent.register_github_trigger(custom, host="github.com", repo="team/repo", accou
             .store
             .lock()
             .unwrap()
-            .connection
+            .test_connection()
             .execute(
                 "UPDATE automation_events SET status='pending' WHERE id=?1",
                 [&id],
@@ -1215,7 +1141,7 @@ agent.register_github_trigger(custom, host="github.com", repo="team/repo", accou
         assert_eq!(f.s.data.lock().unwrap().input_queue.items.len(), 2);
         observe_app(&f.app, &def, &json!({}), 4);
         observe_app(&f.app, &def, &snapshot(17, true, true, &"b".repeat(40)), 5);
-        let (id, payload) = events(&f.app.store.lock().unwrap().connection).remove(1);
+        let (id, payload) = events(&f.app.store.lock().unwrap().test_connection()).remove(1);
         dispatch(&f.app, &def, &id, &payload).await.unwrap();
         assert_eq!(f.s.data.lock().unwrap().input_queue.items.len(), 2);
         assert!(
@@ -1242,7 +1168,7 @@ agent.register_github_trigger(custom, host="github.com", repo="team/repo", accou
         save_recipe(&f.app, &source);
         observe_app(&f.app, &def, &json!({}), 1);
         observe_app(&f.app, &def, &snapshot(17, true, true, &"a".repeat(40)), 2);
-        let (id, payload) = events(&f.app.store.lock().unwrap().connection).remove(0);
+        let (id, payload) = events(&f.app.store.lock().unwrap().test_connection()).remove(0);
         dispatch(&f.app, &def, &id, &payload).await.unwrap();
         assert!(f.s.data.lock().unwrap().input_queue.items.is_empty());
         assert_eq!(f.app.sessions.lock().unwrap().len(), 1);
@@ -1299,7 +1225,7 @@ agent.register_github_trigger(custom, host="github.com", repo="team/repo", accou
         .to_owned();
         observe_app(&f.app, &def, &json!({}), 1);
         observe_app(&f.app, &def, &snapshot(17, true, true, &sha), 2);
-        let (id, payload) = events(&f.app.store.lock().unwrap().connection).remove(0);
+        let (id, payload) = events(&f.app.store.lock().unwrap().test_connection()).remove(0);
         dispatch(&f.app, &def, &id, &payload).await.unwrap();
         let run = f
             .app
@@ -1317,7 +1243,7 @@ agent.register_github_trigger(custom, host="github.com", repo="team/repo", accou
             .store
             .lock()
             .unwrap()
-            .connection
+            .test_connection()
             .query_row(
                 "SELECT payload FROM automation_event_actions WHERE event_id=?1",
                 [id],
@@ -1355,7 +1281,7 @@ agent.register_github_trigger(custom, host="github.com", repo="team/repo", accou
             .unwrap()
             .unwrap();
         let scope = scripts::resolve_all(
-            &f.app.store.lock().unwrap().connection,
+            &f.app.store.lock().unwrap(),
             &f.app.scripts.engine(),
             trigger(&def).unwrap(),
         )
@@ -1364,13 +1290,13 @@ agent.register_github_trigger(custom, host="github.com", repo="team/repo", accou
         .scope;
         f.app.github.seed_review_requests(&scope, json!({})).await;
         tick(&f.app).await.unwrap();
-        assert!(events(&f.app.store.lock().unwrap().connection).is_empty());
+        assert!(events(&f.app.store.lock().unwrap().test_connection()).is_empty());
         f.app
             .github
             .seed_review_requests(&scope, snapshot(17, false, true, &"a".repeat(40)))
             .await;
         tick(&f.app).await.unwrap();
-        let rows = events(&f.app.store.lock().unwrap().connection);
+        let rows = events(&f.app.store.lock().unwrap().test_connection());
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].1["recipe"]["handler"], "review-again");
         assert_eq!(f.s.data.lock().unwrap().input_queue.items.len(), 1);
@@ -1379,14 +1305,17 @@ agent.register_github_trigger(custom, host="github.com", repo="team/repo", accou
             .seed_review_requests(&scope, snapshot(17, true, true, &"a".repeat(40)))
             .await;
         tick(&f.app).await.unwrap();
-        assert_eq!(events(&f.app.store.lock().unwrap().connection).len(), 2);
+        assert_eq!(
+            events(&f.app.store.lock().unwrap().test_connection()).len(),
+            2
+        );
         assert_eq!(f.s.data.lock().unwrap().input_queue.items.len(), 2);
         assert_eq!(
             f.app
                 .store
                 .lock()
                 .unwrap()
-                .connection
+                .test_connection()
                 .query_row(
                     "SELECT count(*) FROM automation_trigger_baselines WHERE automation_id=?1",
                     [&def.id],

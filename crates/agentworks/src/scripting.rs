@@ -1,10 +1,10 @@
 //! HTTP and application adapters for the scripting subsystem.
+use agentworks_database::Store;
 use agentworks_scripting::{Hub, valid_name};
 use agentworks_scripting::{
     PRIORITY_RANGE, Removal, delete, save, seed, set_enabled, set_priority,
 };
 use agentworks_starlark::engine::Engine;
-use rusqlite::Connection;
 use serde_json::json;
 use std::{
     collections::{HashMap, HashSet},
@@ -29,14 +29,8 @@ pub struct Priority {
     priority: i64,
 }
 
-fn ensure_hook(db: &Connection, name: &str) -> Result<(), (axum::http::StatusCode, String)> {
-    let automation: bool = db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM scripts WHERE name=?1 AND capability='automation')",
-            [name],
-            |r| r.get(0),
-        )
-        .map_err(db_error)?;
+fn ensure_hook(db: &Store, name: &str) -> Result<(), (axum::http::StatusCode, String)> {
+    let automation = db.script_is_automation(name).map_err(db_error)?;
     if automation {
         return Err(crate::fail(
             axum::http::StatusCode::CONFLICT,
@@ -46,7 +40,7 @@ fn ensure_hook(db: &Connection, name: &str) -> Result<(), (axum::http::StatusCod
     Ok(())
 }
 
-fn db_error(e: rusqlite::Error) -> (axum::http::StatusCode, String) {
+fn db_error(e: agentworks_database::StorageError) -> (axum::http::StatusCode, String) {
     crate::fail(
         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
         format!("Script storage failed: {e}"),
@@ -54,12 +48,12 @@ fn db_error(e: rusqlite::Error) -> (axum::http::StatusCode, String) {
 }
 
 /// Scripts with the current compile error of each enabled one.
-fn annotated(app: &crate::App, db: &Connection) -> crate::ApiResult {
+fn annotated(app: &crate::App, db: &Store) -> crate::ApiResult {
     let scripts = app.scripts.scripts(db).map_err(db_error)?;
     Ok(axum::Json(json!({"scripts": scripts})))
 }
 
-fn reloaded(app: &crate::App, db: &Connection) -> crate::ApiResult {
+fn reloaded(app: &crate::App, db: &Store) -> crate::ApiResult {
     app.scripts.reload(db).map_err(db_error)?;
     annotated(app, db)
 }
@@ -68,7 +62,7 @@ pub async fn get_scripts(
     axum::extract::State(app): axum::extract::State<crate::App>,
 ) -> crate::ApiResult {
     let store = app.store.lock().unwrap();
-    annotated(&app, &store.connection)
+    annotated(&app, &store)
 }
 
 /// Install or replace a script after validating all of its hook registrations.
@@ -84,13 +78,13 @@ pub async fn put_script(
             "Script names are lowercase letters, digits, - or _ ending in .star",
         ));
     }
-    ensure_hook(&app.store.lock().unwrap().connection, &name)?;
+    ensure_hook(&app.store.lock().unwrap(), &name)?;
     app.scripts
         .check(&name, &body.source)
         .map_err(|d| crate::fail(StatusCode::BAD_REQUEST, d.to_string()))?;
     let store = app.store.lock().unwrap();
-    save(&store.connection, &name, &body.source).map_err(db_error)?;
-    reloaded(&app, &store.connection)
+    save(&store, &name, &body.source).map_err(db_error)?;
+    reloaded(&app, &store)
 }
 
 pub async fn put_enabled(
@@ -99,14 +93,14 @@ pub async fn put_enabled(
     axum::Json(body): axum::Json<Enabled>,
 ) -> crate::ApiResult {
     let store = app.store.lock().unwrap();
-    ensure_hook(&store.connection, &name)?;
-    if !set_enabled(&store.connection, &name, body.enabled).map_err(db_error)? {
+    ensure_hook(&store, &name)?;
+    if !set_enabled(&store, &name, body.enabled).map_err(db_error)? {
         return Err(crate::fail(
             axum::http::StatusCode::NOT_FOUND,
             "Script not found",
         ));
     }
-    reloaded(&app, &store.connection)
+    reloaded(&app, &store)
 }
 
 /// Human-only routing control; scripts cannot set their own precedence.
@@ -123,11 +117,11 @@ pub async fn put_priority(
         ));
     }
     let store = app.store.lock().unwrap();
-    ensure_hook(&store.connection, &name)?;
-    if !set_priority(&store.connection, &name, body.priority).map_err(db_error)? {
+    ensure_hook(&store, &name)?;
+    if !set_priority(&store, &name, body.priority).map_err(db_error)? {
         return Err(crate::fail(StatusCode::NOT_FOUND, "Script not found"));
     }
-    reloaded(&app, &store.connection)
+    reloaded(&app, &store)
 }
 
 pub async fn delete_script(
@@ -136,19 +130,19 @@ pub async fn delete_script(
 ) -> crate::ApiResult {
     use axum::http::StatusCode;
     let store = app.store.lock().unwrap();
-    ensure_hook(&store.connection, &name)?;
-    match delete(&store.connection, &name).map_err(db_error)? {
+    ensure_hook(&store, &name)?;
+    match delete(&store, &name).map_err(db_error)? {
         Removal::Missing => Err(crate::fail(StatusCode::NOT_FOUND, "Script not found")),
         Removal::Builtin => Err(crate::fail(
             StatusCode::CONFLICT,
             "Built-in scripts can be disabled, not deleted",
         )),
-        Removal::Deleted | Removal::Restored => reloaded(&app, &store.connection),
+        Removal::Deleted | Removal::Restored => reloaded(&app, &store),
     }
 }
 
 /// Seed built-ins and start the interpreter thread with the enabled scripts.
-pub fn start(db: &Connection) -> Result<Hub, String> {
+pub fn start(db: &Store) -> Result<Hub, String> {
     seed(db).map_err(|e| e.to_string())?;
     let engine = Arc::new(Engine::new()?);
     crate::automations::migrate_scripts(db, &engine)?;

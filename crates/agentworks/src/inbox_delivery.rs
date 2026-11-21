@@ -6,7 +6,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use rusqlite::{OptionalExtension, Transaction, params};
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -21,19 +21,8 @@ fn now() -> u64 {
     crate::limit_resume::now()
 }
 
-pub const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS inbox_policies(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, policy TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS inbox_policy_requests(session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, request_id TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(session_id,request_id));
-CREATE TABLE IF NOT EXISTS inbox_deliveries(message_id INTEGER PRIMARY KEY REFERENCES agent_messages(id),recipient TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,generation INTEGER NOT NULL,state TEXT NOT NULL,request_id TEXT,reason TEXT);
-CREATE INDEX IF NOT EXISTS inbox_delivery_pending ON inbox_deliveries(recipient,state,message_id);
-CREATE TABLE IF NOT EXISTS reply_requests(message_id INTEGER PRIMARY KEY REFERENCES agent_messages(id),requester TEXT NOT NULL,reply_id INTEGER);
-CREATE INDEX IF NOT EXISTS reply_requests_reply ON reply_requests(reply_id);
-";
 /// A queued delivery that answers its recipient's own reply request. It wakes the
 /// requester once even without a standing policy, and policy changes leave it queued.
-const REPLY_WAKE: &str =
-    "message_id IN (SELECT reply_id FROM reply_requests WHERE reply_id IS NOT NULL)";
-
 pub use agentworks_session::origins::InboxTurn as Turn;
 /// A session's wake policy. `deadline: None` is a standing authorization that does not
 /// expire on its own; `max_turns: None` means no total-turn cap.
@@ -142,23 +131,20 @@ impl Input {
         Ok(())
     }
 }
-fn load(db: &rusqlite::Connection, id: &str) -> Result<Policy> {
-    let raw: Option<String> = db
-        .query_row(
-            "SELECT policy FROM inbox_policies WHERE session_id=?1",
-            [id],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(error)?;
-    raw.map(|v| serde_json::from_str(&v).map_err(error))
-        .unwrap_or_else(|| Ok(Policy::unconfigured()))
+fn load(db: &agentworks_database::inbox::Inbox<'_>, id: &str) -> Result<Policy> {
+    Ok(db
+        .policy(id)
+        .map_err(error)?
+        .unwrap_or_else(Policy::unconfigured))
 }
-fn save(db: &rusqlite::Connection, id: &str, p: &Policy) -> Result<()> {
-    db.execute("INSERT INTO inbox_policies(session_id,policy) VALUES(?1,?2) ON CONFLICT(session_id) DO UPDATE SET policy=excluded.policy",params![id,serde_json::to_string(p).map_err(error)?]).map_err(error)?;
-    Ok(())
+fn save(db: &agentworks_database::inbox::Inbox<'_>, id: &str, p: &Policy) -> Result<()> {
+    db.save_policy(id, p).map_err(error)
 }
-pub(crate) fn cancel_db(db: &rusqlite::Connection, id: &str, reason: &str) -> Result<()> {
+pub(crate) fn cancel_db(
+    db: &agentworks_database::inbox::Inbox<'_>,
+    id: &str,
+    reason: &str,
+) -> Result<()> {
     let mut p = load(db, id)?;
     if !p.enabled {
         return Ok(());
@@ -170,7 +156,7 @@ pub(crate) fn cancel_db(db: &rusqlite::Connection, id: &str, reason: &str) -> Re
         p.reason = Some(reason.into());
         save(db, id, &p)?;
     }
-    db.execute(&format!("UPDATE inbox_deliveries SET state='cancelled',reason=?2 WHERE recipient=?1 AND (state='claimed' OR (state='queued' AND NOT {REPLY_WAKE}))"),params![id,reason]).map_err(error)?;
+    db.cancel_non_reply(id, reason).map_err(error)?;
     Ok(())
 }
 /// Only a captured active turn token can authorize cancellation. Ledger history never can.
@@ -199,7 +185,11 @@ pub(crate) fn interrupt_inflight(s: &Session, reason: &str) -> Result<()> {
     } else {
         d.status = "cancelling".into();
     }
-    let result=s.store.lock().unwrap().connection.execute("UPDATE inbox_deliveries SET reason=?4 WHERE recipient=?1 AND request_id=?2 AND generation=?3",params![s.id,owner.request_id,owner.generation as i64,format!("Cancellation requested: {reason}")]);
+    let result = s.store.lock().unwrap().inbox().set_turn_reason(
+        &s.id,
+        &owner,
+        &format!("Cancellation requested: {reason}"),
+    );
     drop(d);
     if !matches!(result,Ok(n) if n>0) {
         fail_closed(s, "Could not persist exact inbox cancellation");
@@ -236,7 +226,7 @@ pub(crate) fn fail_closed(s: &Session, reason: &str) {
         // Best effort when the underlying disk is unavailable. A durable pre-submission
         // claim already exists; startup reconciliation never replays it.
         if let Some(owner) = &owner {
-            let _ = store.connection.execute("UPDATE inbox_deliveries SET state='paused',reason=?4 WHERE recipient=?1 AND request_id=?2 AND generation=?3",params![s.id,owner.request_id,owner.generation as i64,reason]);
+            let _ = store.inbox().set_turn_state(&s.id, owner, "paused", reason);
         }
     }
     s.emit(
@@ -247,8 +237,8 @@ pub(crate) fn fail_closed(s: &Session, reason: &str) {
 pub fn cancel(s: &Session, reason: &str) -> Result<()> {
     let result = (|| -> Result<()> {
         let mut store = s.store.lock().unwrap();
-        let tx = store.connection.transaction().map_err(error)?;
-        cancel_db(&tx, &s.id, reason)?;
+        let tx = store.transaction().map_err(error)?;
+        cancel_db(&tx.inbox(), &s.id, reason)?;
         tx.commit().map_err(error)
     })();
     let interrupted = interrupt_inflight(s, reason);
@@ -261,7 +251,14 @@ pub fn cancel(s: &Session, reason: &str) -> Result<()> {
 /// queued and claimed deliveries are dropped (the messages stay in the inbox) and an
 /// in-flight inbox turn is interrupted. Messages arriving afterwards wake as usual.
 pub fn stop(s: &Session, reason: &str) -> Result<()> {
-    let result = s.store.lock().unwrap().connection.execute("UPDATE inbox_deliveries SET state='cancelled',reason=?2 WHERE recipient=?1 AND state IN ('queued','claimed')",params![s.id,reason]).map(|_| ()).map_err(error);
+    let result = s
+        .store
+        .lock()
+        .unwrap()
+        .inbox()
+        .stop(&s.id, reason)
+        .map(|_| ())
+        .map_err(error);
     let interrupted = interrupt_inflight(s, reason);
     if result.is_err() || interrupted.is_err() {
         fail_closed(s, "Could not persist inbox stop; inspection required");
@@ -271,7 +268,12 @@ pub fn stop(s: &Session, reason: &str) -> Result<()> {
 /// A sender that can no longer message (grant revoked, moved project, deleted) loses its
 /// queued wakes. No recipient's authorization changes; their other mail still wakes them.
 pub fn drop_from_sender(app: &App, s: &Session, reason: &str) -> Result<()> {
-    app.store.lock().unwrap().connection.execute("UPDATE inbox_deliveries SET state='cancelled',reason=?2 WHERE state='queued' AND message_id IN (SELECT id FROM agent_messages WHERE sender=?1)",params![s.id,reason]).map_err(error)?;
+    app.store
+        .lock()
+        .unwrap()
+        .inbox()
+        .drop_sender(&s.id, reason)
+        .map_err(error)?;
     Ok(())
 }
 /// Recheck the exact queued owner at the native boundary. An obsolete command is
@@ -292,7 +294,12 @@ pub(crate) fn begin(s: &Session, owner: &Turn, native: &str) -> bool {
         return true;
     }
     if d.status == "cancelling" && d.storage_error.is_none() {
-        let result=s.store.lock().unwrap().connection.execute("UPDATE inbox_deliveries SET state='cancelled',reason='Revoked before native submission' WHERE recipient=?1 AND request_id=?2 AND generation=?3",params![s.id,owner.request_id,owner.generation as i64]);
+        let result = s.store.lock().unwrap().inbox().set_turn_state(
+            &s.id,
+            owner,
+            "cancelled",
+            "Revoked before native submission",
+        );
         if matches!(result,Ok(n) if n>0) {
             d.inbox_turn = None;
             d.turn_active = false;
@@ -316,7 +323,10 @@ pub(crate) fn begin(s: &Session, owner: &Turn, native: &str) -> bool {
 fn acknowledge_delivered(s: &Session, owner: &Turn) {
     let changed = {
         let store = s.store.lock().unwrap();
-        let changed = store.connection.execute("UPDATE agent_messages SET acknowledged=1 WHERE recipient=?1 AND acknowledged=0 AND length(text)<=256 AND id IN (SELECT message_id FROM inbox_deliveries WHERE recipient=?1 AND request_id=?2 AND generation=?3)",params![s.id,owner.request_id,owner.generation as i64]).unwrap_or(0);
+        let changed = store
+            .inbox()
+            .acknowledge_delivered(&s.id, owner)
+            .unwrap_or(0);
         (changed > 0).then(|| store.unacknowledged(&s.id).unwrap_or(0))
     };
     if let Some(unacknowledged) = changed {
@@ -336,7 +346,12 @@ pub fn finished(s: &Session, owner: Option<&Turn>) {
     if d.inbox_turn.as_ref() != Some(owner) {
         return;
     }
-    let result=s.store.lock().unwrap().connection.execute("UPDATE inbox_deliveries SET state='sent',reason='Native turn terminated' WHERE recipient=?1 AND request_id=?2 AND generation=?3",params![s.id,owner.request_id,owner.generation as i64]);
+    let result = s.store.lock().unwrap().inbox().set_turn_state(
+        &s.id,
+        owner,
+        "sent",
+        "Native turn terminated",
+    );
     if !matches!(result,Ok(n) if n>0) {
         drop(d);
         fail_closed(s, "Could not persist exact inbox turn termination");
@@ -358,68 +373,52 @@ pub fn finished(s: &Session, owner: Option<&Turn>) {
 /// closed this exact claim. It cannot reopen or rewrite that completed record.
 fn submission_record(s: &Session, owner: &Turn, sent: bool) -> Result<()> {
     let mut store = s.store.lock().unwrap();
-    let tx = store.connection.transaction().map_err(error)?;
-    tx.execute("UPDATE inbox_deliveries SET state=?4,reason=?5 WHERE recipient=?1 AND request_id=?2 AND generation=?3 AND state='claimed' AND reason IS NOT 'Native turn terminated'",params![s.id,owner.request_id,owner.generation as i64,if sent{"sent"}else{"paused"},if sent{None}else{Some("Native submission uncertain; inspect before reauthorization")}]).map_err(error)?;
+    let tx = store.transaction().map_err(error)?;
+    tx.inbox().submission(&s.id, owner, sent).map_err(error)?;
     tx.commit().map_err(error)
 }
 /// Enroll a newly committed message; this never creates or enables a policy. An enabled
 /// policy enrolls all mail. A first reply to the recipient's own open reply request
 /// enrolls on its own: the recipient asked to be woken by exactly that reply.
-pub fn enqueue(
-    tx: &Transaction<'_>,
-    recipient: &str,
-    message: i64,
-    reply_to: Option<i64>,
-) -> Result<()> {
-    let reply = match reply_to {
-        Some(request) => {
-            tx.execute(
-                "UPDATE reply_requests SET reply_id=?3 WHERE message_id=?1 AND requester=?2 AND reply_id IS NULL",
-                params![request, recipient, message],
-            )
-            .map_err(error)?
-                > 0
-        }
-        None => false,
-    };
-    let p = load(tx, recipient)?;
+pub(crate) fn enrollment(
+    raw: Option<&str>,
+    reply: bool,
+    pending: i64,
+) -> agentworks_database::Result<agentworks_database::mail::DeliveryDecision> {
+    use agentworks_database::mail::DeliveryDecision;
+    let p = raw
+        .map(serde_json::from_str::<Policy>)
+        .transpose()?
+        .unwrap_or_else(Policy::unconfigured);
     if !p.enabled && !reply {
-        return Ok(());
+        return Ok(DeliveryDecision::Ignore);
     }
-    let pending: i64 = tx
-        .query_row(
-            "SELECT count(*) FROM inbox_deliveries WHERE recipient=?1 AND state='queued'",
-            [recipient],
-            |r| r.get(0),
-        )
-        .map_err(error)?;
     let eligible = pending < 20 && (reply || (!p.expired(now()) && !p.turns_exhausted()));
-    tx.execute("INSERT INTO inbox_deliveries(message_id,recipient,generation,state,reason) VALUES(?1,?2,?3,?4,?5)",params![message,recipient,p.generation as i64,if eligible {"queued"}else{"cancelled"},if eligible {None}else{Some("Authorization or pending-message bound reached")}]).map_err(error)?;
-    Ok(())
+    Ok(if eligible {
+        DeliveryDecision::Queue {
+            generation: p.generation,
+        }
+    } else {
+        DeliveryDecision::Cancel {
+            generation: p.generation,
+            reason: "Authorization or pending-message bound reached".into(),
+        }
+    })
 }
-fn reply_waiting(db: &rusqlite::Connection, id: &str) -> Result<bool> {
-    db.query_row(
-        &format!("SELECT EXISTS(SELECT 1 FROM inbox_deliveries WHERE recipient=?1 AND state='queued' AND {REPLY_WAKE})"),
-        [id],
-        |r| r.get(0),
-    )
-    .map_err(error)
+fn reply_waiting(db: &agentworks_database::inbox::Inbox<'_>, id: &str) -> Result<bool> {
+    db.reply_waiting(id).map_err(error)
 }
 /// Mail that dispatch would deliver once the session is running: current-generation
 /// mail under a live policy, or a reply wake.
 fn mail_waiting(app: &App, s: &Session) -> bool {
     let store = app.store.lock().unwrap();
-    let Ok(p) = load(&store.connection, &s.id) else {
+    let Ok(p) = load(&store.inbox(), &s.id) else {
         return false;
     };
     let live = p.enabled && !p.expired(now()) && !p.turns_exhausted();
     store
-        .connection
-        .query_row(
-            &format!("SELECT EXISTS(SELECT 1 FROM inbox_deliveries d WHERE d.recipient=?1 AND d.state='queued' AND ((?2 AND d.generation=?3) OR d.{REPLY_WAKE}))"),
-            params![s.id, live, p.generation as i64],
-            |r| r.get(0),
-        )
+        .inbox()
+        .mail_waiting(&s.id, live, p.generation)
         .unwrap_or(false)
 }
 pub async fn get(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
@@ -429,17 +428,9 @@ fn snapshot(app: &App, id: &str) -> ApiResult {
     let s = session(&app, &id)?;
     let held = hold_reason(app, &s);
     let store = app.store.lock().unwrap();
-    let p = load(&store.connection, &id)?;
-    let mut q=store.connection.prepare("SELECT message_id,state,request_id,reason FROM inbox_deliveries WHERE recipient=?1 ORDER BY message_id DESC LIMIT 40").map_err(error)?;
-    let pending: i64 = store
-        .connection
-        .query_row(
-            "SELECT count(*) FROM inbox_deliveries WHERE recipient=?1 AND state='queued'",
-            [id],
-            |r| r.get(0),
-        )
-        .map_err(error)?;
-    let rows=q.query_map([id],|r|Ok(json!({"messageId":r.get::<_,i64>(0)?,"state":r.get::<_,String>(1)?,"requestId":r.get::<_,Option<String>>(2)?,"reason":r.get::<_,Option<String>>(3)?}))).map_err(error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(error)?;
+    let p = load(&store.inbox(), &id)?;
+    let pending = store.inbox().pending(id).map_err(error)?;
+    let rows = store.inbox().deliveries(id).map_err(error)?;
     Ok(Json(
         json!({"policy":p,"pending":pending,"held":held,"deliveries":rows}),
     ))
@@ -458,17 +449,12 @@ pub async fn configure(
     }
     let payload = serde_json::to_string(&input).map_err(error)?;
     // Retry lookup precedes time validation: an expired identical request cannot reauthorize.
-    let prior: Option<String> = app
+    let prior = app
         .store
         .lock()
         .unwrap()
-        .connection
-        .query_row(
-            "SELECT payload FROM inbox_policy_requests WHERE session_id=?1 AND request_id=?2",
-            params![id, input.request_id],
-            |r| r.get(0),
-        )
-        .optional()
+        .inbox()
+        .policy_request(&id, &input.request_id)
         .map_err(error)?;
     if let Some(prior) = prior {
         if prior != payload {
@@ -505,8 +491,8 @@ pub async fn configure(
         mail::require(&app, &s, "communicate")?;
     }
     let mut store = app.store.lock().unwrap();
-    let tx = store.connection.transaction().map_err(error)?;
-    let old = load(&tx, &id)?;
+    let tx = store.transaction().map_err(error)?;
+    let old = load(&tx.inbox(), &id)?;
     let p = Policy {
         enabled: input.enabled,
         generation: old.generation + 1,
@@ -550,14 +536,13 @@ pub async fn configure(
         ..Default::default()
     };
     // Reply wakes are their own authorization; only Stop or archive drops them.
-    tx.execute(&format!("UPDATE inbox_deliveries SET state='cancelled',reason='Policy replaced by human' WHERE recipient=?1 AND (state='claimed' OR (state='queued' AND NOT {REPLY_WAKE}))"),[&id]).map_err(error)?;
-    save(&tx, &id, &p)?;
-    tx.execute(
-        "INSERT INTO inbox_policy_requests(session_id,request_id,payload) VALUES(?1,?2,?3)",
-        params![id, input.request_id, payload],
-    )
-    .map_err(error)?;
-    tx.execute("INSERT INTO agent_audit(actor,action,target,outcome,created) VALUES('human','inbox_policy',?1,?2,?3)",params![id,payload,now() as i64]).map_err(error)?;
+    tx.inbox()
+        .cancel_non_reply(&id, "Policy replaced by human")
+        .map_err(error)?;
+    save(&tx.inbox(), &id, &p)?;
+    tx.inbox()
+        .record_policy_request(&id, &input.request_id, &payload, now() as i64)
+        .map_err(error)?;
     tx.commit().map_err(error)?;
     drop(store);
     interrupt_inflight(&s, "Human replaced inbox policy")?;
@@ -595,17 +580,9 @@ fn restart_reason(p: &Policy) -> Option<String> {
 /// turn is never replayed: it stays paused for inspection. Unclaimed queued mail stays queued
 /// and is dispatched only after the same native context is attached and every gate passes.
 pub fn reconcile(store: &mut crate::store::Store) -> Result<()> {
-    let tx = store.connection.transaction().map_err(error)?;
-    tx.execute("UPDATE inbox_deliveries SET state='paused',reason='Restart during claim; inspect native results; this batch will not be replayed' WHERE state='claimed' OR (state='sent' AND reason IS NOT 'Native turn terminated')",[]).map_err(error)?;
-    let rows = {
-        let mut q = tx
-            .prepare("SELECT session_id,policy FROM inbox_policies")
-            .map_err(error)?;
-        q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-            .map_err(error)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(error)?
-    };
+    let tx = store.transaction().map_err(error)?;
+    tx.inbox().pause_interrupted().map_err(error)?;
+    let rows = tx.inbox().policies().map_err(error)?;
     for (id, raw) in rows {
         // Legacy finite policies load unchanged; only enabled saved authorizations are judged.
         let p: Policy = serde_json::from_str(&raw).map_err(error)?;
@@ -613,7 +590,7 @@ pub fn reconcile(store: &mut crate::store::Store) -> Result<()> {
             continue;
         }
         match restart_reason(&p) {
-            Some(reason) => cancel_db(&tx, &id, &reason)?,
+            Some(reason) => cancel_db(&tx.inbox(), &id, &reason)?,
             None => {
                 let label = if p.standing() {
                     "Standing authorization"
@@ -624,7 +601,7 @@ pub fn reconcile(store: &mut crate::store::Store) -> Result<()> {
                 preserved.reason = Some(format!(
                     "{label} preserved across the service restart; disable at any time"
                 ));
-                save(&tx, &id, &preserved)?;
+                save(&tx.inbox(), &id, &preserved)?;
             }
         }
     }
@@ -765,7 +742,7 @@ fn hold_reason(app: &App, s: &Session) -> Option<&'static str> {
 /// Follow the session to its current project, native context and directory. The human
 /// authorized wakes for this session, not for a snapshot of where it used to be.
 fn rebind(
-    db: &rusqlite::Connection,
+    db: &agentworks_database::inbox::Inbox<'_>,
     s: &Session,
     p: &mut Policy,
     project: Option<String>,
@@ -792,8 +769,8 @@ fn dispatch_inner(app: &App, s: &Session, human_pending: bool) -> Result<()> {
     let (mut p, replies) = {
         let store = app.store.lock().unwrap();
         (
-            load(&store.connection, &s.id)?,
-            reply_waiting(&store.connection, &s.id)?,
+            load(&store.inbox(), &s.id)?,
+            reply_waiting(&store.inbox(), &s.id)?,
         )
     };
     if !p.enabled && !replies {
@@ -834,7 +811,7 @@ fn dispatch_inner(app: &App, s: &Session, human_pending: bool) -> Result<()> {
     };
     if p.enabled {
         rebind(
-            &app.store.lock().unwrap().connection,
+            &app.store.lock().unwrap().inbox(),
             s,
             &mut p,
             project,
@@ -865,20 +842,22 @@ fn dispatch_inner(app: &App, s: &Session, human_pending: bool) -> Result<()> {
         return Ok(());
     }
     // Current-generation mail under a standing policy, plus reply wakes from any generation.
-    let eligible = format!(
-        "d.recipient=?1 AND d.state='queued' AND ((?2 AND d.generation=?3) OR d.{REPLY_WAKE})"
-    );
-    let oldest:Option<i64>=app.store.lock().unwrap().connection.query_row(&format!("SELECT min(m.created) FROM inbox_deliveries d JOIN agent_messages m ON m.id=d.message_id WHERE {eligible}"),params![s.id,p.enabled,p.generation as i64],|r|r.get(0)).map_err(error)?;
+    let oldest = app
+        .store
+        .lock()
+        .unwrap()
+        .inbox()
+        .oldest(&s.id, p.enabled, p.generation)
+        .map_err(error)?;
     if oldest.is_some_and(|t| now() < (t as u64) + cooldown as u64 * 1000) {
         return Ok(());
     }
     let mut messages = {
         let store = app.store.lock().unwrap();
-        let mut q=store.connection.prepare(&format!("SELECT m.id,m.sender,m.sender_title,m.text,m.reply_to FROM inbox_deliveries d JOIN agent_messages m ON m.id=d.message_id WHERE {eligible} ORDER BY m.id LIMIT ?4")).map_err(error)?;
-        q.query_map(params![s.id,p.enabled,p.generation as i64,batch],|r| {
-            let body = r.get::<_, String>(3)?;
-            Ok(json!({"id":r.get::<_,i64>(0)?,"sender":r.get::<_,String>(1)?,"senderTitle":r.get::<_,String>(2)?.chars().take(80).collect::<String>(),"text":body.chars().take(256).collect::<String>(),"truncated":body.chars().count() > 256,"replyTo":r.get::<_,Option<i64>>(4)?}))
-        }).map_err(error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(error)?
+        store
+            .inbox()
+            .eligible_messages(&s.id, p.enabled, p.generation, batch)
+            .map_err(error)?
     };
     // Mail from a sender that can no longer message here is dropped; the rest still wakes.
     let (valid, stale): (Vec<_>, Vec<_>) = messages.drain(..).partition(|m| {
@@ -887,7 +866,12 @@ fn dispatch_inner(app: &App, s: &Session, human_pending: bool) -> Result<()> {
             .is_ok()
     });
     for m in &stale {
-        app.store.lock().unwrap().connection.execute("UPDATE inbox_deliveries SET state='cancelled',reason='Sender can no longer message this session' WHERE message_id=?1 AND state='queued'",[m["id"].as_i64()]).map_err(error)?;
+        app.store
+            .lock()
+            .unwrap()
+            .inbox()
+            .drop_stale(m["id"].as_i64())
+            .map_err(error)?;
     }
     let messages = valid;
     if messages.is_empty() {
@@ -900,11 +884,14 @@ fn dispatch_inner(app: &App, s: &Session, human_pending: bool) -> Result<()> {
     p.last_dispatch = now();
     {
         let mut store = app.store.lock().unwrap();
-        let tx = store.connection.transaction().map_err(error)?;
-        save(&tx, &s.id, &p)?;
+        let tx = store.transaction().map_err(error)?;
+        save(&tx.inbox(), &s.id, &p)?;
         for m in &messages {
             // Reply wakes join this owner's generation so completion and cancellation match.
-            let claimed=tx.execute("UPDATE inbox_deliveries SET state='claimed',request_id=?2,generation=?3 WHERE message_id=?1 AND state='queued'",params![m["id"].as_i64(),request,p.generation as i64]).map_err(error)?;
+            let claimed = tx
+                .inbox()
+                .claim(m["id"].as_i64(), &request, p.generation)
+                .map_err(error)?;
             if claimed != 1 {
                 return Err(error("Queued message was not durably claimed"));
             }
@@ -952,7 +939,7 @@ pub async fn scheduler(app: App) {
         for s in sessions {
             if s.host_id != "local" {
                 // Host checks are remote calls: a default policy only earns one with mail queued.
-                let authorized = load(&app.store.lock().unwrap().connection, &s.id)
+                let authorized = load(&app.store.lock().unwrap().inbox(), &s.id)
                     .is_ok_and(|p| p.enabled && !p.is_default());
                 if !authorized && !mail_waiting(&app, &s) {
                     continue;
@@ -1070,7 +1057,7 @@ mod tests {
             .store
             .lock()
             .unwrap()
-            .connection
+            .test_connection()
             .execute(
                 "INSERT INTO inbox_policy_requests VALUES('recipient','legacy-human',?1)",
                 [payload],
@@ -1253,7 +1240,7 @@ mod tests {
                 max_batch: 2,
                 ..Default::default()
             };
-            save(&store.lock().unwrap().connection, &recipient.id, &p).unwrap();
+            save(&store.lock().unwrap().inbox(), &recipient.id, &p).unwrap();
             Self {
                 app,
                 recipient,
@@ -1279,16 +1266,12 @@ mod tests {
                 .store
                 .lock()
                 .unwrap()
-                .connection
+                .test_connection()
                 .execute("UPDATE agent_messages SET created=created-10000", [])
                 .unwrap();
         }
         fn p(&self) -> Policy {
-            load(
-                &self.app.store.lock().unwrap().connection,
-                &self.recipient.id,
-            )
-            .unwrap()
+            load(&self.app.store.lock().unwrap().inbox(), &self.recipient.id).unwrap()
         }
         fn dispatch(&self, human: bool) {
             dispatch_one(&self.app, &self.recipient, human).unwrap();
@@ -1369,7 +1352,7 @@ mod tests {
         let (done, completed) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             let store = session.store.lock().unwrap();
-            rebind(&store.connection, &session, &mut policy, project, native).unwrap();
+            rebind(&store.inbox(), &session, &mut policy, project, native).unwrap();
             done.send(()).unwrap();
         });
         // A concurrent publisher may hold session state while waiting for the
@@ -1423,14 +1406,14 @@ mod tests {
         assert_eq!(snapshot(&f.app, &f.recipient.id).unwrap().0["pending"], 20);
         let mut p = f.p();
         p.last_dispatch = now();
-        save(&f.app.store.lock().unwrap().connection, &f.recipient.id, &p).unwrap();
+        save(&f.app.store.lock().unwrap().inbox(), &f.recipient.id, &p).unwrap();
         f.dispatch(false);
         assert!(f.receiver.try_recv().is_err());
         f.app
             .store
             .lock()
             .unwrap()
-            .connection
+            .test_connection()
             .execute(
                 "UPDATE inbox_deliveries SET state='claimed' WHERE message_id=1",
                 [],
@@ -1442,7 +1425,7 @@ mod tests {
         f.drain();
         let mut p = f.p();
         p.last_dispatch = 0;
-        save(&f.app.store.lock().unwrap().connection, &f.recipient.id, &p).unwrap();
+        save(&f.app.store.lock().unwrap().inbox(), &f.recipient.id, &p).unwrap();
         f.dispatch(false);
         assert!(matches!(
             f.receiver.try_recv(),
@@ -1482,7 +1465,7 @@ mod tests {
         f.message("one");
         let mut p = f.p();
         p.attempts = p.max_turns.unwrap();
-        save(&f.app.store.lock().unwrap().connection, &f.recipient.id, &p).unwrap();
+        save(&f.app.store.lock().unwrap().inbox(), &f.recipient.id, &p).unwrap();
         f.dispatch(false);
         assert!(!f.p().enabled);
         assert!(f.receiver.try_recv().is_err());
@@ -1513,7 +1496,7 @@ mod tests {
         ));
         let mut p = f.p();
         p.deadline = Some(now() - 1);
-        save(&f.app.store.lock().unwrap().connection, &f.recipient.id, &p).unwrap();
+        save(&f.app.store.lock().unwrap().inbox(), &f.recipient.id, &p).unwrap();
         f.dispatch(false);
         assert!(!f.p().enabled);
         assert!(matches!(
@@ -1556,13 +1539,13 @@ mod tests {
         let path = root.join("db.sqlite3");
         {
             let store = crate::store::Store::open(&path).unwrap();
-            store.connection.execute_batch("DROP TABLE inbox_deliveries; DROP TABLE inbox_policy_requests; DROP TABLE inbox_policies; INSERT INTO sessions VALUES('retained','{}','{}'); INSERT INTO agent_access VALUES('retained','{\"communicate\":true}'); INSERT INTO agent_messages(sender,sender_title,recipient,recipient_title,text,created,request_id) VALUES('retained','Original','retained','Original','Keep history',1,'stable'); PRAGMA user_version=6;").unwrap();
+            store.test_connection().execute_batch("DROP TABLE inbox_deliveries; DROP TABLE inbox_policy_requests; DROP TABLE inbox_policies; INSERT INTO sessions VALUES('retained','{}','{}'); INSERT INTO agent_access VALUES('retained','{\"communicate\":true}'); INSERT INTO agent_messages(sender,sender_title,recipient,recipient_title,text,created,request_id) VALUES('retained','Original','retained','Original','Keep history',1,'stable'); PRAGMA user_version=6;").unwrap();
         }
         {
             let store = crate::store::Store::open(&path).unwrap();
             assert_eq!(
                 store
-                    .connection
+                    .test_connection()
                     .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                     .unwrap(),
                 crate::store::SCHEMA_VERSION
@@ -1572,7 +1555,7 @@ mod tests {
                 store.mailbox("retained", 0).unwrap()["messages"][0]["text"],
                 "Keep history"
             );
-            let policy = load(&store.connection, "retained").unwrap();
+            let policy = load(&store.inbox(), "retained").unwrap();
             assert!(policy.enabled && policy.is_default());
         }
         std::fs::remove_dir_all(root).unwrap();
@@ -1628,7 +1611,7 @@ mod tests {
                 .store
                 .lock()
                 .unwrap()
-                .connection
+                .test_connection()
                 .execute_batch(sql)
                 .unwrap();
         }
@@ -1652,7 +1635,7 @@ mod tests {
             let mut p = self.p();
             p.last_dispatch = 0;
             save(
-                &self.app.store.lock().unwrap().connection,
+                &self.app.store.lock().unwrap().inbox(),
                 &self.recipient.id,
                 &p,
             )
@@ -1663,7 +1646,7 @@ mod tests {
             let mut p = self.p();
             edit(&mut p);
             save(
-                &self.app.store.lock().unwrap().connection,
+                &self.app.store.lock().unwrap().inbox(),
                 &self.recipient.id,
                 &p,
             )
@@ -1857,7 +1840,7 @@ mod tests {
         let rows = |f: &Fixture| -> i64 {
             let store = f.app.store.lock().unwrap();
             store
-                .connection
+                .test_connection()
                 .query_row("SELECT count(*) FROM inbox_policies", [], |r| r.get(0))
                 .unwrap()
         };
@@ -2028,7 +2011,7 @@ mod tests {
             .store
             .lock()
             .unwrap()
-            .connection
+            .test_connection()
             .query_row(
                 "SELECT acknowledged FROM agent_messages WHERE request_id='long'",
                 [],
@@ -2043,7 +2026,7 @@ mod tests {
         f.message("one");
         let store = f.app.store.lock().unwrap();
         let id: i64 = store
-            .connection
+            .test_connection()
             .query_row("SELECT max(id) FROM agent_messages", [], |r| r.get(0))
             .unwrap();
         assert_eq!(store.unacknowledged(&f.recipient.id).unwrap(), 1);
@@ -2296,7 +2279,7 @@ mod tests {
                 ));
                 let mut p = f.p();
                 p.generation += 10;
-                save(&f.app.store.lock().unwrap().connection, &f.recipient.id, &p).unwrap();
+                save(&f.app.store.lock().unwrap().inbox(), &f.recipient.id, &p).unwrap();
                 f.human_turn();
                 let due = f.recipient.data.lock().unwrap().continuation.due_at;
                 // Includes late completion callbacks and every C-06 revocation entry point.
@@ -2348,7 +2331,7 @@ mod tests {
             f.drain();
             let mut p = f.p();
             p.generation += 1;
-            save(&f.app.store.lock().unwrap().connection, &f.recipient.id, &p).unwrap();
+            save(&f.app.store.lock().unwrap().inbox(), &f.recipient.id, &p).unwrap();
             cancel(&f.recipient, action).unwrap();
             let command = f.receiver.try_recv().unwrap();
             assert!(command.cancels(Some(&old)));
@@ -2387,7 +2370,7 @@ mod tests {
             .store
             .lock()
             .unwrap()
-            .connection
+            .test_connection()
             .query_row("SELECT state FROM sessions WHERE id='recipient'", [], |r| {
                 r.get(0)
             })
@@ -2421,7 +2404,7 @@ mod tests {
             .store
             .lock()
             .unwrap()
-            .connection
+            .test_connection()
             .query_row("SELECT state FROM sessions WHERE id='recipient'", [], |r| {
                 r.get(0)
             })
@@ -2574,7 +2557,7 @@ mod tests {
             f.sender.data.lock().unwrap().project_id = Some(project.clone());
             let mut p = f.p();
             p.project = Some(project.clone());
-            save(&f.app.store.lock().unwrap().connection, &f.recipient.id, &p).unwrap();
+            save(&f.app.store.lock().unwrap().inbox(), &f.recipient.id, &p).unwrap();
             f.message("one");
             f.dispatch(false);
             let owner = f.owner();

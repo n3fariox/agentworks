@@ -32,37 +32,14 @@ pub(crate) fn matching_sessions(
     let catalog = app.catalog.lock().unwrap().data.clone();
     let observed: HashMap<String, i64> = {
         let store = app.store.lock().unwrap();
-        let read = || -> rusqlite::Result<HashMap<String, i64>> {
-            let mut statement = store.connection.prepare(
-                "SELECT session_id,observed_at FROM github_pr_tracking
-                 WHERE lower(json_extract(scope,'$[0]'))=lower(?1)
-                   AND lower(json_extract(scope,'$[1]'))=lower(?2)
-                   AND lower(json_extract(scope,'$[2]'))=lower(?3)
-                   AND json_extract(snapshot,?4) IS NOT NULL",
-            )?;
-            statement
-                .query_map(
-                    rusqlite::params![
-                        query.host,
-                        query.owner,
-                        query.repo,
-                        format!("$.\"{}\"", query.number)
-                    ],
-                    |row| {
-                        Ok((
-                            row.get(0)?,
-                            row.get::<_, Option<i64>>(1)?.unwrap_or_default(),
-                        ))
-                    },
-                )?
-                .collect()
-        };
-        read().map_err(|_| {
-            fail(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Could not find PR sessions",
-            )
-        })?
+        store
+            .tracked_sessions_for_pr(&query.host, &query.owner, &query.repo, query.number)
+            .map_err(|_| {
+                fail(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Could not find PR sessions",
+                )
+            })?
     };
     let sessions: Vec<_> = app.sessions.lock().unwrap().values().cloned().collect();
     let mut matches = Vec::new();
@@ -169,7 +146,7 @@ mod tests {
                 (&ids[4], "github.com", "other", 17),
                 (&ids[5], "github.com", "repo", 18),
             ] {
-                store.connection.execute("INSERT INTO github_pr_tracking(session_id,scope,snapshot,status,observed_at) VALUES (?1,?2,?3,'unavailable',123)",rusqlite::params![id,json!([host,"team",repo,"other-account","feature/topic"]).to_string(),json!({number.to_string():{"number":number}}).to_string()]).unwrap();
+                store.test_connection().execute("INSERT INTO github_pr_tracking(session_id,scope,snapshot,status,observed_at) VALUES (?1,?2,?3,'unavailable',123)",rusqlite::params![id,json!([host,"team",repo,"other-account","feature/topic"]).to_string(),json!({number.to_string():{"number":number}}).to_string()]).unwrap();
             }
         }
         let Json(value) = sessions(
@@ -209,7 +186,7 @@ mod tests {
             .store
             .lock()
             .unwrap()
-            .connection
+            .test_connection()
             .execute("DELETE FROM github_pr_tracking", [])
             .unwrap();
         let Json(value) = sessions(

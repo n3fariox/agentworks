@@ -1499,7 +1499,7 @@ mod tests {
             router: std::sync::Arc::default(),
             github: std::sync::Arc::new(crate::github::Hub::default()),
             web_auth: Default::default(),
-            progress: crate::tool_progress::Hub::empty(),
+            scripts: agentworks_scripting::Hub::empty(),
         };
         TestApp { app, root }
     }

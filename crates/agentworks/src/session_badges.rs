@@ -1,11 +1,11 @@
 //! Stored session badges. Existing hooks stage set/clear operations; the host
 //! commits them for the session bound to that invocation after it succeeds.
 use crate::{ApiResult, App, Session, SessionData, session};
+use agentworks_database::Store;
 use axum::{
     Json,
     extract::{Path, Query, State},
 };
-use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -75,13 +75,10 @@ fn validate(value: &Value, source: &str) -> Result<Vec<Badge>, String> {
     }
     Ok(badges)
 }
-fn enabled(db: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
-    let mut query=db.prepare("SELECT s.name,s.hash FROM scripts s LEFT JOIN script_order o ON s.name=o.name WHERE s.enabled=1 ORDER BY COALESCE(o.priority,0) DESC,s.name COLLATE BINARY")?;
-    query
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect()
+fn enabled(db: &Store) -> agentworks_database::StorageResult<Vec<(String, String)>> {
+    db.enabled_scripts()
 }
-fn visible(data: &SessionData, db: &Connection) -> Vec<Badge> {
+fn visible(data: &SessionData, db: &Store) -> Vec<Badge> {
     let mut sources = enabled(db).unwrap_or_default();
     sources.push((GITHUB.into(), "host".into()));
     let mut ids = HashSet::new();
@@ -121,7 +118,7 @@ fn visible(data: &SessionData, db: &Connection) -> Vec<Badge> {
     }
     badges
 }
-fn payload(data: &SessionData, db: &Connection) -> Value {
+fn payload(data: &SessionData, db: &Store) -> Value {
     json!({"badges":visible(data,db),"badgesAt":now(),"badgeRevision":data.badge_revision})
 }
 /// Apply one successful callback atomically. The source/session are host bound,
@@ -135,14 +132,9 @@ pub fn apply(s: &Session, source: &str, hash: &str, effects: &[Value]) -> Result
     }
     let mut data = s.data.lock().unwrap();
     let mut store = s.store.lock().unwrap();
-    let db = &store.connection;
-    let current: Option<String> = db
-        .query_row(
-            "SELECT hash FROM scripts WHERE name=?1 AND enabled=1",
-            [source],
-            |r| r.get(0),
-        )
-        .optional()
+    let db = &store;
+    let current = db
+        .enabled_script_hash(source)
         .map_err(|_| "Could not check badge source")?;
     if current.as_deref() != Some(hash) {
         return Ok(());
@@ -210,7 +202,7 @@ pub fn apply(s: &Session, source: &str, hash: &str, effects: &[Value]) -> Result
         data.script_badges = previous;
         return Err("Could not persist badge changes".into());
     }
-    let event = payload(&data, &store.connection);
+    let event = payload(&data, &store);
     drop(store);
     drop(data);
     let _ = s.tx.send(json!({"kind":"session_badges","data":event}));
@@ -320,14 +312,14 @@ pub async fn context(
 pub(crate) fn stored_payload(s: &Session) -> Value {
     let data = s.data.lock().unwrap();
     let store = s.store.lock().unwrap();
-    payload(&data, &store.connection)
+    payload(&data, &store)
 }
 /// Reads stored state only: never fetches GitHub or runs a script.
 pub async fn list(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     let s = session(&app, &id)?;
     let data = s.data.lock().unwrap();
     let store = s.store.lock().unwrap();
-    Ok(Json(payload(&data, &store.connection)))
+    Ok(Json(payload(&data, &store)))
 }
 
 #[cfg(test)]

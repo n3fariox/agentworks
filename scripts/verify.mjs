@@ -49,7 +49,7 @@ try{
   }
   assert(ready,'Server readiness timed out');
   // Presentation projections, installed hooks and the interpreter engine.
-  await run('cargo',['test','--locked','-p','agentworks-presentation','-p','agentworks-scripting','-p','agentworks-starlark']);
+  await run('cargo',['test','--locked','-p','agentworks-database','-p','agentworks-presentation','-p','agentworks-scripting','-p','agentworks-starlark']);
   await run('node',['--test','tests/bazel-progress.test.mjs']);
   await run('node',['--test','tests/fixture-cleanup.test.mjs']);
   await runLanes(smokeLanes);

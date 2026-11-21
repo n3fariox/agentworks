@@ -8,28 +8,30 @@ The pinned Rust and Zig toolchains are selected by `mise exec -- cargo …` or
 
 | Crate | Owns |
 | --- | --- |
-| `agentworks` | Executable, live application/session handles, HTTP and WebSocket handlers, MCP, persistence, authorization, and scheduling |
+| `agentworks` | Executable, live application/session handles, HTTP and WebSocket handlers, MCP, persistence orchestration, authorization, and scheduling |
+| `agentworks-database` | Application SQLite schema, migrations, row encoding, session/event storage, mailbox and automation ledgers, script/role/controller records, and database snapshot verification |
 | `agentworks-runtime` | Provider setup and executable discovery, ACP negotiation/model/history discovery, SSH supervision and transport, remote worker execution |
 | `agentworks-session` | Serialized session payloads and identities, input queue transitions, continuation decisions, timeout policies and activity clocks |
 | `agentworks-terminal` | PTY processes and cleanup, Ghostty emulation, presentation frames, incremental history, and terminal input |
 | `agentworks-workspace` | Bounded Git execution and inspection, comparisons, worktree policies, preparation, ownership verification, dirty fingerprints, removal, and restoration |
 | `agentworks-presentation` | Sanitized Markdown and inline HTML, prose-line selection/application, transcript compaction, tool identity and bounded display summaries |
-| `agentworks-scripting` | Installed hook definitions, built-in upgrades, precedence, compilation, interpreter scheduling and ephemeral hook results |
+| `agentworks-scripting` | Hook installation policy, shipped sources, compilation, interpreter scheduling and ephemeral hook results |
 | `agentworks-starlark` | Typed interpreter APIs, capability checks, progress parsing, experimental workflow decisions, worker binary, and bundled Starlark sources |
 | `agentworks-worker` | The `agentworks-worker` executable for remote hosts and the subcommand dispatch shared with the service: worker loop, ACP bridges, MCP stdio relay. Feature `goose` (default) embeds Goose |
 | `agentworks-goose-acp` | Embedded Goose harness behind ACP: system prompts, exact forks, Codex subscription tokens, usage reporting |
 | `agentworks-claude-acp`, `agentworks-codex-acp`, `agentworks-demo-acp` | Native ACP bridges started as `agentworks <bridge>` subprocesses |
 
-The service depends on runtime, session, terminal, workspace, presentation,
+The service depends on database, runtime, session, terminal, workspace, presentation,
 scripting, Starlark and worker; the bridges and Goose reach it only through worker.
 Runtime depends on terminal and workspace; session depends on workspace for
-recorded worktree ownership. Scripting depends on presentation and Starlark;
+recorded worktree ownership. Scripting depends on database, presentation and Starlark;
 presentation depends on neither scripting nor the server. There are no dependencies
 back to the service. The runtime, session, terminal, and workspace libraries do
 not accept `App` or live `Session` handles, and do not depend on Axum or SQLite.
-Scripting accepts an existing SQLite connection so the application can retain its
-transaction and locking boundaries. The lower-level Starlark crate also owns an
-experimental workflow store.
+Database depends on the serialized session model, serde and SQLite, and has no
+server, interpreter, Tokio, terminal or Axum dependency. Scripting consumes its
+public `Store` API. The lower-level Starlark crate retains its separate
+experimental workflow store and schema; it does not use the application database.
 
 ## Presentation and scripting
 
@@ -42,7 +44,9 @@ browser snapshots without modifying stored events. Its dependency graph contains
 no Starlark interpreter, SQLite, Tokio or Axum.
 
 `agentworks-scripting` owns installed hooks and their execution lifecycle. Its
-registry handles source, enablement, precedence and built-in upgrades. Its host
+registry supplies shipped sources and annotates stored records with interpreter
+registrations and diagnostics. Database owns source persistence, enablement,
+precedence and the SQL for built-in upgrades. Its host
 compiles handlers and schedules progress, header, chat, inbox and GitHub hooks on
 one interpreter thread. Hook evaluation and ephemeral caches belong here; HTTP
 routes, live session lookup, authorization and durable effect commits do not.
@@ -63,9 +67,47 @@ not the production library or server. Presentation tests can run without linking
 the interpreter or the server. Cargo and Bazel test commands are listed in
 [development and verification](TESTING.md#rust-library-loops).
 
+## Database
+
+`agentworks-database` owns all SQL for the application's `sessions.sqlite3`,
+including schemas previously spread across inbox delivery, controllers, scripts,
+roles, automations, GitHub tracking, queued input and restart handling. Schema
+version 15 and the existing initialization order are preserved. Input queue and
+restart tables still initialize through their original startup entry points.
+There is no data migration or new database file in this extraction.
+
+The connection and SQLite row decoders are private. APIs express durable
+operations rather than accepting arbitrary SQL or row-mapping callbacks. Session
+creation still commits events, grants, audit, control origin, automation run and
+creation reservation together. Automation saves and their scripts/request ledger,
+completion reports and audit, queued input bindings and session state, and mailbox
+messages/replies/wake enrollment retain their atomic commits.
+
+For decisions that must happen between reads and writes, an opaque transaction
+provides restricted `inbox`, `tracking` and `reviews` repository views. Dropping
+it rolls back all views. Message enrollment accepts a policy callback while the
+transaction is open; that callback receives the saved policy and delivery facts,
+and returns a queue/cancel decision without SQL access. Server scheduling,
+authorization, snapshot interpretation, script execution, live session state and
+routing remain outside the database crate.
+
+The server's small `store.rs` adapter converts automation definitions and terminal
+frames at the boundary. Database derives automation indexes and side effects
+from the serialized definition so they cannot disagree with it; interpreter types
+never enter its API. Script records contain source,
+BLAKE3 hash, enablement and priority; compilation and hook metadata remain in
+scripting. Offline recovery keeps backup manifests, catalog validation, retention,
+and filesystem publication in the server; database integrity checks, immutable
+snapshots and table/sequence comparison live in the library.
+
+A `test-support` feature exposes a connection only for existing migration,
+corruption and fault-injection fixtures. It is a dev dependency in Cargo. Bazel
+uses separate test-only database and scripting variants so production targets do
+not enable it or mix incompatible Rust crate identities.
+
 ## Application adapters
 
-The terminal registry, saved-history persistence, session archive checks, remote
+The terminal registry, saved-history adapters, session archive checks, remote
 terminal selection, and browser WebSocket protocol remain in the application.
 The terminal library exports handles, frames, inputs, and local PTY spawning.
 
@@ -116,13 +158,14 @@ overrides. `agentworks agent --stdio` remains the remote worker entry point.
 
 Further boundaries should follow ownership rather than individual helper files:
 
-- Persistence and recovery: event storage, transcript queries, migrations,
-  retention and restore. Keep cross-feature transactions explicit before moving
-  the shared database facade.
+- Recovery and configuration: backup manifests, catalog JSON, retention and
+  filesystem publication can be separated from command-line/server adapters.
+  Application SQLite persistence is now centralized in the database crate.
 - Coordination: attributed messages, tasks, completions, controller relationships
   and their permissions.
-- Automation: schedules, trigger evaluation, execution ledgers and action requests;
-  application adapters perform authorized session operations.
+- Automation: definitions, schedules, trigger evaluation and effect policy;
+  database APIs maintain ledgers, and application adapters perform authorized
+  session operations.
 - GitHub: credentials, API queries, polling and normalized observations; the
   application joins those observations to live sessions and automation actions.
 - Host administration and access: enrollment/service management and browser

@@ -11,14 +11,19 @@ Plain `cargo test` selects the server's default workspace member and does not ru
 dependency crates' unit tests. For focused loops:
 
 ```sh
+scripts/mise-cargo.sh test --locked -p agentworks-database
 scripts/mise-cargo.sh test --locked -p agentworks-presentation
 scripts/mise-cargo.sh test --locked -p agentworks-scripting
 scripts/mise-cargo.sh test --locked -p agentworks
 ```
 
-`npm run test:presentation` and `npm run test:scripting` run the first two commands.
-`npm run verify` includes both libraries alongside the Starlark engine tests.
+`npm run test:database`, `npm run test:presentation` and `npm run test:scripting`
+run the library commands. `npm run verify` includes all three libraries alongside
+the Starlark engine tests. Database tests compile without the server, interpreter
+or terminal/native build. The original persistence tests and cross-table rollback
+tests run in this independent loop.
 With the Bazel baseline available, the corresponding targets are
+`//crates/agentworks-database:unit_test`,
 `//crates/agentworks-presentation:unit_test`,
 `//crates/agentworks-presentation:chat_test`,
 `//crates/agentworks-scripting:unit_test`, and
@@ -30,7 +35,7 @@ override **both** paths for branch-specific checks:
 
 ```sh
 scripts/mise-cargo.sh --config 'build.build-dir=".cache/rust-build"' test --locked \
-  --target-dir .cache/rust-target -p agentworks-presentation -p agentworks-scripting
+  --target-dir .cache/rust-target -p agentworks-database -p agentworks-presentation -p agentworks-scripting
 ```
 
 `--target-dir` alone does not override a configured `build.build-dir`.
