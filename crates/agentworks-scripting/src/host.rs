@@ -1,265 +1,38 @@
-//! U-05 tool progress and inbox message formatting from Starlark scripts (E-01).
-//!
-//! Scripts are stored in SQLite and compiled once; there is no reloading from
-//! disk. The shipped Bazel parser is seeded as a built-in. Tool updates reach a
-//! single dedicated interpreter thread from `Session::emit`, so evaluation never runs
-//! on async request threads. Derived progress is temporary: it is published as
-//! unsequenced `tool_progress` events, included in snapshots, never persisted,
-//! and rebuilt from the retained event window after a restart. Inbox formatting
-//! uses the same thread and script installation lifecycle, as do tool card
-//! headers (`tool_headers`). Raw events and tool status remain authoritative; a
-//! parser failure only removes progress.
-
-use agentworks_starlark::engine::{
-    Capability, Compiled, Diagnostic, Engine, HookInfo, content_hash,
-};
+//! Interpreter scheduling, hook evaluation, and ephemeral derived results.
+use crate::headers::{HeaderTracker, Headers};
+use crate::{Script, list};
+use agentworks_starlark::engine::{Capability, Compiled, Diagnostic, Engine, content_hash};
 use agentworks_starlark::progress::{StarlarkParser, ToolProgress};
-use rusqlite::{Connection, OptionalExtension, params};
-use serde::Serialize;
+use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, mpsc};
 use tokio::sync::broadcast;
 
-use crate::tool_headers::{HeaderTracker, Headers};
-
-/// `script_order` holds human-set routing priorities. It is an additive table;
-/// older binaries ignore it and retain filename ordering.
-pub const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS scripts(name TEXT PRIMARY KEY,capability TEXT NOT NULL,source TEXT NOT NULL,hash TEXT NOT NULL,enabled INTEGER NOT NULL,builtin INTEGER NOT NULL,updated INTEGER NOT NULL);
-  CREATE TABLE IF NOT EXISTS script_order(name TEXT PRIMARY KEY,priority INTEGER NOT NULL);";
-
-/// Accepted routing priorities; scripts without one use 0.
-pub const PRIORITY_RANGE: std::ops::RangeInclusive<i64> = -1000..=1000;
-
-/// Shipped scripts. A built-in follows the shipped source until a user saves
-/// their own version under the same name; it can be disabled but not deleted.
-const BUILTIN: &[(&str, &str)] = &[
-    (
-        "bazel_progress.star",
-        agentworks_starlark::BAZEL_PROGRESS_SCRIPT,
-    ),
-    (
-        "inbox_message.star",
-        agentworks_starlark::INBOX_MESSAGE_SCRIPT,
-    ),
-    ("tool_header.star", agentworks_starlark::TOOL_HEADER_SCRIPT),
-];
+#[cfg(test)]
+use crate::SCHEMA;
+#[cfg(test)]
+use crate::registry::BUILTIN;
+#[cfg(test)]
+use crate::{Removal, delete, save, seed, set_enabled, set_priority, valid_name};
+#[cfg(test)]
+use rusqlite::params;
 
 /// Derived views retained per session; the oldest are dropped first.
 const MAX_VIEWS_PER_SESSION: usize = 1000;
 
-#[derive(Serialize)]
-pub struct Script {
-    pub name: String,
-    pub capability: String,
-    /// Validated installation-time registrations, in declaration order.
-    pub hooks: Vec<HookInfo>,
-    pub source: String,
-    pub hash: String,
-    pub enabled: bool,
-    /// Routing priority: higher runs first, then filename, then declaration order.
-    pub priority: i64,
-    /// Follows the shipped source (unmodified built-in).
-    pub builtin: bool,
-    /// The name of a shipped script, whether or not the user modified it.
-    pub shipped: bool,
-    pub updated: i64,
-    /// Current compile/type error for an enabled script, if any.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-pub fn valid_name(name: &str) -> bool {
-    let stem = name.strip_suffix(".star").unwrap_or("");
-    !stem.is_empty()
-        && stem.len() <= 64
-        && stem
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
-}
-
-fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
-
-/// Insert missing built-ins and move unmodified built-ins to the shipped source.
-pub fn seed(db: &Connection) -> rusqlite::Result<()> {
-    // Preserve saved edits, enable flags and ownership. Legacy assignments become
-    // explicit declarations once; filename routing is no longer used.
-    let legacy = {
-        let mut query = db.prepare("SELECT name,capability,source FROM scripts WHERE capability IN ('parser','message_formatter')")?;
-        query
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    let tx = db.unchecked_transaction()?;
-    for (name, capability, mut source) in legacy {
-        source.push_str(if capability == "parser" {
-            "\nagent.register_progress(on_line, command_pattern = COMMAND_PATTERN, display_name = DISPLAY_NAME)\n"
-        } else {
-            "\nagent.register_formatter(format_message, message_type = \"inbox.peer\")\n"
-        });
-        tx.execute(
-            "UPDATE scripts SET capability='hooks',source=?2,hash=?3 WHERE name=?1",
-            params![name, source, content_hash(&source)],
-        )?;
-    }
-    tx.commit()?;
-    db.execute("DELETE FROM script_order WHERE name IN (SELECT name FROM scripts WHERE name='github_badges.star' AND builtin=1)",[])?;
-    db.execute(
-        "DELETE FROM scripts WHERE name='github_badges.star' AND builtin=1",
-        [],
-    )?;
-    for (name, source) in BUILTIN {
-        let hash = content_hash(source);
-        let existing: Option<(bool, String)> = db
-            .query_row(
-                "SELECT builtin,hash FROM scripts WHERE name=?1",
-                [name],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        match existing {
-            None => {
-                db.execute("INSERT INTO scripts(name,capability,source,hash,enabled,builtin,updated) VALUES (?1,'hooks',?2,?3,1,1,?4)",
-                    params![name, source, hash, now()])?;
-            }
-            Some((true, current)) if current != hash => {
-                db.execute(
-                    "UPDATE scripts SET source=?2,hash=?3,updated=?4 WHERE name=?1",
-                    params![name, source, hash, now()],
-                )?;
-            }
-            Some(_) => {}
-        }
-    }
-    Ok(())
-}
-
-/// All scripts in routing order: priority descending, then filename by byte
-/// value. Hooks within a script keep declaration order.
-pub fn list(db: &Connection) -> rusqlite::Result<Vec<Script>> {
-    let mut stmt = db.prepare(
-        "SELECT s.name,s.capability,s.source,s.hash,s.enabled,s.builtin,s.updated,COALESCE(o.priority,0) AS priority
-         FROM scripts s LEFT JOIN script_order o ON o.name=s.name WHERE s.capability<>'automation'
-         ORDER BY priority DESC, s.name COLLATE BINARY",
-    )?;
-    stmt.query_map([], |r| {
-        Ok(Script {
-            name: r.get(0)?,
-            capability: r.get(1)?,
-            hooks: Vec::new(),
-            source: r.get(2)?,
-            hash: r.get(3)?,
-            enabled: r.get(4)?,
-            priority: r.get(7)?,
-            builtin: r.get(5)?,
-            shipped: false,
-            updated: r.get(6)?,
-            error: None,
-        })
-        .map(|mut s: Script| {
-            s.shipped = BUILTIN.iter().any(|(name, _)| *name == s.name);
-            s
-        })
-    })?
-    .collect()
-}
-
-/// Save a validated user script. Saving over a built-in makes it user-owned.
-pub fn save(db: &Connection, name: &str, source: &str) -> rusqlite::Result<()> {
-    db.execute("INSERT INTO scripts(name,capability,source,hash,enabled,builtin,updated) VALUES (?1,'hooks',?2,?3,1,0,?4)
-        ON CONFLICT(name) DO UPDATE SET source=excluded.source,hash=excluded.hash,capability=excluded.capability,builtin=0,updated=excluded.updated",
-        params![name, source, content_hash(source), now()])?;
-    Ok(())
-}
-
-pub fn set_enabled(db: &Connection, name: &str, enabled: bool) -> rusqlite::Result<bool> {
-    Ok(db.execute(
-        "UPDATE scripts SET enabled=?2,updated=?3 WHERE name=?1",
-        params![name, enabled, now()],
-    )? == 1)
-}
-
-/// Set a script's routing priority. 0 removes the explicit entry.
-pub fn set_priority(db: &Connection, name: &str, priority: i64) -> rusqlite::Result<bool> {
-    let exists = db
-        .query_row("SELECT 1 FROM scripts WHERE name=?1", [name], |_| Ok(()))
-        .optional()?
-        .is_some();
-    if exists {
-        if priority == 0 {
-            db.execute("DELETE FROM script_order WHERE name=?1", [name])?;
-        } else {
-            db.execute(
-                "INSERT INTO script_order(name,priority) VALUES (?1,?2) ON CONFLICT(name) DO UPDATE SET priority=excluded.priority",
-                params![name, priority],
-            )?;
-        }
-    }
-    Ok(exists)
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum Removal {
-    Missing,
-    /// An unmodified built-in: disable it instead.
-    Builtin,
-    Deleted,
-    /// A modified built-in went back to the shipped source.
-    Restored,
-}
-
-/// Delete a user script, or restore a modified built-in to its shipped source.
-/// Restoring keeps the priority; deleting forgets it.
-pub fn delete(db: &Connection, name: &str) -> rusqlite::Result<Removal> {
-    let builtin: Option<bool> = db
-        .query_row("SELECT builtin FROM scripts WHERE name=?1", [name], |r| {
-            r.get(0)
-        })
-        .optional()?;
-    let shipped = BUILTIN.iter().find(|(n, _)| *n == name);
-    Ok(match (builtin, shipped) {
-        (None, _) => Removal::Missing,
-        (Some(true), _) => Removal::Builtin,
-        (Some(false), Some((_, source))) => {
-            db.execute(
-                "UPDATE scripts SET source=?2,hash=?3,builtin=1,updated=?4 WHERE name=?1",
-                params![name, source, content_hash(source), now()],
-            )?;
-            Removal::Restored
-        }
-        (Some(false), None) => {
-            let tx = db.unchecked_transaction()?;
-            tx.execute("DELETE FROM scripts WHERE name=?1", [name])?;
-            tx.execute("DELETE FROM script_order WHERE name=?1", [name])?;
-            tx.commit()?;
-            Removal::Deleted
-        }
-    })
-}
-
-type Views = Arc<Mutex<HashMap<String, HashMap<String, (u64, Value)>>>>;
+type ProgressViews = Arc<Mutex<HashMap<String, HashMap<String, (u64, Value)>>>>;
 
 /// Synchronous core of the parser thread; also used directly by tests.
-pub struct Tracker {
+struct ProgressTracker {
     parsers: Vec<StarlarkParser>,
     live: HashMap<(String, String), ToolProgress>,
-    views: Views,
+    views: ProgressViews,
 }
 
-impl Tracker {
-    fn new(parsers: Vec<StarlarkParser>, views: Views) -> Self {
-        Tracker {
+impl ProgressTracker {
+    fn new(parsers: Vec<StarlarkParser>, views: ProgressViews) -> Self {
+        ProgressTracker {
             parsers,
             live: HashMap::new(),
             views,
@@ -365,7 +138,7 @@ enum Message {
 pub struct Hub {
     engine: Arc<Engine>,
     tx: mpsc::Sender<Message>,
-    views: Views,
+    views: ProgressViews,
     headers: Headers,
     /// Chat message types with an enabled formatter, so rendering skips the thread otherwise.
     chat: Arc<Mutex<HashSet<String>>>,
@@ -382,23 +155,23 @@ const MAX_CHAT_LINE_BYTES: usize = 8 * 1024;
 type ChatCache = HashMap<(String, String, String), (Option<String>, Vec<Value>)>;
 
 impl Hub {
-    pub(crate) fn engine(&self) -> Arc<Engine> {
+    pub fn engine(&self) -> Arc<Engine> {
         self.engine.clone()
     }
 
     pub fn new(engine: Arc<Engine>, parsers: Vec<StarlarkParser>) -> Self {
-        let (views, headers) = (Views::default(), Headers::default());
+        let (views, headers) = (ProgressViews::default(), Headers::default());
         let (tx, rx) = mpsc::channel::<Message>();
         let mut formatters: Vec<Arc<Compiled>> = Vec::new();
         let mut chat_formatters: Vec<Arc<Compiled>> = Vec::new();
         let mut github_hooks: Vec<Arc<Compiled>> = Vec::new();
         let mut github_failures = HashSet::new();
         let mut chat_cache = ChatCache::new();
-        let mut tracker = Tracker::new(parsers, views.clone());
+        let mut tracker = ProgressTracker::new(parsers, views.clone());
         let mut header_tracker = HeaderTracker::new(engine.clone(), headers.clone());
         let interpreter = engine.clone();
         std::thread::Builder::new()
-            .name("tool-progress".into())
+            .name("script-hooks".into())
             .spawn(move || {
                 for message in rx {
                     match message {
@@ -569,7 +342,7 @@ impl Hub {
                     }
                 }
             })
-            .expect("spawn tool-progress thread");
+            .expect("spawn script hook thread");
         Hub {
             engine,
             tx,
@@ -611,29 +384,15 @@ impl Hub {
             }
         }
     }
-    pub fn bind_badge_sessions(&self, sessions: &Arc<Mutex<HashMap<String, Arc<crate::Session>>>>) {
-        let registry = Arc::downgrade(sessions);
-        let failed = Mutex::new(HashSet::new());
-        self.engine
-            .set_badge_sink(Arc::new(move |id, source, hash, effects| {
-                let Some(registry) = registry.upgrade() else {
-                    return;
-                };
-                let target = registry.lock().unwrap().get(id).cloned();
-                if let Some(session) = target {
-                    if let Err(error) =
-                        crate::session_badges::apply(&session, source, hash, effects)
-                    {
-                        if failed.lock().unwrap().insert(format!("{source}@{hash}")) {
-                            eprintln!("Badge update from {source} failed: {error}");
-                        }
-                    }
-                }
-            }));
-    }
-
-    /// A hub with no parsers, for tests and fixtures.
-    #[cfg(test)]
+    /// Start a supported no-hooks host with the embedded interpreter preludes.
+    ///
+    /// This constructor does not read or seed a script registry. Applications
+    /// without configured scripts and external test fixtures can use it directly;
+    /// install hooks later with [`Self::reload`] if needed.
+    ///
+    /// # Panics
+    /// Panics if the embedded preludes cannot initialize. To handle that error,
+    /// construct an [`Engine`] with `Engine::new` and pass it to [`Self::new`].
     pub fn empty() -> Self {
         Hub::new(Arc::new(Engine::new().expect("host preludes")), Vec::new())
     }
@@ -711,7 +470,7 @@ impl Hub {
         Value::Object(map)
     }
 
-    /// Current tool card headers for a snapshot, keyed by `tool_headers::key`.
+    /// Current tool card headers for a snapshot, keyed by [`agentworks_presentation::tool_call::key`].
     pub fn headers(&self, session: &str) -> HashMap<String, String> {
         self.headers
             .lock()
@@ -919,173 +678,50 @@ fn compile_enabled(
     Ok((hooks.parsers, errors))
 }
 
-// HTTP API. Scripts are trusted (single-user host); validation guards mistakes.
-
-#[derive(serde::Deserialize)]
-pub struct Source {
-    source: String,
-}
-
-#[derive(serde::Deserialize)]
-pub struct Enabled {
-    enabled: bool,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Priority {
-    priority: i64,
-}
-
-fn ensure_hook(db: &Connection, name: &str) -> Result<(), (axum::http::StatusCode, String)> {
-    let automation: bool = db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM scripts WHERE name=?1 AND capability='automation')",
-            [name],
-            |r| r.get(0),
-        )
-        .map_err(db_error)?;
-    if automation {
-        return Err(crate::fail(
-            axum::http::StatusCode::CONFLICT,
-            "Manage automation scripts from the Automations tab",
-        ));
-    }
-    Ok(())
-}
-
-fn db_error(e: rusqlite::Error) -> (axum::http::StatusCode, String) {
-    crate::fail(
-        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-        format!("Script storage failed: {e}"),
-    )
-}
-
-/// Scripts with the current compile error of each enabled one.
-fn annotated(app: &crate::App, db: &Connection) -> crate::ApiResult {
-    let mut scripts = list(db).map_err(db_error)?;
-    for script in &mut scripts {
-        let compiled = if script.enabled {
-            Some(
-                app.progress
-                    .engine
-                    .compile_registered(&script.name, &script.source),
-            )
-        } else {
-            app.progress
-                .engine
-                .cached_registered(&script.name, &content_hash(&script.source))
-                .map(Ok)
-        };
-        match compiled {
-            Some(Ok(compiled)) => script.hooks = compiled.hooks.clone(),
-            Some(Err(error)) => script.error = Some(error.to_string()),
-            None => {}
+impl Hub {
+    /// Installed script metadata with registrations and current compile errors.
+    pub fn scripts(&self, db: &Connection) -> rusqlite::Result<Vec<Script>> {
+        let mut scripts = list(db)?;
+        for script in &mut scripts {
+            let compiled = if script.enabled {
+                Some(self.engine.compile_registered(&script.name, &script.source))
+            } else {
+                self.engine
+                    .cached_registered(&script.name, &content_hash(&script.source))
+                    .map(Ok)
+            };
+            match compiled {
+                Some(Ok(compiled)) => script.hooks = compiled.hooks.clone(),
+                Some(Err(error)) => script.error = Some(error.to_string()),
+                None => {}
+            }
         }
-    }
-    Ok(axum::Json(json!({"scripts": scripts})))
-}
-
-fn reloaded(app: &crate::App, db: &Connection) -> crate::ApiResult {
-    app.progress.reload(db).map_err(db_error)?;
-    annotated(app, db)
-}
-
-pub async fn get_scripts(
-    axum::extract::State(app): axum::extract::State<crate::App>,
-) -> crate::ApiResult {
-    let store = app.store.lock().unwrap();
-    annotated(&app, &store.connection)
-}
-
-/// Install or replace a script after validating all of its hook registrations.
-pub async fn put_script(
-    axum::extract::State(app): axum::extract::State<crate::App>,
-    axum::extract::Path(name): axum::extract::Path<String>,
-    axum::Json(body): axum::Json<Source>,
-) -> crate::ApiResult {
-    use axum::http::StatusCode;
-    if !valid_name(&name) {
-        return Err(crate::fail(
-            StatusCode::BAD_REQUEST,
-            "Script names are lowercase letters, digits, - or _ ending in .star",
-        ));
-    }
-    ensure_hook(&app.store.lock().unwrap().connection, &name)?;
-    app.progress
-        .check(&name, &body.source)
-        .map_err(|d| crate::fail(StatusCode::BAD_REQUEST, d.to_string()))?;
-    let store = app.store.lock().unwrap();
-    save(&store.connection, &name, &body.source).map_err(db_error)?;
-    reloaded(&app, &store.connection)
-}
-
-pub async fn put_enabled(
-    axum::extract::State(app): axum::extract::State<crate::App>,
-    axum::extract::Path(name): axum::extract::Path<String>,
-    axum::Json(body): axum::Json<Enabled>,
-) -> crate::ApiResult {
-    let store = app.store.lock().unwrap();
-    ensure_hook(&store.connection, &name)?;
-    if !set_enabled(&store.connection, &name, body.enabled).map_err(db_error)? {
-        return Err(crate::fail(
-            axum::http::StatusCode::NOT_FOUND,
-            "Script not found",
-        ));
-    }
-    reloaded(&app, &store.connection)
-}
-
-/// Human-only routing control; scripts cannot set their own precedence.
-pub async fn put_priority(
-    axum::extract::State(app): axum::extract::State<crate::App>,
-    axum::extract::Path(name): axum::extract::Path<String>,
-    axum::Json(body): axum::Json<Priority>,
-) -> crate::ApiResult {
-    use axum::http::StatusCode;
-    if !PRIORITY_RANGE.contains(&body.priority) {
-        return Err(crate::fail(
-            StatusCode::BAD_REQUEST,
-            "Script priority must be an integer from -1000 to 1000",
-        ));
-    }
-    let store = app.store.lock().unwrap();
-    ensure_hook(&store.connection, &name)?;
-    if !set_priority(&store.connection, &name, body.priority).map_err(db_error)? {
-        return Err(crate::fail(StatusCode::NOT_FOUND, "Script not found"));
-    }
-    reloaded(&app, &store.connection)
-}
-
-pub async fn delete_script(
-    axum::extract::State(app): axum::extract::State<crate::App>,
-    axum::extract::Path(name): axum::extract::Path<String>,
-) -> crate::ApiResult {
-    use axum::http::StatusCode;
-    let store = app.store.lock().unwrap();
-    ensure_hook(&store.connection, &name)?;
-    match delete(&store.connection, &name).map_err(db_error)? {
-        Removal::Missing => Err(crate::fail(StatusCode::NOT_FOUND, "Script not found")),
-        Removal::Builtin => Err(crate::fail(
-            StatusCode::CONFLICT,
-            "Built-in scripts can be disabled, not deleted",
-        )),
-        Removal::Deleted | Removal::Restored => reloaded(&app, &store.connection),
+        Ok(scripts)
     }
 }
 
-/// Seed built-ins and start the interpreter thread with the enabled scripts.
-pub fn start(db: &Connection) -> Result<Hub, String> {
+impl agentworks_presentation::chat::LineFormatter for Hub {
+    fn format_chat_in_session(
+        &self,
+        session: Option<&str>,
+        kind: &str,
+        provider: &str,
+        cwd: &str,
+        lines: Vec<String>,
+    ) -> Option<Vec<Option<String>>> {
+        Hub::format_chat_in_session(self, session, kind, provider, cwd, lines)
+    }
+}
+
+/// Seed and load standalone hook execution. Application-specific migrations
+/// must be coordinated by the caller before constructing a hub with its engine.
+#[cfg(test)]
+fn start(db: &Connection) -> Result<Hub, String> {
     seed(db).map_err(|e| e.to_string())?;
-    let engine = Arc::new(Engine::new()?);
-    crate::automations::migrate_scripts(db, &engine)?;
-    let hub = Hub::new(engine, Vec::new());
-    for error in hub.reload(db).map_err(|e| e.to_string())? {
-        eprintln!("Script disabled for this run: {error}");
-    }
+    let hub = Hub::new(Arc::new(Engine::new()?), Vec::new());
+    hub.reload(db).map_err(|e| e.to_string())?;
     Ok(hub)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1097,11 +733,11 @@ mod tests {
         db
     }
 
-    fn tracker(db: &Connection) -> Tracker {
+    fn tracker(db: &Connection) -> ProgressTracker {
         let engine = Arc::new(Engine::new().unwrap());
         let (parsers, errors) = compile_enabled(&engine, db).unwrap();
         assert!(errors.is_empty());
-        Tracker::new(parsers, Views::default())
+        ProgressTracker::new(parsers, ProgressViews::default())
     }
 
     fn fixture() -> Vec<Value> {
@@ -1120,19 +756,27 @@ mod tests {
                 published.push(p);
             }
         }
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../tests/fixtures/bazel-progress-events.json"
-        );
         let actual = serde_json::to_string_pretty(&published).unwrap() + "\n";
         if std::env::var_os("UPDATE_GOLDEN").is_some() {
+            let manifest =
+                option_env!("CARGO_MANIFEST_DIR").expect("regenerate golden fixtures with Cargo");
+            let path = std::path::Path::new(manifest)
+                .join("../../tests/fixtures/bazel-progress-events.json");
             std::fs::write(path, &actual).unwrap();
+        } else {
+            // JSON object key order is deliberately not checked: standalone and
+            // unified builds can enable different serde_json map features.
+            // Regenerate with the server selected too to preserve the fixture's
+            // existing key order rather than introducing whole-file churn.
+            assert_eq!(
+                serde_json::from_str::<Value>(include_str!(
+                    "../../../tests/fixtures/bazel-progress-events.json"
+                ))
+                .unwrap(),
+                Value::Array(published.clone()),
+                "regenerate with UPDATE_GOLDEN=1 scripts/mise-cargo.sh test --locked -p agentworks -p agentworks-scripting u05_fixture"
+            );
         }
-        assert_eq!(
-            std::fs::read_to_string(path).unwrap(),
-            actual,
-            "regenerate with UPDATE_GOLDEN=1 cargo test u05_fixture"
-        );
         let last = &published.last().unwrap()["data"];
         assert_eq!(last["parser"], "Bazel");
         assert_eq!(last["progress"]["phase"], "Testing");

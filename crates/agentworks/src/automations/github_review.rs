@@ -132,7 +132,7 @@ async fn tick(app: &App) -> Result<()> {
         }
         let recipes = scripts::resolve_all(
             &app.store.lock().unwrap().connection,
-            &app.progress.engine(),
+            &app.scripts.engine(),
             trigger(&def).unwrap(),
         );
         let mut errors = Vec::new();
@@ -224,7 +224,7 @@ async fn decide(app: &App, def: &Definition, id: &str, payload: &Value) -> Resul
     if let Some(handler) = payload["recipe"]["handler"].as_str() {
         binding.handler = handler.into();
     }
-    let recipe = scripts::resolve_source(&app.progress.engine(), &binding, source)?;
+    let recipe = scripts::resolve_source(&app.scripts.engine(), &binding, source)?;
     if payload["recipe"]["hash"] != recipe.script.hash {
         return Err("Pinned script hash does not match source".into());
     }
@@ -254,7 +254,7 @@ async fn decide(app: &App, def: &Definition, id: &str, payload: &Value) -> Resul
         ctx["instructions"] = json!(instructions);
     }
     let event = json!({"id":id,"kind":if payload["reviewRequested"]==true {"pr.review_requested"}else{"pr.assigned_to_me"},"data":{"pr":payload["pr"],"assigned":payload["assigned"],"reviewRequested":payload["reviewRequested"],"initial":payload["initial"],"subscription":payload["subscription"]}});
-    let engine = app.progress.engine();
+    let engine = app.scripts.engine();
     let script = recipe.script.clone();
     let (value, _) = tokio::task::spawn_blocking(move || engine.call(&script, &ctx, &event))
         .await?
@@ -631,7 +631,7 @@ mod tests {
         let mut store = app.store.lock().unwrap();
         let recipe = scripts::resolve(
             &store.connection,
-            &app.progress.engine(),
+            &app.scripts.engine(),
             trigger(def).unwrap(),
         )
         .unwrap();
@@ -1144,7 +1144,7 @@ agent.register_github_trigger(custom, host="github.com", repo="team/repo", accou
             "SETTINGS = None",
             &format!("SETTINGS = {}", super::super::generator::literal(&settings)),
         );
-        app.progress
+        app.scripts
             .engine()
             .compile_automation("github_review.star", &source)
             .unwrap();
@@ -1356,7 +1356,7 @@ agent.register_github_trigger(custom, host="github.com", repo="team/repo", accou
             .unwrap();
         let scope = scripts::resolve_all(
             &f.app.store.lock().unwrap().connection,
-            &f.app.progress.engine(),
+            &f.app.scripts.engine(),
             trigger(&def).unwrap(),
         )
         .unwrap()

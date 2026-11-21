@@ -461,7 +461,7 @@ async fn definition(
                     .map(|b| b.script.clone())
             })
             .unwrap_or_else(|| format!("automation_{id}.star"));
-        if !crate::tool_progress::valid_name(&name) {
+        if !agentworks_scripting::valid_name(&name) {
             return Err(fail(
                 StatusCode::BAD_REQUEST,
                 "Use a lowercase .star filename",
@@ -540,11 +540,11 @@ async fn definition(
             ));
         }
         let resolved = if let Some(source) = &source {
-            scripts::resolve_source(&app.progress.engine(), binding, source)
+            scripts::resolve_source(&app.scripts.engine(), binding, source)
         } else {
             scripts::resolve(
                 &app.store.lock().unwrap().connection,
-                &app.progress.engine(),
+                &app.scripts.engine(),
                 binding,
             )
         }
@@ -552,11 +552,11 @@ async fn definition(
         script_hash = Some(resolved.script.hash.clone());
         if input.enabled {
             let recipes = if let Some(source) = &source {
-                scripts::resolve_all_source(&app.progress.engine(), binding, source)
+                scripts::resolve_all_source(&app.scripts.engine(), binding, source)
             } else {
                 scripts::resolve_all(
                     &app.store.lock().unwrap().connection,
-                    &app.progress.engine(),
+                    &app.scripts.engine(),
                     binding,
                 )
             }
@@ -736,7 +736,7 @@ pub async fn list(State(app): State<App>) -> ApiResult {
                         .ok();
                     if let Some(source) = source
                         && let Ok((_, recipes)) =
-                            scripts::manifest(&app.progress.engine(), &binding.script, &source)
+                            scripts::manifest(&app.scripts.engine(), &binding.script, &source)
                     {
                         value["registrations"] = json!(
                             recipes
@@ -803,7 +803,7 @@ fn save(
             store
                 .save_automation_source(def, rearm.then_some(now), ledger.as_ref(), Some(source))
                 .map_err(storage)?;
-            app.progress.reload(&store.connection).map_err(storage)?;
+            app.scripts.reload(&store.connection).map_err(storage)?;
         } else {
             store
                 .save_automation(def, rearm.then_some(now), ledger.as_ref())

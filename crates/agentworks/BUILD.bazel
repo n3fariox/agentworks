@@ -1,0 +1,42 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+rust_binary(
+    name = "agentworks",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    compile_data = [
+        "//scripts:embedded_scripts",
+        "//web:assets",
+    ],
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    version = "0.1.0",
+    deps = [
+        "//crates/agentworks-runtime",
+        "//crates/agentworks-session",
+        "//crates/agentworks-starlark",
+        "//crates/agentworks-terminal",
+        "//crates/agentworks-presentation",
+        "//crates/agentworks-scripting",
+        "//crates/agentworks-worker",
+        "//crates/agentworks-workspace",
+    ] + all_crate_deps(normal = True),
+)
+
+rust_test(
+    name = "unit_test",
+    crate = ":agentworks",
+    data = [
+        "//tests:fixtures/codex-quota.mjs",
+        "@nodejs_host//:node_bin",
+    ],
+    env = {
+        "AGENTWORKS_CODEX_QUOTA_FIXTURE": "$(rootpath //tests:fixtures/codex-quota.mjs)",
+        "NODE_BIN": "$(rootpath @nodejs_host//:node_bin)",
+    },
+)

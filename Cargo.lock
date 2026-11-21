@@ -116,20 +116,20 @@ name = "agentworks"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol 3.4.0",
+ "agentworks-presentation",
  "agentworks-runtime",
+ "agentworks-scripting",
  "agentworks-session",
  "agentworks-starlark",
  "agentworks-terminal",
  "agentworks-worker",
  "agentworks-workspace",
- "ammonia",
  "axum",
  "base64 0.22.1",
  "futures",
  "jiff",
  "libc",
  "octocrab",
- "pulldown-cmark",
  "reqwest 0.13.5",
  "rig-core",
  "rig-reqwest",
@@ -191,6 +191,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentworks-presentation"
+version = "0.1.0"
+dependencies = [
+ "ammonia",
+ "pulldown-cmark",
+ "serde_json",
+]
+
+[[package]]
 name = "agentworks-runtime"
 version = "0.1.0"
 dependencies = [
@@ -209,6 +218,18 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "agentworks-scripting"
+version = "0.1.0"
+dependencies = [
+ "agentworks-presentation",
+ "agentworks-starlark",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

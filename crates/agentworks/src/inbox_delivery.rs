@@ -894,7 +894,7 @@ fn dispatch_inner(app: &App, s: &Session, human_pending: bool) -> Result<()> {
         return Ok(());
     }
     let request = format!("inbox:{}:{}:{}", s.id, p.generation, p.attempts + 1);
-    let formatted = app.progress.format_inbox_in_session(Some(&s.id), &messages);
+    let formatted = app.scripts.format_inbox_in_session(Some(&s.id), &messages);
     let text = instruction(&request, &messages, &formatted);
     p.attempts += 1;
     p.last_dispatch = now();
@@ -1185,7 +1185,7 @@ mod tests {
                 github: Arc::new(crate::github::Hub::default()),
                 web_auth: Default::default(),
 
-                progress: crate::tool_progress::Hub::empty(),
+                scripts: agentworks_scripting::Hub::empty(),
             };
             let make = |id: &str| {
                 let d:crate::SessionData=serde_json::from_value(json!({"status":"idle","seq":0,"requests":[],"models":null,"available_commands":[],"turn_active":false,"project_id":"project","provider_session_id":format!("native-{id}")})).unwrap();
@@ -1232,7 +1232,7 @@ mod tests {
                     mcp_refresh_pending: Default::default(),
                     fresh_environment: Default::default(),
                     notifications: app.notifications.clone(),
-                    progress: app.progress.clone(),
+                    scripts: app.scripts.clone(),
                     account_quota: app.account_quota.clone(),
                 });
                 app.sessions.lock().unwrap().insert(id.into(), s.clone());
