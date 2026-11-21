@@ -46,6 +46,12 @@ pub fn configuration(s: &Session) -> Vec<McpServer> {
         ]);
     vec![McpServer::Stdio(server)]
 }
+fn invalid_message_id() -> (StatusCode, String) {
+    crate::fail(
+        StatusCode::BAD_REQUEST,
+        "Invalid messageId: pass a message number or agentworks://messages/<n> URI",
+    )
+}
 fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}})
 }
@@ -255,8 +261,7 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
         }
         "acknowledge_message" => {
             mail::require_actor(app, a, "communicate")?;
-            let id = mail::message_ref(&args["messageId"])
-                .ok_or_else(|| crate::fail(StatusCode::BAD_REQUEST, "Missing messageId"))?;
+            let id = mail::message_ref(&args["messageId"]).ok_or_else(invalid_message_id)?;
             let result = mail::acknowledge(app, &a.id, id)?;
             if let Some(s) = &a.session {
                 mail::mailbox_updated(app, s, id);
@@ -265,8 +270,7 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
         }
         "read_message" => {
             mail::require_actor(app, a, "communicate")?;
-            let id = mail::message_ref(&args["messageId"])
-                .ok_or_else(|| crate::fail(StatusCode::BAD_REQUEST, "Missing messageId"))?;
+            let id = mail::message_ref(&args["messageId"]).ok_or_else(invalid_message_id)?;
             let message = app.store.lock().unwrap().read_message(&a.id, id)?;
             if let Some(s) = &a.session {
                 mail::mailbox_updated(app, s, id);

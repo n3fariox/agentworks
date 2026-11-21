@@ -191,15 +191,17 @@ impl crate::store::Store {
     }
     /// Acknowledge one received message, or all of them with `None`. An acknowledged message
     /// has been handled, so its pending wake is dropped too. Returns how many changed.
+    /// Both updates commit together, so a message is never acknowledged while its wake stays queued.
     pub fn acknowledge(&self, recipient: &str, message: Option<i64>) -> Result<usize> {
-        let count = self
-            .connection
+        let tx = self.connection.unchecked_transaction().map_err(db_error)?;
+        let count = tx
             .execute(
                 "UPDATE agent_messages SET acknowledged=1 WHERE recipient=?1 AND acknowledged=0 AND (?2 IS NULL OR id=?2)",
                 params![recipient, message],
             )
             .map_err(db_error)?;
-        self.connection.execute("UPDATE inbox_deliveries SET state='cancelled',reason='Acknowledged before delivery' WHERE recipient=?1 AND state='queued' AND message_id IN (SELECT id FROM agent_messages WHERE recipient=?1 AND acknowledged=1 AND (?2 IS NULL OR id=?2))",params![recipient, message]).map_err(db_error)?;
+        tx.execute("UPDATE inbox_deliveries SET state='cancelled',reason='Acknowledged before delivery' WHERE recipient=?1 AND state='queued' AND message_id IN (SELECT id FROM agent_messages WHERE recipient=?1 AND acknowledged=1 AND (?2 IS NULL OR id=?2))",params![recipient, message]).map_err(db_error)?;
+        tx.commit().map_err(db_error)?;
         Ok(count)
     }
     pub fn unacknowledged(&self, id: &str) -> Result<i64> {
@@ -346,10 +348,18 @@ pub fn session_ref(id: &str) -> &str {
     id.strip_prefix(SESSION_URI).unwrap_or(id)
 }
 pub const MESSAGE_URI: &str = "agentworks://messages/";
-/// Accepts a message number or an `agentworks://messages/<n>` URI.
+/// Accepts a message number, as a JSON number or a string, or an `agentworks://messages/<n>`
+/// URI. Prompts name messages by number while the tool schema types the field as a string,
+/// so `"42"` is the common form agents send.
 pub fn message_ref(v: &Value) -> Option<i64> {
-    v.as_i64()
-        .or_else(|| v.as_str()?.strip_prefix(MESSAGE_URI)?.parse().ok())
+    let n = match v.as_str() {
+        Some(s) => {
+            let s = s.trim();
+            s.strip_prefix(MESSAGE_URI).unwrap_or(s).parse().ok()?
+        }
+        None => v.as_i64()?,
+    };
+    (n > 0).then_some(n)
 }
 pub fn peer(app: &App, actor: &Session, id: &str) -> Result<Arc<Session>> {
     peer_of(app, &project(actor), id)
@@ -696,6 +706,31 @@ pub async fn audit_log(State(app): State<App>, Path(id): Path<String>) -> ApiRes
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn message_refs_accept_numbers_numeric_strings_and_uris() {
+        for v in [
+            json!(42),
+            json!("42"),
+            json!(" 42 "),
+            json!("agentworks://messages/42"),
+        ] {
+            assert_eq!(message_ref(&v), Some(42), "{v}");
+        }
+        for v in [
+            json!(null),
+            json!(0),
+            json!(-1),
+            json!("0"),
+            json!(""),
+            json!("#42"),
+            json!("agentworks://messages/"),
+            json!("agentworks://sessions/42"),
+            json!(4.2),
+        ] {
+            assert_eq!(message_ref(&v), None, "{v}");
+        }
+    }
 
     #[test]
     fn saved_coordinator_grants_imply_archive_but_participants_do_not() {
