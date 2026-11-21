@@ -181,6 +181,18 @@
             <option value="decision_model">Decision model (single-shot HTTP, falls back to round-robin)</option>
           </select>
         </fieldset>
+        <fieldset class="settings-section" id="routing-round-robin-settings"><legend>Quota &amp; usage round-robin</legend>
+          <p class="field-note">Used when Quota &amp; usage round-robin is selected, and as the automatic fallback if the decision model is unavailable.</p>
+          <label for="routing-rr-strategy">Balancing strategy</label>
+          <select id="routing-rr-strategy">
+            <option value="quota_and_sessions">Least-used quota + running sessions (balanced)</option>
+            <option value="least_used_quota">Least-used quota first</option>
+            <option value="strict_round_robin">Strict round-robin (skip exhausted)</option>
+          </select>
+          <label for="routing-rr-quota-limit">Exhausted quota threshold (%)</label>
+          <input id="routing-rr-quota-limit" type="number" min="1" max="100" step="1" value="99">
+          <p class="field-note">Candidates at or above this observed quota percentage are deprioritized as exhausted.</p>
+        </fieldset>
         <fieldset class="settings-section" id="routing-decision-settings"><legend>Decision model</legend>
           <p class="field-note">Uses OpenAI Decisions (<code>/v1/decisions</code>), Gemini Decisions (<code>/v1beta/decisions</code>), or Jev / llama.cpp System One (<code>/v1/systemone</code>) to score the session title, initial prompt, and candidate pool.</p>
           <label for="routing-decision-protocol">Decision API</label>
@@ -204,7 +216,7 @@
           <textarea id="routing-decision-instructions" rows="3" maxlength="4096" placeholder="e.g. Prefer Codex for short refactors, Claude for deep multi-file architecture work."></textarea>
         </fieldset>
         <fieldset class="settings-section"><legend>Candidate pool</legend>
-          <p class="field-note">Leave empty to automatically include all visible, available harnesses on the target host (excluding Demo).</p>
+          <p class="field-note">Leave empty to automatically include all visible, available harnesses on the target host.</p>
           <div class="project-field-heading"><h3>Configured candidates</h3><button id="add-routing-candidate" class="text-button" type="button">＋ Add candidate</button></div>
           <div id="routing-candidates"></div>
         </fieldset>

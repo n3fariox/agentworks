@@ -120,6 +120,37 @@ pub struct DecisionModelConfig {
     pub timeout_ms: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoundRobinStrategy {
+    #[default]
+    QuotaAndSessions,
+    LeastUsedQuota,
+    StrictRoundRobin,
+}
+
+fn default_quota_limit_percent() -> u8 {
+    99
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoundRobinConfig {
+    #[serde(default)]
+    pub strategy: RoundRobinStrategy,
+    #[serde(default = "default_quota_limit_percent")]
+    pub quota_limit_percent: u8,
+}
+
+impl Default for RoundRobinConfig {
+    fn default() -> Self {
+        Self {
+            strategy: RoundRobinStrategy::default(),
+            quota_limit_percent: default_quota_limit_percent(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -129,6 +160,8 @@ pub struct Settings {
     pub approach: Approach,
     #[serde(default)]
     pub candidates: Vec<Candidate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub round_robin: Option<RoundRobinConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision_model: Option<DecisionModelConfig>,
 }
@@ -142,6 +175,8 @@ pub struct ProjectSettings {
     pub approach: Option<Approach>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidates: Option<Vec<Candidate>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub round_robin: Option<RoundRobinConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision_model: Option<DecisionModelConfig>,
 }
@@ -187,6 +222,7 @@ pub fn resolve_settings(global: Option<&Settings>, project: Option<&ProjectSetti
         mode: proj.mode.unwrap_or(base.mode),
         approach: proj.approach.unwrap_or(base.approach),
         candidates: proj.candidates.clone().unwrap_or(base.candidates),
+        round_robin: proj.round_robin.clone().or(base.round_robin),
         decision_model: proj.decision_model.clone().or(base.decision_model),
     }
 }
@@ -353,8 +389,15 @@ fn validate_decision_model(
     Ok(())
 }
 
+fn validate_round_robin(cfg: &mut Option<RoundRobinConfig>) {
+    if let Some(rr) = cfg.as_mut() {
+        rr.quota_limit_percent = rr.quota_limit_percent.clamp(1, 100);
+    }
+}
+
 pub fn validate_settings(settings: &mut Settings) -> Result<(), (StatusCode, String)> {
     validate_candidates(&mut settings.candidates)?;
+    validate_round_robin(&mut settings.round_robin);
     validate_decision_model(&mut settings.decision_model)
 }
 
@@ -364,6 +407,7 @@ pub fn validate_project_settings(
     if let Some(candidates) = &mut settings.candidates {
         validate_candidates(candidates)?;
     }
+    validate_round_robin(&mut settings.round_robin);
     validate_decision_model(&mut settings.decision_model)
 }
 
@@ -682,17 +726,27 @@ fn build_pool(
 fn select_quota_round_robin(
     app: &App,
     pool: &[EligibleCandidate],
+    round_robin: Option<&RoundRobinConfig>,
     mode: Mode,
     fallback: bool,
     fallback_prefix: Option<&str>,
 ) -> RoutingDecision {
+    let rr = round_robin.cloned().unwrap_or_default();
+    let limit_fraction = f64::from(rr.quota_limit_percent.clamp(1, 100)) / 100.0;
     let mut best_idx = 0usize;
     let mut best_key = (true, i64::MAX, u64::MAX, usize::MAX);
 
     for (idx, c) in pool.iter().enumerate() {
-        let score = ((c.quota_used + c.session_load) * 10_000.0).round() as i64;
+        let exhausted = c.exhausted || c.quota_used >= limit_fraction;
+        let score = match rr.strategy {
+            RoundRobinStrategy::QuotaAndSessions => {
+                ((c.quota_used + c.session_load) * 10_000.0).round() as i64
+            }
+            RoundRobinStrategy::LeastUsedQuota => (c.quota_used * 10_000.0).round() as i64,
+            RoundRobinStrategy::StrictRoundRobin => 0,
+        };
         let last_seq = app.router.last_seq(&c.candidate_key);
-        let rank = (c.exhausted, score, last_seq, idx);
+        let rank = (exhausted, score, last_seq, idx);
         if rank < best_key {
             best_key = rank;
             best_idx = idx;
@@ -1272,6 +1326,7 @@ pub async fn route(
         Approach::QuotaRoundRobin => Ok(select_quota_round_robin(
             app,
             &pool,
+            effective.round_robin.as_ref(),
             effective.mode,
             false,
             None,
@@ -1293,6 +1348,7 @@ pub async fn route(
                     Ok(select_quota_round_robin(
                         app,
                         &pool,
+                        effective.round_robin.as_ref(),
                         effective.mode,
                         true,
                         Some(&format!("Decision model unavailable ({err})")),
@@ -1514,8 +1570,27 @@ mod tests {
                 candidate_key: candidate_key("codex-rust", None, Some("codex-mini")),
             },
         ];
-        let picked = select_quota_round_robin(&f.app, &pool, Mode::Default, false, None);
+        let picked = select_quota_round_robin(&f.app, &pool, None, Mode::Default, false, None);
         assert_eq!(picked.provider, "codex-rust");
+
+        // Strict round-robin rotates evenly when neither candidate exceeds the quota limit.
+        let strict = RoundRobinConfig {
+            strategy: RoundRobinStrategy::StrictRoundRobin,
+            quota_limit_percent: 90,
+        };
+        let first = select_quota_round_robin(&f.app, &pool, Some(&strict), Mode::Default, false, None);
+        let second = select_quota_round_robin(&f.app, &pool, Some(&strict), Mode::Default, false, None);
+        assert_ne!(first.provider, second.provider);
+
+        // Quota limit threshold marks claude-rust exhausted once quota >= 70%.
+        let tight = RoundRobinConfig {
+            strategy: RoundRobinStrategy::StrictRoundRobin,
+            quota_limit_percent: 70,
+        };
+        let capped_a = select_quota_round_robin(&f.app, &pool, Some(&tight), Mode::Default, false, None);
+        let capped_b = select_quota_round_robin(&f.app, &pool, Some(&tight), Mode::Default, false, None);
+        assert_eq!(capped_a.provider, "codex-rust");
+        assert_eq!(capped_b.provider, "codex-rust");
 
         // Role requirement filters out opencode while keeping demo.
         {
@@ -1540,6 +1615,7 @@ mod tests {
                         enabled: true,
                     },
                 ],
+                round_robin: None,
                 decision_model: None,
             });
             catalog.save(data).unwrap();
