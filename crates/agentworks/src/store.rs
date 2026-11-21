@@ -723,6 +723,7 @@ impl Store {
                 prompt_capabilities: serde_json::Value::Null,
                 worktree: None,
                 role: None,
+                routing: None,
                 native_rename: false,
                 startup: None,
             };
@@ -1060,6 +1061,7 @@ mod tests {
             prompt_capabilities: serde_json::Value::Null,
             worktree: None,
             role: None,
+            routing: None,
             native_rename: false,
             startup: None,
         };

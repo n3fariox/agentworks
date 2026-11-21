@@ -22,6 +22,12 @@ pub struct Project {
         skip_serializing_if = "Option::is_none"
     )]
     pub default_communication_role: Option<crate::communication::Role>,
+    #[serde(
+        default,
+        rename = "sessionRouting",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub session_routing: Option<crate::routing::ProjectSettings>,
     #[serde(default, rename = "locationIds")]
     pub location_ids: Vec<String>,
     /// Where new sessions in this project start on each host, keyed by host
@@ -79,6 +85,8 @@ pub struct Settings {
     /// Harnesses left out of the new-session picker; their sessions still run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden_providers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_routing: Option<crate::routing::Settings>,
 }
 pub const DEFAULT_ACTIVE_SESSIONS: u32 = 32;
 pub const MAX_ACTIVE_SESSIONS: u32 = 256;
@@ -251,6 +259,7 @@ impl Catalog {
                 archived: false,
                 tasks_enabled: false,
                 default_communication_role: role.flatten(),
+                session_routing: None,
             };
             data.projects.push(project.clone());
             project
@@ -289,6 +298,23 @@ impl Catalog {
             .workspace_policy = policy;
         self.save(data)
             .map_err(|_| "Could not save workspace policy".into())
+    }
+    pub fn set_project_session_routing(
+        &mut self,
+        id: &str,
+        routing: Option<crate::routing::ProjectSettings>,
+    ) -> Result<Project, String> {
+        let mut data = self.data.clone();
+        let project = data
+            .projects
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or("Project not found")?;
+        project.session_routing = routing;
+        let updated = project.clone();
+        self.save(data)
+            .map_err(|_| "Could not save project routing settings".to_owned())?;
+        Ok(updated)
     }
     pub fn set_archived(&mut self, id: &str, archived: bool) -> Result<Project, String> {
         let mut data = self.data.clone();
@@ -915,6 +941,7 @@ mod tests {
                 idle_sleep_minutes: Some(0),
                 git: None,
                 hidden_providers: None,
+                session_routing: None,
             })
             .unwrap();
         let mut reopened = Catalog::open(path.clone()).unwrap();

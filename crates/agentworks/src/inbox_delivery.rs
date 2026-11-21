@@ -1177,6 +1177,7 @@ mod tests {
                 hosts: crate::hosts::Hosts::new(),
                 host_usage: Arc::new(crate::host_usage::Hub::default()),
                 account_quota: Arc::default(),
+                router: Arc::default(),
                 github: Arc::new(crate::github::Hub::default()),
                 web_auth: Default::default(),
 

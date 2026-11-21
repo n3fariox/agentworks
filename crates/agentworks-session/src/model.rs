@@ -103,12 +103,32 @@ pub struct SessionData {
     /// on every new/load/resume/fork, because harnesses do not persist it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<RoleSnapshot>,
+    /// Session router decision recorded at creation, if the session was routed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<RoutingDecision>,
     /// The running turn is a native `/rename`; its reported title is adopted.
     #[serde(skip)]
     pub native_rename: bool,
     /// The startup step in progress, shown until the session is ready.
     #[serde(skip)]
     pub startup: Option<String>,
+}
+
+/// Recorded decision from the session router at creation time.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutingDecision {
+    pub mode: String,
+    pub approach: String,
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider: Option<String>,
+    #[serde(default)]
+    pub fallback: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// The resolved text of a role at the time a session was created. Later edits

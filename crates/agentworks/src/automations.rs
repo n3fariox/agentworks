@@ -508,7 +508,9 @@ async fn definition(
             "Use a name up to 80 characters and instructions up to 32 KB",
         ));
     }
-    if !agentworks_runtime::remote::PROVIDERS.contains(&input.provider.as_str()) {
+    if input.provider != "auto"
+        && !agentworks_runtime::remote::PROVIDERS.contains(&input.provider.as_str())
+    {
         return Err(fail(StatusCode::BAD_REQUEST, "Unknown harness"));
     }
     let model = input
@@ -586,8 +588,25 @@ async fn definition(
         .model_provider
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty());
-    crate::model_providers::selected(app, host, &input.provider, model_provider.as_deref()).await?;
-    let cwd = crate::hosts::directory_on(app, host, &input.provider, &input.cwd).await?;
+    if input.provider != "auto" {
+        crate::model_providers::selected(app, host, &input.provider, model_provider.as_deref())
+            .await?;
+    }
+    let cwd = if input.provider == "auto" && host != "local" {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(12),
+            crate::hosts::remote_directory(app, host, &input.cwd),
+        )
+        .await
+        .map_err(|_| {
+            fail(
+                StatusCode::REQUEST_TIMEOUT,
+                "Remote directory validation timed out",
+            )
+        })??
+    } else {
+        crate::hosts::directory_on(app, host, &input.provider, &input.cwd).await?
+    };
     let mut catalog = app.catalog.lock().unwrap();
     if input
         .project_id
@@ -908,24 +927,29 @@ async fn start(
     // A bound profile replaces the host environment as the credential source,
     // so it must still exist and be enabled on this host. Whether its key is
     // accepted is only known once the provider is contacted.
-    if let Some(profile) = def.model_provider.as_deref() {
-        crate::model_providers::selected(app, &def.host_id, &def.provider, Some(profile))
-            .await
-            .map_err(|(_, message)| {
-                fail(
-                    StatusCode::CONFLICT,
-                    format!("Model provider profile is unavailable: {message}"),
-                )
-            })?;
-    }
-    if def.host_id == "local"
-        && (!installed(&def.provider)
-            || (def.model_provider.is_none() && use_api_key() && !key_present(&def.provider)))
-    {
-        return Err(fail(
-            StatusCode::CONFLICT,
-            "Harness or its authentication is unavailable",
-        ));
+    let will_route = def.provider == "auto"
+        || crate::routing::effective_mode(app, def.project_id.as_deref())
+            == crate::routing::Mode::Always;
+    if !will_route {
+        if let Some(profile) = def.model_provider.as_deref() {
+            crate::model_providers::selected(app, &def.host_id, &def.provider, Some(profile))
+                .await
+                .map_err(|(_, message)| {
+                    fail(
+                        StatusCode::CONFLICT,
+                        format!("Model provider profile is unavailable: {message}"),
+                    )
+                })?;
+        }
+        if def.host_id == "local"
+            && (!installed(&def.provider)
+                || (def.model_provider.is_none() && use_api_key() && !key_present(&def.provider)))
+        {
+            return Err(fail(
+                StatusCode::CONFLICT,
+                "Harness or its authentication is unavailable",
+            ));
+        }
     }
     if app.sessions.lock().unwrap().values().any(|s| {
         let d = s.data.lock().unwrap();
@@ -973,6 +997,7 @@ async fn start(
             queued_prompt: Some(def.prompt),
             control_origin: None,
             fork: None,
+            ..Default::default()
         }),
     )
     .await?;

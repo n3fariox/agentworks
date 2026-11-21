@@ -99,7 +99,9 @@ fn tools(a: &mail::Access, session: bool, tasks_enabled: bool) -> Value {
         tools.push(tool("restart_service", "GLOBAL service restart. Explicit human restartService grant required. Returns durable identity immediately. wait drains all sessions; interrupt stops all harnesses. Optional handoff resumes only your saved native context once, after finishing this turn.", json!({"requestId":{"type":"string"},"mode":{"type":"string","enum":["wait","interrupt"]},"expiresInSeconds":{"type":"integer","minimum":5,"maximum":900},"release":{"type":"string"},"handoff":{"type":"boolean"},"handoffDeadline":{"type":"integer"}}), &["requestId","mode","expiresInSeconds"]));
     }
     if a.start_sessions {
-        tools.push(tool("start_session","Start a session using the project's configured communication role; no grants are copied from the caller. Does not submit a prompt. Reuse requestId on retry.",json!({"provider":{"type":"string","enum":agentworks_runtime::remote::PROVIDERS},"cwd":{"type":"string"},"inheritResumePolicy":{"type":"boolean","default":false},"title":{"type":"string"},"model":{"type":"string"},"modelProvider":{"type":"string"},"requestId":{"type":"string","maxLength":50},"workspace":{"type":"object","properties":{"mode":{"type":"string","enum":["directory","newWorktree","existingWorktree"]},"branch":{"type":"string"},"baseRef":{"type":"string"},"path":{"type":"string"}},"required":["mode"],"additionalProperties":false}}),&["provider","cwd","requestId"]));
+        let mut provider_choices: Vec<&str> = agentworks_runtime::remote::PROVIDERS.to_vec();
+        provider_choices.push("auto");
+        tools.push(tool("start_session","Start a session using the project's configured communication role; no grants are copied from the caller. Does not submit a prompt unless prompt is provided. Omit provider (or pass 'auto') to use the session router when configured; if routing is set to always, explicit provider and model choices are overridden. Reuse requestId on retry.",json!({"provider":{"type":"string","enum":provider_choices,"description":"Agent harness ID or 'auto'. May be omitted when session routing is enabled; ignored when routing is set to always."},"cwd":{"type":"string"},"inheritResumePolicy":{"type":"boolean","default":false},"title":{"type":"string"},"description":{"type":"string","maxLength":8192,"description":"Optional task description scored by the session router without submitting a turn."},"prompt":{"type":"string","maxLength":100000,"description":"Optional initial prompt queued when the session starts and scored by the session router."},"model":{"type":"string"},"modelProvider":{"type":"string"},"requestId":{"type":"string","maxLength":50},"workspace":{"type":"object","properties":{"mode":{"type":"string","enum":["directory","newWorktree","existingWorktree"]},"branch":{"type":"string"},"baseRef":{"type":"string"},"path":{"type":"string"}},"required":["mode"],"additionalProperties":false}}),&["cwd","requestId"]));
     }
     if a.prompt_sessions {
         tools.push(tool("prompt_session","Submit a new turn to an idle session in this project; starts model work. A sleeping session is woken and asks you to retry shortly. Reuse requestId on retry.",json!({"sessionId":{"type":"string","description":"Session ID or agentworks://sessions/<id> URI, passed exactly as given in list_sessions or a prompt."},"text":{"type":"string"},"requestId":{"type":"string","maxLength":50}}),&["sessionId","text","requestId"]));
@@ -137,7 +139,9 @@ fn tools(a: &mail::Access, session: bool, tasks_enabled: bool) -> Value {
     if a.manage_automations {
         let workflow = json!({"type":"object","description":"Recipe: {version:1, trigger:{kind:'manual'} or {kind:'schedule',timeZone:'Europe/Berlin',at:'09:30',days:[1..7 ISO weekdays],missed:'skip'|'runOnce'} or {kind:'once',timeZone,at:'YYYY-MM-DDTHH:MM' local, 1 minute to 1 year ahead,missed,afterRun:'complete' (pause, keep) |'delete'} or {kind:'script',script:'github_review.star',handler:'default',parameters:{host:'github.com',repo:'owner/repo',account:'login'}} (requires an enabled main-host account; unattended dispatch also requires promptSessions; ambiguous session matches are skipped), steps:[{kind:'agent',text}] (1-20, run in order in one turn)}. See docs/SCHEDULED-AUTOMATIONS.md."});
         let fields = |update: bool| {
-            let mut p = json!({"requestId":{"type":"string","maxLength":100},"name":{"type":"string","maxLength":80},"provider":{"type":"string","enum":agentworks_runtime::remote::PROVIDERS},"model":{"type":"string"},"modelProvider":{"type":"string"},"cwd":{"type":"string","description":"Run directory on your host; must be inside its allowed roots."},"enabled":{"type":"boolean","default":true},"prompt":{"type":"string","description":"Single instruction; use workflow for steps or a schedule."},"workflow":workflow.clone()});
+            let mut provider_choices: Vec<&str> = agentworks_runtime::remote::PROVIDERS.to_vec();
+            provider_choices.push("auto");
+            let mut p = json!({"requestId":{"type":"string","maxLength":100},"name":{"type":"string","maxLength":80},"provider":{"type":"string","enum":provider_choices},"model":{"type":"string"},"modelProvider":{"type":"string"},"cwd":{"type":"string","description":"Run directory on your host; must be inside its allowed roots."},"enabled":{"type":"boolean","default":true},"prompt":{"type":"string","description":"Single instruction; use workflow for steps or a schedule."},"workflow":workflow.clone()});
             if update {
                 p["automationId"] = json!({"type":"string"});
                 p["revision"] = json!({"type":"integer","description":"Revision from get_automation; a stale revision is rejected."});
@@ -332,9 +336,15 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
                 agent_access: None,
                 role: None,
                 inherited_role: None,
-                provider: field(&args, "provider")?,
+                provider: args["provider"]
+                    .as_str()
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .to_owned(),
                 cwd: field(&args, "cwd")?,
                 title: args["title"].as_str().map(str::to_owned),
+                description: args["description"].as_str().map(str::to_owned),
+                prompt: args["prompt"].as_str().map(str::to_owned),
                 model: args["model"].as_str().map(str::to_owned),
                 model_provider: args["modelProvider"].as_str().map(str::to_owned),
                 project_id: Some(scope),
@@ -354,6 +364,7 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
                     actor_title: a.session.is_none().then(|| a.title.clone()),
                 }),
                 fork: None,
+                ..Default::default()
             };
             crate::create_session(State(app.clone()), Json(req))
                 .await

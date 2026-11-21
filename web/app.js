@@ -170,9 +170,35 @@ function toast(message,tone='error') {
 }
 function el(tag,className,text) {const node=document.createElement(tag);if(className)node.className=className;if(text!==undefined)node.textContent=text;return node;}
 function basename(path) {return path.replaceAll('\\','/').split('/').filter(Boolean).at(-1)||path;}
+function effectiveSessionRouting(projectId=$('create-project')?.value||null){
+  const global=config?.sessionRouting||{mode:'off',approach:'quota_round_robin',candidates:[]};
+  if((global.mode||'off')==='off')return {...global,mode:'off'};
+  const project=projectId?projects.find(p=>p.id===projectId)?.sessionRouting:null;
+  if(!project)return global;
+  return {
+    mode:project.mode||global.mode,
+    approach:project.approach||global.approach,
+    candidates:project.candidates||global.candidates,
+    decisionModel:project.decisionModel||global.decisionModel,
+  };
+}
 function providerNote() {
-  const p=config.providers.find(p=>p.id===$('provider').value);
-  const remote=createHost();
+  const value=$('provider').value,remote=createHost(),effective=effectiveSessionRouting();
+  if(value==='auto'){
+    const modeNote=effective.mode==='always'
+      ?'Always routed is enabled: the session router chooses the agent and model automatically.'
+      :'Auto routed (default): the session router chooses the best available agent and model.';
+    if(remote){
+      const ok=remote.status==='connected'&&!!remote.roots?.length;
+      $('provider-note').textContent=ok?`${modeNote} Runs on ${remote.name}.`:`${remote.name} is unavailable or has no allowed directories.`;
+      $('create-submit').disabled=!ok||creating||worktrees.blocked();
+    }else{
+      $('provider-note').textContent=modeNote;
+      $('create-submit').disabled=creating||worktrees.blocked();
+    }
+    createChanged();return;
+  }
+  const p=config.providers.find(p=>p.id===value);
   if(remote){
     const available=remote.status==='connected'&&remote.worker?.providers?.includes(p.id);
     $('provider-note').textContent=available?`Uses ${labels[p.id]} and its provider configuration on ${remote.name}.`:`${labels[p.id]} is unavailable on ${remote.name}.`;
@@ -196,11 +222,11 @@ function renderRoles(){
   select.value=roleLibrary.some(r=>r.id===previous)?previous:'';updateRoleNote();
 }
 function updateRoleNote(){
-  const select=$('create-role'),p=config.providers.find(p=>p.id===$('provider').value);
-  if(forkSource){select.disabled=true;select.value='';$('create-role-note').textContent=!forkSource.role?'The parent has no role.':p?.roles?`Forks keep the parent's role · ${forkSource.role.name}`:`${labels[p?.id]||'This agent'} cannot fork this session because it must keep the “${forkSource.role.name}” role.`;return;}
-  select.disabled=!p?.roles;if(!p?.roles)select.value='';
+  const select=$('create-role'),val=$('provider').value,isAuto=val==='auto',p=config.providers.find(p=>p.id===val);
+  if(forkSource){select.disabled=true;select.value='';$('create-role-note').textContent=!forkSource.role?'The parent has no role.':(isAuto||p?.roles)?`Forks keep the parent's role · ${forkSource.role.name}`:`${labels[p?.id]||'This agent'} cannot fork this session because it must keep the “${forkSource.role.name}” role.`;return;}
+  select.disabled=!isAuto&&!p?.roles;if(!isAuto&&!p?.roles)select.value='';
   const role=roleLibrary.find(r=>r.id===select.value);
-  $('create-role-note').textContent=!p?.roles?`${labels[p?.id]||'This agent'} does not accept role instructions yet.`:role?(role.description||'Custom role.')+' Added to the agent\'s system prompt.':'Adds instructions to the agent\'s system prompt. Roles do not change Agentworks access.';
+  $('create-role-note').textContent=isAuto?(role?(role.description||'Custom role.')+' Only harnesses supporting roles will be routed.':'Adds instructions to the agent\'s system prompt. Selecting a role narrows the routed pool.'):!p?.roles?`${labels[p?.id]||'This agent'} does not accept role instructions yet.`:role?(role.description||'Custom role.')+' Added to the agent\'s system prompt.':'Adds instructions to the agent\'s system prompt. Roles do not change Agentworks access.';
   createChanged();
 }
 const communicationLabels={off:'Off',participant:'Participant',coordinator:'Coordinator'};
@@ -212,11 +238,23 @@ function updateCommunicationDefault(){
   createChanged();
 }
 // Most recently used harness first; hidden harnesses stay out unless a fork keeps one.
-function renderProviderPicker(keep){
+function renderProviderPicker(keep,projectId=$('create-project').value||null){
+  const effective=effectiveSessionRouting(projectId);
+  if(effective.mode==='always'){
+    const opt=el('option','','Auto · always routed');opt.value='auto';
+    $('provider').replaceChildren(opt);$('provider').value='auto';$('provider').disabled=true;
+    return;
+  }
+  $('provider').disabled=false;
   const used=readStorage(localStorage,'agentworks-provider-used',{});
   const shown=config.providers.filter(p=>!p.hidden||p.id===keep);
   const items=(shown.length?shown:config.providers).map((p,i)=>({p,i})).sort((a,b)=>(used[b.p.id]||0)-(used[a.p.id]||0)||a.i-b.i);
-  $('provider').replaceChildren(...items.map(({p})=>{const option=el('option','',p.name+(p.authMode==='api_key'&&!p.keyPresent?' · API key needed':''));option.value=p.id;return option;}));
+  const options=items.map(({p})=>{const option=el('option','',p.name+(p.authMode==='api_key'&&!p.keyPresent?' · API key needed':''));option.value=p.id;return option;});
+  if(effective.mode==='default'){
+    const auto=el('option','','Auto · routed (default)');auto.value='auto';
+    options.unshift(auto);
+  }
+  $('provider').replaceChildren(...options);
 }
 let githubCreate=null;
 function openCreate(context={}) {
@@ -224,17 +262,21 @@ function openCreate(context={}) {
   githubCreate=context.githubPr||null;worktrees.setPrefill(context.worktreePrefill||null);
   $('create-github-note').hidden=!githubCreate;$('create-github-note').textContent=githubCreate?`PR #${githubCreate.number} · ${githubCreate.host}/${githubCreate.owner}/${githubCreate.repo}. Choose a matching project/source directory. The worktree starts at this PR head; the session opens without a prompt.`:'';
   if(context.provider)context.provider=currentProvider(context.provider);
-  renderProviderPicker(context.provider);
-  updateProjectControls();
   forkSource=context.fork||null;const generation=++forkGeneration;modelPicked=false;
   const workspaceContext=workspace?.context();
   const projectId=Object.hasOwn(context,'projectId')?context.projectId:workspaceContext?.projectId??active?.projectId??null;
   $('create-project').value=projectId||'';
+  renderProviderPicker(context.provider,projectId);
+  updateProjectControls();
   const remembered=readStorage(localStorage,'agentworks-project-locations',{});
   $('create-resume-policy').checked=false;
+  $('create-initial-prompt').value='';$('create-send-initial-prompt').checked=true;$('create-initial-prompt-field').hidden=!!forkSource;
   $('create-role').value='';api('/api/roles').then(list=>{roleLibrary=Array.isArray(list)?list:[];renderRoles();}).catch(()=>{});
   $('create-agent-access').value='';updateCommunicationDefault();$('create-error').textContent='';$('directory').value=context.cwd||(projectId?projectRoot('local',projectId):workspaceContext?.cwd||remembered.ungrouped||(active?.hostId==='local'?active.cwd:null))||config.roots[0];$('session-title').value=context.title||'';
-  if(context.provider&&$('provider').querySelector(`option[value="${context.provider}"]`))$('provider').value=context.provider;
+  const effective=effectiveSessionRouting(projectId);
+  if(effective.mode==='always')$('provider').value='auto';
+  else if(context.provider&&$('provider').querySelector(`option[value="${context.provider}"]`))$('provider').value=context.provider;
+  else if(effective.mode==='default'&&!forkSource)$('provider').value='auto';
   $('fork-boundary').replaceChildren(new Option('Latest completed turn at submission',''));$('fork-context').value='auto';$('fork-summary').value='';
   renderForkHeader();fillCreateHosts(context.hostId||'local',context.cwd);providerNote();updateRoleNote();
   // Forking suggests its own worktree so the new session starts from this one's
@@ -341,6 +383,13 @@ async function openFork(parent=active){
 function resetCreateModels(){
   discoveryGeneration++;
   const select=$('create-model');select.replaceChildren();
+  if($('provider').value==='auto'){
+    const option=el('option','','Router chooses model');option.value='';select.append(option);
+    select.disabled=true;$('load-models').disabled=true;
+    $('model-note').textContent='Model is chosen by the session router.';
+    createChanged();return;
+  }
+  select.disabled=false;
   // A forked session keeps the parent's model when it keeps the parent's harness.
   const carried=forkSource?.model&&forkSource.provider===$('provider').value&&(forkSource.modelProvider||null)===modelProviders.selection()?forkSource.model:null;
   const defaultId=carried||modelProviders.defaultModel()||config.defaultModels?.[$('provider').value];
@@ -643,11 +692,25 @@ async function refreshSessions(){
   if(active){const current=sessions.find(s=>s.id===active.id);if(current){active.projectId=current.projectId;active.hostId=current.hostId;active.automation=current.automation;active.archived=current.archived;}}
   sidebar();workspace?.sync(catalog,sessions);taskMentions.refresh();
 }
+const routingModeLabels={off:'Off',default:'Default routed',always:'Always routed'};
+const routingApproachLabels={quota_round_robin:'Quota round-robin',decision_model:'Decision model'};
+function updateProjectRoutingNote(){
+  const globalMode=config?.sessionRouting?.mode||'off';
+  const globalApproach=config?.sessionRouting?.approach||'quota_round_robin';
+  $('project-routing-mode').querySelector('option[value=""]').textContent='Use global default · '+routingModeLabels[globalMode];
+  $('project-routing-approach').querySelector('option[value=""]').textContent='Use global default · '+routingApproachLabels[globalApproach];
+  $('project-routing-note').textContent=globalMode==='off'
+    ?'Global session routing is off, which overrides project routing settings.'
+    :'Overrides global session routing for new sessions in this project.';
+}
 function openProjectDialog(project=null){
   if(savingProject)return;
   editingProject=project?.id||null;$('project-dialog-title').textContent=project?'Project settings':'New project';
   $('project-name').value=project?.name||'';$('project-slug').value=project?.slug||'';$('project-tasks').hidden=!project?.tasksEnabled;$('project-tasks-enabled').checked=!!project?.tasksEnabled;updateProjectTicketFields();$('project-communication-role').value=project?.defaultCommunicationRole||'';
   $('project-communication-role').querySelector('option[value=""]').textContent='Use global default · '+communicationLabels[config.defaultCommunicationRole||'participant'];
+  $('project-routing-mode').value=project?.sessionRouting?.mode||'';
+  $('project-routing-approach').value=project?.sessionRouting?.approach||'';
+  updateProjectRoutingNote();
   $('project-error').textContent='';$('delete-project').hidden=!project;$('archive-project').hidden=!project;$('open-controllers').hidden=!project;
   $('archive-project').textContent=project?.archived?'Unarchive project':'Archive project';
   projectDirectory.open({paths:projectDirectories(project),hostId:$('create-dialog').open?$('create-host').value||'local':undefined});
@@ -1457,20 +1520,33 @@ $('dismiss-project').onclick=()=>{if(!savingProject)$('project-dialog').close();
 function updateProjectTicketFields(){$('project-slug').disabled=savingProject||!$('project-tasks-enabled').checked;}
 $('project-tasks-enabled').onchange=updateProjectTicketFields;
 $('project-dialog').addEventListener('cancel',event=>{if(savingProject)event.preventDefault();});
+function syncCreateRoutingForProject(projectId){
+  const prev=$('provider').value,effective=effectiveSessionRouting(projectId);
+  renderProviderPicker(forkSource?.provider||prev,projectId);
+  if(effective.mode==='always')$('provider').value='auto';
+  else if(effective.mode==='default'&&!forkSource&&(prev==='auto'||!$('provider').querySelector(`option[value="${prev}"]`)))$('provider').value='auto';
+  else if($('provider').querySelector(`option[value="${prev}"]`))$('provider').value=prev;
+  resetCreateModels();providerNote();modelProviders.loadCreate();updateRoleNote();
+}
 // Switching projects always moves the directory to the new project's root.
-$('create-project').onchange=()=>{const host=createHost(),projectId=$('create-project').value||null;$('directory').value=projectRoot(host?.id||'local',projectId)||(host?host.roots||[]:config.roots)[0]||'';$('directory').dispatchEvent(new Event('input'));worktrees.projectChanged();updateCommunicationDefault();};
+$('create-project').onchange=()=>{const host=createHost(),projectId=$('create-project').value||null;$('directory').value=projectRoot(host?.id||'local',projectId)||(host?host.roots||[]:config.roots)[0]||'';$('directory').dispatchEvent(new Event('input'));worktrees.projectChanged();updateCommunicationDefault();syncCreateRoutingForProject(projectId);};
 $('project-form').onsubmit=async event=>{
   event.preventDefault();if(savingProject)return;savingProject=true;
-  for(const id of ['save-project','project-name','project-tasks-enabled','project-slug','project-directory','project-directory-host','project-directory-browse','project-directory-clear','project-default-mode','project-require-worktree','project-communication-role','archive-project','delete-project','dismiss-project'])$(id).disabled=true;
+  for(const id of ['save-project','project-name','project-tasks-enabled','project-slug','project-directory','project-directory-host','project-directory-browse','project-directory-clear','project-default-mode','project-require-worktree','project-communication-role','project-routing-mode','project-routing-approach','archive-project','delete-project','dismiss-project'])$(id).disabled=true;
   $('project-error').textContent='';
   try{
     const policy=policyEditor.value(),directory=projectDirectory.value();
-    const project=await api(editingProject?`/api/projects/${editingProject}`:'/api/projects',{method:editingProject?'PATCH':'POST',body:JSON.stringify({name:$('project-name').value,tasksEnabled:$('project-tasks-enabled').checked,...($('project-tasks-enabled').checked&&$('project-slug').value?{slug:$('project-slug').value}:{}),defaultCommunicationRole:$('project-communication-role').value||null,...(directory!==undefined?{defaultLocations:directory}:{})})});
+    const existingRouting=editingProject?projects.find(p=>p.id===editingProject)?.sessionRouting:null;
+    const rMode=$('project-routing-mode').value||null,rApproach=$('project-routing-approach').value||null;
+    const nextRouting=(!rMode&&!rApproach&&!existingRouting?.candidates&&!existingRouting?.decisionModel)
+      ?null
+      :{...(existingRouting||{}),mode:rMode,approach:rApproach};
+    const project=await api(editingProject?`/api/projects/${editingProject}`:'/api/projects',{method:editingProject?'PATCH':'POST',body:JSON.stringify({name:$('project-name').value,tasksEnabled:$('project-tasks-enabled').checked,...($('project-tasks-enabled').checked&&$('project-slug').value?{slug:$('project-slug').value}:{}),defaultCommunicationRole:$('project-communication-role').value||null,sessionRouting:nextRouting,...(directory!==undefined?{defaultLocations:directory}:{})})});
     editingProject=project.id;projects=projects.filter(p=>p.id!==project.id).concat(project);updateProjectControls();taskMentions.refresh();$('project-tasks').hidden=!project.tasksEnabled;projectDirectory.commit();$('delete-project').hidden=false;$('archive-project').hidden=false;
     try{await api(`/api/projects/${project.id}/workspace-policy`,{method:'PUT',body:JSON.stringify(policy)});}
     catch(error){throw new Error(`Project name saved. Workspace policy was not saved: ${error.message}. Retry Save project.`);}
-    await refreshSessions();if($('create-dialog').open){$('create-project').value=project.id;const start=projectDirectoryOn($('create-host').value||'local',project.id);if(start){$('directory').value=start;$('directory').dispatchEvent(new Event('input'));$('directory').dispatchEvent(new Event('change'));}worktrees.projectChanged();updateCommunicationDefault();}$('project-dialog').close();
-  }catch(error){$('project-error').textContent=error.message;}finally{savingProject=false;for(const id of ['save-project','project-name','project-tasks-enabled','project-slug','project-directory','project-directory-host','project-directory-browse','project-directory-clear','project-default-mode','project-require-worktree','project-communication-role','archive-project','delete-project','dismiss-project'])$(id).disabled=false;updateProjectTicketFields();}
+    await refreshSessions();if($('create-dialog').open){$('create-project').value=project.id;const start=projectDirectoryOn($('create-host').value||'local',project.id);if(start){$('directory').value=start;$('directory').dispatchEvent(new Event('input'));$('directory').dispatchEvent(new Event('change'));}worktrees.projectChanged();updateCommunicationDefault();syncCreateRoutingForProject(project.id);}$('project-dialog').close();
+  }catch(error){$('project-error').textContent=error.message;}finally{savingProject=false;for(const id of ['save-project','project-name','project-tasks-enabled','project-slug','project-directory','project-directory-host','project-directory-browse','project-directory-clear','project-default-mode','project-require-worktree','project-communication-role','project-routing-mode','project-routing-approach','archive-project','delete-project','dismiss-project'])$(id).disabled=false;updateProjectTicketFields();}
 };
 // Archive and delete apply to the project's sessions too unless the user keeps them in Ungrouped.
 let removingProject=null;
@@ -1545,8 +1621,9 @@ $('create-form').onsubmit=async event=>{
   event.preventDefault();if(creating||worktrees.blocked())return;creating=true;providerNote();$('create-error').textContent='';
   const fork=forkSource,githubPr=githubCreate;
   try{
-    const source=$('directory').value.trim();
-    const payload={resumePolicy:{enabled:$('create-resume-policy').checked},provider:$('provider').value,modelProvider:modelProviders.selection(),...worktrees.submission(),title:$('session-title').value,projectId:$('create-project').value||null,hostId:$('create-host').value,model:$('create-model').value,...(!fork&&$('create-role').value?{role:$('create-role').value}:{}),...($('create-agent-access').value?{agentAccess:{communicate:$('create-agent-access').value!=='off',...Object.fromEntries(['startSessions','promptSessions','cancelSessions','runAutomations'].map(key=>[key,$('create-agent-access').value==='coordinator']))}}:{})};
+    const source=$('directory').value.trim(),initialText=!fork?$('create-initial-prompt').value:'';
+    const sendPrompt=!!(initialText.trim()&&$('create-send-initial-prompt').checked);
+    const payload={resumePolicy:{enabled:$('create-resume-policy').checked},provider:$('provider').value,modelProvider:modelProviders.selection(),...worktrees.submission(),title:$('session-title').value,projectId:$('create-project').value||null,hostId:$('create-host').value,model:$('create-model').value,...(initialText.trim()?(sendPrompt?{prompt:initialText}:{description:initialText}):{}),...(!fork&&$('create-role').value?{role:$('create-role').value}:{}),...($('create-agent-access').value?{agentAccess:{communicate:$('create-agent-access').value!=='off',...Object.fromEntries(['startSessions','promptSessions','cancelSessions','runAutomations'].map(key=>[key,$('create-agent-access').value==='coordinator']))}}:{})};
     if(fork)Object.assign(payload,{boundarySeq:$('fork-boundary').value?Number($('fork-boundary').value):null,context:$('fork-context').value,summary:$('fork-context').value==='summary'?$('fork-summary').value:null});
     const signature=JSON.stringify({source:fork?.id||null,payload});
     if(!pendingCreate||pendingCreate.signature!==signature)pendingCreate={signature,requestId:uuid()};
@@ -1560,6 +1637,7 @@ $('create-form').onsubmit=async event=>{
     if(githubPr){try{await api(`/api/sessions/${created.id}/github`,{method:'POST',body:JSON.stringify({links:[{host:githubPr.host,owner:githubPr.owner,repo:githubPr.repo,kind:'pullRequest',number:githubPr.number}]})});}catch(error){toast('Session created; could not attach PR: '+error.message);}}
     sessions.unshift(created);$('create-dialog').close();selectSession(created);
     if(fork)toast(`Forked from “${fork.title}”. Its recorded history and lineage are preserved; the selected context handoff is applied.`,'success');
+    else if(created.routing)toast(`Routed to ${labels[created.provider]||created.provider}${created.routing.model?` · ${created.routing.model}`:''}${created.routing.fallback?' (fallback)':''}`,'success');
   }catch(e){$('create-error').textContent=e.message;}finally{creating=false;providerNote();}
 };
 // L-05: one stable pending identity per session (survives switches, reloads and lost
@@ -1686,17 +1764,92 @@ const selectSettingsCategory=setupSettingsTabs($('settings-dialog'));
 const gitSettings=setupGitSettings({$,api,picker:directoryPicker,getHosts:()=>hosts,getLocations:()=>locations,getActive:()=>active});
 $('project-git-settings').onclick=async()=>{const cwd=$('project-directory').value.trim(),host=$('project-directory-host').value||'local';await openSettings();selectSettingsCategory('git');await gitSettings.repository(cwd,host);};
 $('add-root').onclick=()=>addRoot().focus();
+let routingModelProfiles=[];
+function updateRoutingDecisionVisibility(){
+  $('routing-decision-settings').hidden=$('routing-approach').value!=='decision_model';
+  $('routing-decision-url-field').hidden=!!$('routing-decision-provider').value;
+}
+$('routing-approach').onchange=updateRoutingDecisionVisibility;
+$('routing-decision-provider').onchange=updateRoutingDecisionVisibility;
+function addRoutingCandidateRow(candidate={}){
+  const row=el('div','routing-candidate-row');
+  const provider=el('select');
+  for(const p of config.providers){const o=el('option','',p.name);o.value=p.id;provider.append(o);}
+  provider.value=candidate.provider&&config.providers.some(p=>p.id===candidate.provider)?candidate.provider:(config.providers[0]?.id||'demo');
+  const mp=el('select');mp.append(new Option('Host env',''));
+  for(const profile of routingModelProfiles)mp.append(new Option(profile.name,profile.id));
+  mp.value=candidate.modelProvider||'';
+  const model=el('input');model.placeholder='Default model';model.maxLength=256;model.value=candidate.model||'';
+  const notes=el('input');notes.placeholder='Optional routing hint (e.g. fast edits)';notes.maxLength=500;notes.value=candidate.notes||'';
+  const enabledLabel=el('label','workspace-check');const enabled=el('input');enabled.type='checkbox';enabled.checked=candidate.enabled!==false;enabledLabel.append(enabled,document.createTextNode('Enabled'));
+  const remove=el('button','text-button','Remove');remove.type='button';remove.onclick=()=>row.remove();
+  const syncMp=()=>{mp.hidden=provider.value!=='goose';};
+  provider.onchange=syncMp;syncMp();
+  row.append(provider,mp,model,notes,enabledLabel,remove);
+  $('routing-candidates').append(row);
+}
+$('add-routing-candidate').onclick=()=>addRoutingCandidateRow();
+function readRoutingSettings(){
+  const candidates=[...$('routing-candidates').querySelectorAll('.routing-candidate-row')].map(row=>{
+    const [provider,mp,model,notes]=row.querySelectorAll('select,input');
+    const enabled=row.querySelector('input[type="checkbox"]').checked;
+    return {
+      provider:provider.value,
+      ...(provider.value==='goose'&&mp.value?{modelProvider:mp.value}:{}),
+      ...(model.value.trim()?{model:model.value.trim()}:{}),
+      ...(notes.value.trim()?{notes:notes.value.trim()}:{}),
+      enabled,
+    };
+  });
+  const protocol=$('routing-decision-protocol').value||'auto';
+  const providerId=$('routing-decision-provider').value||null;
+  const baseUrl=!providerId&&$('routing-decision-url').value.trim()?$('routing-decision-url').value.trim():null;
+  const dmModel=$('routing-decision-model').value.trim()||null;
+  const instructions=$('routing-decision-instructions').value.trim()||null;
+  const timeout=Number.isInteger($('routing-decision-timeout').valueAsNumber)?$('routing-decision-timeout').valueAsNumber:5000;
+  const decisionModel=(protocol!=='auto'||providerId||baseUrl||dmModel||instructions||timeout!==5000)?{
+    protocol,
+    ...(providerId?{modelProviderId:providerId}:{}),
+    ...(baseUrl?{baseUrl}:{}),
+    ...(dmModel?{model:dmModel}:{}),
+    ...(instructions?{instructions}:{}),
+    timeoutMs:timeout,
+  }:null;
+  return {
+    mode:$('routing-mode').value||'off',
+    approach:$('routing-approach').value||'quota_round_robin',
+    candidates,
+    ...(decisionModel?{decisionModel}:{}),
+  };
+}
 async function openSettings(){
   const timeoutsReady=timeoutControls.load();
   parserScripts.load();
   notifications.load().then(()=>notifications.mount($('notification-controls'))).catch(error=>notifications.mount($('notification-controls'),error));
   try{
     modelProviders.loadSettings();
-    const settings=await api('/api/settings');$('settings-roots').replaceChildren();for(const root of settings.roots)addRoot(root);$('settings-error').textContent='';$('settings-saved').textContent='Save applies global defaults and host settings. Display, notifications, model providers and parsers save immediately.';
+    const [settings,mpList]=await Promise.all([api('/api/settings'),api('/api/model-providers').catch(()=>({profiles:[]}))]);
+    routingModelProfiles=mpList.profiles||[];
+    $('settings-roots').replaceChildren();for(const root of settings.roots)addRoot(root);$('settings-error').textContent='';$('settings-saved').textContent='Save applies global defaults and host settings. Display, notifications, model providers and parsers save immediately.';
     gitSettings.populate(settings.git);
     $('default-communication-role').value=settings.defaultCommunicationRole||'participant';
     $('max-active-sessions').value=settings.maxActiveSessions;
     $('idle-sleep-hours').value=settings.idleSleepMinutes/60;
+    const sr=settings.sessionRouting||{mode:'off',approach:'quota_round_robin',candidates:[]};
+    $('routing-mode').value=sr.mode||'off';
+    $('routing-approach').value=sr.approach||'quota_round_robin';
+    const dmSelect=$('routing-decision-provider');
+    $('routing-decision-protocol').value=sr.decisionModel?.protocol||'auto';
+    dmSelect.replaceChildren(new Option('Custom base URL (no stored key)',''));
+    for(const profile of routingModelProfiles.filter(p=>p.kind==='openai-compatible'))dmSelect.append(new Option(`${profile.name} (${profile.defaultModel})`,profile.id));
+    dmSelect.value=sr.decisionModel?.modelProviderId&&[...dmSelect.options].some(o=>o.value===sr.decisionModel.modelProviderId)?sr.decisionModel.modelProviderId:'';
+    $('routing-decision-url').value=sr.decisionModel?.baseUrl||'';
+    $('routing-decision-model').value=sr.decisionModel?.model||'';
+    $('routing-decision-timeout').value=sr.decisionModel?.timeoutMs||5000;
+    $('routing-decision-instructions').value=sr.decisionModel?.instructions||'';
+    $('routing-candidates').replaceChildren();
+    for(const c of sr.candidates||[])addRoutingCandidateRow(c);
+    updateRoutingDecisionVisibility();
     const fields=$('default-model-fields');fields.replaceChildren();
     const hidden=new Set(settings.hiddenProviders||[]);
     for(const provider of config.providers){
@@ -1770,9 +1923,9 @@ $('settings-form').onsubmit=async event=>{
     const defaultModels={};for(const input of $('default-model-fields').querySelectorAll('input[data-provider]')){if(input.value.trim())defaultModels[input.dataset.provider]=input.value.trim();}
     const hiddenProviders=[...$('default-model-fields').querySelectorAll('[data-visible]')].filter(power=>power.getAttribute('aria-checked')!=='true').map(power=>power.dataset.visible);
     const timeouts=timeoutControls.pendingDefault();
-    const settings=await api('/api/settings',{method:'PUT',body:JSON.stringify({git:gitSettings.value(),roots:rootValues().filter(Boolean),defaultModels,claudeDefaultPermissionMode:$('claude-default-permission-mode')?.value,codexDefaultPermissionMode:$('codex-default-permission-mode')?.value,antigravityDefaultPermissionMode:$('antigravity-default-permission-mode')?.value,hiddenProviders,defaultCommunicationRole:$('default-communication-role').value,maxActiveSessions:Number.isInteger($('max-active-sessions').valueAsNumber)?$('max-active-sessions').valueAsNumber:undefined,idleSleepMinutes:Number.isFinite($('idle-sleep-hours').valueAsNumber)?Math.round($('idle-sleep-hours').valueAsNumber*60):undefined,...(timeouts?{timeouts}:{})})});
+    const settings=await api('/api/settings',{method:'PUT',body:JSON.stringify({git:gitSettings.value(),roots:rootValues().filter(Boolean),defaultModels,claudeDefaultPermissionMode:$('claude-default-permission-mode')?.value,codexDefaultPermissionMode:$('codex-default-permission-mode')?.value,antigravityDefaultPermissionMode:$('antigravity-default-permission-mode')?.value,hiddenProviders,defaultCommunicationRole:$('default-communication-role').value,sessionRouting:readRoutingSettings(),maxActiveSessions:Number.isInteger($('max-active-sessions').valueAsNumber)?$('max-active-sessions').valueAsNumber:undefined,idleSleepMinutes:Number.isFinite($('idle-sleep-hours').valueAsNumber)?Math.round($('idle-sleep-hours').valueAsNumber*60):undefined,...(timeouts?{timeouts}:{})})});
     if(timeouts)timeoutControls.acceptDefault(timeouts);
-    config.roots=settings.roots;config.defaultModels=settings.defaultModels;for(const p of config.providers)p.hidden=settings.hiddenProviders.includes(p.id);config.defaultCommunicationRole=settings.defaultCommunicationRole||'participant';applyRoots();
+    config.roots=settings.roots;config.defaultModels=settings.defaultModels;for(const p of config.providers)p.hidden=settings.hiddenProviders.includes(p.id);config.defaultCommunicationRole=settings.defaultCommunicationRole||'participant';config.sessionRouting=settings.sessionRouting;applyRoots();
     $('settings-dialog').close();toast('Settings saved. They apply to new sessions.','success');
   }catch(e){$('settings-error').textContent='Host settings were not saved: '+e.message+' Display preferences are stored separately in this browser.';}finally{$('save-settings').disabled=false;}
 };

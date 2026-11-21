@@ -155,6 +155,14 @@ impl Hub {
         result
     }
 
+    pub fn get(&self, host_id: &str, family: &str) -> Option<Value> {
+        self.latest
+            .lock()
+            .unwrap()
+            .get(&(host_id.to_owned(), family.to_owned()))
+            .cloned()
+    }
+
     fn snapshot(&self) -> Value {
         let latest = self.latest.lock().unwrap();
         json!({"kind":"snapshot","entries":latest.values().collect::<Vec<_>>()})

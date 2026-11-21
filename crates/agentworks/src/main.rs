@@ -38,6 +38,7 @@ mod permission_modes;
 mod recovery;
 mod relocation;
 mod roles;
+mod routing;
 mod service_restart;
 mod service_unit;
 mod session_badges;
@@ -160,6 +161,7 @@ struct App {
     hosts: Arc<hosts::Hosts>,
     host_usage: Arc<host_usage::Hub>,
     account_quota: Arc<account_quota::Hub>,
+    router: Arc<routing::RouterState>,
     github: Arc<github::Hub>,
     web_auth: Arc<web_auth::WebAuth>,
 
@@ -431,7 +433,7 @@ impl Session {
         });
         json!({"id":self.id,"provider":self.provider,"cwd":self.cwd(),"additionalDirectories":data.additional_directories,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"model":model,
             "archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"asleep":data.lifecycle.asleep,"created":self.created,"status":data.status,"turnRunning":data.turn_active,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"]),
-            "projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id(),"modelProvider":data.model_provider,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"providerCapabilities":data.agent_capabilities["sessionCapabilities"],"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None}})
+            "projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id(),"modelProvider":data.model_provider,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"routing":data.routing,"providerCapabilities":data.agent_capabilities["sessionCapabilities"],"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None}})
     }
     /// Full snapshot for the HTTP API, with every retained event as stored.
     fn snapshot(&self) -> Value {
@@ -473,7 +475,7 @@ impl Session {
         let window = self.window(&data);
         let (events, resumed) = events(&window, data.seq);
         json!({"kind":"snapshot","seq":data.seq,"resumed":resumed,"session":{"id":self.id,"provider":self.provider,
-            "cwd":self.cwd(),"additionalDirectories":data.additional_directories,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"asleep":data.lifecycle.asleep,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id(),"modelProvider":data.model_provider,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None},"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"]),"unacknowledged":unacknowledged,"startup":data.startup} ,"events":events,
+            "cwd":self.cwd(),"additionalDirectories":data.additional_directories,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"asleep":data.lifecycle.asleep,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id(),"modelProvider":data.model_provider,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"routing":data.routing,"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None},"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"]),"unacknowledged":unacknowledged,"startup":data.startup} ,"events":events,
             "truncated":window.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
             "asyncTasks":data.async_tasks.snapshot(),"providerCapabilities":data.agent_capabilities["sessionCapabilities"],"sessionConfig":data.session_config,"permissionModes":data.permission_modes,"models":data.models,"attachments":attachments::policy(&self.provider,&data.prompt_capabilities),"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|a.event(id)).collect::<Vec<_>>(),
@@ -639,7 +641,7 @@ impl Session {
                 .automation
                 .as_ref()
                 .map(|a| format!("automation:{}", a.run_id))
-                .ok_or("Missing automation metadata")?;
+                .unwrap_or_else(|| format!("create:{}", self.id));
             if let Some(origin) = data.automation.as_mut() {
                 origin.outcome = None;
             }
@@ -845,6 +847,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         hosts: hosts::Hosts::new(),
         host_usage: Arc::new(host_usage::Hub::default()),
         account_quota: Arc::default(),
+        router: Arc::default(),
         github: Arc::new(github::Hub::default()),
         web_auth: Arc::new(web_auth),
 
@@ -1911,7 +1914,7 @@ async fn status(State(app): State<App>) -> Json<Value> {
     let defaults = app.catalog.lock().unwrap().data.settings.clone();
     let auth = if use_api_key() { "api_key" } else { "existing" };
     // Legacy `claude`/`codex` session IDs stay valid but are never offered for new sessions.
-    let mut status = json!({"roots":effective_roots(&app),"defaultModels":defaults.default_models,"defaultCommunicationRole":defaults.default_communication_role.unwrap_or_default(),"providers":[
+    let mut status = json!({"roots":effective_roots(&app),"defaultModels":defaults.default_models,"defaultCommunicationRole":defaults.default_communication_role.unwrap_or_default(),"sessionRouting":defaults.session_routing.unwrap_or_default(),"providers":[
         {"id":"demo","name":"Demo agent","installed":true,"keyPresent":true},
         {"id":"claude-rust","name":"Claude","installed":installed("claude-rust"),"keyPresent":key_present("claude-rust"),"authMode":auth},
         {"id":"codex-rust","name":"Codex","installed":installed("codex-rust"),"keyPresent":key_present("codex-rust"),"authMode":auth},
@@ -1982,7 +1985,7 @@ async fn get_settings(State(app): State<App>) -> Json<Value> {
     let roots = effective_roots(&app);
     let settings = app.catalog.lock().unwrap().data.settings.clone();
     Json(
-        json!({"git":settings.git.unwrap_or_default(),"roots":roots,"maxActiveSessions":settings.max_active_sessions.unwrap_or(catalog::DEFAULT_ACTIVE_SESSIONS),"idleSleepMinutes":settings.idle_sleep_minutes.unwrap_or(catalog::DEFAULT_IDLE_SLEEP_MINUTES),"defaultModels":settings.default_models,"claudeDefaultPermissionMode":settings.claude_default_permission_mode.unwrap_or_default(),"codexDefaultPermissionMode":settings.codex_default_permission_mode.unwrap_or_default(),"antigravityDefaultPermissionMode":settings.antigravity_default_permission_mode.unwrap_or_default(),"defaultCommunicationRole":settings.default_communication_role.unwrap_or_default(),"hiddenProviders":settings.hidden_providers.unwrap_or_default()}),
+        json!({"git":settings.git.unwrap_or_default(),"roots":roots,"maxActiveSessions":settings.max_active_sessions.unwrap_or(catalog::DEFAULT_ACTIVE_SESSIONS),"idleSleepMinutes":settings.idle_sleep_minutes.unwrap_or(catalog::DEFAULT_IDLE_SLEEP_MINUTES),"defaultModels":settings.default_models,"claudeDefaultPermissionMode":settings.claude_default_permission_mode.unwrap_or_default(),"codexDefaultPermissionMode":settings.codex_default_permission_mode.unwrap_or_default(),"antigravityDefaultPermissionMode":settings.antigravity_default_permission_mode.unwrap_or_default(),"defaultCommunicationRole":settings.default_communication_role.unwrap_or_default(),"hiddenProviders":settings.hidden_providers.unwrap_or_default(),"sessionRouting":settings.session_routing.unwrap_or_default()}),
     )
 }
 
@@ -2120,6 +2123,9 @@ async fn save_settings(State(app): State<App>, Json(mut settings): Json<Settings
     }) {
         return Err(fail(StatusCode::BAD_REQUEST, "Unknown harness"));
     }
+    if let Some(routing) = settings.session_routing.as_mut() {
+        routing::validate_settings(routing)?;
+    }
     settings.roots = Some(normalized);
     persist_settings(&app, |current| {
         // Older settings forms may omit these controls; keep their saved defaults.
@@ -2144,6 +2150,10 @@ async fn save_settings(State(app): State<App>, Json(mut settings): Json<Settings
             .hidden_providers
             .take()
             .or(current.hidden_providers.clone());
+        settings.session_routing = settings
+            .session_routing
+            .take()
+            .or_else(|| current.session_routing.clone());
         settings
     })?;
     Ok(get_settings(State(app.clone())).await)
@@ -2413,6 +2423,7 @@ async fn import_session(State(app): State<App>, Json(req): Json<ImportSession>) 
             queued_prompt: None,
             control_origin: None,
             fork: None,
+            ..Default::default()
         }),
     )
     .await
@@ -2446,6 +2457,12 @@ struct ProjectName {
         deserialize_with = "communication::role_patch"
     )]
     default_communication_role: Option<Option<communication::Role>>,
+    #[serde(
+        default,
+        rename = "sessionRouting",
+        deserialize_with = "routing::project_patch"
+    )]
+    session_routing: Option<Option<routing::ProjectSettings>>,
     /// Project directories by host id. A host left out keeps its directory;
     /// `null` clears that host's directory.
     #[serde(default, rename = "defaultLocations")]
@@ -2485,9 +2502,12 @@ async fn project_locations(
 fn save_project(
     app: &App,
     id: Option<&str>,
-    req: ProjectName,
+    mut req: ProjectName,
     locations: Vec<(String, Option<PathBuf>)>,
 ) -> ApiResult {
+    if let Some(Some(sr)) = req.session_routing.as_mut() {
+        routing::validate_project_settings(sr)?;
+    }
     let mut catalog = app.catalog.lock().unwrap();
     let mut project = catalog
         .project_with_options(
@@ -2498,6 +2518,11 @@ fn save_project(
             req.tasks_enabled,
         )
         .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    if let Some(sr) = req.session_routing {
+        project = catalog
+            .set_project_session_routing(&project.id, sr)
+            .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
     for (host, path) in locations {
         let location = match path {
             Some(path) => Some(catalog.location_on(&host, &path).map_err(|_| {
@@ -2863,25 +2888,7 @@ async fn fork_session(
         req.context.as_deref().unwrap_or("auto"),
         req.summary.as_deref(),
     )?;
-    let provider = req
-        .provider
-        .clone()
-        .unwrap_or_else(|| parent.provider.clone());
     let parent_profile = parent.data.lock().unwrap().model_provider.clone();
-    let model_provider = req.model_provider.clone().unwrap_or_else(|| {
-        if provider == parent.provider && target_host == parent.host_id {
-            parent_profile.clone()
-        } else {
-            None
-        }
-    });
-    let same_model_provider = model_provider == parent_profile;
-    // Native history belongs to one host/provider. Cross-host/provider forks
-    // retain the recorded transcript/summary and open a fresh native session.
-    if target_host != parent.host_id || provider != parent.provider || !same_model_provider {
-        seed.lineage.source_session_id = None;
-        seed.lineage.source_message_id = None;
-    }
     let (title, inherited_model, project_id, inherited_role) = {
         let data = parent.data.lock().unwrap();
         (
@@ -2889,21 +2896,77 @@ async fn fork_session(
                 .title
                 .clone()
                 .unwrap_or_else(|| parent.title.clone()),
-            // A model only carries over to the same harness; another agent advertises
-            // its own models and would reject a foreign ID.
-            (provider == parent.provider && same_model_provider)
-                .then(|| {
-                    data.models["currentValue"]
-                        .as_str()
-                        .map(str::to_owned)
-                        .or_else(|| parent.initial_model.clone())
-                })
-                .flatten(),
+            data.models["currentValue"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| parent.initial_model.clone()),
             req.project_id.clone().or_else(|| data.project_id.clone()),
             // Every fork keeps the parent's exact role snapshot.
             data.role.clone(),
         )
     };
+    let effective_cwd = req
+        .cwd
+        .unwrap_or_else(|| parent.cwd().to_string_lossy().into_owned());
+    let effective_title = req
+        .title
+        .unwrap_or_else(|| format!("{title} (fork)"))
+        .chars()
+        .take(80)
+        .collect::<String>();
+    let routing_mode = routing::effective_mode(&app, project_id.as_deref());
+    let requested_provider = req.provider.as_deref().unwrap_or("");
+    let (provider, model_provider, routed_model, already_routed) =
+        if routing::should_route(routing_mode, requested_provider, false) {
+            let decision = routing::route(
+                &app,
+                &routing::RouteInput {
+                    project_id: project_id.as_deref(),
+                    host_id: &target_host,
+                    title: Some(&effective_title),
+                    description: None,
+                    prompt: None,
+                    role_name: inherited_role.as_ref().map(|r| r.name.as_str()),
+                    role_description: None,
+                    requires_role_support: inherited_role.is_some(),
+                    cwd: &effective_cwd,
+                },
+            )
+            .await?;
+            (
+                decision.provider.clone(),
+                decision.model_provider.clone(),
+                decision.model.clone(),
+                Some(decision),
+            )
+        } else {
+            let provider = req
+                .provider
+                .clone()
+                .unwrap_or_else(|| parent.provider.clone());
+            let model_provider = req.model_provider.clone().unwrap_or_else(|| {
+                if provider == parent.provider && target_host == parent.host_id {
+                    parent_profile.clone()
+                } else {
+                    None
+                }
+            });
+            (provider, model_provider, req.model, None)
+        };
+    let same_model_provider = model_provider == parent_profile;
+    // Native history belongs to one host/provider. Cross-host/provider forks
+    // retain the recorded transcript/summary and open a fresh native session.
+    if target_host != parent.host_id || provider != parent.provider || !same_model_provider {
+        seed.lineage.source_session_id = None;
+        seed.lineage.source_message_id = None;
+    }
+    // A model only carries over to the same harness; another agent advertises
+    // its own models and would reject a foreign ID.
+    let final_model = routed_model.or_else(|| {
+        (already_routed.is_none() && provider == parent.provider && same_model_provider)
+            .then_some(inherited_model)
+            .flatten()
+    });
     let result = create_session_inner(
         &app,
         Create {
@@ -2915,26 +2978,21 @@ async fn fork_session(
             role: None,
             inherited_role,
             provider: provider.clone(),
-            cwd: req
-                .cwd
-                .unwrap_or_else(|| parent.cwd().to_string_lossy().into_owned()),
-            title: Some(
-                req.title
-                    .unwrap_or_else(|| format!("{title} (fork)"))
-                    .chars()
-                    .take(80)
-                    .collect(),
-            ),
-            model: req.model.or(inherited_model),
+            cwd: effective_cwd,
+            title: Some(effective_title),
+            model: final_model,
             model_provider,
             project_id,
             host_id: Some(target_host),
+            prompt: None,
+            description: None,
             external_id: None,
             external_host: false,
             automation: None,
             queued_prompt: None,
             control_origin: None,
             fork: Some(seed),
+            already_routed,
         },
         Some(&key),
     )
@@ -2962,6 +3020,7 @@ struct Create {
     /// A fork's copy of its parent's role; never set by a client.
     #[serde(skip)]
     inherited_role: Option<agentworks_session::model::RoleSnapshot>,
+    #[serde(default)]
     provider: String,
     cwd: String,
     title: Option<String>,
@@ -2972,6 +3031,12 @@ struct Create {
     project_id: Option<String>,
     #[serde(rename = "hostId")]
     host_id: Option<String>,
+    /// Optional initial prompt sent when the session starts (and scored by the router).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prompt: Option<String>,
+    /// Optional task description used by the router without sending a prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
     #[serde(skip)]
     external_id: Option<String>,
     #[serde(skip)]
@@ -2985,6 +3050,8 @@ struct Create {
     /// L-08 prepared carry-over; built by the fork endpoint, never by a client.
     #[serde(skip)]
     fork: Option<fork::Seed>,
+    #[serde(skip)]
+    already_routed: Option<agentworks_session::model::RoutingDecision>,
 }
 async fn create_session(State(app): State<App>, Json(req): Json<Create>) -> ApiResult {
     limit_resume::new_policy(req.resume_policy.clone())?;
@@ -3041,6 +3108,61 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
     if req.model.as_ref().is_some_and(|m| m.len() > 256) {
         return Err(fail(StatusCode::BAD_REQUEST, "Model ID is too long"));
     }
+    if req.prompt.as_ref().is_some_and(|p| p.chars().count() > 100_000) {
+        return Err(fail(StatusCode::BAD_REQUEST, "Initial prompt is too long"));
+    }
+    if req.description.as_ref().is_some_and(|d| d.chars().count() > 8192) {
+        return Err(fail(StatusCode::BAD_REQUEST, "Description is too long"));
+    }
+    if req.queued_prompt.is_none()
+        && let Some(prompt) = req.prompt.as_ref().filter(|p| !p.trim().is_empty())
+    {
+        req.queued_prompt = Some(prompt.clone());
+    }
+    if req
+        .project_id
+        .as_deref()
+        .is_some_and(|id| !app.catalog.lock().unwrap().contains(id))
+    {
+        return Err(fail(StatusCode::BAD_REQUEST, "Project not found"));
+    }
+    let host_id = req.host_id.as_deref().unwrap_or("local");
+    let routing_mode = routing::effective_mode(app, req.project_id.as_deref());
+    let routing_decision = if let Some(decision) = req.already_routed.take() {
+        Some(decision)
+    } else if routing::should_route(routing_mode, &req.provider, req.external_id.is_some()) {
+        let requested_role = if let Some(role) = &req.inherited_role {
+            Some((role.name.clone(), None))
+        } else if let Some(role_id) = req.role.as_deref().filter(|r| !r.is_empty()) {
+            let role = roles::get(&app.store.lock().unwrap().connection, role_id)
+                .map_err(|_| fail(StatusCode::INTERNAL_SERVER_ERROR, "Could not read role"))?
+                .ok_or_else(|| fail(StatusCode::BAD_REQUEST, "Role not found"))?;
+            Some((role.name, Some(role.description)))
+        } else {
+            None
+        };
+        let decision = routing::route(
+            app,
+            &routing::RouteInput {
+                project_id: req.project_id.as_deref(),
+                host_id,
+                title: req.title.as_deref(),
+                description: req.description.as_deref(),
+                prompt: req.queued_prompt.as_deref().or(req.prompt.as_deref()),
+                role_name: requested_role.as_ref().map(|(n, _)| n.as_str()),
+                role_description: requested_role.as_ref().and_then(|(_, d)| d.as_deref()),
+                requires_role_support: requested_role.is_some(),
+                cwd: &req.cwd,
+            },
+        )
+        .await?;
+        req.provider = decision.provider.clone();
+        req.model = decision.model.clone();
+        req.model_provider = decision.model_provider.clone();
+        Some(decision)
+    } else {
+        None
+    };
     if !agentworks_runtime::remote::PROVIDERS.contains(&req.provider.as_str()) {
         return Err(fail(StatusCode::BAD_REQUEST, "Unknown provider"));
     }
@@ -3308,6 +3430,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
             prompt_capabilities: Value::Null,
             worktree: owned_worktree,
             role,
+            routing: routing_decision,
             native_rename: false,
             startup: None,
         }),
