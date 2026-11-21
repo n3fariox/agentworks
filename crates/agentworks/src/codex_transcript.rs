@@ -208,24 +208,35 @@ fn keep_backup(path: &FsPath, name: &str, now: u64) -> io::Result<PathBuf> {
             Err(e) => e,
         };
         // Filesystems without hard links get a copy instead.
-        let mut target = match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&backup)
-        {
-            Ok(file) => file,
+        match copy_private(path, &backup) {
+            Ok(()) => return Ok(backup),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(io::Error::other(format!("{linked}; {e}"))),
-        };
-        let copied =
-            io::copy(&mut fs::File::open(path)?, &mut target).and_then(|_| target.sync_all());
-        if let Err(e) = copied {
-            let _ = fs::remove_file(&backup);
-            return Err(io::Error::other(format!("{linked}; {e}")));
         }
-        return Ok(backup);
     }
     Err(io::Error::other("too many backups with the same time"))
+}
+
+/// Copies `source` to a new file at `target`, private like the rollout. An existing
+/// `target` is never replaced (`AlreadyExists`), and any later failure removes the
+/// partial copy.
+fn copy_private(source: &FsPath, target: &FsPath) -> io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(target)?;
+    let copied = fs::File::open(source)
+        .and_then(|mut source| io::copy(&mut source, &mut file))
+        .and_then(|_| file.sync_all());
+    if copied.is_err() {
+        drop(file);
+        let _ = fs::remove_file(target);
+    }
+    copied.map(|_| ())
 }
 
 #[derive(Debug)]
@@ -500,6 +511,30 @@ mod tests {
         assert_eq!(fs::read_to_string(&outcome.backup).unwrap(), content);
         assert_eq!(fs::read_to_string(&again.backup).unwrap(), kept);
         assert_eq!(backups(&path).len(), 2);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_copy_fallback_is_private_and_never_replaces_or_leaves_a_partial_backup() {
+        let dir = std::env::temp_dir().join(format!("aw-codex-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let (source, backup) = (dir.join("rollout.jsonl"), dir.join("backup"));
+        fs::write(&source, "full").unwrap();
+        copy_private(&source, &backup).unwrap();
+        assert_eq!(fs::read_to_string(&backup).unwrap(), "full");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&backup).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        fs::write(&source, "compacted").unwrap();
+        let taken = copy_private(&source, &backup).unwrap_err();
+        assert_eq!(taken.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&backup).unwrap(), "full");
+        let missing = dir.join("other-backup");
+        assert!(copy_private(&dir.join("gone.jsonl"), &missing).is_err());
+        assert!(!missing.exists(), "a failed copy leaves no empty backup");
         fs::remove_dir_all(dir).unwrap();
     }
 

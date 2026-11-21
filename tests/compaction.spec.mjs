@@ -60,3 +60,28 @@ test('a compaction shows as a divider that fills in, expands to its summary and 
   await expect(page.locator('.message.assistant')).toBeVisible();
   expect(errors).toEqual([]);
 });
+
+test('markdown batches stay under the request body limit in UTF-8 bytes',async({page})=>{
+  const session={id:'cjk-fixture',title:'CJK fixture',provider:'demo',cwd:'/fixture',status:'idle',hostId:'local'};
+  // 20k CJK characters: 20k UTF-16 units but 60 KB of UTF-8 each.
+  const events=[];for(let i=0;i<6;i++){events.push({kind:'user',seq:2*i+1,data:{text:`q${i}`}});events.push(acp(2*i+2,{sessionUpdate:'agent_message_chunk',messageId:`m${i}`,content:{type:'text',text:`答${i}`+'漢'.repeat(20000)}}));}
+  const bodies=[];
+  await page.addInitScript(()=>localStorage.setItem('agentworks-session','cjk-fixture'));
+  await page.routeWebSocket('**/api/sessions/*/events',ws=>ws.send(JSON.stringify({kind:'snapshot',seq:12,session,events,approvals:[],commands:[],permissionModes:{options:[]},toolProgress:{}})));
+  await page.route('**/api/**',async route=>{
+    const req=route.request(),path=new URL(req.url()).pathname,json=data=>route.fulfill({json:data});
+    if(path==='/api/status')return json({roots:['/fixture'],defaultModels:{},providers:[{id:'demo',name:'Demo agent',installed:true}]});
+    if(path==='/api/catalog')return json({projects:[],hosts:[{id:'local',name:'Local',status:'connected'}],locations:[]});
+    if(path==='/api/sessions')return json([session]);
+    if(path==='/api/automations')return json([]);
+    if(path==='/api/markdown/batch'){
+      const body=req.postDataBuffer();bodies.push(body.length);
+      if(body.length>128*1024)return route.fulfill({status:413,body:'too large'});
+      return json({results:JSON.parse(body.toString()).items.map(i=>({html:`<p class="md">${i.text.slice(0,2)}</p>`}))});
+    }
+    return json({});
+  });
+  await page.goto(base);await expect(page.locator('#header-title')).toHaveText('CJK fixture');
+  await expect(page.locator('.message.assistant p.md')).toHaveCount(6);
+  expect(Math.max(...bodies)).toBeLessThanOrEqual(96*1024);
+});

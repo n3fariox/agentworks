@@ -1334,7 +1334,7 @@ function updateUserMarkdown(message,body){
 // Messages rendered in the same tick share one request: opening a transcript renders
 // every message, and over a slow link one round trip each dominates the load.
 const markdownQueue=[];let markdownFlush=null;
-const MARKDOWN_BATCH_ITEMS=200,MARKDOWN_BATCH_BYTES=96*1024;
+const MARKDOWN_BATCH_ITEMS=200,MARKDOWN_BATCH_BYTES=96*1024,utf8=new TextEncoder();
 // Each message's render timer fires as its own task, spread over a long draw, so
 // the queue waits briefly for the rest of them; that is small beside a round trip.
 const MARKDOWN_COALESCE_MS=20;
@@ -1344,10 +1344,11 @@ function renderMarkdown(request){
 function flushMarkdown(){
   markdownFlush=null;const pending=markdownQueue.splice(0);
   while(pending.length){
-    // Stay under the server's request body limit; an oversized message goes alone.
-    const batch=[];let bytes=0;
+    // Stay under the server's 128 KiB request body limit, counted in UTF-8 bytes
+    // (`{"items":[...]}` plus a comma per item); an oversized message goes alone.
+    const batch=[];let bytes=12;
     while(pending.length&&batch.length<MARKDOWN_BATCH_ITEMS){
-      const size=JSON.stringify(pending[0].request).length;
+      const size=utf8.encode(JSON.stringify(pending[0].request)).byteLength+1;
       if(batch.length&&bytes+size>MARKDOWN_BATCH_BYTES)break;
       bytes+=size;batch.push(pending.shift());
     }
