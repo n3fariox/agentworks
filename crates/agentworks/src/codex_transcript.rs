@@ -191,6 +191,43 @@ fn backups(path: &FsPath) -> Vec<(PathBuf, u64)> {
     found
 }
 
+/// Keeps the original under a name no other backup has. Neither the hard link nor
+/// the copy fallback ever replaces an existing file, so a second compaction in the
+/// same second cannot overwrite the first, full backup.
+fn keep_backup(path: &FsPath, name: &str, now: u64) -> io::Result<PathBuf> {
+    for n in 0..1000u32 {
+        let suffix = if n == 0 {
+            now.to_string()
+        } else {
+            format!("{now}-{n}")
+        };
+        let backup = path.with_file_name(format!("{name}{BACKUP}{suffix}"));
+        let linked = match fs::hard_link(path, &backup) {
+            Ok(()) => return Ok(backup),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => e,
+        };
+        // Filesystems without hard links get a copy instead.
+        let mut target = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(io::Error::other(format!("{linked}; {e}"))),
+        };
+        let copied =
+            io::copy(&mut fs::File::open(path)?, &mut target).and_then(|_| target.sync_all());
+        if let Err(e) = copied {
+            let _ = fs::remove_file(&backup);
+            return Err(io::Error::other(format!("{linked}; {e}")));
+        }
+        return Ok(backup);
+    }
+    Err(io::Error::other("too many backups with the same time"))
+}
+
 #[derive(Debug)]
 struct Outcome {
     before: u64,
@@ -269,16 +306,15 @@ fn compact(path: &FsPath, now: u64) -> io::Result<Outcome> {
             return Err(error);
         }
     };
-    let backup = path.with_file_name(format!("{name}{BACKUP}{now}"));
-    if let Err(error) = fs::hard_link(path, &backup) {
-        // Filesystems without hard links get a copy instead.
-        if let Err(copy) = fs::copy(path, &backup) {
+    let backup = match keep_backup(path, name, now) {
+        Ok(backup) => backup,
+        Err(error) => {
             let _ = fs::remove_file(&temp);
             return Err(io::Error::other(format!(
-                "Could not keep a backup ({error}; {copy}); nothing was changed"
+                "Could not keep a backup ({error}); nothing was changed"
             )));
         }
-    }
+    };
     if let Err(error) = fs::rename(&temp, path) {
         let _ = fs::remove_file(&temp);
         let _ = fs::remove_file(&backup);
@@ -456,9 +492,13 @@ mod tests {
         // The original is kept whole, and compacting again keeps the same lines.
         assert_eq!(fs::read_to_string(&outcome.backup).unwrap(), content);
         assert_eq!(backups(&path).len(), 1);
-        let again = compact(&path, 8).unwrap();
+        // Compacting again in the same second keeps the first, full backup.
+        let again = compact(&path, 7).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), kept);
         assert_eq!(again.images, 0);
+        assert_ne!(again.backup, outcome.backup);
+        assert_eq!(fs::read_to_string(&outcome.backup).unwrap(), content);
+        assert_eq!(fs::read_to_string(&again.backup).unwrap(), kept);
         assert_eq!(backups(&path).len(), 2);
         fs::remove_dir_all(dir).unwrap();
     }
