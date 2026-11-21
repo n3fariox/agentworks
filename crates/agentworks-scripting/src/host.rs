@@ -384,7 +384,15 @@ impl Hub {
             }
         }
     }
-    /// A hub with no installed hooks, useful for consumers and fixtures.
+    /// Start a supported no-hooks host with the embedded interpreter preludes.
+    ///
+    /// This constructor does not read or seed a script registry. Applications
+    /// without configured scripts and external test fixtures can use it directly;
+    /// install hooks later with [`Self::reload`] if needed.
+    ///
+    /// # Panics
+    /// Panics if the embedded preludes cannot initialize. To handle that error,
+    /// construct an [`Engine`] with `Engine::new` and pass it to [`Self::new`].
     pub fn empty() -> Self {
         Hub::new(Arc::new(Engine::new().expect("host preludes")), Vec::new())
     }
@@ -756,13 +764,17 @@ mod tests {
                 .join("../../tests/fixtures/bazel-progress-events.json");
             std::fs::write(path, &actual).unwrap();
         } else {
+            // JSON object key order is deliberately not checked: standalone and
+            // unified builds can enable different serde_json map features.
+            // Regenerate with the server selected too to preserve the fixture's
+            // existing key order rather than introducing whole-file churn.
             assert_eq!(
                 serde_json::from_str::<Value>(include_str!(
                     "../../../tests/fixtures/bazel-progress-events.json"
                 ))
                 .unwrap(),
                 Value::Array(published.clone()),
-                "regenerate with UPDATE_GOLDEN=1 cargo test -p agentworks-scripting u05_fixture"
+                "regenerate with UPDATE_GOLDEN=1 scripts/mise-cargo.sh test --locked -p agentworks -p agentworks-scripting u05_fixture"
             );
         }
         let last = &published.last().unwrap()["data"];

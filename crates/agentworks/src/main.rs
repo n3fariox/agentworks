@@ -53,7 +53,7 @@ mod web_auth;
 mod workspace;
 mod worktree_cleanup;
 mod worktrees;
-use agentworks_presentation::chat as chat_format;
+use agentworks_presentation::chat;
 use agentworks_presentation::markdown::{inline_html, render_markdown_with_marker};
 use agentworks_runtime::provider::{cli_provider, installed, key_present, use_api_key};
 use agentworks_session::{SessionData, timeouts};
@@ -4155,9 +4155,9 @@ async fn markdown(State(app): State<App>, Json(req): Json<Markdown>) -> Json<Val
             let (hub, text) = (app.scripts.clone(), req.text.clone());
             tokio::task::spawn_blocking(move || {
                 let apply = if req.user {
-                    chat_format::apply_user_in_session
+                    chat::apply_user_in_session
                 } else {
-                    chat_format::apply_in_session
+                    chat::apply_in_session
                 };
                 apply(&hub, &s.id, &s.provider, &s.cwd().to_string_lossy(), &text)
             })
@@ -4187,7 +4187,7 @@ async fn format_user(
     let hub = app.scripts.clone();
     let (provider, cwd) = (s.provider.clone(), s.cwd().to_string_lossy().into_owned());
     let lines = tokio::task::spawn_blocking(move || {
-        chat_format::format_in_session(&hub, Some(&s.id), "chat.user", &provider, &cwd, &req.text)
+        chat::format_in_session(&hub, Some(&s.id), "chat.user", &provider, &cwd, &req.text)
     })
     .await
     .unwrap_or(None)

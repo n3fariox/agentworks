@@ -1,5 +1,5 @@
 //! Browser snapshots derived from authoritative transcript events.
-use crate::tool_call as tool_headers;
+use crate::tool_call;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -74,7 +74,7 @@ pub fn compact(
     let latest: HashMap<String, u64> = events
         .iter()
         .filter(|e| is_tool(e))
-        .filter_map(|e| Some((tool_headers::key(&e["data"])?, e["seq"].as_u64()?)))
+        .filter_map(|e| Some((tool_call::key(&e["data"])?, e["seq"].as_u64()?)))
         .collect();
     let mut seen = HashSet::new();
     let mut out: Vec<Value> = Vec::new();
@@ -83,7 +83,7 @@ pub fn compact(
     for event in events {
         if event["seq"].as_u64().unwrap_or(0) <= after {
             if is_tool(event)
-                && let Some(key) = tool_headers::key(&event["data"])
+                && let Some(key) = tool_call::key(&event["data"])
             {
                 seen.insert(key);
             }
@@ -93,7 +93,7 @@ pub fn compact(
             out.push(event.clone());
             continue;
         }
-        let key = tool_headers::key(&event["data"]);
+        let key = tool_call::key(&event["data"]);
         let first = key.as_ref().is_some_and(|k| seen.insert(k.clone()));
         let (data, meaningful) = strip(&event["data"]);
         if data["bodyOmitted"] == true
