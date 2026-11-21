@@ -278,7 +278,7 @@ pub fn seed(
         native_used: false,
         truncated: window
             .front()
-            .is_some_and(|e| e["seq"].as_u64().unwrap_or(0) > 1),
+            .is_some_and(|e| crate::event_compaction::first_seq(e) > 1),
         created: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()

@@ -2,10 +2,13 @@ import {test,expect} from '@playwright/test';
 import {spawn,execFileSync} from 'node:child_process';
 import {mkdtemp,mkdir,writeFile,readFile,rm} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
+import {gunzipSync} from 'node:zlib';
 
 // Disposable server, repositories and a fake gh. No real account or GitHub API
 // is contacted, and no credentials are read from this machine.
 const base='http://127.0.0.1:4541';
+// Large session events arrive as gzip binary frames (the agentworks.gzip subprotocol).
+const decode=message=>JSON.parse(typeof message==='string'?message:gunzipSync(message).toString('utf8'));
 let fixture,repo,linked,server,log='',exited=false;
 const git=(cwd,...args)=>execFileSync('git',['-c','user.name=Fixture','-c','user.email=fixture@localhost',...args],{cwd,encoding:'utf8'}).trim();
 async function api(path,body,method){
@@ -29,7 +32,7 @@ async function trackingSocket(page){
   let socket;
   await page.routeWebSocket('**/api/sessions/*/events',ws=>{
     socket=ws;const server=ws.connectToServer();
-    server.onMessage(message=>{const event=JSON.parse(String(message));if(!['github_context','github_event'].includes(event.kind))ws.send(message);});
+    server.onMessage(message=>{const event=decode(message);if(!['github_context','github_event'].includes(event.kind))ws.send(message);});
   });
   return ()=>socket;
 }
@@ -379,7 +382,7 @@ for(const mobile of [false,true])test(`archived-only PR matches open from the lo
   // and when its websocket snapshot arrives.
   await page.route(`**/api/sessions/${session.id}?view=meta`,route=>route.fulfill({json:{...session,archived:true,status:'suspended',explicitlySuspended:false}}));
   await page.routeWebSocket(`**/api/sessions/${session.id}/events*`,ws=>{
-    const server=ws.connectToServer();server.onMessage(message=>{const event=JSON.parse(String(message));if(event.kind==='snapshot')Object.assign(event.session,{archived:true,status:'suspended',explicitlySuspended:false});ws.send(JSON.stringify(event));});
+    const server=ws.connectToServer();server.onMessage(message=>{const event=decode(message);if(event.kind==='snapshot')Object.assign(event.session,{archived:true,status:'suspended',explicitlySuspended:false});ws.send(JSON.stringify(event));});
   });
   await api(`/api/sessions/${session.id}/github`,{links:[{host:'ghe-a.example.com',owner:'team',repo:'repo',kind:'pullRequest',number}]});
   await api(`/api/sessions/${session.id}`,{archived:true},'PATCH');

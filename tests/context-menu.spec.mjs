@@ -48,7 +48,7 @@ async function fixture(page,{withProjects=false}={}){
     if(path==='/api/catalog')return json({projects,hosts:[{id:'local',name:'Local'}],locations:[]});
     if(path==='/api/sessions')return json(sessions);
     if(path==='/api/automations')return json([]);
-    if(path==='/api/markdown')return json({html:'<p>A useful answer</p>'});
+    if(path==='/api/markdown/batch')return json({results:route.request().postDataJSON().items.map(()=>({html:'<p>A useful answer</p>'}))});
     const session=sessions.find(s=>path===`/api/sessions/${s.id}`);if(session)return json(snapshot(session));
     return json({});
   });

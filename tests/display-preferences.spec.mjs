@@ -385,7 +385,7 @@ for(const mobile of [false,true])test(`user Markdown edits inline, preserves sou
   await expect(page.locator('#prompt-editor .cm-md-strong')).toHaveText('Draft');
   // A late transcript render cannot undo the switch back to plain text.
   await preference('off');
-  await page.route('**/api/markdown',async route=>{
+  await page.route('**/api/markdown{,/batch}',async route=>{
     const response=await route.fetch();await new Promise(r=>setTimeout(r,500));await route.fulfill({response});
   });
   await preference('on');await preference('off');await page.waitForTimeout(600);

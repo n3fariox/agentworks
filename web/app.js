@@ -800,11 +800,37 @@ function dormant(){return status==='suspended'&&!!active&&!active.explicitlySusp
 function connect(gen){
   if(gen!==generation||!active)return;
   $('connection').textContent='Connecting';
-  const ws=new WebSocket(socketUrl(`/api/sessions/${active.id}/events${eventSeq!==null?'?after='+eventSeq:''}`));socket=ws;
+  // Large messages (snapshots, big tool updates) arrive gzipped as binary frames.
+  // The server only gzips when it accepts the subprotocol; otherwise everything stays text.
+  const ws=new WebSocket(socketUrl(`/api/sessions/${active.id}/events${eventSeq!==null?'?after='+eventSeq:''}`),socketGzip?['agentworks.gzip']:[]);socket=ws;ws.binaryType='arraybuffer';
   ws.onopen=()=>{if(gen!==generation)return;connected=true;reconnectDelay=500;$('connection').textContent='Connected';updateControls();};
+  // Decoding is asynchronous, so every message goes through one queue to keep its order.
+  let inbound=Promise.resolve();
   ws.onmessage=event=>{
+    inbound=inbound.then(async()=>{
+      const text=typeof event.data==='string'?event.data:await new Response(new Blob([event.data]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+      if(gen===generation)applySocketMessage(text);
+    }).catch(error=>console.error('Could not apply session event',error));
+  };
+  ws.onclose=()=>{
     if(gen!==generation)return;
-    const e=JSON.parse(event.data);
+    connected=false;$('connection').textContent='Reconnecting';updateControls();
+    const retry=async()=>{
+      if(gen!==generation||!active)return;
+      try{await api(`/api/sessions/${active.id}?view=meta`);connect(gen);}catch(error){
+        if(gen!==generation)return;
+        if(error.status===404){
+          $('session-notice').textContent='This session was deleted.';$('session-notice').hidden=false;
+          status='closed';updateControls();refreshSessions().catch(()=>{});
+        }else{retryTimer=setTimeout(retry,reconnectDelay);reconnectDelay=Math.min(5000,reconnectDelay*2);}
+      }
+    };
+    retryTimer=setTimeout(retry,reconnectDelay);reconnectDelay=Math.min(5000,reconnectDelay*2);
+  };
+}
+const socketGzip=typeof DecompressionStream==='function';
+function applySocketMessage(text){
+    const e=JSON.parse(text);
     if(e.kind==='github_context'){github.updateContext(active.id,e.data);return;}
     if(e.kind==='github_event'){document.dispatchEvent(new CustomEvent('github-event',{detail:{sessionId:active.id,...e.data}}));return;}
     if(e.kind==='session_badges'){github.updateBadges(active.id,e.data);return;}
@@ -823,7 +849,8 @@ function connect(gen){
         resetTranscript();usageStatus.reset();
         currentUserSeq=e.session.lastUserSeq??null;status=e.session.status;Object.assign(active,e.session);showPlace();
         // Keep loaded earlier pages when they meet the current retained window without a gap.
-        const first=e.events[0]?.seq,last=storedEvents.at(-1)?.seq;
+        // A merged chunk run starts at its `from` sequence.
+        const first=e.events[0]?.from??e.events[0]?.seq,last=storedEvents.at(-1)?.seq;
         const kept=Number.isSafeInteger(first)&&Number.isSafeInteger(last)&&last>=first-1?storedEvents.filter(item=>item.seq<first):[];
         storedEvents=[...kept,...e.events];if(!kept.length)older={mode:e.truncated?'more':'none',loading:false,error:''};
         replay(e.session.lastUserSeq);
@@ -852,22 +879,6 @@ function connect(gen){
     }
     scheduleDraw();updateControls();renderContinuation();usageStatus.render();
     if(notificationTarget)requestAnimationFrame(revealNotificationTarget);
-  };
-  ws.onclose=()=>{
-    if(gen!==generation)return;
-    connected=false;$('connection').textContent='Reconnecting';updateControls();
-    const retry=async()=>{
-      if(gen!==generation||!active)return;
-      try{await api(`/api/sessions/${active.id}?view=meta`);connect(gen);}catch(error){
-        if(gen!==generation)return;
-        if(error.status===404){
-          $('session-notice').textContent='This session was deleted.';$('session-notice').hidden=false;
-          status='closed';updateControls();refreshSessions().catch(()=>{});
-        }else{retryTimer=setTimeout(retry,reconnectDelay);reconnectDelay=Math.min(5000,reconnectDelay*2);}
-      }
-    };
-    retryTimer=setTimeout(retry,reconnectDelay);reconnectDelay=Math.min(5000,reconnectDelay*2);
-  };
 }
 // Items get ids derived from their source event so a re-fold maps them onto the same DOM nodes.
 function itemId(){return itemKey?`${itemKey}:${itemCount++}`:uuid();}
@@ -1314,11 +1325,37 @@ function updateUserMarkdown(message,body){
   message.markdownTimer=setTimeout(async()=>{
     message.markdownTimer=null;
     try{
-      const result=await api('/api/markdown',{method:'POST',body:JSON.stringify({text,user:true,...(sessionId?{sessionId}:{})})});
+      const result=await renderMarkdown({text,user:true,...(sessionId?{sessionId}:{})});
       if(body.dataset.source!==text||body.dataset.format!==format||active?.id!==sessionId)return;
       message.html=result.html;body.innerHTML=result.html;body.classList.add('markdown');decorateMarkdown(body,message.referenceCwd?message.referenceCwd.replace(/\/$/,'')+'/':'');enhanceMermaid(body,result.mermaidClass);display.enhance(body,message.id);
     }catch{/* The original text stays readable if rendering is unavailable. */}
   },200);
+}
+// Messages rendered in the same tick share one request: opening a transcript renders
+// every message, and over a slow link one round trip each dominates the load.
+const markdownQueue=[];let markdownFlush=null;
+const MARKDOWN_BATCH_ITEMS=200,MARKDOWN_BATCH_BYTES=96*1024,utf8=new TextEncoder();
+// Each message's render timer fires as its own task, spread over a long draw, so
+// the queue waits briefly for the rest of them; that is small beside a round trip.
+const MARKDOWN_COALESCE_MS=20;
+function renderMarkdown(request){
+  return new Promise((resolve,reject)=>{markdownQueue.push({request,resolve,reject});markdownFlush??=setTimeout(flushMarkdown,MARKDOWN_COALESCE_MS);});
+}
+function flushMarkdown(){
+  markdownFlush=null;const pending=markdownQueue.splice(0);
+  while(pending.length){
+    // Stay under the server's 128 KiB request body limit, counted in UTF-8 bytes
+    // (`{"items":[...]}` plus a comma per item); an oversized message goes alone.
+    const batch=[];let bytes=12;
+    while(pending.length&&batch.length<MARKDOWN_BATCH_ITEMS){
+      const size=utf8.encode(JSON.stringify(pending[0].request)).byteLength+1;
+      if(batch.length&&bytes+size>MARKDOWN_BATCH_BYTES)break;
+      bytes+=size;batch.push(pending.shift());
+    }
+    api('/api/markdown/batch',{method:'POST',body:JSON.stringify({items:batch.map(b=>b.request)})}).then(
+      response=>batch.forEach((b,i)=>response?.results?.[i]?b.resolve(response.results[i]):b.reject(new Error('Markdown result missing'))),
+      error=>batch.forEach(b=>b.reject(error)));
+  }
 }
 function updateMarkdown(message,body){
   if(body.dataset.source===message.text)return;
@@ -1331,7 +1368,7 @@ function updateMarkdown(message,body){
     const text=message.text;message.markdownPending=true;
     try{
       // Agent messages name their session so its chat.agent formatters apply; inbox deliveries don't.
-      const result=await api('/api/markdown',{method:'POST',body:JSON.stringify({text,...(message.inboxDelivery||!active?{}:{sessionId:active.id})})});
+      const result=await renderMarkdown({text,...(message.inboxDelivery||!active?{}:{sessionId:active.id})});
       message.html=result.html;body.innerHTML=result.html;body.classList.add('markdown');decorateMarkdown(body,message.referenceCwd?message.referenceCwd.replace(/\/$/,'')+'/':'');enhanceMermaid(body,result.mermaidClass);display.enhance(body,message.id);
     }catch{body.textContent=message.text;}finally{
       message.markdownPending=false;
@@ -2096,6 +2133,55 @@ function openRename(session){
   $('rename-dialog').showModal();$('rename-title').focus();
 }
 $('rename-session').onclick=()=>{if(active)openRename(active);};
+// Codex keeps its own rollout file per conversation and never shortens it; every
+// context compaction appends a checkpoint. Compacting keeps the latest one onward.
+const codexProviders=['codex','codex-rust'];
+const fileSize=b=>b<1048576?`${Math.max(1,Math.round(b/1024))} KB`:b<1073741824?`${(b/1048576).toFixed(b<10485760?1:0)} MB`:`${(b/1073741824).toFixed(1)} GB`;
+let codexTranscript=null;
+async function loadCodexTranscript(){
+  const button=$('codex-transcript'),session=active;
+  if(!session||!codexProviders.includes(session.provider)||session.hostId!=='local'){button.hidden=true;return null;}
+  try{
+    const info=await api(`/api/sessions/${encodeURIComponent(session.id)}/codex-transcript`);
+    if(active!==session)return null;
+    button.hidden=!info.available;if(info.available)button.textContent=`Codex transcript · ${fileSize(info.bytes)}…`;
+    codexTranscript={sessionId:session.id,...info};return codexTranscript;
+  }catch{button.hidden=true;return null;}
+}
+function renderCodexTranscript(info){
+  const n=info.checkpoints;
+  $('codex-transcript-size').textContent=`${fileSize(info.bytes)} on disk · ${n} compaction checkpoint${n===1?'':'s'}.`;
+  const worthwhile=info.compactedBytes!=null&&info.compactedBytes<info.bytes;
+  $('codex-transcript-plan').textContent=info.running?'Suspend the harness first: Codex writes to this file while it runs.'
+    :worthwhile?`Compacting keeps the latest checkpoint and what follows: about ${fileSize(info.compactedBytes)}.`
+    :info.compactedBytes==null?'Codex has not compacted this conversation yet, so there is nothing to remove.':'The file already starts at its latest checkpoint.';
+  $('codex-transcript-compact').disabled=info.running||!worthwhile;
+  const backups=info.backups||[],kept=backups.reduce((sum,b)=>sum+b.bytes,0);
+  $('codex-transcript-backup').hidden=$('codex-transcript-delete-backup').hidden=!backups.length;
+  $('codex-transcript-backup').textContent=backups.length?`The original is kept beside it as a backup (${fileSize(kept)}). Delete it once the session resumes normally.`:'';
+}
+$('lifecycle-menu').addEventListener('toggle',()=>{if($('lifecycle-menu').open)loadCodexTranscript();});
+$('codex-transcript').onclick=async()=>{
+  $('lifecycle-menu').open=false;sessionMenu.close();$('codex-transcript-error').textContent='';
+  const info=await loadCodexTranscript();if(!info)return;
+  renderCodexTranscript(info);$('codex-transcript-dialog').showModal();
+};
+$('codex-transcript-dismiss').onclick=()=>$('codex-transcript-dialog').close();
+async function codexTranscriptAction(path,method,busy){
+  const id=codexTranscript?.sessionId;if(!id)return;
+  for(const b of $('codex-transcript-dialog').querySelectorAll('button'))b.disabled=true;
+  $('codex-transcript-error').textContent='';$('codex-transcript-plan').textContent=busy;
+  try{
+    const info=await api(`/api/sessions/${encodeURIComponent(id)}/codex-transcript${path}`,{method,body:method==='POST'?'{}':undefined});
+    codexTranscript={sessionId:id,...info};
+    if(info.result)toast(`Codex transcript compacted: ${fileSize(info.result.before)} → ${fileSize(info.result.after)}`,'success');
+    if(active?.id===id)$('codex-transcript').textContent=`Codex transcript · ${fileSize(info.bytes)}…`;
+    renderCodexTranscript(info);
+  }catch(error){$('codex-transcript-error').textContent=error.message;if(codexTranscript)renderCodexTranscript(codexTranscript);}
+  finally{for(const b of $('codex-transcript-dialog').querySelectorAll('button:not(#codex-transcript-compact)'))b.disabled=false;}
+}
+$('codex-transcript-form').onsubmit=event=>{event.preventDefault();codexTranscriptAction('/compact','POST','Compacting…');};
+$('codex-transcript-delete-backup').onclick=()=>codexTranscriptAction('','DELETE','Deleting the backup…');
 $('rename-dismiss').onclick=()=>$('rename-dialog').close();
 $('rename-form').onsubmit=async event=>{
   event.preventDefault();const id=renameTarget?.id;if(!id)return;
