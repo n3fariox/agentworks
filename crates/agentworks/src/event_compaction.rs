@@ -178,7 +178,7 @@ fn fold_tools(events: &[Value], plan: &mut Plan) {
     let mut updates: HashMap<String, Vec<&Value>> = HashMap::new();
     let mut order = Vec::new();
     for event in events {
-        let Some(key) = crate::tool_headers::key(&event["data"]) else {
+        let Some(key) = agentworks_presentation::tool_call::key(&event["data"]) else {
             continue;
         };
         if is_tool(event, "tool_call") {

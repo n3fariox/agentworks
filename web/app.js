@@ -1837,6 +1837,9 @@ function readRoutingSettings(){
       enabled,
     };
   });
+  const rrStrategy=$('routing-rr-strategy').value||'quota_and_sessions';
+  const rrQuotaLimit=Number.isInteger($('routing-rr-quota-limit').valueAsNumber)?Math.max(1,Math.min(100,$('routing-rr-quota-limit').valueAsNumber)):99;
+  const roundRobin={strategy:rrStrategy,quotaLimitPercent:rrQuotaLimit};
   const protocol=$('routing-decision-protocol').value||'auto';
   const providerId=$('routing-decision-provider').value||null;
   const baseUrl=!providerId&&$('routing-decision-url').value.trim()?$('routing-decision-url').value.trim():null;
@@ -1855,6 +1858,7 @@ function readRoutingSettings(){
     mode:$('routing-mode').value||'off',
     approach:$('routing-approach').value||'quota_round_robin',
     candidates,
+    roundRobin,
     ...(decisionModel?{decisionModel}:{}),
   };
 }
@@ -1874,6 +1878,8 @@ async function openSettings(){
     const sr=settings.sessionRouting||{mode:'off',approach:'quota_round_robin',candidates:[]};
     $('routing-mode').value=sr.mode||'off';
     $('routing-approach').value=sr.approach||'quota_round_robin';
+    $('routing-rr-strategy').value=sr.roundRobin?.strategy||'quota_and_sessions';
+    $('routing-rr-quota-limit').value=sr.roundRobin?.quotaLimitPercent??99;
     const dmSelect=$('routing-decision-provider');
     $('routing-decision-protocol').value=sr.decisionModel?.protocol||'auto';
     dmSelect.replaceChildren(new Option('Custom base URL (no stored key)',''));

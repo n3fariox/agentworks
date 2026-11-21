@@ -57,6 +57,8 @@
     "test:antigravity": "node --test tests/antigravity-usage.test.mjs && playwright test tests/antigravity.spec.mjs",
     "test:terminal": "playwright test tests/terminal.spec.mjs tests/terminal-links.spec.mjs",
     "test:transcript-history": "playwright test tests/transcript-history.spec.mjs",
+    "test:presentation": "scripts/mise-cargo.sh test --locked -p agentworks-presentation",
+    "test:scripting": "scripts/mise-cargo.sh test --locked -p agentworks-scripting",
     "test:starlark": "cargo test --locked -p agentworks-starlark",
     "test:progress": "node --test tests/bazel-progress.test.mjs && node scripts/progress-smoke.mjs",
     "test:tool-bodies": "node scripts/tool-bodies-smoke.mjs && playwright test tests/tool-bodies.spec.mjs",

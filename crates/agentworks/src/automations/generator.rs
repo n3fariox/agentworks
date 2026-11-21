@@ -95,7 +95,7 @@ pub(super) fn generate(form: &Form) -> Result<String, String> {
 }
 pub async fn preview(State(app): State<App>, Json(form): Json<Form>) -> ApiResult {
     let source = generate(&form).map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
-    scripts::resolve_source(&app.progress.engine(), &binding("preview.star"), &source)
+    scripts::resolve_source(&app.scripts.engine(), &binding("preview.star"), &source)
         .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
     Ok(Json(json!({"source":source})))
 }
@@ -111,7 +111,7 @@ pub(super) fn descriptor(
     name: &str,
     source: &str,
 ) -> Result<Value, (StatusCode, String)> {
-    let (descriptor, _) = scripts::manifest(&app.progress.engine(), name, source)
+    let (descriptor, _) = scripts::manifest(&app.scripts.engine(), name, source)
         .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
     if !descriptor["settings"].is_object()
         || !descriptor["instructions"]
@@ -346,7 +346,7 @@ pub struct Inspect {
 }
 pub async fn inspect(State(app): State<App>, Json(input): Json<Inspect>) -> ApiResult {
     let name = input.name.unwrap_or_else(|| "import.star".into());
-    if !crate::tool_progress::valid_name(&name) {
+    if !agentworks_scripting::valid_name(&name) {
         return Err(fail(
             StatusCode::BAD_REQUEST,
             "Use a lowercase .star filename",

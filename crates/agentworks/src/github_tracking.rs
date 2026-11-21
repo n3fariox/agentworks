@@ -203,7 +203,7 @@ async fn deliver(s: &Arc<Session>) -> Result<(), String> {
             serde_json::from_str(&payload).map_err(|_| "Invalid stored PR event")?;
         event["id"] = json!(id);
         let (hub, session, provider, cwd) = (
-            s.progress.clone(),
+            s.scripts.clone(),
             s.id.clone(),
             s.provider.clone(),
             s.cwd().to_string_lossy().into_owned(),
@@ -544,7 +544,7 @@ pub(crate) mod tests {
             let catalog = Arc::new(Mutex::new(
                 crate::Catalog::open(root.join("catalog.json")).unwrap(),
             ));
-            let progress = crate::tool_progress::start(&store.lock().unwrap().connection).unwrap();
+            let scripts = crate::scripting::start(&store.lock().unwrap().connection).unwrap();
             let app = App {
                 sessions: Default::default(),
                 roots: Arc::new(vec![root.clone()]),
@@ -565,9 +565,9 @@ pub(crate) mod tests {
                 router: Arc::default(),
                 github: Arc::new(crate::github::Hub::default()),
                 web_auth: Default::default(),
-                progress,
+                scripts,
             };
-            app.progress.bind_badge_sessions(&app.sessions);
+            crate::scripting::bind_badge_sessions(&app.scripts, &app.sessions);
             let config = crate::github::Config {
                 connections: vec![crate::github::Connection {
                     host: "github.com".into(),
@@ -618,7 +618,7 @@ def changed(ctx: GithubContext, event: dict[str, typing.Any]) -> None:
     return None
 agent.register_github(changed)
 "#;
-        let _ = crate::tool_progress::put_script(
+        let _ = crate::scripting::put_script(
             State(f.app.clone()),
             Path("pr.star".into()),
             Json(serde_json::from_value(json!({"source":source})).unwrap()),
@@ -741,7 +741,7 @@ def changed(ctx: GithubContext, event: dict[str, typing.Any]) -> None:
     return None
 agent.register_github(changed, events = ["pr.status_changed"])
 "#;
-        let _ = crate::tool_progress::put_script(
+        let _ = crate::scripting::put_script(
             State(f.app.clone()),
             Path("filtered.star".into()),
             Json(serde_json::from_value(json!({"source":source})).unwrap()),
@@ -781,7 +781,7 @@ agent.register_github(changed, events = ["pr.status_changed"])
         );
         // Event contents cannot redirect a setter to a different target session.
         let (hub, id, provider, cwd, forged) = (
-            f.app.progress.clone(),
+            f.app.scripts.clone(),
             f.s.id.clone(),
             f.s.provider.clone(),
             f.s.cwd().to_string_lossy().into_owned(),

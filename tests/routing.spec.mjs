@@ -41,7 +41,12 @@ test('global and project session router settings drive new session dialog',async
   await page.locator('#nav-settings').click();
   await page.locator('#settings-tab-routing').click();
   await page.locator('#routing-mode').selectOption('default');
+  await page.locator('#routing-approach').selectOption('decision_model');
+  await expect(page.locator('#routing-round-robin-settings')).toBeVisible();
+  await expect(page.locator('#routing-decision-settings')).toBeVisible();
   await page.locator('#routing-approach').selectOption('quota_round_robin');
+  await expect(page.locator('#routing-round-robin-settings')).toBeVisible();
+  await expect(page.locator('#routing-decision-settings')).toBeHidden();
   await page.locator('#add-routing-candidate').click();
   const row=page.locator('.routing-candidate-row').first();
   await row.locator('select').first().selectOption('demo');

@@ -41,6 +41,12 @@ Default builds exclude the viewer and its CAD/WebAssembly assets. Enabled builds
 
 The inline Markdown composer is bundled locally, including its third-party license notices. After changing its source or dependencies, run `npm ci --prefix web && npm run build:markdown-composer --prefix web` before building Rust.
 
+## Rust workspace
+
+The server composes libraries for sessions, execution, workspaces, presentation,
+and scripting. See [workspace ownership and dependency boundaries](docs/architecture.md)
+and [independent test loops](docs/TESTING.md#rust-library-loops).
+
 ## Connect an agent
 
 Claude and Codex reuse the host CLI sign-in. Run Agentworks as the same OS user as those CLIs; refresh expired credentials with `codex login` or Claude’s `/login`. OpenCode requires its native CLI and is restricted to advertised free models. The demo needs no account.

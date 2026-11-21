@@ -4,7 +4,6 @@ mod attachments;
 mod automations;
 mod browser_origin;
 mod catalog;
-mod chat_format;
 mod codex_oauth;
 mod codex_transcript;
 mod communication;
@@ -41,6 +40,7 @@ mod recovery;
 mod relocation;
 mod roles;
 mod routing;
+mod scripting;
 mod service_restart;
 mod service_unit;
 mod session_badges;
@@ -51,13 +51,13 @@ mod tasks;
 mod terminal;
 mod tls;
 mod tool_bodies;
-mod tool_headers;
-mod tool_progress;
 mod transcript_history;
 mod web_auth;
 mod workspace;
 mod worktree_cleanup;
 mod worktrees;
+use agentworks_presentation::chat;
+use agentworks_presentation::markdown::{inline_html, render_markdown_with_marker};
 use agentworks_runtime::provider::{cli_provider, installed, key_present, use_api_key};
 use agentworks_session::{SessionData, timeouts};
 use agentworks_workspace::sha256;
@@ -167,8 +167,8 @@ struct App {
     github: Arc<github::Hub>,
     web_auth: Arc<web_auth::WebAuth>,
 
-    /// U-05 progress parser thread and installed scripts.
-    progress: tool_progress::Hub,
+    /// Installed hook execution shared by presentation and automation adapters.
+    scripts: agentworks_scripting::Hub,
 }
 
 struct Session {
@@ -193,8 +193,8 @@ struct Session {
     fresh_environment: std::sync::atomic::AtomicBool,
     /// U-02; cloned from the app hub so `emit` needs no global state.
     notifications: notifications::Hub,
-    /// U-05; derived tool progress, fed from `emit`.
-    progress: tool_progress::Hub,
+    /// Script host; derives tool views from events emitted by this session.
+    scripts: agentworks_scripting::Hub,
     /// Account quota shared with every session on the same host and family.
     account_quota: Arc<account_quota::Hub>,
 }
@@ -356,7 +356,7 @@ impl Session {
         // Publish the tool before any derived header/progress for it.
         let _ = self.tx.send(event.clone());
         if kind == "acp" {
-            self.progress.update(
+            self.scripts.update(
                 &self.id,
                 (&self.provider, &self.cwd()),
                 &self.tx,
@@ -445,7 +445,7 @@ impl Session {
     /// `after`, a reconnecting browser receives only newer events, provided the
     /// retained window still continues from that sequence (`resumed`).
     fn browser_snapshot(&self, after: Option<u64>) -> Value {
-        let headers = self.progress.headers(&self.id);
+        let headers = self.scripts.headers(&self.id);
         let mut opened_cut = false;
         let mut snapshot = self.snapshot_with(|events, seq| {
             // A merged chunk run the browser saw only part of cannot be resumed past.
@@ -456,7 +456,11 @@ impl Session {
                     })
                     && !event_compaction::splits(events, after)
             });
-            let compacted = tool_bodies::compact(events, resumed.unwrap_or(0), &headers);
+            let compacted = agentworks_presentation::transcript::compact(
+                events,
+                resumed.unwrap_or(0),
+                &headers,
+            );
             if resumed.is_some() {
                 return (json!(compacted), resumed);
             }
@@ -491,7 +495,7 @@ impl Session {
             "truncated":window.front().is_some_and(|e|event_compaction::first_seq(e)>1),
             "asyncTasks":data.async_tasks.snapshot(),"providerCapabilities":data.agent_capabilities["sessionCapabilities"],"sessionConfig":data.session_config,"permissionModes":data.permission_modes,"models":data.models,"attachments":attachments::policy(&self.provider,&data.prompt_capabilities),"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|a.event(id)).collect::<Vec<_>>(),
-            "toolProgress":self.progress.views(&self.id)})
+            "toolProgress":self.scripts.views(&self.id)})
     }
     fn read_window(&self) -> Result<(VecDeque<Value>, usize), String> {
         let recent = self.store.lock().unwrap().recent(&self.id);
@@ -831,7 +835,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     inbox_delivery::reconcile(&mut store).map_err(|(_, e)| e)?;
     event_compaction::startup(&mut store);
     let restored = store.load().map_err(|e| e.to_string())?;
-    let progress = tool_progress::start(&store.connection)?;
+    let scripts = scripting::start(&store.connection)?;
     let attachment_root = db_path.with_extension("attachments");
     attachments::prune_orphans(
         &attachment_root,
@@ -864,9 +868,9 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         github: Arc::new(github::Hub::default()),
         web_auth: Arc::new(web_auth),
 
-        progress,
+        scripts,
     };
-    app.progress.bind_badge_sessions(&app.sessions);
+    crate::scripting::bind_badge_sessions(&app.scripts, &app.sessions);
     if let Some(policy) = app
         .catalog
         .lock()
@@ -948,11 +952,11 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             mcp_refresh_pending: std::sync::atomic::AtomicBool::new(false),
             fresh_environment: Default::default(),
             notifications: app.notifications.clone(),
-            progress: app.progress.clone(),
+            scripts: app.scripts.clone(),
             account_quota: app.account_quota.clone(),
         });
         for (seq, data) in &replay {
-            app.progress
+            app.scripts
                 .replay(&s.id, (&s.provider, &s.cwd()), &s.tx, *seq, data);
         }
         if interrupted {
@@ -1451,18 +1455,18 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/roles/{id}",
             axum::routing::put(roles::update).delete(roles::delete),
         )
-        .route("/api/scripts", get(tool_progress::get_scripts))
+        .route("/api/scripts", get(scripting::get_scripts))
         .route(
             "/api/scripts/{name}",
-            axum::routing::put(tool_progress::put_script).delete(tool_progress::delete_script),
+            axum::routing::put(scripting::put_script).delete(scripting::delete_script),
         )
         .route(
             "/api/scripts/{name}/enabled",
-            axum::routing::put(tool_progress::put_enabled),
+            axum::routing::put(scripting::put_enabled),
         )
         .route(
             "/api/scripts/{name}/priority",
-            axum::routing::put(tool_progress::put_priority),
+            axum::routing::put(scripting::put_priority),
         )
         .route("/api/timeouts", get(get_timeouts).put(save_timeouts))
         .route(
@@ -3470,7 +3474,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
         mcp_refresh_pending: std::sync::atomic::AtomicBool::new(false),
         fresh_environment: Default::default(),
         notifications: app.notifications.clone(),
-        progress: app.progress.clone(),
+        scripts: app.scripts.clone(),
         account_quota: app.account_quota.clone(),
     });
     // Event publication takes session state before the catalog. Release the
@@ -4053,7 +4057,7 @@ async fn delete_session_locked(app: &App, s: &Session) -> Result<(), (StatusCode
     terminal::stop(&s.id, true).await;
     attachments::delete_session(&s.id);
     app.sessions.lock().unwrap().remove(&s.id);
-    app.progress.forget(&s.id);
+    app.scripts.forget(&s.id);
     s.status("closed");
     Ok(())
 }
@@ -4335,13 +4339,13 @@ fn render_message(app: &App, req: Markdown) -> Value {
     let text = match session {
         Some(s) => {
             let apply = if req.user {
-                chat_format::apply_user_in_session
+                chat::apply_user_in_session
             } else {
-                chat_format::apply_in_session
+                chat::apply_in_session
             };
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 apply(
-                    &app.progress,
+                    &app.scripts,
                     &s.id,
                     &s.provider,
                     &s.cwd().to_string_lossy(),
@@ -4408,10 +4412,10 @@ async fn format_user(
     Json(req): Json<UserFormat>,
 ) -> ApiResult {
     let s = session(&app, &id)?;
-    let hub = app.progress.clone();
+    let hub = app.scripts.clone();
     let (provider, cwd) = (s.provider.clone(), s.cwd().to_string_lossy().into_owned());
     let lines = tokio::task::spawn_blocking(move || {
-        chat_format::format_in_session(&hub, Some(&s.id), "chat.user", &provider, &cwd, &req.text)
+        chat::format_in_session(&hub, Some(&s.id), "chat.user", &provider, &cwd, &req.text)
     })
     .await
     .unwrap_or(None)
@@ -4423,174 +4427,6 @@ async fn format_user(
     });
     Ok(Json(json!({ "lines": lines })))
 }
-/// One paragraph renders inline, so a formatted line sits among literal ones.
-fn inline_html(markdown: &str) -> String {
-    let html = render_markdown_with_marker(markdown, "awmermaid-user");
-    let html = html.trim();
-    match html
-        .strip_prefix("<p>")
-        .and_then(|inner| inner.strip_suffix("</p>"))
-    {
-        Some(inner) if !inner.contains("<p>") => inner.to_owned(),
-        _ => html.to_owned(),
-    }
-}
-#[cfg(test)]
-fn render_markdown(text: &str) -> String {
-    render_markdown_with_marker(text, "awmermaid-test")
-}
-fn render_markdown_with_marker(text: &str, marker: &str) -> String {
-    let parser = pulldown_cmark::Parser::new_ext(
-        text,
-        pulldown_cmark::Options::ENABLE_TABLES | pulldown_cmark::Options::ENABLE_STRIKETHROUGH,
-    );
-    let mut out = String::new();
-    let parser = parser.map(|event| match event {
-        pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(
-            pulldown_cmark::CodeBlockKind::Fenced(info),
-        )) if info.trim().eq_ignore_ascii_case("mermaid") => pulldown_cmark::Event::Start(
-            pulldown_cmark::Tag::CodeBlock(pulldown_cmark::CodeBlockKind::Fenced(marker.into())),
-        ),
-        pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link {
-            link_type,
-            dest_url,
-            title,
-            id,
-        }) => {
-            // A bare filename with a line suffix resembles a URL scheme to the
-            // sanitizer. Make its relative-path meaning explicit before cleaning.
-            let parts: Vec<_> = dest_url.split(':').collect();
-            let local_line = (parts.len() == 2 || parts.len() == 3)
-                && parts[0].contains('.')
-                && !parts[0].contains('/')
-                && parts[1..]
-                    .iter()
-                    .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
-            let dest_url = if local_line {
-                format!("./{dest_url}").into()
-            } else {
-                dest_url
-            };
-            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link {
-                link_type,
-                dest_url,
-                title,
-                id,
-            })
-        }
-        event => event,
-    });
-    // Prose outside code and existing links gets GitHub-style bare URL links.
-    let (mut code, mut link) = (0usize, 0usize);
-    let parser = pulldown_cmark::TextMergeStream::new(parser).flat_map(move |event| {
-        use pulldown_cmark::{Event, Tag, TagEnd};
-        match &event {
-            Event::Start(Tag::CodeBlock(_)) => code += 1,
-            Event::End(TagEnd::CodeBlock) => code = code.saturating_sub(1),
-            Event::Start(Tag::Link { .. } | Tag::Image { .. }) => link += 1,
-            Event::End(TagEnd::Link | TagEnd::Image) => link = link.saturating_sub(1),
-            Event::Text(text) if code == 0 && link == 0 => return autolink(text),
-            _ => {}
-        }
-        vec![event]
-    });
-    pulldown_cmark::html::push_html(&mut out, parser);
-    ammonia::Builder::default()
-        .url_relative(ammonia::UrlRelative::PassThrough)
-        // Agents link host files as file:// URLs; the browser turns local ones
-        // into in-app previews instead of navigating.
-        .add_url_schemes(&["file", "agentworks"])
-        .add_tag_attributes("code", &["class"])
-        .attribute_filter(|element, attribute, value| {
-            if element != "code" || attribute != "class" {
-                return Some(value.into());
-            }
-            // Keep only fenced-code language hints for display preferences.
-            let languages = value
-                .split_whitespace()
-                .filter(|class| {
-                    class.strip_prefix("language-").is_some_and(|language| {
-                        (1..=32).contains(&language.len())
-                            && language
-                                .bytes()
-                                .all(|b| b.is_ascii_alphanumeric() || b"+#._-".contains(&b))
-                    })
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            (!languages.is_empty()).then(|| languages.into())
-        })
-        .clean(&out)
-        .to_string()
-}
-
-/// Splits bare `http(s)://` URLs out of a text run as links. Trailing sentence
-/// punctuation and unbalanced closing brackets stay outside the link.
-fn autolink<'a>(text: &pulldown_cmark::CowStr<'a>) -> Vec<pulldown_cmark::Event<'a>> {
-    use pulldown_cmark::{CowStr, Event, LinkType, Tag, TagEnd};
-    let mut events = Vec::new();
-    let (mut rest, mut plain) = (text.as_ref(), String::new());
-    while let Some(start) = ["https://", "http://"]
-        .iter()
-        .filter_map(|scheme| {
-            rest.match_indices(scheme)
-                .map(|(i, _)| i)
-                .find(|&i| !rest[..i].ends_with(|c: char| c.is_alphanumeric()))
-        })
-        .min()
-    {
-        let candidate = &rest[start..];
-        let mut end = candidate
-            .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '`'))
-            .unwrap_or(candidate.len());
-        loop {
-            let url = &candidate[..end];
-            let unbalanced = |open, close| {
-                url.ends_with(close) && url.matches(close).count() > url.matches(open).count()
-            };
-            if url.ends_with(['.', ',', ':', ';', '!', '?', '\'', '*', '_'])
-                || unbalanced('(', ')')
-                || unbalanced('[', ']')
-            {
-                end -= 1;
-            } else {
-                break;
-            }
-        }
-        let url = &candidate[..end];
-        // A scheme alone is prose, not a link.
-        if !url
-            .split_once("://")
-            .is_some_and(|(_, host)| host.chars().next().is_some_and(char::is_alphanumeric))
-        {
-            plain.push_str(&rest[..start + 1]);
-            rest = &rest[start + 1..];
-            continue;
-        }
-        plain.push_str(&rest[..start]);
-        if !plain.is_empty() {
-            events.push(Event::Text(CowStr::from(std::mem::take(&mut plain))));
-        }
-        events.push(Event::Start(Tag::Link {
-            link_type: LinkType::Autolink,
-            dest_url: CowStr::from(url.to_owned()),
-            title: CowStr::Borrowed(""),
-            id: CowStr::Borrowed(""),
-        }));
-        events.push(Event::Text(CowStr::from(url.to_owned())));
-        events.push(Event::End(TagEnd::Link));
-        rest = &rest[start + end..];
-    }
-    if events.is_empty() {
-        return vec![Event::Text(text.clone())];
-    }
-    plain.push_str(rest);
-    if !plain.is_empty() {
-        events.push(Event::Text(CowStr::from(plain)));
-    }
-    events
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4611,33 +4447,6 @@ mod tests {
         assert!(
             serde_json::from_value::<ProjectName>(json!({"name":"Bad","tasksEnabled":"true"}))
                 .is_err()
-        );
-    }
-    #[test]
-    fn markdown_links_bare_urls_outside_code() {
-        let html = render_markdown(
-            "See https://example.com/a_(b)?q=1, (http://x.io/path). Also `https://code.example` and [named](https://n.example).\n\n```\nhttps://fenced.example\n```\nnohttps://nope and https:// alone",
-        );
-        assert!(html.contains(r#"<a href="https://example.com/a_(b)?q=1" rel="noopener noreferrer">https://example.com/a_(b)?q=1</a>, "#), "{html}");
-        assert!(
-            html.contains(
-                r#"(<a href="http://x.io/path" rel="noopener noreferrer">http://x.io/path</a>)."#
-            ),
-            "{html}"
-        );
-        assert!(html.contains("<code>https://code.example</code>"), "{html}");
-        assert!(
-            html.contains(r#">named</a>"#) && !html.contains(">https://n.example<"),
-            "{html}"
-        );
-        assert!(
-            html.contains("https://fenced.example\n</code>")
-                && !html.contains(r#"href="https://fenced"#),
-            "{html}"
-        );
-        assert!(
-            !html.contains(r#"href="https://nope"#) && html.contains("https:// alone"),
-            "{html}"
         );
     }
     #[test]
@@ -4682,59 +4491,5 @@ mod tests {
         assert!(!allowed_host("", network, 4317, false));
         assert!(allowed_host("agentbox", network, 443, true));
         assert!(!allowed_host("agentbox", network, 443, false));
-    }
-    #[test]
-    fn markdown_removes_active_content() {
-        let html = render_markdown(
-            "# Hello\n<script>alert(1)</script>\n[x](javascript:alert(1))\n<img src=x onerror=alert(1)>",
-        );
-        assert!(html.contains("<h1>Hello</h1>"));
-        assert!(!html.contains("<script"));
-        assert!(!html.contains("javascript:"));
-        assert!(!html.contains("onerror"));
-    }
-    #[test]
-    fn markdown_keeps_file_links() {
-        let html = render_markdown(
-            "[a](file:///home/x/a.png) [b](/home/x/b.png) [line](sample.rs:42) [bad](javascript:42)",
-        );
-        assert!(html.contains(r#"href="file:///home/x/a.png""#));
-        assert!(html.contains(r#"href="/home/x/b.png""#));
-        assert!(html.contains(r#"href="./sample.rs:42""#));
-        assert!(!html.contains("javascript:"));
-    }
-    #[test]
-    fn markdown_keeps_session_links_from_formatters() {
-        let html = render_markdown(
-            "[@ui-hover](agentworks://sessions/28d9887c-e7c3-4096-870c-8ccf6d4eb4ae)",
-        );
-        assert!(
-            html.contains(r#"href="agentworks://sessions/28d9887c-e7c3-4096-870c-8ccf6d4eb4ae""#)
-        );
-        assert!(html.contains(">@ui-hover</a>"));
-    }
-
-    #[test]
-    fn markdown_marks_only_mermaid_fences() {
-        let html = render_markdown_with_marker(
-            "```mermaid\nflowchart LR; A-->B\n```\n<pre><code class=\"language-mermaid\">flowchart LR; X-->Y</code></pre>\n\n```js\nconst x = 1;\n```",
-            "awmermaid-0123456789abcdef",
-        );
-        assert_eq!(
-            html.matches("language-awmermaid-0123456789abcdef").count(),
-            1
-        );
-        assert!(html.contains("language-mermaid"));
-        assert!(html.contains("language-js"));
-    }
-    #[test]
-    fn markdown_keeps_only_code_language_classes() {
-        let html = render_markdown(
-            "```rust\nfn main() {}\n```\n<code class=\"toast language-x\">a</code><p class=\"language-js\">b</p>",
-        );
-        assert!(html.contains("<code class=\"language-rust\">"));
-        assert!(html.contains("<code class=\"language-x\">"));
-        assert!(!html.contains("toast"));
-        assert!(!html.contains("<p class"));
     }
 }

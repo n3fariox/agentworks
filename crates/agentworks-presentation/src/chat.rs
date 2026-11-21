@@ -1,14 +1,25 @@
 //! `chat.agent` Starlark formatters rewrite agent message lines before Markdown
 //! rendering. Display only: the stored transcript and what the agent sees are
 //! unchanged, and the result is sanitized like any other Markdown.
-use crate::tool_progress::Hub;
+/// Executes configured line formatters. Implementations own evaluation and failures;
+/// presentation chooses prose lines and restores their original positions.
+pub trait LineFormatter {
+    fn format_chat_in_session(
+        &self,
+        session: Option<&str>,
+        kind: &str,
+        provider: &str,
+        cwd: &str,
+        lines: Vec<String>,
+    ) -> Option<Vec<Option<String>>>;
+}
 
 /// Lines past this many are shown as written.
 const MAX_LINES: usize = 2000;
 
 /// Whether each `\n`-separated line is prose. Fenced code blocks, fences
 /// included, are not; an unclosed fence runs to the end, as in CommonMark.
-pub fn prose_lines(text: &str) -> Vec<bool> {
+fn prose_lines(text: &str) -> Vec<bool> {
     let mut fence: Option<(u8, usize)> = None;
     text.split('\n')
         .map(|line| {
@@ -39,7 +50,7 @@ pub fn prose_lines(text: &str) -> Vec<bool> {
 /// None to keep it; None overall when no formatter of that kind is enabled.
 /// Lines are passed in order, without a CRLF carriage return.
 pub fn format_in_session(
-    hub: &Hub,
+    hub: &impl LineFormatter,
     session: Option<&str>,
     kind: &str,
     provider: &str,
@@ -68,14 +79,20 @@ pub fn format_in_session(
 
 /// An agent message's Markdown with each formatted line replaced.
 #[cfg(test)]
-pub fn apply(hub: &Hub, provider: &str, cwd: &str, text: &str) -> String {
+fn apply(hub: &impl LineFormatter, provider: &str, cwd: &str, text: &str) -> String {
     apply_impl(hub, None, "chat.agent", provider, cwd, text)
 }
-pub fn apply_in_session(hub: &Hub, session: &str, provider: &str, cwd: &str, text: &str) -> String {
+pub fn apply_in_session(
+    hub: &impl LineFormatter,
+    session: &str,
+    provider: &str,
+    cwd: &str,
+    text: &str,
+) -> String {
     apply_impl(hub, Some(session), "chat.agent", provider, cwd, text)
 }
 pub fn apply_user_in_session(
-    hub: &Hub,
+    hub: &impl LineFormatter,
     session: &str,
     provider: &str,
     cwd: &str,
@@ -84,7 +101,7 @@ pub fn apply_user_in_session(
     apply_impl(hub, Some(session), "chat.user", provider, cwd, text)
 }
 fn apply_impl(
-    hub: &Hub,
+    hub: &impl LineFormatter,
     session: Option<&str>,
     kind: &str,
     provider: &str,
@@ -126,7 +143,20 @@ mod tests {
 
     #[test]
     fn without_formatters_text_is_unchanged() {
-        let hub = Hub::empty();
+        struct Disabled;
+        impl LineFormatter for Disabled {
+            fn format_chat_in_session(
+                &self,
+                _: Option<&str>,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: Vec<String>,
+            ) -> Option<Vec<Option<String>>> {
+                None
+            }
+        }
+        let hub = Disabled;
         let text = "OPS-1\r\n```\nOPS-2\n```\n\n";
         assert_eq!(apply(&hub, "claude", "/work", text), text);
     }
