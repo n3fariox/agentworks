@@ -135,3 +135,28 @@ fn rejected_automation_save_rolls_back_its_script_and_request_ledger() {
     assert!(db.automation_request("actor", "request").unwrap().is_none());
     assert!(db.automation::<serde_json::Value>("a").unwrap().is_none());
 }
+
+#[test]
+fn version_15_upgrade_preserves_history_and_adds_empty_compaction_cursors() {
+    let path = std::env::temp_dir().join(format!("database-v15-{}.sqlite3", uuid::Uuid::new_v4()));
+    {
+        let db = Store::open(&path).unwrap();
+        db.connection.execute_batch("INSERT INTO sessions VALUES ('s','{}','{}'); INSERT INTO events VALUES ('s',7,'{\"seq\":7}'); DROP TABLE event_compaction; DROP TABLE maintenance; PRAGMA user_version=15;").unwrap();
+    }
+    {
+        let mut db = Store::open(&path).unwrap();
+        assert_eq!(
+            db.connection
+                .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            16
+        );
+        assert_eq!(db.last_sequences().unwrap(), vec![("s".into(), 7)]);
+        assert_eq!(db.recent("s").unwrap(), vec!["{\"seq\":7}".to_owned()]);
+        assert_eq!(db.compaction_cursor("s").unwrap(), 0);
+        assert_eq!(db.maintained("vacuum").unwrap(), None);
+        db.record_maintenance("vacuum", 123).unwrap();
+        assert_eq!(db.maintained("vacuum").unwrap(), Some(123));
+    }
+    std::fs::remove_file(path).unwrap();
+}

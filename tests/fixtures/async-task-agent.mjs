@@ -28,7 +28,8 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     if(text.endsWith('busy'))return;
     if(text.endsWith('late')){reply(id,{stopReason:'end_turn'});promptId=null;setTimeout(()=>state('root-job','completed'),300);return;}
     if(text.endsWith('trim')){
-      for(let i=0;i<3100;i++)update(root,{sessionUpdate:'agent_thought_chunk',messageId:'trim',content:{type:'text',text:'.'}});
+      // Distinct messages: chunks of one message are compacted into one stored event.
+      for(let i=0;i<3100;i++)update(root,{sessionUpdate:'agent_thought_chunk',messageId:`trim-${i}`,content:{type:'text',text:'.'}});
       reply(id,{stopReason:'end_turn'});promptId=null;return;
     }
     update(root,{sessionUpdate:'subagent_spawned',subagentSessionId:'child',name:'Worker',task:'Build the child',capabilities:{}});

@@ -42,3 +42,7 @@ CREATE INDEX IF NOT EXISTS github_pr_events_by_session ON github_pr_events(sessi
 
 pub(crate) const SCRIPTS: &str = "CREATE TABLE IF NOT EXISTS scripts(name TEXT PRIMARY KEY,capability TEXT NOT NULL,source TEXT NOT NULL,hash TEXT NOT NULL,enabled INTEGER NOT NULL,builtin INTEGER NOT NULL,updated INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS script_order(name TEXT PRIMARY KEY,priority INTEGER NOT NULL);";
+
+/// The compaction cursor per session, and when storage maintenance (vacuum) last ran.
+pub(crate) const EVENT_COMPACTION: &str = "CREATE TABLE IF NOT EXISTS event_compaction(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,through INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS maintenance(name TEXT PRIMARY KEY,at INTEGER NOT NULL);";

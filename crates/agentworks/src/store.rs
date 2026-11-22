@@ -16,6 +16,16 @@ impl std::ops::DerefMut for Store {
     }
 }
 impl Store {
+    pub fn apply_compaction(
+        &mut self,
+        id: &str,
+        plan: &crate::event_compaction::Plan,
+        through: u64,
+    ) -> Result<()> {
+        self.0
+            .apply_compaction(id, &plan.remove, &plan.replace, through)
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         Ok(Self(agentworks_database::Store::open(path)?))
     }

@@ -16,7 +16,8 @@ use std::{
 // Recovery adds no tables and preserves every v10 schedule/slot ledger row.
 // v13 adds browser-independent PR tracking and its durable event journal.
 // v14 adds GitHub review ledgers. v15 separates script kinds and adds per-trigger baselines.
-pub const SCHEMA_VERSION: i64 = 15;
+// v16 adds the transcript compaction cursor.
+pub const SCHEMA_VERSION: i64 = 16;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 #[derive(Serialize, Deserialize)]
@@ -68,6 +69,23 @@ pub fn exclusive(path: &Path, busy: &str) -> Result<std::fs::File> {
 pub struct Store {
     pub(crate) connection: Connection,
     _lock: Option<std::fs::File>,
+    /// State last written by `event`, excluding its sequence number.
+    pub(crate) written: std::collections::HashMap<String, u64>,
+}
+/// Serialized state for the row, and a hash of everything in it except `seq`.
+fn state_row(state: &SessionData) -> Result<(String, u64)> {
+    use std::hash::{Hash, Hasher};
+    let mut value = serde_json::to_value(state)?;
+    let object = value
+        .as_object_mut()
+        .ok_or("Session state is not an object")?;
+    let seq = object.remove("seq");
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(object)?.hash(&mut hasher);
+    if let Some(seq) = seq {
+        object.insert("seq".into(), seq);
+    }
+    Ok((serde_json::to_string(&value)?, hasher.finish()))
 }
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
@@ -88,6 +106,7 @@ impl Store {
         Ok(Self {
             connection,
             _lock: Some(lock),
+            written: Default::default(),
         })
     }
     /// An isolated database with the production schema, for ephemeral use and unit tests.
@@ -97,6 +116,7 @@ impl Store {
         Ok(Self {
             connection,
             _lock: None,
+            written: Default::default(),
         })
     }
     fn initialize(connection: &Connection) -> Result<()> {
@@ -127,13 +147,14 @@ impl Store {
           COMMIT;")?;
         // C-01 controllers, U-05 parser scripts, roles and A-01 schedules are additive schema migrations.
         connection.execute_batch(&format!(
-            "BEGIN; {} {} {} {} {} {} PRAGMA user_version={SCHEMA_VERSION}; COMMIT;",
+            "BEGIN; {} {} {} {} {} {} {} PRAGMA user_version={SCHEMA_VERSION}; COMMIT;",
             crate::schema::INBOX_DELIVERY,
             crate::schema::CONTROLLERS,
             crate::schema::SCRIPTS,
             crate::schema::ROLES,
             crate::schema::AUTOMATIONS,
-            crate::schema::GITHUB_TRACKING
+            crate::schema::GITHUB_TRACKING,
+            crate::schema::EVENT_COMPACTION
         ))?;
         Ok(())
     }
@@ -235,6 +256,7 @@ impl Store {
         Ok(())
     }
     pub fn save_state(&mut self, id: &str, state: &SessionData) -> Result<()> {
+        self.written.remove(id);
         if self.connection.execute(
             "UPDATE sessions SET state=?2 WHERE id=?1",
             params![id, serde_json::to_string(state)?],
@@ -246,6 +268,7 @@ impl Store {
     }
     /// Metadata and state in one write, so a moved directory and its handoff note agree.
     pub fn save_session(&mut self, metadata: &Metadata, state: &SessionData) -> Result<()> {
+        self.written.remove(&metadata.id);
         if self.connection.execute(
             "UPDATE sessions SET metadata=?2,state=?3 WHERE id=?1",
             params![
@@ -260,13 +283,20 @@ impl Store {
         Ok(())
     }
     pub fn event(&mut self, id: &str, state: &SessionData, event: &Value) -> Result<()> {
+        let (row, key) = state_row(state)?;
+        let unchanged = self.written.get(id) == Some(&key);
         let transaction = self.connection.transaction()?;
         // A late callback after deletion must never recreate a session.
-        if transaction.execute(
-            "UPDATE sessions SET state=?2 WHERE id=?1",
-            params![id, serde_json::to_string(state)?],
-        )? != 0
-        {
+        let exists = if unchanged {
+            transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)",
+                [id],
+                |r| r.get::<_, bool>(0),
+            )?
+        } else {
+            transaction.execute("UPDATE sessions SET state=?2 WHERE id=?1", params![id, row])? != 0
+        };
+        if exists {
             transaction.execute(
                 "INSERT INTO events(session_id,seq,payload) VALUES (?1,?2,?3)",
                 params![id, i64::try_from(state.seq)?, serde_json::to_string(event)?],
@@ -279,9 +309,15 @@ impl Store {
             )?;
         }
         transaction.commit()?;
+        if exists {
+            self.written.insert(id.to_owned(), key);
+        } else {
+            self.written.remove(id);
+        }
         Ok(())
     }
     pub fn batch(&mut self, id: &str, state: &SessionData, events: &[Value]) -> Result<()> {
+        self.written.remove(id);
         let tx = self.connection.transaction()?;
         if tx.execute(
             "UPDATE sessions SET state=?2 WHERE id=?1",
@@ -327,6 +363,7 @@ impl Store {
         Ok(())
     }
     pub fn delete(&mut self, id: &str) -> Result<()> {
+        self.written.remove(id);
         let tx = self.connection.transaction()?;
         tx.execute(
             "UPDATE automation_runs SET status='deleted' WHERE session_id=?1",
@@ -594,6 +631,13 @@ impl Store {
             let (metadata, state) = row?;
             let metadata: Metadata = serde_json::from_str(&metadata)?;
             let mut state: SessionData = serde_json::from_str(&state)?;
+            // The state row is not rewritten for events that change only `seq`.
+            let newest: i64 = self.connection.query_row(
+                "SELECT COALESCE(MAX(seq),0) FROM events WHERE session_id=?1",
+                [&metadata.id],
+                |r| r.get(0),
+            )?;
+            state.seq = state.seq.max(newest.max(0) as u64);
             state.parked = true;
             sessions.push((metadata, state));
         }
@@ -644,6 +688,136 @@ impl Store {
             |r| r.get::<_, bool>(0),
         )?;
         Ok((page, more))
+    }
+    /// Every session with the sequence of its newest stored event.
+    pub fn last_sequences(&self) -> Result<Vec<(String, u64)>> {
+        let mut query = self.connection.prepare(
+            "SELECT id,(SELECT COALESCE(MAX(seq),0) FROM events WHERE session_id=sessions.id) FROM sessions",
+        )?;
+        let rows = query
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+    /// When the named maintenance task last ran, in Unix milliseconds.
+    pub fn maintained(&self, name: &str) -> Result<Option<u64>> {
+        let at = self
+            .connection
+            .query_row("SELECT at FROM maintenance WHERE name=?1", [name], |r| {
+                r.get::<_, i64>(0)
+            })
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(e),
+            })?;
+        Ok(at.map(|at| at.max(0) as u64))
+    }
+    pub fn record_maintenance(&mut self, name: &str, at: u64) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO maintenance(name,at) VALUES (?1,?2) ON CONFLICT(name) DO UPDATE SET at=excluded.at",
+            params![name, i64::try_from(at)?],
+        )?;
+        Ok(())
+    }
+    /// Page count, free pages and page size of the database file.
+    pub fn pages(&self) -> Result<(u64, u64, u64)> {
+        let get = |pragma: &str| -> rusqlite::Result<u64> {
+            self.connection
+                .query_row(&format!("PRAGMA {pragma}"), [], |r| r.get::<_, i64>(0))
+                .map(|v| v.max(0) as u64)
+        };
+        Ok((
+            get("page_count")?,
+            get("freelist_count")?,
+            get("page_size")?,
+        ))
+    }
+    /// Rewrites the database file without free pages, and truncates the WAL.
+    pub fn vacuum(&mut self) -> Result<()> {
+        self.connection
+            .execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
+    }
+    /// Sequence through which the session's stored events have been compacted.
+    pub fn compaction_cursor(&self, id: &str) -> Result<u64> {
+        let through: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT through FROM event_compaction WHERE session_id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(e),
+            })?;
+        Ok(through.map_or(0, |t| t.max(0) as u64))
+    }
+    /// Stored payloads with `after < seq <= through`, oldest first.
+    pub fn events_between(
+        &self,
+        id: &str,
+        after: u64,
+        through: u64,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        let mut query = self.connection.prepare(
+            "SELECT payload FROM events WHERE session_id=?1 AND seq>?2 AND seq<=?3 ORDER BY seq LIMIT ?4",
+        )?;
+        let rows = query
+            .query_map(
+                params![
+                    id,
+                    i64::try_from(after)?,
+                    i64::try_from(through)?,
+                    i64::try_from(limit)?
+                ],
+                |r| r.get::<_, String>(0),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+    /// Rewrites compacted rows and advances the cursor together. A deleted session is left alone.
+    pub fn apply_compaction(
+        &mut self,
+        id: &str,
+        remove_sequences: &[u64],
+        replacements: &[Value],
+        through: u64,
+    ) -> Result<()> {
+        let tx = self.connection.transaction()?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)",
+            [id],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Ok(());
+        }
+        {
+            let mut remove =
+                tx.prepare_cached("DELETE FROM events WHERE session_id=?1 AND seq=?2")?;
+            for seq in remove_sequences {
+                remove.execute(params![id, i64::try_from(*seq)?])?;
+            }
+            let mut replace =
+                tx.prepare_cached("UPDATE events SET payload=?3 WHERE session_id=?1 AND seq=?2")?;
+            for event in replacements {
+                let seq = event["seq"].as_i64().ok_or("Invalid sequence")?;
+                replace.execute(params![id, seq, serde_json::to_string(event)?])?;
+            }
+        }
+        tx.execute(
+            "INSERT INTO event_compaction(session_id,through) VALUES (?1,?2)
+             ON CONFLICT(session_id) DO UPDATE SET through=MAX(through,excluded.through)",
+            params![id, i64::try_from(through)?],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
     /// One-time import from the pre-persistence HTTP snapshot. Never overwrite an existing row.
     pub fn import_legacy(&mut self, path: &Path) -> Result<()> {
@@ -1139,13 +1313,47 @@ mod tests {
             // Duplicate sequence must roll back the accompanying state change.
             state.status = "running".into();
             assert!(store.event("test", &state, &event).is_err());
+            // Events that change only `seq` leave the state row as it was.
+            state.status = "idle".into();
+            for seq in 2..=3 {
+                state.seq = seq;
+                store
+                    .event("test", &state, &json!({"seq":seq,"kind":"acp","data":{}}))
+                    .unwrap();
+            }
+            let row = |store: &Store| -> i64 {
+                store
+                    .connection
+                    .query_row(
+                        "SELECT json_extract(state,'$.seq') FROM sessions WHERE id='test'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap()
+            };
+            assert_eq!(row(&store), 1);
+            // Any other change is written, with the current sequence.
+            state.seq = 4;
+            state.turn_active = true;
+            store
+                .event("test", &state, &json!({"seq":4,"kind":"user","data":{}}))
+                .unwrap();
+            assert_eq!(row(&store), 4);
+            state.seq = 5;
+            store
+                .event("test", &state, &json!({"seq":5,"kind":"acp","data":{}}))
+                .unwrap();
+            assert_eq!(row(&store), 4);
+            state.turn_active = false;
         }
         {
             let mut store = Store::open(&path).unwrap();
             let loaded = store.load().unwrap();
             assert_eq!(loaded.len(), 1);
             assert_eq!(loaded[0].1.status, "idle");
-            assert_eq!(store.recent("test").unwrap().len(), 1);
+            assert_eq!(loaded[0].1.seq, 5, "recovered from the newest event");
+            assert!(loaded[0].1.turn_active);
+            assert_eq!(store.recent("test").unwrap().len(), 5);
             // The recovery source persists independently of the visible event
             // window, which may no longer include a long-running turn's user event.
             assert_eq!(loaded[0].1.last_prompt, state.last_prompt);
@@ -1158,9 +1366,20 @@ mod tests {
                 loaded[0].1.provider_session_id.as_deref(),
                 Some("provider-session")
             );
+            // A queue write bypasses `save_state`, but must invalidate the event cache.
+            let mut resumed = store.load().unwrap().pop().unwrap().1;
+            resumed.seq = 6;
+            store.event("test", &resumed, &json!({"seq":6})).unwrap();
+            let mut queued: SessionData =
+                serde_json::from_value(serde_json::to_value(&resumed).unwrap()).unwrap();
+            queued.status = "waiting".into();
+            store.save_input_queue("test", &queued, None, 1).unwrap();
+            resumed.seq = 7;
+            store.event("test", &resumed, &json!({"seq":7})).unwrap();
+            assert_eq!(store.load().unwrap()[0].1.status, "idle");
             store.delete("test").unwrap();
-            state.seq = 2;
-            store.event("test", &state, &json!({"seq":2})).unwrap();
+            state.seq = 8;
+            store.event("test", &state, &json!({"seq":8})).unwrap();
             assert!(store.load().unwrap().is_empty());
         }
         std::fs::remove_file(&path).unwrap();

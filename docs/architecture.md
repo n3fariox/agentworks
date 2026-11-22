@@ -72,9 +72,11 @@ the interpreter or the server. Cargo and Bazel test commands are listed in
 `agentworks-database` owns all SQL for the application's `sessions.sqlite3`,
 including schemas previously spread across inbox delivery, controllers, scripts,
 roles, automations, GitHub tracking, queued input and restart handling. Schema
-version 15 and the existing initialization order are preserved. Input queue and
+version 16, including main's transcript compaction cursor, and the existing
+initialization order are preserved. Input queue and
 restart tables still initialize through their original startup entry points.
-There is no data migration or new database file in this extraction.
+The version 15 to 16 upgrade remains additive; this extraction introduces no
+additional database file or schema change.
 
 The connection and SQLite row decoders are private. APIs express durable
 operations rather than accepting arbitrary SQL or row-mapping callbacks. Session
@@ -98,7 +100,8 @@ never enter its API. Script records contain source,
 BLAKE3 hash, enablement and priority; compilation and hook metadata remain in
 scripting. Offline recovery keeps backup manifests, catalog validation, retention,
 and filesystem publication in the server; database integrity checks, immutable
-snapshots and table/sequence comparison live in the library.
+snapshots, compaction writes/cursors and table/sequence comparison live in the
+library. Compaction planning and maintenance scheduling remain server policy.
 
 A `test-support` feature exposes a connection only for existing migration,
 corruption and fault-injection fixtures. It is a dev dependency in Cargo. Bazel

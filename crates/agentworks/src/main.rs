@@ -5,6 +5,7 @@ mod automations;
 mod browser_origin;
 mod catalog;
 mod codex_oauth;
+mod codex_transcript;
 mod communication;
 mod completion;
 mod controllers;
@@ -12,6 +13,7 @@ mod diff;
 mod directories;
 mod elicitation;
 mod enrollment;
+mod event_compaction;
 mod fork;
 mod git_context;
 mod git_settings;
@@ -444,18 +446,32 @@ impl Session {
     /// retained window still continues from that sequence (`resumed`).
     fn browser_snapshot(&self, after: Option<u64>) -> Value {
         let headers = self.scripts.headers(&self.id);
+        let mut opened_cut = false;
         let mut snapshot = self.snapshot_with(|events, seq| {
+            // A merged chunk run the browser saw only part of cannot be resumed past.
             let resumed = after.filter(|&after| {
                 after <= seq
                     && events.front().map_or(after == seq, |e| {
-                        e["seq"].as_u64().unwrap_or(0) <= after.saturating_add(1)
+                        event_compaction::first_seq(e) <= after.saturating_add(1)
                     })
+                    && !event_compaction::splits(events, after)
             });
-            (
-                json!(agentworks_presentation::transcript::compact(events, resumed.unwrap_or(0), &headers)),
-                resumed,
-            )
+            let compacted = agentworks_presentation::transcript::compact(
+                events,
+                resumed.unwrap_or(0),
+                &headers,
+            );
+            if resumed.is_some() {
+                return (json!(compacted), resumed);
+            }
+            let (opening, cut) =
+                transcript_history::opening(transcript_history::without_superseded(compacted));
+            opened_cut = cut;
+            (json!(opening), None)
         });
+        if opened_cut {
+            snapshot["truncated"] = json!(true);
+        }
         snapshot["toolHeaders"] = json!(headers);
         snapshot
     }
@@ -476,7 +492,7 @@ impl Session {
         let (events, resumed) = events(&window, data.seq);
         json!({"kind":"snapshot","seq":data.seq,"resumed":resumed,"session":{"id":self.id,"provider":self.provider,
             "cwd":self.cwd(),"additionalDirectories":data.additional_directories,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"asleep":data.lifecycle.asleep,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id(),"modelProvider":data.model_provider,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"routing":data.routing,"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None},"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"]),"unacknowledged":unacknowledged,"startup":data.startup} ,"events":events,
-            "truncated":window.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
+            "truncated":window.front().is_some_and(|e|event_compaction::first_seq(e)>1),
             "asyncTasks":data.async_tasks.snapshot(),"providerCapabilities":data.agent_capabilities["sessionCapabilities"],"sessionConfig":data.session_config,"permissionModes":data.permission_modes,"models":data.models,"attachments":attachments::policy(&self.provider,&data.prompt_capabilities),"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|a.event(id)).collect::<Vec<_>>(),
             "toolProgress":self.scripts.views(&self.id)})
@@ -817,6 +833,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         .import_legacy(&db_path.with_file_name("legacy-sessions.json"))
         .map_err(|e| e.to_string())?;
     inbox_delivery::reconcile(&mut store).map_err(|(_, e)| e)?;
+    event_compaction::startup(&mut store);
     let restored = store.load().map_err(|e| e.to_string())?;
     let scripts = scripting::start(&store)?;
     let attachment_root = db_path.with_extension("attachments");
@@ -868,6 +885,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     }
     for (metadata, mut data) in restored {
         inbox_delivery::restore(&mut data);
+        data.async_tasks.forget_finished_details();
         data.continuation.reconcile();
         lifecycle::settle_archived(&mut data);
         data.input_queue.recover();
@@ -1641,6 +1659,14 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/{id}/suspend", post(lifecycle::suspend))
         .route("/api/sessions/{id}/resume", post(resume))
         .route("/api/sessions/{id}/restart", post(restart))
+        .route(
+            "/api/sessions/{id}/codex-transcript",
+            get(codex_transcript::info).delete(codex_transcript::delete_backups),
+        )
+        .route(
+            "/api/sessions/{id}/codex-transcript/compact",
+            post(codex_transcript::compact_now),
+        )
         .route("/api/sessions/{id}/directory", post(relocation::change))
         .route(
             "/api/sessions/{id}/additional-directories",
@@ -1725,12 +1751,16 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/api/sessions/{id}/diff", get(diff::view))
         .route("/api/markdown", post(markdown))
+        .route("/api/markdown/batch", post(markdown_batch))
         .route("/api/sessions/{id}/user-format", post(format_user))
         .route("/{name}", get(hosting::asset));
     #[cfg(feature = "model-viewer")]
     let router = router.route("/model-viewer-assets/{*name}", get(model_viewer::asset));
     let router = router
         .layer(DefaultBodyLimit::max(128 * 1024))
+        // Transcript pages, tool bodies and web assets over slow links. WebSocket
+        // upgrades have no body and pass through; session events gzip themselves.
+        .layer(tower_http::compression::CompressionLayer::new())
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app.clone());
     let scheme = if tls.is_some() { "https" } else { "http" };
@@ -4142,6 +4172,8 @@ struct EventsQuery {
     /// Last event sequence the browser applied; resumes without a full replay.
     after: Option<u64>,
 }
+/// WebSocket subprotocol under which large session messages are gzip binary frames.
+const GZIP_SUBPROTOCOL: &str = "agentworks.gzip";
 async fn events(
     State(app): State<App>,
     Path(id): Path<String>,
@@ -4155,9 +4187,11 @@ async fn events(
             return Err(error);
         }
     };
+    let ws = ws.protocols([GZIP_SUBPROTOCOL]);
+    let gzip = ws.selected_protocol().is_some();
     Ok(ws.on_upgrade(move |socket| {
         tracing::debug!(session = %s.id, "Session WebSocket upgraded");
-        event_socket(socket, s, query.after)
+        event_socket(socket, s, query.after, gzip)
     }))
 }
 
@@ -4189,13 +4223,40 @@ async fn notification_socket(socket: WebSocket, mut rx: broadcast::Receiver<Valu
         }
     }
 }
-async fn event_socket(socket: WebSocket, s: Arc<Session>, after: Option<u64>) {
+/// Messages at least this large are gzipped for clients that ask for it.
+const SOCKET_COMPRESS_MIN: usize = 8 * 1024;
+/// A session event as a WebSocket message: text, or a gzip binary frame when large.
+/// permessage-deflate is not available in tungstenite, so compression is explicit.
+async fn socket_message(value: &Value, gzip: bool) -> Message {
+    let text = value.to_string();
+    if !gzip || text.len() < SOCKET_COMPRESS_MIN {
+        return Message::Text(text.into());
+    }
+    let compressed = tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(
+            Vec::with_capacity(text.len() / 6),
+            flate2::Compression::new(6),
+        );
+        encoder
+            .write_all(text.as_bytes())
+            .and_then(|()| encoder.finish())
+            .map_err(|_| text)
+    })
+    .await;
+    match compressed {
+        Ok(Ok(bytes)) => Message::Binary(bytes.into()),
+        Ok(Err(text)) => Message::Text(text.into()),
+        Err(_) => Message::Text(value.to_string().into()),
+    }
+}
+async fn event_socket(socket: WebSocket, s: Arc<Session>, after: Option<u64>, gzip: bool) {
     let mut rx = s.tx.subscribe();
     let (mut sink, mut stream) = socket.split();
     let snapshot = s.browser_snapshot(after);
     let mut seq = snapshot["seq"].as_u64().unwrap_or(0);
     if sink
-        .send(Message::Text(snapshot.to_string().into()))
+        .send(socket_message(&snapshot, gzip).await)
         .await
         .is_err()
     {
@@ -4210,7 +4271,7 @@ async fn event_socket(socket: WebSocket, s: Arc<Session>, after: Option<u64>) {
                 // U-05: derived tool progress and headers reuse their source event's seq and are never stored.
                 if !matches!(event["kind"].as_str(),Some("input_queue"|"tool_progress"|"tool_header"|"session_badges"|"github_event"|"github_context")) {if n<=seq {continue;} seq=n;}
                 let closed=event["kind"]=="status" && (event["data"]["status"]=="closed" || event["data"]["status"]=="suspended");
-                if sink.send(Message::Text(event.to_string().into())).await.is_err(){break;}
+                if sink.send(socket_message(&event,gzip).await).await.is_err(){break;}
                 if closed {let _=sink.send(Message::Close(None)).await;break;}
             }
             incoming=stream.next()=>match incoming {
@@ -4268,31 +4329,75 @@ struct Markdown {
     #[serde(default, rename = "sessionId")]
     session_id: Option<String>,
 }
-async fn markdown(State(app): State<App>, Json(req): Json<Markdown>) -> Json<Value> {
+/// Renders one message, applying its session's `chat.agent` (or user) formatters.
+/// Blocking: formatters run scripts. A formatter that panics leaves the text as written.
+fn render_message(app: &App, req: Markdown) -> Value {
     let session = req
         .session_id
         .as_deref()
         .and_then(|id| app.sessions.lock().unwrap().get(id).cloned());
     let text = match session {
         Some(s) => {
-            let (hub, text) = (app.scripts.clone(), req.text.clone());
-            tokio::task::spawn_blocking(move || {
-                let apply = if req.user {
-                    chat::apply_user_in_session
-                } else {
-                    chat::apply_in_session
-                };
-                apply(&hub, &s.id, &s.provider, &s.cwd().to_string_lossy(), &text)
-            })
-            .await
-            .unwrap_or(req.text)
+            let apply = if req.user {
+                chat::apply_user_in_session
+            } else {
+                chat::apply_in_session
+            };
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                apply(
+                    &app.scripts,
+                    &s.id,
+                    &s.provider,
+                    &s.cwd().to_string_lossy(),
+                    &req.text,
+                )
+            }))
+            .unwrap_or_else(|_| req.text.clone())
         }
         None => req.text,
     };
     let marker = format!("awmermaid-{}", &Uuid::new_v4().simple().to_string()[..16]);
-    Json(
-        json!({"html":render_markdown_with_marker(&text, &marker), "mermaidClass":format!("language-{marker}")}),
-    )
+    json!({"html":render_markdown_with_marker(&text, &marker), "mermaidClass":format!("language-{marker}")})
+}
+async fn markdown(State(app): State<App>, Json(req): Json<Markdown>) -> ApiResult {
+    tokio::task::spawn_blocking(move || Json(render_message(&app, req)))
+        .await
+        .map_err(|_| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Markdown rendering failed",
+            )
+        })
+}
+#[derive(Deserialize)]
+struct MarkdownBatch {
+    items: Vec<Markdown>,
+}
+/// Most messages rendered in one batch request.
+const MARKDOWN_BATCH: usize = 200;
+/// Opening a transcript renders every message; one round trip serves them all.
+async fn markdown_batch(State(app): State<App>, Json(req): Json<MarkdownBatch>) -> ApiResult {
+    if req.items.len() > MARKDOWN_BATCH {
+        return Err(fail(
+            StatusCode::BAD_REQUEST,
+            format!("At most {MARKDOWN_BATCH} messages per batch"),
+        ));
+    }
+    tokio::task::spawn_blocking(move || {
+        let results: Vec<Value> = req
+            .items
+            .into_iter()
+            .map(|item| render_message(&app, item))
+            .collect();
+        Json(json!({ "results": results }))
+    })
+    .await
+    .map_err(|_| {
+        fail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Markdown rendering failed",
+        )
+    })
 }
 #[derive(Deserialize)]
 struct UserFormat {

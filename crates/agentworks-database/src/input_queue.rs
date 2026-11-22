@@ -21,6 +21,7 @@ impl Store {
         binding: Option<(&str, &str, &str)>,
         created: i64,
     ) -> Result<()> {
+        self.written.remove(id);
         let tx = self
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
