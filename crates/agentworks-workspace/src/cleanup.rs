@@ -68,6 +68,28 @@ pub struct Inspection {
     /// The blocker is only that other sessions use the checkout; a human may override it.
     #[serde(default)]
     pub in_use: bool,
+    /// The branch checked out now; it may differ from the recorded one when the agent switched.
+    #[serde(default)]
+    pub checked_out: Option<String>,
+    /// Set when HEAD is detached.
+    #[serde(default)]
+    pub detached: Option<Detached>,
+}
+impl Inspection {
+    /// Removal would lose work: uncommitted changes, or commits no ref reaches.
+    pub fn needs_confirmation(&self) -> bool {
+        self.dirty.as_ref().is_some_and(Dirty::any)
+            || self.detached.as_ref().is_some_and(|d| d.orphaned > 0)
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Detached {
+    pub head: String,
+    /// Commits reachable from HEAD but from no branch, tag or remote-tracking ref.
+    pub orphaned: usize,
+    /// `<short sha> <subject>` for the newest orphaned commits.
+    pub commits: Vec<String>,
 }
 
 /// Submodule git directories are deleted with the worktree, so commits reachable
@@ -83,8 +105,13 @@ fn utf8(path: &std::path::Path) -> Result<&str, Error> {
         .ok_or_else(|| conflict("Worktree path must be UTF-8"))
 }
 
-/// Confirms the path is still the recorded linked checkout of the recorded repository.
-pub async fn verify(app: &(impl worktrees::Context + ?Sized), o: &Owned) -> Result<(), String> {
+/// Confirms the path is still the recorded linked checkout of the recorded repository
+/// and returns the branch checked out there, or `None` for a detached HEAD. A different
+/// named branch is fine: removing the checkout never deletes branches.
+pub async fn verify_checkout(
+    app: &(impl worktrees::Context + ?Sized),
+    o: &Owned,
+) -> Result<Option<String>, String> {
     let path = utf8(&o.path).map_err(|e| e.1)?;
     if app.checked(path).map_err(|e| e.1)? != o.path {
         return Err("Worktree path no longer resolves to its recorded location".into());
@@ -93,13 +120,22 @@ pub async fn verify(app: &(impl worktrees::Context + ?Sized), o: &Owned) -> Resu
     if repo.top != o.path || !repo.linked || repo.common != o.common_dir {
         return Err("Path is no longer the recorded linked worktree of this repository".into());
     }
-    let head = worktrees::git(app, &o.path, &["symbolic-ref", "-q", "HEAD"])
-        .await
-        .map_err(|_| "HEAD is detached; commits might exist only in this checkout".to_owned())?;
-    if head != format!("refs/heads/{}", o.branch) {
+    let Ok(head) = worktrees::git(app, &o.path, &["symbolic-ref", "-q", "HEAD"]).await else {
+        return Ok(None);
+    };
+    head.strip_prefix("refs/heads/")
+        .map(|b| Some(b.to_owned()))
+        .ok_or_else(|| format!("HEAD points at {head}; commits might exist only in this checkout"))
+}
+
+/// Like [`verify_checkout`], but also requires the recorded branch (restore and adoption).
+pub async fn verify(app: &(impl worktrees::Context + ?Sized), o: &Owned) -> Result<(), String> {
+    let branch = verify_checkout(app, o)
+        .await?
+        .ok_or("HEAD is detached; commits might exist only in this checkout")?;
+    if branch != o.branch {
         return Err(format!(
-            "Checked-out {} differs from the recorded branch {}; commits might exist only in this checkout",
-            head.strip_prefix("refs/heads/").unwrap_or(&head),
+            "Checked-out {branch} differs from the recorded branch {}",
             o.branch
         ));
     }
@@ -149,6 +185,8 @@ pub async fn inspect_in(
         shared_with: Vec::new(),
         blocker: None,
         in_use: false,
+        checked_out: None,
+        detached: None,
     };
     let Some(o) = owned else {
         return result;
@@ -164,7 +202,7 @@ pub async fn inspect_in(
     }
     result.state = "present".into();
     let checked = async {
-        verify(app, &o).await?;
+        let branch = verify_checkout(app, &o).await?;
         let list = worktrees::git(app, &o.path, &["worktree", "list", "--porcelain", "-z"])
             .await
             .map_err(|e| e.1)?;
@@ -191,6 +229,28 @@ pub async fn inspect_in(
         .await
         .map_err(|e| format!("Could not inspect changes: {}", e.1))?;
         // Size/mtime catch later edits to a path that was already dirty when confirmed.
+        let detached = match branch {
+            Some(_) => None,
+            None => {
+                let not = ["HEAD", "--not", "--branches", "--tags", "--remotes"];
+                let count =
+                    worktrees::git(app, &o.path, &[&["rev-list", "--count"][..], &not].concat())
+                        .await
+                        .map_err(|e| format!("Could not inspect detached HEAD: {}", e.1))?;
+                let log = worktrees::git(
+                    app,
+                    &o.path,
+                    &[&["log", "--format=%h %s", "-n", "10"][..], &not].concat(),
+                )
+                .await
+                .map_err(|e| format!("Could not inspect detached HEAD: {}", e.1))?;
+                Some(Detached {
+                    head: head.clone(),
+                    orphaned: count.trim().parse().unwrap_or(0),
+                    commits: log.lines().map(str::to_owned).collect(),
+                })
+            }
+        };
         let (mut dirty, paths) = parse_status(&raw);
         let stranded = worktrees::git(
             app,
@@ -230,10 +290,18 @@ pub async fn inspect_in(
                 material.push_str(&format!("\0{}:{modified}", meta.len()));
             }
         }
-        Ok::<_, String>((locked, dirty, crate::sha256::hex(material.as_bytes())))
+        Ok::<_, String>((
+            branch,
+            detached,
+            locked,
+            dirty,
+            crate::sha256::hex(material.as_bytes()),
+        ))
     };
     match checked.await {
-        Ok((locked, dirty, fingerprint)) => {
+        Ok((branch, detached, locked, dirty, fingerprint)) => {
+            result.checked_out = branch;
+            result.detached = detached;
             result.locked = locked;
             result.dirty = Some(dirty);
             result.fingerprint = Some(fingerprint);
@@ -296,7 +364,15 @@ pub async fn remove_in(
         }
         worktrees::git(app, &o.main_top, &forced).await?;
     }
-    Ok(json!({"outcome":"removed","forced":dirty,"path":o.path,"branch":o.branch}))
+    let branch = current.checked_out.as_ref().unwrap_or(&o.branch);
+    let discarded = current
+        .detached
+        .as_ref()
+        .filter(|d| d.orphaned > 0)
+        .map(|d| &d.head);
+    Ok(
+        json!({"outcome":"removed","forced":dirty,"path":o.path,"branch":branch,"discardedHead":discarded}),
+    )
 }
 
 pub async fn restore_in(

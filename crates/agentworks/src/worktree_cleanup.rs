@@ -69,6 +69,8 @@ pub(crate) async fn inspect(app: &App, s: &Session) -> Inspection {
                 shared_with: Vec::new(),
                 blocker: Some(reason),
                 in_use: false,
+                checked_out: None,
+                detached: None,
             },
         }
     };
@@ -87,12 +89,13 @@ pub(crate) async fn inspect(app: &App, s: &Session) -> Inspection {
 }
 
 fn view(s: &Session, i: &Inspection) -> Value {
-    let dirty = i.dirty.as_ref().is_some_and(Dirty::any);
     json!({
         "owned": i.owned.is_some(),
         "state": i.state,
         "path": i.owned.as_ref().map_or(&s.cwd(), |o| &o.path),
         "branch": i.owned.as_ref().map(|o| &o.branch),
+        "checkedOut": i.checked_out,
+        "detached": i.detached,
         "baseCommit": i.owned.as_ref().map(|o| &o.base_commit),
         "removedAt": i.owned.as_ref().and_then(|o| o.removed),
         "population": i.owned.as_ref().and_then(|o| o.population.as_ref()),
@@ -103,7 +106,7 @@ fn view(s: &Session, i: &Inspection) -> Value {
         "sharedWith": i.shared_with,
         "cleanup": {
             "allowed": i.state == "present" && i.blocker.is_none(),
-            "requiresConfirmation": dirty,
+            "requiresConfirmation": i.needs_confirmation(),
             "overridable": i.state == "present" && i.in_use,
             "reason": match i.state.as_str() {
                 "unowned" => Some("This session did not create its worktree; Agentworks never removes it".into()),
@@ -173,9 +176,9 @@ pub async fn cleanup(
         "removed" => return Ok(json!({"outcome":"removed","worktree":summary})),
         _ => {}
     }
-    // Validate dirty-removal consent before an exit hook can change files.
+    // Validate removal consent before an exit hook can change files.
     if mode == Cleanup::Remove
-        && first.dirty.as_ref().is_some_and(Dirty::any)
+        && first.needs_confirmation()
         && confirm != first.fingerprint.as_deref()
     {
         return Err(conflict(
@@ -191,11 +194,13 @@ pub async fn cleanup(
     }
     let o = first.owned.clone().expect("owned worktree");
     let dirty = first.dirty.as_ref().is_some_and(Dirty::any);
-    if dirty {
+    if first.needs_confirmation() {
         if mode == Cleanup::Auto {
-            return retained(
-                "Worktree has uncommitted or untracked changes; confirm removal explicitly",
-            );
+            return retained(if dirty {
+                "Worktree has uncommitted or untracked changes; confirm removal explicitly"
+            } else {
+                "Detached HEAD has commits on no branch; confirm removal explicitly"
+            });
         }
         if confirm != first.fingerprint.as_deref() {
             return Err(conflict(
@@ -229,10 +234,20 @@ pub async fn cleanup(
     if let Err((_, message)) = removal {
         return retained(&message);
     }
+    // Restore recreates the branch the agent was last on; the recorded one is retained too.
+    let branch = first.checked_out.clone().unwrap_or(o.branch);
     if let Some(w) = s.data.lock().unwrap().worktree.as_mut() {
         w.removed = Some(now());
+        w.branch = branch.clone();
     }
-    Ok(json!({"outcome":"removed","forced":dirty,"path":o.path,"branch":o.branch}))
+    let discarded = first
+        .detached
+        .as_ref()
+        .filter(|d| d.orphaned > 0)
+        .map(|d| &d.head);
+    Ok(
+        json!({"outcome":"removed","forced":dirty,"path":o.path,"branch":branch,"discardedHead":discarded}),
+    )
 }
 
 async fn remote(
@@ -546,20 +561,112 @@ mod tests {
     async fn unused_confirmation_never_overrides_integrity_blockers() {
         let f = Fixture::new();
         let owner = f.owner();
-        git(&f.worktree, &["switch", "-q", "-c", "elsewhere"]);
-        let shown = inspect(&f.app, &owner).await;
-        assert!(
-            !shown.in_use
-                && shown
-                    .blocker
-                    .as_deref()
-                    .unwrap()
-                    .contains("differs from the recorded branch")
+        git(
+            &f.root.join("repo"),
+            &["worktree", "lock", f.worktree.to_str().unwrap()],
         );
+        let shown = inspect(&f.app, &owner).await;
+        assert!(!shown.in_use && shown.blocker.as_deref() == Some("Worktree is locked"));
         let err = cleanup(&f.app, &owner, Cleanup::Remove, None, &["early".into()])
             .await
             .unwrap_err();
-        assert!(err.1.contains("differs from the recorded branch"));
+        assert!(err.1.contains("Worktree is locked"));
         assert!(f.worktree.is_dir());
+    }
+
+    #[tokio::test]
+    async fn detached_head_without_orphaned_commits_needs_no_confirmation() {
+        let f = Fixture::new();
+        f.app.sessions.lock().unwrap().remove("early");
+        let owner = f.owner();
+        git(&f.worktree, &["switch", "-q", "--detach"]);
+        let shown = inspect(&f.app, &owner).await;
+        assert!(shown.blocker.is_none() && !shown.needs_confirmation());
+        assert_eq!(shown.detached.as_ref().unwrap().orphaned, 0);
+        let removed = cleanup(&f.app, &owner, Cleanup::Auto, None, &[])
+            .await
+            .unwrap();
+        assert_eq!(removed["outcome"], "removed");
+        assert_eq!(removed["branch"], "owned");
+        assert!(removed["discardedHead"].is_null());
+    }
+
+    #[tokio::test]
+    async fn detached_head_with_orphaned_commits_requires_confirmation() {
+        let f = Fixture::new();
+        f.app.sessions.lock().unwrap().remove("early");
+        let owner = f.owner();
+        git(&f.worktree, &["switch", "-q", "--detach"]);
+        let commit = [
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+        ];
+        git(&f.worktree, &[&commit[..], &["lost work"]].concat());
+        let shown = inspect(&f.app, &owner).await;
+        let detached = shown.detached.as_ref().unwrap();
+        assert!(shown.blocker.is_none() && shown.needs_confirmation());
+        assert_eq!(detached.orphaned, 1);
+        assert!(detached.commits[0].ends_with(" lost work"));
+        assert_eq!(
+            view(&owner, &shown)["cleanup"]["requiresConfirmation"],
+            true
+        );
+
+        // Archive keeps it; an unconfirmed removal is refused.
+        let kept = cleanup(&f.app, &owner, Cleanup::Auto, None, &[])
+            .await
+            .unwrap();
+        assert_eq!(kept["outcome"], "retained");
+        let err = cleanup(&f.app, &owner, Cleanup::Remove, None, &[])
+            .await
+            .unwrap_err();
+        assert!(err.1.contains("confirm again"));
+        assert!(f.worktree.is_dir());
+
+        let removed = cleanup(
+            &f.app,
+            &owner,
+            Cleanup::Remove,
+            shown.fingerprint.as_deref(),
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(removed["outcome"], "removed");
+        assert_eq!(removed["branch"], "owned");
+        assert_eq!(removed["discardedHead"], detached.head.as_str());
+        assert!(!f.worktree.exists());
+    }
+
+    #[tokio::test]
+    async fn switched_branch_is_removed_and_restored_from_the_checked_out_branch() {
+        let f = Fixture::new();
+        f.app.sessions.lock().unwrap().remove("early");
+        let owner = f.owner();
+        git(&f.worktree, &["switch", "-q", "-c", "elsewhere"]);
+        let shown = inspect(&f.app, &owner).await;
+        assert!(shown.blocker.is_none());
+        assert_eq!(shown.checked_out.as_deref(), Some("elsewhere"));
+        let removed = cleanup(&f.app, &owner, Cleanup::Auto, None, &[])
+            .await
+            .unwrap();
+        assert_eq!(removed["outcome"], "removed");
+        assert_eq!(removed["branch"], "elsewhere");
+        assert!(!f.worktree.exists());
+        let repo = f.root.join("repo");
+        // Neither branch is deleted.
+        git(&repo, &["rev-parse", "--verify", "refs/heads/owned"]);
+        git(&repo, &["rev-parse", "--verify", "refs/heads/elsewhere"]);
+        let owned = owner.data.lock().unwrap().worktree.clone().unwrap();
+        assert_eq!(owned.branch, "elsewhere");
+        let restored = restore_in(&f.app, &owned).await.unwrap().unwrap();
+        assert_eq!(restored["branch"], "elsewhere");
+        assert_eq!(git(&f.worktree, &["branch", "--show-current"]), "elsewhere");
     }
 }

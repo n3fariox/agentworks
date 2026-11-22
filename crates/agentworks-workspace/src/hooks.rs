@@ -54,7 +54,8 @@ pub async fn run(
     event: &str,
     reason: &str,
 ) -> Result<String, Error> {
-    crate::cleanup::verify(app, owned)
+    // The agent may have switched branches; exit hooks still run in that checkout.
+    crate::cleanup::verify_checkout(app, owned)
         .await
         .map_err(|e| fail(StatusCode::CONFLICT, e))?;
     let Some(state) = &owned.hooks else {

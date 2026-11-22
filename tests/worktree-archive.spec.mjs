@@ -16,8 +16,8 @@ test.beforeAll(async()=>{
 test.afterAll(async()=>{await new Promise(ok=>server.close(ok));});
 const worktree={owned:true,path:'/repo/.worktrees/two',branch:'agentworks/two',removed:false};
 const clean={staged:0,unstaged:0,untracked:0,paths:[],truncated:false};
-function status({dirty=clean,cleanup,sharedWith=[]}){
-  return {owned:true,state:'present',path:worktree.path,branch:worktree.branch,dirty,fingerprint:'fp-1',locked:false,sharedWith,cleanup};
+function status({dirty=clean,cleanup,sharedWith=[],detached=null}){
+  return {owned:true,state:'present',path:worktree.path,branch:worktree.branch,checkedOut:detached?null:worktree.branch,detached,dirty,fingerprint:'fp-1',locked:false,sharedWith,cleanup};
 }
 async function fixture(page,{archived=false,inspection}){
   const sessions=[{id:'one',title:'Current session',provider:'demo',cwd:'/repo',status:'idle',hostId:'local'},
@@ -79,6 +79,20 @@ test('archived sessions offer removal of a retained dirty worktree',async({page}
   expect(writes[0]).toEqual({path:'/api/sessions/two/worktree/remove',body:{confirmDirty:'fp-1'}});
   await expect(page.locator('#toast')).toContainText('branch agentworks/two retained');
   await row(page).click({button:'right'});await expect(item(page,'Remove worktree…')).toHaveCount(0);
+});
+
+test('archiving a detached HEAD with commits on no branch asks before discarding them',async({page})=>{
+  const detached={head:'0123456789abcdef0123456789abcdef01234567',orphaned:2,commits:['0123456 second','89abcde first']};
+  const writes=await fixture(page,{inspection:status({detached,cleanup:{allowed:true,requiresConfirmation:true,overridable:false,reason:null}})});
+  await row(page).click({button:'right'});await item(page,'Archive session').click();
+  await expect(dialog(page).getByRole('heading')).toHaveText('Commits on no branch');
+  await expect(page.locator('#worktree-archive-summary')).toContainText('detached HEAD (0123456789) with 2 commits on no branch');
+  await expect(page.locator('#worktree-archive-commits li')).toHaveText(['0123456 second','89abcde first']);
+  await expect(page.locator('#worktree-archive-paths')).toBeHidden();
+  await expect(page.locator('#worktree-archive-loss')).toContainText('recovered only by hash');
+  await page.locator('#worktree-archive-remove').click();
+  await expect.poll(()=>writes.length).toBe(1);
+  expect(writes[0]).toEqual({path:'/api/sessions/two',body:{archived:true,worktree:'remove',confirmDirty:'fp-1'}});
 });
 
 test('unsafe blockers are reported without offering removal',async({page})=>{

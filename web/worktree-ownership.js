@@ -12,25 +12,29 @@ export function setupWorktreeOwnership({api,toast}){
   dialog.addEventListener('close',()=>{if(pending)settle(null);});
   function counts(d){return [[d.staged,'staged'],[d.unstaged,'unstaged'],[d.untracked,'untracked']].filter(([n])=>n).map(([n,l])=>`${n} ${l}`).join(', ');}
   const isDirty=status=>Boolean(status.dirty&&counts(status.dirty));
+  const orphaned=status=>status.detached?.orphaned||0;
+  const plural=(n,word)=>`${n} ${word}${n===1?'':'s'}`;
+  const items=(list,values,more)=>{list.replaceChildren(...values.map(text=>{const item=document.createElement('li');item.textContent=text;return item;}));if(more){const item=document.createElement('li');item.textContent='…and more';list.append(item);}list.hidden=!values.length;};
   // archived: the session is already archived, so the only choice is removing the retained checkout.
   function choose(status,archived=false){
-    const dirty=isDirty(status),inUse=status.cleanup.overridable;
-    $('worktree-archive-title').textContent=inUse?'Worktree still in use':dirty?'Uncommitted worktree changes':'Remove worktree';
-    $('worktree-archive-summary').textContent=dirty?`${status.path} has ${counts(status.dirty)} change(s).`:`${status.path} has no uncommitted changes.`;
-    const list=$('worktree-archive-paths');list.replaceChildren();list.hidden=!dirty;
-    for(const path of dirty?status.dirty.paths:[]){const item=document.createElement('li');item.textContent=path;list.append(item);}
-    if(dirty&&status.dirty.truncated){const item=document.createElement('li');item.textContent='…and more';list.append(item);}
+    const dirty=isDirty(status),lost=orphaned(status),inUse=status.cleanup.overridable,risky=dirty||lost>0;
+    $('worktree-archive-title').textContent=inUse?'Worktree still in use':dirty&&lost?'Unsaved worktree work':dirty?'Uncommitted worktree changes':lost?'Commits on no branch':'Remove worktree';
+    const parts=[dirty&&`${counts(status.dirty)} change(s)`,lost&&`a detached HEAD (${status.detached.head.slice(0,10)}) with ${plural(lost,'commit')} on no branch`].filter(Boolean);
+    $('worktree-archive-summary').textContent=parts.length?`${status.path} has ${parts.join(' and ')}.`:`${status.path} has no uncommitted changes.`;
+    items($('worktree-archive-paths'),dirty?status.dirty.paths:[],dirty&&status.dirty.truncated);
+    items($('worktree-archive-commits'),lost?status.detached.commits:[],lost>status.detached?.commits.length);
     $('worktree-archive-in-use').hidden=!inUse;
     $('worktree-archive-users').replaceChildren(...status.sharedWith.map(other=>{const item=document.createElement('li');item.textContent=other.title||other.id;return item;}));
     $('worktree-archive-unused').checked=false;
-    $('worktree-archive-loss').textContent=dirty?'Deleting removes these staged, unstaged and untracked changes permanently, along with ignored files in the checkout.':'Removing deletes the checkout directory, including ignored files.';
-    $('worktree-archive-branch').textContent=status.branch;
+    $('worktree-archive-loss').textContent=[dirty&&'Deleting removes these staged, unstaged and untracked changes permanently, along with ignored files in the checkout.',lost&&`The listed commits are on no branch; after removal they can be recovered only by hash (git branch <name> ${status.detached.head.slice(0,10)}) until Git garbage-collects them.`,!risky&&'Removing deletes the checkout directory, including ignored files.'].filter(Boolean).join(' ');
+    $('worktree-archive-branch').textContent=status.checkedOut||status.branch;
     $('worktree-archive-keep').hidden=archived;
-    $('worktree-archive-remove').textContent=archived?(dirty?'Remove, delete changes':'Remove worktree'):(dirty?'Archive, delete changes':'Archive, remove worktree');
+    $('worktree-archive-remove').textContent=archived?(risky?'Remove, discard work':'Remove worktree'):(risky?'Archive, discard work':'Archive, remove worktree');
     $('worktree-archive-remove').disabled=inUse;
     return new Promise(resolve=>{pending=resolve;dialog.showModal();(archived?$('worktree-archive-cancel'):$('worktree-archive-keep')).focus();});
   }
-  const removal=status=>({confirmDirty:isDirty(status)?status.fingerprint:undefined,confirmUnused:status.cleanup.overridable?status.sharedWith.map(other=>other.id):undefined});
+  const discarded=outcome=>outcome.discardedHead?` Detached commits are recoverable by hash: ${outcome.discardedHead}.`:'';
+  const removal=status=>({confirmDirty:status.cleanup.requiresConfirmation?status.fingerprint:undefined,confirmUnused:status.cleanup.overridable?status.sharedWith.map(other=>other.id):undefined});
   // Returns the updated session, or null when the human cancels.
   async function archive(session){
     const path=`/api/sessions/${encodeURIComponent(session.id)}`;
@@ -51,7 +55,7 @@ export function setupWorktreeOwnership({api,toast}){
     }
     const updated=await api(path,{method:'PATCH',body:JSON.stringify(body)});
     const cleanup=updated.worktreeCleanup;
-    if(cleanup?.outcome==='removed'&&cleanup.branch)toast(`Archived. Worktree removed; branch ${cleanup.branch} retained for restore.`,'success');
+    if(cleanup?.outcome==='removed'&&cleanup.branch)toast(`Archived. Worktree removed; branch ${cleanup.branch} retained for restore.${discarded(cleanup)}`,'success');
     else if(cleanup?.outcome==='retained'&&body.worktree!=='keep')toast(`Archived. Worktree kept: ${cleanup.reason}`);
     return updated;
   }
@@ -62,7 +66,7 @@ export function setupWorktreeOwnership({api,toast}){
     if(!status.cleanup.allowed&&!status.cleanup.overridable)throw new Error(`Worktree not removed: ${status.cleanup.reason||`worktree is ${status.state}`}`);
     if(await choose(status,true)!=='remove')return false;
     const outcome=await api(`${path}/remove`,{method:'POST',body:JSON.stringify(removal(status))});
-    toast(outcome.branch?`Worktree removed; branch ${outcome.branch} retained for restore.`:'Worktree removed.','success');
+    toast((outcome.branch?`Worktree removed; branch ${outcome.branch} retained for restore.`:'Worktree removed.')+discarded(outcome),'success');
     return true;
   }
   return {archive,removeRetained};
