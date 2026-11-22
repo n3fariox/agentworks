@@ -16,7 +16,7 @@ The pinned Rust and Zig toolchains are selected by `mise exec -- cargo …` or
 | `agentworks-presentation` | Sanitized Markdown and inline HTML, prose-line selection/application, transcript compaction, tool identity and bounded display summaries |
 | `agentworks-scripting` | Installed hook definitions, built-in upgrades, precedence, compilation, interpreter scheduling and ephemeral hook results |
 | `agentworks-starlark` | Typed interpreter APIs, capability checks, progress parsing, experimental workflow decisions, worker binary, and bundled Starlark sources |
-| `agentworks-secrets` | Redaction of delivered secret values and `run_with_secrets` execution (templates, private files, capped redacted output), used by the service and the worker's MCP facade |
+| `agentworks-secrets` | Session secrets: key file and value sealing, name and assignment rules, their tables on a caller's SQLite connection, redaction of delivered values, and `run_with_secrets` execution. Feature `storage` (default) covers the key file and tables; the worker builds without it |
 | `agentworks-worker` | The `agentworks-worker` executable for remote hosts and the subcommand dispatch shared with the service: worker loop, ACP bridges, MCP stdio relay. Feature `goose` (default) embeds Goose |
 | `agentworks-goose-acp` | Embedded Goose harness behind ACP: system prompts, exact forks, Codex subscription tokens, usage reporting |
 | `agentworks-claude-acp`, `agentworks-codex-acp`, `agentworks-demo-acp` | Native ACP bridges started as `agentworks <bridge>` subprocesses |
@@ -24,7 +24,8 @@ The pinned Rust and Zig toolchains are selected by `mise exec -- cargo …` or
 The service depends on runtime, session, terminal, workspace, presentation,
 scripting, Starlark, secrets and worker; worker also depends on secrets; the bridges and Goose reach it only through worker.
 Runtime depends on terminal and workspace; session depends on workspace for
-recorded worktree ownership. Scripting depends on presentation and Starlark;
+recorded worktree ownership. Scripting depends on presentation and Starlark; secrets depends on no other
+Agentworks crate and, like scripting, accepts the service's SQLite connection;
 presentation depends on neither scripting nor the server. There are no dependencies
 back to the service. The runtime, session, terminal, and workspace libraries do
 not accept `App` or live `Session` handles, and do not depend on Axum or SQLite.

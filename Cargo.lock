@@ -125,7 +125,6 @@ dependencies = [
  "agentworks-terminal",
  "agentworks-worker",
  "agentworks-workspace",
- "argon2",
  "axum",
  "base64 0.22.1",
  "flate2",
@@ -136,7 +135,6 @@ dependencies = [
  "reqwest 0.13.5",
  "rig-core",
  "rig-reqwest",
- "ring",
  "rusqlite",
  "serde",
  "serde_json",
@@ -243,8 +241,11 @@ dependencies = [
 name = "agentworks-secrets"
 version = "0.1.0"
 dependencies = [
+ "argon2",
  "base64 0.22.1",
  "libc",
+ "ring",
+ "rusqlite",
  "serde",
  "serde_json",
  "tokio",

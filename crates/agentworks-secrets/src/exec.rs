@@ -142,7 +142,8 @@ impl Drop for Private {
 }
 impl Call {
     pub fn from_arguments(arguments: Map<String, Value>) -> Result<Self, String> {
-        serde_json::from_value(Value::Object(arguments)).map_err(|e| format!("Invalid arguments: {e}"))
+        serde_json::from_value(Value::Object(arguments))
+            .map_err(|e| format!("Invalid arguments: {e}"))
     }
     /// What the service needs to authorize the call: the names it uses and the shape of
     /// the command, never a value.

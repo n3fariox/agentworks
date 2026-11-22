@@ -115,7 +115,10 @@ impl ServerHandler for Proxy {
     }
 }
 /// Waits out any human approval, then returns the service's release of the values.
-async fn resolve(proxy: &Proxy, request: Value) -> std::result::Result<Map<String, Value>, ErrorData> {
+async fn resolve(
+    proxy: &Proxy,
+    request: Value,
+) -> std::result::Result<Map<String, Value>, ErrorData> {
     let mut response = proxy.request("resolve_secrets", request).await?;
     while let Some(id) = response["pending"].as_str().map(str::to_owned) {
         tokio::time::sleep(Duration::from_millis(500)).await;

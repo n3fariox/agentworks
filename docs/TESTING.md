@@ -13,6 +13,7 @@ dependency crates' unit tests. For focused loops:
 ```sh
 scripts/mise-cargo.sh test --locked -p agentworks-presentation
 scripts/mise-cargo.sh test --locked -p agentworks-scripting
+scripts/mise-cargo.sh test --locked -p agentworks-secrets
 scripts/mise-cargo.sh test --locked -p agentworks
 ```
 

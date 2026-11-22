@@ -96,7 +96,11 @@ fn profile_agent(
         .envs(login)
         .envs(session.map(session_environment).into_iter().flatten())
         // Session secrets sit above the login environment and below harness settings.
-        .envs(secrets.iter().map(|(name, value)| (name.clone(), value.to_string())))
+        .envs(
+            secrets
+                .iter()
+                .map(|(name, value)| (name.clone(), value.to_string())),
+        )
         .envs(base.environment().clone());
     let config = if let Some(id) = profile {
         if provider != "goose" {
