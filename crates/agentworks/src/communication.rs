@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use rusqlite::{OptionalExtension, params};
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -41,45 +41,7 @@ pub fn role_patch<'de, D: serde::Deserializer<'de>>(
 ) -> std::result::Result<Option<Option<Role>>, D::Error> {
     Option::<Role>::deserialize(deserializer).map(Some)
 }
-#[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Access {
-    #[serde(default)]
-    pub communicate: bool,
-    #[serde(default)]
-    pub start_sessions: bool,
-    #[serde(default)]
-    pub prompt_sessions: bool,
-    #[serde(default)]
-    pub cancel_sessions: bool,
-    #[serde(default)]
-    pub run_automations: bool,
-    #[serde(default)]
-    pub restart_service: bool,
-    /// The review queue was removed. Saved grants and older clients may still send this
-    /// key, so it is accepted and ignored rather than rejected as unknown.
-    #[serde(default, rename = "manageReviewQueue", skip_serializing)]
-    pub _removed_review_queue: bool,
-    /// Explicit controller grant; never inherited from a session role.
-    #[serde(default)]
-    pub archive_sessions: bool,
-    /// Explicit opt-in to create, edit, pause and delete project automations;
-    /// never part of a role preset or inherited by child sessions.
-    #[serde(default)]
-    pub manage_automations: bool,
-}
-impl Access {
-    pub fn enabled(&self) -> bool {
-        self.communicate
-            || self.start_sessions
-            || self.prompt_sessions
-            || self.cancel_sessions
-            || self.run_automations
-            || self.restart_service
-            || self.archive_sessions
-            || self.manage_automations
-    }
-}
+pub use agentworks_database::Access;
 pub use agentworks_session::origins::ControlOrigin;
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -121,113 +83,53 @@ fn now() -> i64 {
         .as_millis() as i64
 }
 
-/// Columns as selected by `MESSAGE_COLUMNS`.
-fn message_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
-    Ok(
-        json!({"id":r.get::<_,i64>(0)?,"uri":format!("{MESSAGE_URI}{}",r.get::<_,i64>(0)?),"sender":r.get::<_,String>(1)?,"senderUri":actor_uri(&r.get::<_,String>(1)?),"senderTitle":r.get::<_,String>(2)?,"recipient":r.get::<_,String>(3)?,"recipientUri":actor_uri(&r.get::<_,String>(3)?),"recipientTitle":r.get::<_,String>(4)?,"text":r.get::<_,String>(5)?,"replyTo":r.get::<_,Option<i64>>(6)?,"replyToUri":r.get::<_,Option<i64>>(6)?.map(|n|format!("{MESSAGE_URI}{n}")),"created":r.get::<_,i64>(7)?,"acknowledged":r.get::<_,bool>(8)?,"expectReply":r.get::<_,bool>(9)?,"replyId":r.get::<_,Option<i64>>(10)?}),
-    )
+fn message_value(m: agentworks_database::mail::Message) -> Value {
+    json!({"id":m.id,"uri":format!("{MESSAGE_URI}{}",m.id),"sender":m.sender,"senderUri":actor_uri(&m.sender),"senderTitle":m.sender_title,"recipient":m.recipient,"recipientUri":actor_uri(&m.recipient),"recipientTitle":m.recipient_title,"text":m.text,"replyTo":m.reply_to,"replyToUri":m.reply_to.map(|n|format!("{MESSAGE_URI}{n}")),"created":m.created,"acknowledged":m.acknowledged,"expectReply":m.expect_reply,"replyId":m.reply_id})
 }
-/// `expectReply` and `replyId` show an outstanding or answered reply request.
-const MESSAGE_COLUMNS: &str = "SELECT m.id,m.sender,m.sender_title,m.recipient,m.recipient_title,m.text,m.reply_to,m.created,m.acknowledged,r.message_id IS NOT NULL,r.reply_id FROM agent_messages m LEFT JOIN reply_requests r ON r.message_id=m.id";
 impl crate::store::Store {
     pub fn access(&self, id: &str) -> Result<Access> {
-        let raw: Option<String> = self
-            .connection
-            .query_row(
-                "SELECT grants FROM agent_access WHERE session_id=?1",
-                [id],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(db_error)?;
-        raw.map(|v| serde_json::from_str(&v).map_err(db_error))
-            .unwrap_or(Ok(Access::default()))
+        self.0.access(id).map_err(db_error)
     }
     pub fn save_access(&mut self, id: &str, access: &Access) -> Result<()> {
-        let tx = self.connection.transaction().map_err(db_error)?;
-        tx.execute("INSERT INTO agent_access(session_id,grants) VALUES (?1,?2) ON CONFLICT(session_id) DO UPDATE SET grants=excluded.grants",params![id,serde_json::to_string(access).map_err(db_error)?]).map_err(db_error)?;
-        tx.execute("INSERT INTO agent_audit(actor,action,target,outcome,created) VALUES ('human','access',?1,?2,?3)",params![id,serde_json::to_string(access).map_err(db_error)?,now()]).map_err(db_error)?;
-        tx.commit().map_err(db_error)
+        self.0.save_access(id, access, now()).map_err(db_error)
     }
     pub fn mailbox(&self, id: &str, after: i64) -> Result<Value> {
         if after < 0 {
             return Err(fail(StatusCode::BAD_REQUEST, "Invalid message cursor"));
         }
-        let mut q=self.connection.prepare(&format!("{MESSAGE_COLUMNS} WHERE (m.sender=?1 OR m.recipient=?1) AND m.id>?2 ORDER BY m.id LIMIT 21")).map_err(db_error)?;
-        let mut messages = q
-            .query_map(params![id, after], message_row)
+        let mut messages: Vec<Value> = self
+            .0
+            .mailbox_messages(id, after)
             .map_err(db_error)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(db_error)?;
+            .into_iter()
+            .map(message_value)
+            .collect();
         let has_more = messages.len() > 20;
         messages.truncate(20);
         Ok(
             json!({"nextCursor":messages.last().map(|v|v["id"].clone()).unwrap_or(json!(after)),"messages":messages,"hasMore":has_more}),
         )
     }
-    /// Fetching one message means the reader saw its full text, so a received message is
-    /// acknowledged on read. Sent messages are readable but never acknowledged by the sender.
     pub fn read_message(&self, id: &str, message: i64) -> Result<Value> {
-        let found = self
-            .connection
-            .query_row(
-                &format!("{MESSAGE_COLUMNS} WHERE m.id=?1 AND (m.sender=?2 OR m.recipient=?2)"),
-                params![message, id],
-                message_row,
-            )
-            .optional()
-            .map_err(db_error)?;
-        let Some(mut found) = found else {
-            return Err(fail(
-                StatusCode::NOT_FOUND,
-                "Message not found in this mailbox",
-            ));
-        };
-        if found["recipient"] == id && found["acknowledged"] == false {
-            self.acknowledge(id, Some(message))?;
-            found["acknowledged"] = json!(true);
-        }
-        Ok(found)
+        self.0
+            .read_message(id, message)
+            .map_err(db_error)?
+            .map(message_value)
+            .ok_or_else(|| fail(StatusCode::NOT_FOUND, "Message not found in this mailbox"))
     }
-    /// Acknowledge one received message, or all of them with `None`. An acknowledged message
-    /// has been handled, so its pending wake is dropped too. Returns how many changed.
-    /// Both updates commit together, so a message is never acknowledged while its wake stays queued.
     pub fn acknowledge(&self, recipient: &str, message: Option<i64>) -> Result<usize> {
-        let tx = self.connection.unchecked_transaction().map_err(db_error)?;
-        let count = tx
-            .execute(
-                "UPDATE agent_messages SET acknowledged=1 WHERE recipient=?1 AND acknowledged=0 AND (?2 IS NULL OR id=?2)",
-                params![recipient, message],
-            )
-            .map_err(db_error)?;
-        tx.execute("UPDATE inbox_deliveries SET state='cancelled',reason='Acknowledged before delivery' WHERE recipient=?1 AND state='queued' AND message_id IN (SELECT id FROM agent_messages WHERE recipient=?1 AND acknowledged=1 AND (?2 IS NULL OR id=?2))",params![recipient, message]).map_err(db_error)?;
-        tx.commit().map_err(db_error)?;
-        Ok(count)
+        self.0.acknowledge(recipient, message).map_err(db_error)
     }
     pub fn unacknowledged(&self, id: &str) -> Result<i64> {
-        self.connection
-            .query_row(
-                "SELECT count(*) FROM agent_messages WHERE recipient=?1 AND acknowledged=0",
-                [id],
-                |r| r.get(0),
-            )
-            .map_err(db_error)
+        self.0.unacknowledged(id).map_err(db_error)
     }
     pub fn audit(&self, actor: &str, action: &str, target: &str, outcome: &str) -> Result<()> {
-        self.connection.execute("INSERT INTO agent_audit(actor,action,target,outcome,created) VALUES (?1,?2,?3,?4,?5)",params![actor,action,target,outcome,now()]).map_err(db_error)?;
-        Ok(())
+        self.0
+            .audit(actor, action, target, outcome, now())
+            .map_err(db_error)
     }
     pub fn control_start(&self, actor: &str, request: &str) -> Result<Option<String>> {
-        let value = self
-            .connection
-            .query_row(
-                "SELECT session_id FROM agent_starts WHERE actor=?1 AND request_id=?2",
-                params![actor, request],
-                |r| r.get::<_, Option<String>>(0),
-            )
-            .optional()
-            .map_err(db_error)?;
-        Ok(value.map(Option::unwrap_or_default))
+        self.0.control_start(actor, request).map_err(db_error)
     }
 }
 
@@ -472,72 +374,54 @@ pub fn send_as(app: &App, s: &Actor, req: SendMessage) -> Result<Value> {
     }
     let sender_title = s.title.clone();
     let mut store = app.store.lock().unwrap();
-    let tx = store.connection.transaction().map_err(db_error)?;
-    let previous:Option<(i64,String,String,Option<i64>,bool)>=tx.query_row("SELECT id,recipient,text,reply_to,EXISTS(SELECT 1 FROM reply_requests WHERE message_id=agent_messages.id) FROM agent_messages WHERE sender=?1 AND request_id=?2",params![s.id,req.request_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(db_error)?;
-    if let Some((id, recipient, text, reply, expect_reply)) = previous {
-        if recipient != target_id
-            || text != req.text
-            || reply != req.reply_to
-            || expect_reply != (req.expect_reply && s.session.is_some())
-        {
+    use agentworks_database::mail::{NewMessage, SendOutcome};
+    let result = store
+        .send_message(
+            &NewMessage {
+                sender: &s.id,
+                sender_title: &sender_title,
+                recipient: &target_id,
+                recipient_title: &target_title,
+                text: &req.text,
+                reply_to: req.reply_to,
+                request_id: &req.request_id,
+                expect_reply: req.expect_reply && s.session.is_some(),
+                enqueue: target.is_some() && s.session.is_some(),
+                created: now(),
+            },
+            crate::inbox_delivery::enrollment,
+        )
+        .map_err(db_error)?;
+    let id = match result {
+        SendOutcome::Inserted(id) => id,
+        SendOutcome::Duplicate(id) => {
+            return Ok(json!({"id":id,"uri":format!("{MESSAGE_URI}{id}"),"duplicate":true}));
+        }
+        SendOutcome::Conflict => {
             return Err(fail(
                 StatusCode::CONFLICT,
                 "Request ID already used for a different message",
             ));
         }
-        return Ok(json!({"id":id,"uri":format!("{MESSAGE_URI}{id}"),"duplicate":true}));
-    }
-    if let Some(reply) = req.reply_to {
-        let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM agent_messages WHERE id=?1 AND ((sender=?2 AND recipient=?3) OR (sender=?3 AND recipient=?2)))",params![reply,s.id,target_id],|r|r.get(0)).map_err(db_error)?;
-        if !valid {
+        SendOutcome::InvalidReply => {
             return Err(fail(
                 StatusCode::FORBIDDEN,
                 "Reply target is not in this conversation",
             ));
         }
-    }
-    let count: i64 = tx
-        .query_row(
-            "SELECT count(*) FROM agent_messages WHERE recipient=?1 AND acknowledged=0",
-            [&target_id],
-            |r| r.get(0),
-        )
-        .map_err(db_error)?;
-    if count >= 1000 {
-        return Err(fail(
-            StatusCode::TOO_MANY_REQUESTS,
-            "Recipient inbox is full",
-        ));
-    }
-    let recent: i64 = tx
-        .query_row(
-            "SELECT count(*) FROM agent_messages WHERE sender=?1 AND created>?2",
-            params![s.id, now().saturating_sub(60000)],
-            |r| r.get(0),
-        )
-        .map_err(db_error)?;
-    if recent >= 60 {
-        return Err(fail(
-            StatusCode::TOO_MANY_REQUESTS,
-            "Message rate exceeded; retry later",
-        ));
-    }
-    tx.execute("INSERT INTO agent_messages(sender,sender_title,recipient,recipient_title,text,reply_to,created,request_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![s.id,sender_title,target_id,target_title,req.text,req.reply_to,now(),req.request_id]).map_err(db_error)?;
-    let id = tx.last_insert_rowid();
-    tx.execute("INSERT INTO agent_audit(actor,action,target,outcome,created) VALUES (?1,'send_message',?2,'accepted',?3)",params![s.id,target_id,now()]).map_err(db_error)?;
-    // Only a session can be woken by the reply it asked for.
-    if req.expect_reply && s.session.is_some() {
-        tx.execute(
-            "INSERT INTO reply_requests(message_id,requester) VALUES(?1,?2)",
-            params![id, s.id],
-        )
-        .map_err(db_error)?;
-    }
-    // Only session peers can feed wake delivery; controllers need an explicit prompt grant.
-    if target.is_some() && s.session.is_some() {
-        crate::inbox_delivery::enqueue(&tx, &target_id, id, req.reply_to)?;
-    }
-    tx.commit().map_err(db_error)?;
+        SendOutcome::InboxFull => {
+            return Err(fail(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Recipient inbox is full",
+            ));
+        }
+        SendOutcome::RateLimited => {
+            return Err(fail(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Message rate exceeded; retry later",
+            ));
+        }
+    };
     drop(store);
     for session in [s.session.as_ref(), target.as_ref()].into_iter().flatten() {
         mailbox_updated(app, session, id);
@@ -559,14 +443,7 @@ pub fn mailbox_updated(app: &App, session: &Session, message: i64) {
 }
 pub fn acknowledge(app: &App, recipient: &str, id: i64) -> Result<Value> {
     let store = app.store.lock().unwrap();
-    let known: bool = store
-        .connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM agent_messages WHERE id=?1 AND recipient=?2)",
-            params![id, recipient],
-            |r| r.get(0),
-        )
-        .map_err(db_error)?;
+    let known = store.message_recipient(id).map_err(db_error)?.as_deref() == Some(recipient);
     if !known {
         return Err(fail(
             StatusCode::NOT_FOUND,
@@ -710,8 +587,7 @@ pub async fn audit_log(State(app): State<App>, Path(id): Path<String>) -> ApiRes
     session(&app, &id)?;
     let store = app.store.lock().unwrap();
     // Controller names are joined in so attributed operations stay readable after revocation.
-    let mut q=store.connection.prepare("SELECT a.actor,a.action,a.target,a.outcome,a.created,c.name FROM agent_audit a LEFT JOIN agent_controllers c ON a.actor='controller:'||c.id WHERE a.actor=?1 OR a.target=?1 ORDER BY a.id DESC LIMIT 100").map_err(db_error)?;
-    let events=q.query_map([id],|r|Ok(json!({"actor":r.get::<_,String>(0)?,"action":r.get::<_,String>(1)?,"target":r.get::<_,String>(2)?,"outcome":r.get::<_,String>(3)?,"created":r.get::<_,i64>(4)?,"actorTitle":r.get::<_,Option<String>>(5)?}))).map_err(db_error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?;
+    let events = store.agent_audit(&id).map_err(db_error)?;
     Ok(Json(json!({"events":events})))
 }
 

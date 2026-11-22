@@ -1,0 +1,1472 @@
+use crate::{Access, Finish, Ledger};
+use agentworks_session::SessionData;
+pub const MAX_EVENTS: usize = 3000;
+pub const MAX_EVENT_BYTES: usize = 4 * 1024 * 1024;
+use rusqlite::{Connection, params};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::{
+    collections::VecDeque,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+// v10 introduced A-01 schedules; v11 is the combined A-01/R-02 release marker;
+// v12 adds the manageAutomations grant and agent automation request ledger.
+// Recovery adds no tables and preserves every v10 schedule/slot ledger row.
+// v13 adds browser-independent PR tracking and its durable event journal.
+// v14 adds GitHub review ledgers. v15 separates script kinds and adds per-trigger baselines.
+// v16 adds the transcript compaction cursor.
+// v17 adds encrypted session secrets.
+pub const SCHEMA_VERSION: i64 = 17;
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+#[derive(Serialize, Deserialize)]
+pub struct Metadata {
+    pub id: String,
+    pub provider: String,
+    pub cwd: PathBuf,
+    pub title: String,
+    pub initial_model: Option<String>,
+    pub created: u64,
+    pub host_id: String,
+    pub location_id: String,
+}
+/// The retained event window for `Store::recent` rows, with its serialized size.
+pub fn window(recent: Vec<String>) -> Result<(VecDeque<Value>, usize)> {
+    let mut events = recent
+        .into_iter()
+        .rev()
+        .map(|s| serde_json::from_str(&s))
+        .collect::<serde_json::Result<VecDeque<Value>>>()?;
+    let mut bytes = events.iter().map(|e| e.to_string().len()).sum();
+    while bytes > MAX_EVENT_BYTES && events.len() > 1 {
+        bytes -= events.pop_front().unwrap().to_string().len();
+    }
+    Ok((events, bytes))
+}
+
+/// Hold an exclusive lock for the lifetime of the returned file.
+pub fn exclusive(path: &Path, busy: &str) -> Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let lock = options.open(path)?;
+    // A child forked by another thread shares a lock this process just released until it
+    // execs, so a momentary conflict is retried; only a lasting one is another process.
+    for attempt in 0.. {
+        match lock.try_lock() {
+            Ok(()) => break,
+            Err(_) if attempt < 20 => std::thread::sleep(std::time::Duration::from_millis(25)),
+            Err(_) => return Err(busy.to_string().into()),
+        }
+    }
+    Ok(lock)
+}
+pub struct Store {
+    pub(crate) connection: Connection,
+    _lock: Option<std::fs::File>,
+    /// State last written by `event`, excluding its sequence number.
+    pub(crate) written: std::collections::HashMap<String, u64>,
+}
+/// Serialized state for the row, and a hash of everything in it except `seq`.
+fn state_row(state: &SessionData) -> Result<(String, u64)> {
+    use std::hash::{Hash, Hasher};
+    let mut value = serde_json::to_value(state)?;
+    let object = value
+        .as_object_mut()
+        .ok_or("Session state is not an object")?;
+    let seq = object.remove("seq");
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(object)?.hash(&mut hasher);
+    if let Some(seq) = seq {
+        object.insert("seq".into(), seq);
+    }
+    Ok((serde_json::to_string(&value)?, hasher.finish()))
+}
+impl Store {
+    pub fn open(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)?;
+        }
+        let lock = exclusive(
+            &path.with_extension("sqlite3.lock"),
+            "Another Agentworks process is already using this session database",
+        )?;
+        let connection = Connection::open(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Self::initialize(&connection)?;
+        Ok(Self {
+            connection,
+            _lock: Some(lock),
+            written: Default::default(),
+        })
+    }
+    /// An isolated database with the production schema, for ephemeral use and unit tests.
+    pub fn memory() -> Result<Self> {
+        let connection = Connection::open_in_memory()?;
+        Self::initialize(&connection)?;
+        Ok(Self {
+            connection,
+            _lock: None,
+            written: Default::default(),
+        })
+    }
+    fn initialize(connection: &Connection) -> Result<()> {
+        connection.busy_timeout(Duration::from_secs(5))?;
+        let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version > SCHEMA_VERSION {
+            return Err("Session database was created by a newer Agentworks version".into());
+        }
+        connection.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
+        )?;
+
+        connection.execute_batch("BEGIN; CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, metadata TEXT NOT NULL, state TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS events(session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, seq INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(session_id,seq));
+          CREATE TABLE IF NOT EXISTS terminal_snapshots(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, snapshot TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS automations(id TEXT PRIMARY KEY, definition TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS automation_runs(id TEXT PRIMARY KEY,automation_id TEXT NOT NULL,request_id TEXT NOT NULL,session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,name TEXT NOT NULL,provider TEXT NOT NULL,created INTEGER NOT NULL,status TEXT NOT NULL,UNIQUE(automation_id,request_id));
+          CREATE INDEX IF NOT EXISTS automation_runs_by_definition ON automation_runs(automation_id,created);
+          CREATE TABLE IF NOT EXISTS agent_access(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,grants TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS agent_messages(id INTEGER PRIMARY KEY AUTOINCREMENT,sender TEXT NOT NULL,sender_title TEXT NOT NULL,recipient TEXT NOT NULL,recipient_title TEXT NOT NULL,text TEXT NOT NULL,reply_to INTEGER,created INTEGER NOT NULL,request_id TEXT NOT NULL,acknowledged INTEGER NOT NULL DEFAULT 0,UNIQUE(sender,request_id));
+          CREATE INDEX IF NOT EXISTS agent_messages_recipient ON agent_messages(recipient,id);
+          CREATE INDEX IF NOT EXISTS agent_messages_sender ON agent_messages(sender,id);
+          CREATE TABLE IF NOT EXISTS agent_audit(id INTEGER PRIMARY KEY AUTOINCREMENT,actor TEXT NOT NULL,action TEXT NOT NULL,target TEXT NOT NULL,outcome TEXT NOT NULL,created INTEGER NOT NULL);
+          CREATE TABLE IF NOT EXISTS agent_starts(actor TEXT NOT NULL,request_id TEXT NOT NULL,session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,PRIMARY KEY(actor,request_id));
+          CREATE TABLE IF NOT EXISTS agent_completions(id INTEGER PRIMARY KEY AUTOINCREMENT,author TEXT NOT NULL,author_title TEXT NOT NULL,project_id TEXT,request_id TEXT NOT NULL,payload TEXT NOT NULL,report TEXT NOT NULL,created INTEGER NOT NULL,UNIQUE(author,request_id));
+          CREATE INDEX IF NOT EXISTS agent_completions_latest ON agent_completions(author,id DESC);
+          CREATE TABLE IF NOT EXISTS session_creations(request_key TEXT PRIMARY KEY,payload TEXT NOT NULL,session_id TEXT,error TEXT,mutation_started INTEGER NOT NULL DEFAULT 0);
+          COMMIT;")?;
+        // C-01 controllers, U-05 parser scripts, roles, A-01 schedules and secrets are additive schema migrations.
+        connection.execute_batch(&format!(
+            "BEGIN; {} {} {} {} {} {} {} {} PRAGMA user_version={SCHEMA_VERSION}; COMMIT;",
+            crate::schema::INBOX_DELIVERY,
+            crate::schema::CONTROLLERS,
+            crate::schema::SCRIPTS,
+            crate::schema::ROLES,
+            crate::schema::AUTOMATIONS,
+            crate::schema::GITHUB_TRACKING,
+            crate::schema::EVENT_COMPACTION,
+            crate::schema::SECRETS
+        ))?;
+        Ok(())
+    }
+    pub fn insert(
+        &mut self,
+        metadata: &Metadata,
+        state: &SessionData,
+        access: Option<&Access>,
+        creation_key: Option<&str>,
+    ) -> Result<()> {
+        let tx = self.connection.transaction()?;
+        tx.execute(
+            "INSERT INTO sessions(id,metadata,state) VALUES (?1,?2,?3)",
+            params![
+                metadata.id,
+                serde_json::to_string(metadata)?,
+                serde_json::to_string(state)?
+            ],
+        )?;
+        for event in &state.events {
+            tx.execute(
+                "INSERT INTO events(session_id,seq,payload) VALUES (?1,?2,?3)",
+                params![
+                    metadata.id,
+                    event["seq"].as_i64().ok_or("Invalid sequence")?,
+                    event.to_string()
+                ],
+            )?;
+        }
+        if let Some(access) = access {
+            tx.execute(
+                "INSERT INTO agent_access(session_id,grants) VALUES (?1,?2)",
+                params![metadata.id, serde_json::to_string(access)?],
+            )?;
+            tx.execute("INSERT INTO agent_audit(actor,action,target,outcome,created) VALUES ('human','access',?1,?2,?3)",params![metadata.id,serde_json::to_string(access)?,metadata.created as i64])?;
+        }
+        if let Some(origin) = &state.control_origin {
+            tx.execute(
+                "INSERT INTO agent_starts(actor,request_id,session_id) VALUES (?1,?2,?3)",
+                params![origin.actor, origin.request, metadata.id],
+            )?;
+        }
+        if let Some(origin) = &state.automation {
+            tx.execute("INSERT INTO automation_runs(id,automation_id,request_id,session_id,name,provider,created,status) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![origin.run_id,origin.automation_id,origin.request_id,metadata.id,origin.name,metadata.provider,i64::try_from(metadata.created)?,run_status(state)])?;
+        }
+        if let Some(key) = creation_key {
+            tx.execute(
+                "UPDATE session_creations SET session_id=?2,error=NULL WHERE request_key=?1",
+                params![key, metadata.id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn reserve_creation(&mut self, key: &str, payload: &str) -> Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        let prior: Option<(String, Option<String>, Option<String>, bool)> = self
+            .connection
+            .query_row(
+                "SELECT payload,session_id,error,mutation_started FROM session_creations WHERE request_key=?1",
+                [key],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        if let Some((saved, session, error, mutation_started)) = prior {
+            if saved != payload {
+                return Err("Request ID already used for a different session payload".into());
+            }
+            if let Some(id) = session {
+                return Ok(Some(id));
+            }
+            if !mutation_started {
+                // Payload binding persists, but no Git mutation/session insertion was armed.
+                self.connection.execute(
+                    "UPDATE session_creations SET error=NULL WHERE request_key=?1",
+                    [key],
+                )?;
+                return Ok(None);
+            }
+            return Err(format!("Previous creation did not complete: {}. Inspect retained files before using a new request ID", error.as_deref().unwrap_or("interrupted preparation")).into());
+        }
+        self.connection.execute(
+            "INSERT INTO session_creations(request_key,payload) VALUES (?1,?2)",
+            params![key, payload],
+        )?;
+        Ok(None)
+    }
+    pub fn arm_creation(&mut self, key: &str) -> Result<()> {
+        if self.connection.execute("UPDATE session_creations SET mutation_started=1 WHERE request_key=?1 AND session_id IS NULL", [key])? != 1 {
+            return Err("Creation request could not be durably armed".into());
+        }
+        Ok(())
+    }
+    pub fn creation_error(&mut self, key: &str, message: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE session_creations SET error=?2 WHERE request_key=?1 AND session_id IS NULL",
+            params![key, message],
+        )?;
+        Ok(())
+    }
+    pub fn save_state(&mut self, id: &str, state: &SessionData) -> Result<()> {
+        self.written.remove(id);
+        if self.connection.execute(
+            "UPDATE sessions SET state=?2 WHERE id=?1",
+            params![id, serde_json::to_string(state)?],
+        )? != 1
+        {
+            return Err("Session no longer exists".into());
+        }
+        Ok(())
+    }
+    /// Metadata and state in one write, so a moved directory and its handoff note agree.
+    pub fn save_session(&mut self, metadata: &Metadata, state: &SessionData) -> Result<()> {
+        self.written.remove(&metadata.id);
+        if self.connection.execute(
+            "UPDATE sessions SET metadata=?2,state=?3 WHERE id=?1",
+            params![
+                metadata.id,
+                serde_json::to_string(metadata)?,
+                serde_json::to_string(state)?
+            ],
+        )? != 1
+        {
+            return Err("Session no longer exists".into());
+        }
+        Ok(())
+    }
+    pub fn event(&mut self, id: &str, state: &SessionData, event: &Value) -> Result<()> {
+        let (row, key) = state_row(state)?;
+        let unchanged = self.written.get(id) == Some(&key);
+        let transaction = self.connection.transaction()?;
+        // A late callback after deletion must never recreate a session.
+        let exists = if unchanged {
+            transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)",
+                [id],
+                |r| r.get::<_, bool>(0),
+            )?
+        } else {
+            transaction.execute("UPDATE sessions SET state=?2 WHERE id=?1", params![id, row])? != 0
+        };
+        if exists {
+            transaction.execute(
+                "INSERT INTO events(session_id,seq,payload) VALUES (?1,?2,?3)",
+                params![id, i64::try_from(state.seq)?, serde_json::to_string(event)?],
+            )?;
+        }
+        if state.automation.is_some() {
+            transaction.execute(
+                "UPDATE automation_runs SET status=?2 WHERE session_id=?1 AND status<>?2",
+                params![id, run_status(state)],
+            )?;
+        }
+        transaction.commit()?;
+        if exists {
+            self.written.insert(id.to_owned(), key);
+        } else {
+            self.written.remove(id);
+        }
+        Ok(())
+    }
+    pub fn batch(&mut self, id: &str, state: &SessionData, events: &[Value]) -> Result<()> {
+        self.written.remove(id);
+        let tx = self.connection.transaction()?;
+        if tx.execute(
+            "UPDATE sessions SET state=?2 WHERE id=?1",
+            params![id, serde_json::to_string(state)?],
+        )? == 0
+        {
+            return Err("Session was deleted while importing".into());
+        }
+        for event in events {
+            tx.execute(
+                "INSERT INTO events(session_id,seq,payload) VALUES (?1,?2,?3)",
+                params![
+                    id,
+                    event["seq"].as_i64().ok_or("Invalid sequence")?,
+                    serde_json::to_string(event)?
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn save_terminal<T: Serialize>(&mut self, id: &str, frame: &T) -> Result<()> {
+        self.connection.execute("INSERT INTO terminal_snapshots(session_id,snapshot) VALUES (?1,?2) ON CONFLICT(session_id) DO UPDATE SET snapshot=excluded.snapshot",params![id,serde_json::to_string(frame)?])?;
+        Ok(())
+    }
+    pub fn terminal<T: serde::de::DeserializeOwned>(&self, id: &str) -> Result<Option<T>> {
+        use rusqlite::OptionalExtension;
+        let value: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT snapshot FROM terminal_snapshots WHERE session_id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value
+            .map(|value| serde_json::from_str(&value))
+            .transpose()?)
+    }
+    pub fn clear_terminal(&mut self, id: &str) -> Result<()> {
+        self.connection
+            .execute("DELETE FROM terminal_snapshots WHERE session_id=?1", [id])?;
+        Ok(())
+    }
+    pub fn delete(&mut self, id: &str) -> Result<()> {
+        self.written.remove(id);
+        let tx = self.connection.transaction()?;
+        tx.execute(
+            "UPDATE automation_runs SET status='deleted' WHERE session_id=?1",
+            [id],
+        )?;
+        tx.execute("DELETE FROM sessions WHERE id=?1", [id])?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn automations<T: serde::de::DeserializeOwned>(&self) -> Result<Vec<T>> {
+        let mut stmt = self
+            .connection
+            .prepare("SELECT definition FROM automations ORDER BY id")?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows
+            .into_iter()
+            .map(|s| serde_json::from_str(&s))
+            .collect::<serde_json::Result<Vec<_>>>()?)
+    }
+    /// Definitions that deserialize. A row that does not is logged and left
+    /// out, so one bad definition cannot stop listing or scheduling the rest.
+    /// Restore validation keeps the strict [`Store::automations`].
+    pub fn usable_automations<T: serde::de::DeserializeOwned>(&self) -> Result<Vec<T>> {
+        let mut stmt = self
+            .connection
+            .prepare("SELECT id,definition FROM automations ORDER BY id")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id, s)| match serde_json::from_str(&s) {
+                Ok(def) => Some(def),
+                Err(error) => {
+                    eprintln!("Skipping unreadable automation {id}: {error}");
+                    None
+                }
+            })
+            .collect())
+    }
+    pub fn automation<T: serde::de::DeserializeOwned>(&self, id: &str) -> Result<Option<T>> {
+        use rusqlite::OptionalExtension;
+        let value = self
+            .connection
+            .query_row(
+                "SELECT definition FROM automations WHERE id=?1",
+                [id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(value.map(|s| serde_json::from_str(&s)).transpose()?)
+    }
+    /// Saves a definition; `arm` atomically resets its schedule cursor. A
+    /// definition without a schedule has no cursor. An agent's `ledger` entry
+    /// commits with it.
+    pub fn save_automation_source(
+        &mut self,
+        definition: &str,
+        arm: Option<i64>,
+        ledger: Option<&Ledger>,
+        source: Option<&str>,
+    ) -> Result<()> {
+        // Project the persisted definition here so callers cannot give SQL
+        // indexes/side effects that disagree with its serialized document.
+        let definition = AutomationWrite::encode(definition)?;
+        let tx = self.connection.transaction()?;
+        if let Some(ledger) = ledger {
+            record_automation_request(&tx, ledger)?;
+        }
+        if let Some(source) = source {
+            let Some(script) = definition.script.as_deref() else {
+                return Err("Source requires a script automation".into());
+            };
+            let hook_exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM scripts WHERE name=?1 AND capability<>'automation')",
+                [&script],
+                |r| r.get(0),
+            )?;
+            if hook_exists {
+                return Err("A hook script already uses this filename".into());
+            }
+            tx.execute("INSERT INTO scripts(name,capability,source,hash,enabled,builtin,updated) VALUES (?1,'automation',?2,?3,?5,0,?4) ON CONFLICT(name) DO UPDATE SET source=excluded.source,hash=excluded.hash,enabled=excluded.enabled,capability='automation',builtin=0,updated=excluded.updated",params![script,source,crate::content_hash(source),definition.updated as i64,definition.enabled])?;
+        }
+        if let Some(script) = definition.script.as_deref() {
+            tx.execute(
+                "UPDATE scripts SET enabled=?2 WHERE name=?1 AND capability='automation'",
+                params![script, definition.enabled],
+            )?;
+        }
+        tx.execute("INSERT INTO automations(id,definition) VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET definition=excluded.definition",params![definition.id,definition.document])?;
+        // Edits cannot replay an old occurrence with new instructions/settings.
+        tx.execute("UPDATE automation_events SET status='skipped',detail='Definition changed or paused before dispatch' WHERE automation_id=?1 AND status='pending' AND (?2=0 OR revision<>?3)", params![definition.id,definition.enabled,definition.revision as i64])?;
+        if !definition.enabled || definition.script.is_none() {
+            tx.execute(
+                "DELETE FROM automation_github_polls WHERE automation_id=?1",
+                [&definition.id],
+            )?;
+            tx.execute(
+                "DELETE FROM automation_trigger_baselines WHERE automation_id=?1",
+                [&definition.id],
+            )?;
+            tx.execute(
+                "DELETE FROM automation_github_baselines WHERE automation_id=?1",
+                [&definition.id],
+            )?;
+        }
+        if !definition.timed {
+            tx.execute(
+                "DELETE FROM automation_schedules WHERE automation_id=?1",
+                [&definition.id],
+            )?;
+        } else if let Some(cursor) = arm {
+            tx.execute("INSERT INTO automation_schedules(automation_id,cursor) VALUES (?1,?2) ON CONFLICT(automation_id) DO UPDATE SET cursor=excluded.cursor",params![definition.id,cursor])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn schedule_cursor(&self, id: &str) -> Result<Option<i64>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT cursor FROM automation_schedules WHERE automation_id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+    pub fn arm_schedule(&mut self, id: &str, cursor: i64) -> Result<()> {
+        self.connection.execute("INSERT INTO automation_schedules(automation_id,cursor) VALUES (?1,?2) ON CONFLICT(automation_id) DO UPDATE SET cursor=excluded.cursor",params![id,cursor])?;
+        Ok(())
+    }
+    /// Records the outcome of one occurrence and advances the cursor past it.
+    /// The first outcome recorded for an occurrence is kept. A one-time
+    /// definition's `finish` (completed or deleted) commits with it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_slot(
+        &mut self,
+        id: &str,
+        slot: i64,
+        request_id: &str,
+        outcome: &str,
+        detail: Option<&str>,
+        now: i64,
+        finish: Option<&Finish>,
+    ) -> Result<()> {
+        use Finish;
+        let tx = self.connection.transaction()?;
+        tx.execute("INSERT OR IGNORE INTO automation_slots(automation_id,slot,request_id,outcome,detail,created) VALUES (?1,?2,?3,?4,?5,?6)",params![id,slot,request_id,outcome,detail,now])?;
+        tx.execute("INSERT INTO automation_schedules(automation_id,cursor) VALUES (?1,?2) ON CONFLICT(automation_id) DO UPDATE SET cursor=MAX(cursor,excluded.cursor)",params![id,slot])?;
+        match finish {
+            None => {}
+            Some(Finish::Complete(definition)) => {
+                tx.execute(
+                    "UPDATE automations SET definition=?2 WHERE id=?1",
+                    params![id, definition],
+                )?;
+                tx.execute(
+                    "DELETE FROM automation_schedules WHERE automation_id=?1",
+                    [id],
+                )?;
+            }
+            Some(Finish::Delete) => {
+                tx.execute("DELETE FROM automations WHERE id=?1", [id])?;
+                tx.execute(
+                    "DELETE FROM automation_schedules WHERE automation_id=?1",
+                    [id],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn detach_automation_project(&mut self, id: &str) -> Result<()> {
+        // A review subscription must never fall back to projectless routing
+        // when its project is deleted. Timed/manual definitions keep their
+        // existing detachment behavior.
+        let tx = self.connection.transaction()?;
+        tx.execute("UPDATE automation_events SET status='skipped',detail='Review project deleted before dispatch' WHERE status='pending' AND automation_id IN (SELECT id FROM automations WHERE json_extract(definition,'$.projectId')=?1)",[id])?;
+        tx.execute("DELETE FROM automation_trigger_baselines WHERE automation_id IN (SELECT id FROM automations WHERE json_extract(definition,'$.projectId')=?1)",[id])?;
+        tx.execute("DELETE FROM automation_github_baselines WHERE automation_id IN (SELECT id FROM automations WHERE json_extract(definition,'$.projectId')=?1)",[id])?;
+        tx.execute("DELETE FROM automation_github_polls WHERE automation_id IN (SELECT id FROM automations WHERE json_extract(definition,'$.projectId')=?1)",[id])?;
+        tx.execute("UPDATE scripts SET enabled=0 WHERE capability='automation' AND name IN (SELECT json_extract(definition,'$.workflow.trigger.script') FROM automations WHERE json_extract(definition,'$.projectId')=?1)",[id])?;
+        tx.execute("UPDATE automations SET definition=json_set(definition,'$.enabled',json('false'),'$.revision',COALESCE(json_extract(definition,'$.revision'),0)+1) WHERE json_extract(definition,'$.projectId')=?1 AND json_extract(definition,'$.workflow.trigger.kind')='script'",[id])?;
+        tx.execute("UPDATE automations SET definition=json_set(definition,'$.projectId',NULL) WHERE json_extract(definition,'$.projectId')=?1",[id])?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn delete_automation(&mut self, id: &str, ledger: Option<&Ledger>) -> Result<()> {
+        let tx = self.connection.transaction()?;
+        if let Some(ledger) = ledger {
+            record_automation_request(&tx, ledger)?;
+        }
+        tx.execute("DELETE FROM script_order WHERE name IN (SELECT json_extract(definition,'$.workflow.trigger.script') FROM automations WHERE id=?1)",[id])?;
+        tx.execute("DELETE FROM scripts WHERE capability='automation' AND name IN (SELECT json_extract(definition,'$.workflow.trigger.script') FROM automations WHERE id=?1)",[id])?;
+        tx.execute("DELETE FROM automations WHERE id=?1", [id])?;
+        tx.execute(
+            "DELETE FROM automation_trigger_baselines WHERE automation_id=?1",
+            [id],
+        )?;
+        tx.execute(
+            "DELETE FROM automation_github_baselines WHERE automation_id=?1",
+            [id],
+        )?;
+        tx.execute(
+            "DELETE FROM automation_github_polls WHERE automation_id=?1",
+            [id],
+        )?;
+        tx.execute("UPDATE automation_event_actions SET status='skipped',detail='Automation deleted before dispatch' WHERE status='pending' AND event_id IN (SELECT id FROM automation_events WHERE automation_id=?1)",[id])?;
+        tx.execute("UPDATE automation_events SET status='skipped',detail='Definition deleted before dispatch' WHERE automation_id=?1 AND status='pending'", [id])?;
+        tx.execute(
+            "DELETE FROM automation_schedules WHERE automation_id=?1",
+            [id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+    /// Runs, newest first, plus scheduled occurrences that started no run
+    /// (`missed` or `skipped`, with a `detail`). Scheduled runs carry
+    /// `scheduledFor`.
+    pub fn automation_runs(&self, id: &str) -> Result<Vec<Value>> {
+        let mut stmt=self.connection.prepare("SELECT r.id,r.session_id,r.name,r.provider,r.created,r.status,s.slot,s.detail FROM automation_runs r LEFT JOIN automation_slots s ON s.automation_id=r.automation_id AND s.request_id=r.request_id WHERE r.automation_id=?1 AND NOT EXISTS(SELECT 1 FROM automation_events e WHERE e.automation_id=r.automation_id AND r.request_id LIKE 'github:'||e.id||':%')
+          UNION ALL SELECT 'slot:'||slot,NULL,NULL,NULL,created,outcome,slot,detail FROM automation_slots WHERE automation_id=?1 AND outcome<>'started'
+          UNION ALL SELECT 'event:'||id,target,NULL,NULL,created,status,NULL,'PR#'||json_extract(payload,'$.number')||': '||COALESCE(detail,'Awaiting dispatch') FROM automation_events WHERE automation_id=?1
+          ORDER BY 5 DESC LIMIT 100")?;
+        Ok(stmt.query_map([id],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"sessionId":r.get::<_,Option<String>>(1)?,"name":r.get::<_,Option<String>>(2)?,"provider":r.get::<_,Option<String>>(3)?,"created":r.get::<_,i64>(4)?,"status":r.get::<_,String>(5)?,"scheduledFor":r.get::<_,Option<i64>>(6)?,"detail":r.get::<_,Option<String>>(7)?})))?.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+    /// A previously recorded agent request: `(operation, payload, result)`.
+    pub fn automation_request(
+        &self,
+        actor: &str,
+        request_id: &str,
+    ) -> Result<Option<(String, String, String)>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT operation,payload,result FROM automation_agent_requests WHERE actor=?1 AND request_id=?2",
+                params![actor, request_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?)
+    }
+    pub fn run_session(&self, id: &str, request_id: &str) -> Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        let row = self
+            .connection
+            .query_row(
+                "SELECT session_id FROM automation_runs WHERE automation_id=?1 AND request_id=?2",
+                params![id, request_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        Ok(row.map(|session| session.unwrap_or_default()))
+    }
+    pub fn load(&self) -> Result<Vec<(Metadata, SessionData)>> {
+        let mut query = self
+            .connection
+            .prepare("SELECT metadata,state FROM sessions ORDER BY rowid")?;
+        let rows = query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut sessions = Vec::new();
+        for row in rows {
+            let (metadata, state) = row?;
+            let metadata: Metadata = serde_json::from_str(&metadata)?;
+            let mut state: SessionData = serde_json::from_str(&state)?;
+            // The state row is not rewritten for events that change only `seq`.
+            let newest: i64 = self.connection.query_row(
+                "SELECT COALESCE(MAX(seq),0) FROM events WHERE session_id=?1",
+                [&metadata.id],
+                |r| r.get(0),
+            )?;
+            state.seq = state.seq.max(newest.max(0) as u64);
+            state.parked = true;
+            sessions.push((metadata, state));
+        }
+        Ok(sessions)
+    }
+    /// Stored payloads of a session's newest events, newest first. Parse them with
+    /// `window` after releasing the store, so other sessions can keep writing.
+    pub fn recent(&self, id: &str) -> Result<Vec<String>> {
+        let mut events = self
+            .connection
+            .prepare("SELECT payload FROM events WHERE session_id=?1 ORDER BY seq DESC LIMIT ?2")?;
+        let recent = events
+            .query_map(params![id, MAX_EVENTS as i64], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(recent)
+    }
+    /// Stored events with seq strictly below `before`, oldest first: the newest `limit`
+    /// such events, cut at `max_bytes` (at least one event is always returned). The flag
+    /// reports whether any stored event remains below the returned page.
+    pub fn older_events(
+        &self,
+        id: &str,
+        before: u64,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<(Vec<Value>, bool)> {
+        let before = i64::try_from(before)?;
+        let mut query = self.connection.prepare(
+            "SELECT seq,payload FROM events WHERE session_id=?1 AND seq<?2 ORDER BY seq DESC LIMIT ?3",
+        )?;
+        let rows = query.query_map(params![id, before, i64::try_from(limit)?], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let (mut page, mut bytes, mut earliest) = (Vec::new(), 0, before);
+        for row in rows {
+            let (seq, payload) = row?;
+            if !page.is_empty() && bytes + payload.len() > max_bytes {
+                break;
+            }
+            bytes += payload.len();
+            earliest = seq;
+            page.push(serde_json::from_str::<Value>(&payload)?);
+        }
+        page.reverse();
+        let more = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE session_id=?1 AND seq<?2)",
+            params![id, earliest],
+            |r| r.get::<_, bool>(0),
+        )?;
+        Ok((page, more))
+    }
+    /// Every session with the sequence of its newest stored event.
+    pub fn last_sequences(&self) -> Result<Vec<(String, u64)>> {
+        let mut query = self.connection.prepare(
+            "SELECT id,(SELECT COALESCE(MAX(seq),0) FROM events WHERE session_id=sessions.id) FROM sessions",
+        )?;
+        let rows = query
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+    /// When the named maintenance task last ran, in Unix milliseconds.
+    pub fn maintained(&self, name: &str) -> Result<Option<u64>> {
+        let at = self
+            .connection
+            .query_row("SELECT at FROM maintenance WHERE name=?1", [name], |r| {
+                r.get::<_, i64>(0)
+            })
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(e),
+            })?;
+        Ok(at.map(|at| at.max(0) as u64))
+    }
+    pub fn record_maintenance(&mut self, name: &str, at: u64) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO maintenance(name,at) VALUES (?1,?2) ON CONFLICT(name) DO UPDATE SET at=excluded.at",
+            params![name, i64::try_from(at)?],
+        )?;
+        Ok(())
+    }
+    /// Page count, free pages and page size of the database file.
+    pub fn pages(&self) -> Result<(u64, u64, u64)> {
+        let get = |pragma: &str| -> rusqlite::Result<u64> {
+            self.connection
+                .query_row(&format!("PRAGMA {pragma}"), [], |r| r.get::<_, i64>(0))
+                .map(|v| v.max(0) as u64)
+        };
+        Ok((
+            get("page_count")?,
+            get("freelist_count")?,
+            get("page_size")?,
+        ))
+    }
+    /// Rewrites the database file without free pages, and truncates the WAL.
+    pub fn vacuum(&mut self) -> Result<()> {
+        self.connection
+            .execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
+    }
+    /// Sequence through which the session's stored events have been compacted.
+    pub fn compaction_cursor(&self, id: &str) -> Result<u64> {
+        let through: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT through FROM event_compaction WHERE session_id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(e),
+            })?;
+        Ok(through.map_or(0, |t| t.max(0) as u64))
+    }
+    /// Stored payloads with `after < seq <= through`, oldest first.
+    pub fn events_between(
+        &self,
+        id: &str,
+        after: u64,
+        through: u64,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        let mut query = self.connection.prepare(
+            "SELECT payload FROM events WHERE session_id=?1 AND seq>?2 AND seq<=?3 ORDER BY seq LIMIT ?4",
+        )?;
+        let rows = query
+            .query_map(
+                params![
+                    id,
+                    i64::try_from(after)?,
+                    i64::try_from(through)?,
+                    i64::try_from(limit)?
+                ],
+                |r| r.get::<_, String>(0),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+    /// Rewrites compacted rows and advances the cursor together. A deleted session is left alone.
+    pub fn apply_compaction(
+        &mut self,
+        id: &str,
+        remove_sequences: &[u64],
+        replacements: &[Value],
+        through: u64,
+    ) -> Result<()> {
+        let tx = self.connection.transaction()?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)",
+            [id],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Ok(());
+        }
+        {
+            let mut remove =
+                tx.prepare_cached("DELETE FROM events WHERE session_id=?1 AND seq=?2")?;
+            for seq in remove_sequences {
+                remove.execute(params![id, i64::try_from(*seq)?])?;
+            }
+            let mut replace =
+                tx.prepare_cached("UPDATE events SET payload=?3 WHERE session_id=?1 AND seq=?2")?;
+            for event in replacements {
+                let seq = event["seq"].as_i64().ok_or("Invalid sequence")?;
+                replace.execute(params![id, seq, serde_json::to_string(event)?])?;
+            }
+        }
+        tx.execute(
+            "INSERT INTO event_compaction(session_id,through) VALUES (?1,?2)
+             ON CONFLICT(session_id) DO UPDATE SET through=MAX(through,excluded.through)",
+            params![id, i64::try_from(through)?],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+    /// One-time import from the pre-persistence HTTP snapshot. Never overwrite an existing row.
+    pub fn import_legacy(&mut self, path: &Path) -> Result<()> {
+        if !path.exists() {
+            return Ok(());
+        }
+        let snapshots: Vec<Value> = serde_json::from_slice(&std::fs::read(path)?)?;
+        let tx = self.connection.transaction()?;
+        for snapshot in snapshots {
+            let s = &snapshot["session"];
+            let id = s["id"].as_str().ok_or("Legacy snapshot has no ID")?;
+            let metadata = Metadata {
+                id: id.into(),
+                provider: s["provider"].as_str().ok_or("Missing provider")?.into(),
+                cwd: PathBuf::from(s["cwd"].as_str().ok_or("Missing directory")?),
+                title: s["title"].as_str().unwrap_or("Imported session").into(),
+                initial_model: snapshot["models"]["currentValue"]
+                    .as_str()
+                    .map(str::to_owned),
+                created: s["created"].as_u64().unwrap_or(0),
+                host_id: s["hostId"].as_str().unwrap_or("local").into(),
+                location_id: s["locationId"].as_str().ok_or("Missing location")?.into(),
+            };
+            let events = snapshot["events"].as_array().ok_or("Missing events")?;
+            let provider_session_id = events
+                .iter()
+                .rev()
+                .find(|e| e["kind"] == "ready")
+                .and_then(|e| e["data"]["providerSessionId"].as_str())
+                .map(str::to_owned);
+            let state = SessionData {
+                script_badges: Default::default(),
+                badge_revision: 0,
+                lifecycle: Default::default(),
+                inbox_turn: None,
+                status: "suspended".into(),
+                seq: snapshot["seq"].as_u64().unwrap_or(0),
+                events: VecDeque::new(),
+                bytes: 0,
+                parked: false,
+                requests: events
+                    .iter()
+                    .filter(|e| e["kind"] == "user")
+                    .filter_map(|e| e["data"]["requestId"].as_str().map(str::to_owned))
+                    .collect(),
+                last_prompt: events.iter().rev().find(|e| e["kind"] == "user").cloned(),
+                models: snapshot["models"].clone(),
+                permission_modes: snapshot["permissionModes"].clone(),
+                session_config: snapshot["sessionConfig"].clone(),
+                agent_capabilities: Value::Null,
+                async_tasks: Default::default(),
+                provider_history_deleted: false,
+                provider_history_delete_pending: false,
+                model_provider: None,
+                initial_claude_permission_mode: None,
+                initial_codex_permission_mode: None,
+                initial_antigravity_permission_mode: None,
+                available_commands: snapshot["commands"].clone(),
+                turn_active: false,
+                project_id: s["projectId"].as_str().map(str::to_owned),
+                provider_session_id,
+                external: false,
+                import_pending: false,
+                opencode_host: false,
+                automation: None,
+                queued_prompt: None,
+                input_queue: Default::default(),
+                control_origin: None,
+                storage_error: None,
+                continuation: Default::default(),
+                timeouts: None,
+                lineage: Default::default(),
+                carried_context: None,
+                additional_directories: Vec::new(),
+                prompt_capabilities: serde_json::Value::Null,
+                worktree: None,
+                role: None,
+                routing: None,
+                native_rename: false,
+                startup: None,
+            };
+            let inserted = tx.execute(
+                "INSERT OR IGNORE INTO sessions(id,metadata,state) VALUES (?1,?2,?3)",
+                params![
+                    id,
+                    serde_json::to_string(&metadata)?,
+                    serde_json::to_string(&state)?
+                ],
+            )?;
+            if inserted != 0 {
+                for event in events {
+                    tx.execute(
+                        "INSERT INTO events(session_id,seq,payload) VALUES (?1,?2,?3)",
+                        params![
+                            id,
+                            event["seq"].as_i64().ok_or("Missing sequence")?,
+                            serde_json::to_string(event)?
+                        ],
+                    )?;
+                }
+            }
+        }
+        tx.commit()?;
+        std::fs::rename(path, path.with_extension("imported.json"))?;
+        Ok(())
+    }
+}
+
+/// The subset of the serialized definition that has SQL indexes/side effects.
+/// Scheduling and workflow validation remain the caller's domain responsibility.
+#[derive(Deserialize)]
+struct AutomationFields {
+    id: String,
+    enabled: bool,
+    updated: u64,
+    #[serde(default)]
+    revision: u64,
+    workflow: Option<WorkflowFields>,
+}
+#[derive(Deserialize)]
+struct WorkflowFields {
+    trigger: TriggerFields,
+}
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum TriggerFields {
+    Manual,
+    Schedule,
+    Once,
+    Script { script: String },
+}
+struct AutomationWrite {
+    id: String,
+    document: String,
+    script: Option<String>,
+    enabled: bool,
+    updated: u64,
+    revision: u64,
+    timed: bool,
+}
+impl AutomationWrite {
+    fn encode(document: &str) -> Result<Self> {
+        let fields: AutomationFields = serde_json::from_str(document)?;
+        let trigger = fields.workflow.map(|w| w.trigger);
+        let timed = matches!(trigger, Some(TriggerFields::Schedule | TriggerFields::Once));
+        let script = match trigger {
+            Some(TriggerFields::Script { script }) => Some(script),
+            _ => None,
+        };
+        Ok(Self {
+            id: fields.id,
+            document: document.to_owned(),
+            script,
+            enabled: fields.enabled,
+            updated: fields.updated,
+            revision: fields.revision,
+            timed,
+        })
+    }
+}
+
+fn record_automation_request(tx: &rusqlite::Transaction, ledger: &Ledger) -> Result<()> {
+    tx.execute("INSERT INTO automation_agent_requests(actor,request_id,operation,payload,result,created) VALUES (?1,?2,?3,?4,?5,?6)",params![ledger.actor,ledger.request_id,ledger.operation,ledger.payload,ledger.result,std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64])?;
+    Ok(())
+}
+
+fn run_status(data: &SessionData) -> &str {
+    data.automation
+        .as_ref()
+        .and_then(|a| a.outcome.as_deref())
+        .unwrap_or(match data.status.as_str() {
+            "idle" => "starting",
+            "suspended" => "interrupted",
+            "error" => "failed",
+            other => other,
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::{Connection, params};
+
+    use serde_json::json;
+    #[test]
+    fn v5_migration_preserves_every_existing_table_and_defaults_policy_off() {
+        let path =
+            std::env::temp_dir().join(format!("agentworks-v5-{}.sqlite3", uuid::Uuid::new_v4()));
+        let snapshot = |db: &Connection| -> Vec<(String, Vec<String>)> {
+            let mut stmt=db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").unwrap();
+            let names: Vec<String> = stmt
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            names
+                .into_iter()
+                .map(|name| {
+                    let mut q = db
+                        .prepare(&format!("SELECT * FROM {name} ORDER BY rowid"))
+                        .unwrap();
+                    let columns = q.column_count();
+                    let rows = q
+                        .query_map([], |r| {
+                            Ok((0..columns)
+                                .map(|i| format!("{:?}", r.get_ref(i).unwrap()))
+                                .collect::<Vec<_>>()
+                                .join("|"))
+                        })
+                        .unwrap()
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .unwrap();
+                    (name, rows)
+                })
+                .collect()
+        };
+        let before;
+        {
+            let store = Store::open(&path).unwrap();
+            store.connection.execute_batch(r#"
+              INSERT INTO sessions VALUES ('old','{}','{}');
+              INSERT INTO events VALUES ('old',1,'{"kind":"user","seq":1}');
+              INSERT INTO agent_access VALUES ('old','{"startSessions":true}');
+              INSERT INTO agent_starts VALUES ('old','start','old');
+              INSERT INTO agent_completions(author,author_title,request_id,payload,report,created) VALUES ('old','Old','done','{}','{"status":"completed"}',1);
+              INSERT INTO agent_audit(actor,action,target,outcome,created) VALUES ('old','access','old','accepted',1);
+              INSERT INTO agent_messages(sender,sender_title,recipient,recipient_title,text,created,request_id) VALUES ('old','Old','old','Old','history',1,'mail');
+              INSERT INTO automations VALUES ('auto','{}');
+              INSERT INTO automation_runs VALUES ('run','auto','req','old','Test','demo',1,'completed');
+              INSERT INTO session_creations VALUES ('create','{}','old',NULL,1);
+              PRAGMA user_version=5;
+            "#).unwrap();
+            before = snapshot(&store.connection);
+        }
+        {
+            let store = Store::open(&path).unwrap();
+            assert_eq!(before, snapshot(&store.connection));
+            assert_eq!(
+                store
+                    .connection
+                    .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                SCHEMA_VERSION
+            );
+        }
+        let state:SessionData=serde_json::from_value(json!({"status":"idle","seq":0,"requests":[],"models":null,"available_commands":[],"turn_active":false,"project_id":null,"provider_session_id":null})).unwrap();
+        assert!(!state.continuation.enabled);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(path.with_extension("sqlite3.lock")).unwrap();
+    }
+    #[test]
+    fn migrates_v3_without_changing_existing_data() {
+        let path = std::env::temp_dir().join(format!(
+            "agentworks-migration-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ));
+        {
+            let store = Store::open(&path).unwrap();
+            store.connection.execute_batch("DROP TABLE agent_completions;
+                INSERT INTO sessions VALUES ('old','{\"title\":\"Original\"}','{\"status\":\"suspended\"}');
+                INSERT INTO events VALUES ('old',7,'{\"seq\":7}');
+                INSERT INTO agent_access VALUES ('old','{\"communicate\":true}');
+                INSERT INTO agent_messages(sender,sender_title,recipient,recipient_title,text,created,request_id) VALUES ('old','Original','peer','Peer','Retain me',1,'request');
+                INSERT INTO agent_audit(actor,action,target,outcome,created) VALUES ('old','send_message','peer','accepted',1);
+                PRAGMA user_version=3;").unwrap();
+        }
+        {
+            let store = Store::open(&path).unwrap();
+            let db = &store.connection;
+            assert_eq!(
+                db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                SCHEMA_VERSION
+            );
+            for (sql, expected) in [
+                (
+                    "SELECT metadata FROM sessions WHERE id='old'",
+                    "{\"title\":\"Original\"}",
+                ),
+                (
+                    "SELECT state FROM sessions WHERE id='old'",
+                    "{\"status\":\"suspended\"}",
+                ),
+                (
+                    "SELECT payload FROM events WHERE session_id='old'",
+                    "{\"seq\":7}",
+                ),
+                (
+                    "SELECT grants FROM agent_access WHERE session_id='old'",
+                    "{\"communicate\":true}",
+                ),
+                (
+                    "SELECT text FROM agent_messages WHERE sender='old'",
+                    "Retain me",
+                ),
+                (
+                    "SELECT outcome FROM agent_audit WHERE actor='old'",
+                    "accepted",
+                ),
+            ] {
+                assert_eq!(
+                    db.query_row(sql, [], |r| r.get::<_, String>(0)).unwrap(),
+                    expected
+                );
+            }
+            assert_eq!(store.latest_completion("old", None).unwrap(), None);
+            // Historical identity intentionally survives deletion, as with mailbox senders.
+            db.execute("INSERT INTO agent_completions(author,author_title,project_id,request_id,payload,report,created) VALUES ('old','Original','project','done','{}','{\"author\":\"old\",\"authorTitle\":\"Original\"}',1)", []).unwrap();
+            db.execute("DELETE FROM sessions WHERE id='old'", [])
+                .unwrap();
+            assert_eq!(
+                store.latest_completion("old", None).unwrap().unwrap()["authorTitle"],
+                "Original"
+            );
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(path.with_extension("sqlite3.lock")).unwrap();
+    }
+
+    #[test]
+    fn v4_migration_and_interrupted_creation_reservations_survive_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "agentworks-creation-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ));
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .connection
+                .execute_batch("DROP TABLE session_creations; PRAGMA user_version=4;")
+                .unwrap();
+        }
+        {
+            let mut store = Store::open(&path).unwrap();
+            assert_eq!(store.reserve_creation("key", "payload").unwrap(), None);
+            store
+                .creation_error("key", "mutation-free validation failure")
+                .unwrap();
+            assert_eq!(store.reserve_creation("key", "payload").unwrap(), None);
+            store.arm_creation("key").unwrap();
+            assert_eq!(
+                store.reserve_creation("preflight", "payload").unwrap(),
+                None
+            );
+            assert!(
+                store
+                    .reserve_creation("key", "changed")
+                    .unwrap_err()
+                    .to_string()
+                    .contains("different")
+            );
+        }
+        {
+            let mut store = Store::open(&path).unwrap();
+            assert_eq!(
+                store.reserve_creation("preflight", "payload").unwrap(),
+                None
+            );
+            assert!(
+                store
+                    .reserve_creation("key", "payload")
+                    .unwrap_err()
+                    .to_string()
+                    .contains("interrupted")
+            );
+            store.creation_error("key", "retained destination").unwrap();
+            assert!(
+                store
+                    .reserve_creation("key", "payload")
+                    .unwrap_err()
+                    .to_string()
+                    .contains("retained destination")
+            );
+            store
+                .connection
+                .execute(
+                    "UPDATE session_creations SET session_id='old' WHERE request_key='key'",
+                    [],
+                )
+                .unwrap();
+            assert_eq!(
+                store.reserve_creation("key", "payload").unwrap(),
+                Some("old".into())
+            );
+        }
+        std::fs::remove_file(&path).unwrap();
+    }
+    #[test]
+    fn legacy_snapshot_import_preserves_identity_and_transcript() {
+        let dir = std::env::temp_dir().join(format!("agentworks-import-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy = dir.join("legacy-sessions.json");
+        std::fs::write(&legacy,serde_json::to_vec(&json!([{
+            "seq":2,"session":{"id":"old-id","provider":"opencode","cwd":"/projects/app","title":"Keep this","created":123,"hostId":"local","locationId":"location","projectId":"project"},
+            "models":{"currentValue":"opencode/big-pickle"},"commands":[],"events":[
+                {"seq":1,"kind":"ready","data":{"providerSessionId":"native-id"}},
+                {"seq":2,"kind":"user","data":{"text":"My conversation","requestId":"request"}}
+            ]
+        }])).unwrap()).unwrap();
+        let mut store = Store::open(&dir.join("sessions.sqlite3")).unwrap();
+        store.import_legacy(&legacy).unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].0.id, "old-id");
+        assert_eq!(loaded[0].0.created, 123);
+        assert_eq!(
+            loaded[0].1.provider_session_id.as_deref(),
+            Some("native-id")
+        );
+        assert!(loaded[0].1.parked && loaded[0].1.events.is_empty());
+        assert_eq!(store.recent("old-id").unwrap().len(), 2);
+        assert!(loaded[0].1.requests.contains("request"));
+        assert_eq!(loaded[0].1.project_id.as_deref(), Some("project"));
+        assert!(!legacy.exists());
+        assert!(legacy.with_extension("imported.json").exists());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn events_and_state_commit_together_and_deleted_sessions_stay_deleted() {
+        let path =
+            std::env::temp_dir().join(format!("agentworks-store-{}.sqlite3", uuid::Uuid::new_v4()));
+        let metadata = Metadata {
+            id: "test".into(),
+            provider: "demo".into(),
+            cwd: "/projects/app".into(),
+            title: "Test".into(),
+            initial_model: None,
+            created: 1,
+            host_id: "local".into(),
+            location_id: "location".into(),
+        };
+        let mut state = SessionData {
+            script_badges: Default::default(),
+            badge_revision: 0,
+            lifecycle: Default::default(),
+            inbox_turn: None,
+            status: "starting".into(),
+            seq: 0,
+            events: VecDeque::new(),
+            bytes: 0,
+            parked: false,
+            requests: Default::default(),
+            last_prompt: Some(
+                json!({"seq":0,"kind":"user","data":{"text":"  exact prompt\n\n  ","requestId":"original"}}),
+            ),
+            models: Value::Null,
+            permission_modes: Value::Null,
+            session_config: json!({"configOptions":[{"id":"fast-mode","type":"boolean","currentValue":true}]}),
+            agent_capabilities: Value::Null,
+            async_tasks: Default::default(),
+            provider_history_deleted: false,
+            provider_history_delete_pending: false,
+            model_provider: None,
+            initial_claude_permission_mode: None,
+            initial_codex_permission_mode: None,
+            initial_antigravity_permission_mode: None,
+            available_commands: json!([]),
+            turn_active: false,
+            project_id: None,
+            provider_session_id: Some("provider-session".into()),
+            external: false,
+            import_pending: false,
+            opencode_host: false,
+            automation: None,
+            queued_prompt: None,
+            input_queue: Default::default(),
+            control_origin: None,
+            storage_error: None,
+            continuation: Default::default(),
+            timeouts: None,
+            lineage: Default::default(),
+            carried_context: None,
+            additional_directories: Vec::new(),
+            prompt_capabilities: serde_json::Value::Null,
+            worktree: None,
+            role: None,
+            routing: None,
+            native_rename: false,
+            startup: None,
+        };
+        {
+            let mut store = Store::open(&path).unwrap();
+            store.insert(&metadata, &state, None, None).unwrap();
+            assert!(
+                Store::open(&path).is_err(),
+                "a second server must not open the same database"
+            );
+            state.seq = 1;
+            state.status = "idle".into();
+            let event = json!({"seq":1,"kind":"status","data":{"status":"idle"}});
+            store.event("test", &state, &event).unwrap();
+            // Duplicate sequence must roll back the accompanying state change.
+            state.status = "running".into();
+            assert!(store.event("test", &state, &event).is_err());
+            // Events that change only `seq` leave the state row as it was.
+            state.status = "idle".into();
+            for seq in 2..=3 {
+                state.seq = seq;
+                store
+                    .event("test", &state, &json!({"seq":seq,"kind":"acp","data":{}}))
+                    .unwrap();
+            }
+            let row = |store: &Store| -> i64 {
+                store
+                    .connection
+                    .query_row(
+                        "SELECT json_extract(state,'$.seq') FROM sessions WHERE id='test'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap()
+            };
+            assert_eq!(row(&store), 1);
+            // Any other change is written, with the current sequence.
+            state.seq = 4;
+            state.turn_active = true;
+            store
+                .event("test", &state, &json!({"seq":4,"kind":"user","data":{}}))
+                .unwrap();
+            assert_eq!(row(&store), 4);
+            state.seq = 5;
+            store
+                .event("test", &state, &json!({"seq":5,"kind":"acp","data":{}}))
+                .unwrap();
+            assert_eq!(row(&store), 4);
+            state.turn_active = false;
+        }
+        {
+            let mut store = Store::open(&path).unwrap();
+            let loaded = store.load().unwrap();
+            assert_eq!(loaded.len(), 1);
+            assert_eq!(loaded[0].1.status, "idle");
+            assert_eq!(loaded[0].1.seq, 5, "recovered from the newest event");
+            assert!(loaded[0].1.turn_active);
+            assert_eq!(store.recent("test").unwrap().len(), 5);
+            // The recovery source persists independently of the visible event
+            // window, which may no longer include a long-running turn's user event.
+            assert_eq!(loaded[0].1.last_prompt, state.last_prompt);
+            assert_eq!(loaded[0].1.session_config, state.session_config);
+            assert_eq!(
+                loaded[0].1.last_prompt.as_ref().unwrap()["data"]["text"],
+                "  exact prompt\n\n  "
+            );
+            assert_eq!(
+                loaded[0].1.provider_session_id.as_deref(),
+                Some("provider-session")
+            );
+            // A queue write bypasses `save_state`, but must invalidate the event cache.
+            let mut resumed = store.load().unwrap().pop().unwrap().1;
+            resumed.seq = 6;
+            store.event("test", &resumed, &json!({"seq":6})).unwrap();
+            let mut queued: SessionData =
+                serde_json::from_value(serde_json::to_value(&resumed).unwrap()).unwrap();
+            queued.status = "waiting".into();
+            store.save_input_queue("test", &queued, None, 1).unwrap();
+            resumed.seq = 7;
+            store.event("test", &resumed, &json!({"seq":7})).unwrap();
+            assert_eq!(store.load().unwrap()[0].1.status, "idle");
+            store.delete("test").unwrap();
+            state.seq = 8;
+            store.event("test", &state, &json!({"seq":8})).unwrap();
+            assert!(store.load().unwrap().is_empty());
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(path.with_extension("sqlite3.lock")).unwrap();
+    }
+    #[test]
+    fn older_events_page_backwards_without_gaps_or_overlap() {
+        let path =
+            std::env::temp_dir().join(format!("agentworks-older-{}.sqlite3", uuid::Uuid::new_v4()));
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .connection
+                .execute_batch("INSERT INTO sessions VALUES ('a','{}','{}'),('b','{}','{}');")
+                .unwrap();
+            for seq in 1..=10 {
+                for id in ["a", "b"] {
+                    store.connection.execute("INSERT INTO events VALUES (?1,?2,?3)",
+                        params![id, seq, json!({"seq":seq,"kind":"user","data":{"text":format!("{id}{seq}")}}).to_string()]).unwrap();
+                }
+            }
+            let seqs = |page: &[Value]| {
+                page.iter()
+                    .map(|e| e["seq"].as_u64().unwrap())
+                    .collect::<Vec<_>>()
+            };
+            let (page, more) = store.older_events("a", 8, 3, usize::MAX).unwrap();
+            assert_eq!((seqs(&page), more), (vec![5, 6, 7], true));
+            assert_eq!(page[0]["data"]["text"], "a5");
+            let (page, more) = store.older_events("a", 5, 3, usize::MAX).unwrap();
+            assert_eq!((seqs(&page), more), (vec![2, 3, 4], true));
+            let (page, more) = store.older_events("a", 2, 3, usize::MAX).unwrap();
+            assert_eq!((seqs(&page), more), (vec![1], false));
+            let (page, more) = store.older_events("a", 1, 3, usize::MAX).unwrap();
+            assert_eq!((seqs(&page), more), (vec![], false));
+            // The byte budget shortens a page but never starves it.
+            let (page, more) = store.older_events("a", 8, 3, 1).unwrap();
+            assert_eq!((seqs(&page), more), (vec![7], true));
+            // Reading history never removes it.
+            let count: i64 = store
+                .connection
+                .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 20);
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(path.with_extension("sqlite3.lock")).unwrap();
+    }
+}
+
+impl Store {
+    pub fn tool_body_events(
+        &self,
+        id: &str,
+        low: u64,
+        high: u64,
+        needle: &str,
+        limit: usize,
+        mut matches: impl FnMut(&Value) -> bool,
+    ) -> rusqlite::Result<Vec<Value>> {
+        let mut query=self.connection.prepare("SELECT payload FROM events WHERE session_id=?1 AND seq BETWEEN ?2 AND ?3 AND instr(payload, ?4) > 0 ORDER BY seq")?;
+        let rows = query.query_map(params![id, low as i64, high as i64, needle], |r| {
+            r.get::<_, String>(0)
+        })?;
+        let mut events = Vec::new();
+        for row in rows {
+            let Ok(event) = serde_json::from_str::<Value>(&row?) else {
+                continue;
+            };
+            if matches(&event) {
+                events.push(event);
+                if events.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(events)
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl Store {
+    /// Fixture-only access for corruption, migration and storage-failure tests.
+    /// Production builds do not expose a SQLite connection.
+    pub fn test_connection(&self) -> &Connection {
+        &self.connection
+    }
+}

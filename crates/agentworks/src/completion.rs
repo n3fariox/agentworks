@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use rusqlite::{OptionalExtension, params};
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -72,12 +72,7 @@ impl Report {
 }
 impl crate::store::Store {
     pub fn latest_completion(&self, id: &str, scope: Option<&str>) -> mail::Result<Value> {
-        let raw: Option<String> = self.connection.query_row(
-            "SELECT report FROM agent_completions WHERE author=?1 AND (?2 IS NULL OR project_id=?2) ORDER BY id DESC LIMIT 1",
-            params![id, scope], |r| r.get(0)).optional().map_err(error)?;
-        Ok(
-            json!({"report": raw.map(|s| serde_json::from_str::<Value>(&s)).transpose().map_err(error)?}),
-        )
+        Ok(json!({"report":self.0.latest_completion(id,scope).map_err(error)?}))
     }
 }
 pub fn report(app: &App, s: &Session, req: Report) -> mail::Result<Value> {
@@ -92,46 +87,36 @@ pub fn report(app: &App, s: &Session, req: Report) -> mail::Result<Value> {
     let project = mail::project(s);
     let title = s.display_title();
     let mut store = app.store.lock().unwrap();
-    let tx = store.connection.transaction().map_err(error)?;
-    let previous: Option<(String, String)> = tx
-        .query_row(
-            "SELECT payload,report FROM agent_completions WHERE author=?1 AND request_id=?2",
-            params![s.id, req.request_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+    use agentworks_database::mail::CompletionOutcome;
+    let created = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let request = req.request_id.clone();
+    let outcome = store
+        .report_completion(
+            &s.id,
+            &title,
+            project.as_deref(),
+            &request,
+            &payload,
+            serde_json::to_value(req).map_err(error)?,
+            created,
         )
-        .optional()
         .map_err(error)?;
-    if let Some((old, report)) = previous {
-        if old != payload {
+    let report = match outcome {
+        CompletionOutcome::Saved(report) => report,
+        CompletionOutcome::Duplicate(report) => {
+            return Ok(json!({"report":report,"duplicate":true}));
+        }
+        CompletionOutcome::Conflict => {
             return Err(fail(
                 StatusCode::CONFLICT,
                 "Request ID already used for a different completion report",
             ));
         }
-        return Ok(
-            json!({"report":serde_json::from_str::<Value>(&report).map_err(error)?,"duplicate":true}),
-        );
-    }
-    let created = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
-    tx.execute("INSERT INTO agent_completions(author,author_title,project_id,request_id,payload,report,created) VALUES (?1,?2,?3,?4,?5,'{}',?6)", params![s.id,title,project,req.request_id,payload,created]).map_err(error)?;
-    let id = tx.last_insert_rowid();
-    let mut report = serde_json::to_value(req).map_err(error)?;
-    let obj = report.as_object_mut().unwrap();
-    obj.insert("id".into(), json!(id));
-    obj.insert("author".into(), json!(s.id));
-    obj.insert("authorTitle".into(), json!(title));
-    obj.insert("projectId".into(), json!(project));
-    obj.insert("created".into(), json!(created));
-    tx.execute(
-        "UPDATE agent_completions SET report=?2 WHERE id=?1",
-        params![id, report.to_string()],
-    )
-    .map_err(error)?;
-    tx.execute("INSERT INTO agent_audit(actor,action,target,outcome,created) VALUES (?1,'completion_reported',?1,?2,?3)",params![s.id,format!("report:{id}"),created]).map_err(error)?;
-    tx.commit().map_err(error)?;
+    };
+    let id = report["id"].as_i64().unwrap();
     drop(store);
     {
         let mut data = s.data.lock().unwrap();

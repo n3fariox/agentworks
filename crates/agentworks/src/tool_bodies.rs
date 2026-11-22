@@ -60,36 +60,26 @@ pub async fn tool_body(
     let needle = format!("\"toolCallId\":{}", json!(tool));
     let store = s.store.clone();
     let id = s.id.clone();
-    let events = tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<Value>> {
-        let store = store.lock().unwrap();
-        let mut query = store.connection.prepare(
-            "SELECT payload FROM events WHERE session_id=?1 AND seq BETWEEN ?2 AND ?3 AND instr(payload, ?4) > 0 ORDER BY seq",
-        )?;
-        let mut events = Vec::new();
-        let rows = query.query_map(rusqlite::params![id, low as i64, high as i64, needle], |r| {
-            r.get::<_, String>(0)
+    let events =
+        tokio::task::spawn_blocking(move || -> agentworks_database::StorageResult<Vec<Value>> {
+            let store = store.lock().unwrap();
+            store.tool_body_events(&id, low, high, &needle, MAX_BODY_EVENTS, |event| {
+                is_tool(event) && matches(&event["data"])
+            })
+        })
+        .await
+        .map_err(|_| {
+            crate::fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Tool output lookup failed",
+            )
+        })?
+        .map_err(|e| {
+            crate::fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Tool output could not be read: {e}"),
+            )
         })?;
-        for row in rows {
-            let Ok(event) = serde_json::from_str::<Value>(&row?) else {
-                continue;
-            };
-            if is_tool(&event) && matches(&event["data"]) {
-                events.push(event);
-                if events.len() >= MAX_BODY_EVENTS {
-                    break;
-                }
-            }
-        }
-        Ok(events)
-    })
-    .await
-    .map_err(|_| crate::fail(StatusCode::INTERNAL_SERVER_ERROR, "Tool output lookup failed"))?
-    .map_err(|e| {
-        crate::fail(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Tool output could not be read: {e}"),
-        )
-    })?;
     if events.is_empty() {
         return Err(crate::fail(
             StatusCode::NOT_FOUND,

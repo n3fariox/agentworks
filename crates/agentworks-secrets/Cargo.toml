@@ -4,20 +4,19 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "Encrypted session secrets, their assignments, redaction and templated commands."
+description = "Session secret sealing, assignment rules, redaction and templated commands."
 
 [features]
-default = ["storage"]
-# The key file, value sealing and tables, which only the service needs. The worker's
-# MCP facade turns it off to keep SQLite and the crypto libraries out of its binary.
-storage = ["dep:argon2", "dep:ring", "dep:rusqlite"]
+default = ["vault"]
+# The key file and value sealing, which only the service needs. The worker's MCP
+# facade turns it off to keep argon2 and ring out of its binary.
+vault = ["dep:argon2", "dep:ring"]
 
 [dependencies]
 argon2 = { version = "0.6", default-features = false, features = ["alloc"], optional = true }
 base64 = "0.22"
 libc.workspace = true
 ring = { version = "0.17", optional = true }
-rusqlite = { version = "0.39.0", features = ["bundled"], optional = true }
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["io-util", "process", "rt", "time"] }

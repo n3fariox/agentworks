@@ -1,7 +1,7 @@
 //! Durable restart decisions. Only systemd launches the successor: the manager repoints
 //! the release directory's `current` link, writes a dispatch ticket and exits 75.
 use crate::*;
-use rusqlite::{OptionalExtension, params};
+
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct Manager {
@@ -114,19 +114,19 @@ fn db(e: impl std::fmt::Display) -> (StatusCode, String) {
     )
 }
 fn records(app: &App) -> Result<Vec<Record>, (StatusCode, String)> {
-    let store = app.store.lock().unwrap();
-    let mut q = store
-        .connection
-        .prepare("SELECT record FROM service_restarts ORDER BY rowid DESC")
-        .map_err(db)?;
-    q.query_map([], |r| r.get::<_, String>(0))
-        .map_err(db)?
-        .map(|r| serde_json::from_str(&r.map_err(db)?).map_err(db))
-        .collect()
+    app.store.lock().unwrap().restart_records().map_err(db)
 }
 fn save(app: &App, r: &Record) -> Result<(), (StatusCode, String)> {
-    app.store.lock().unwrap().connection.execute("INSERT INTO service_restarts(actor,request_id,payload,record) VALUES (?1,?2,?3,?4) ON CONFLICT(actor,request_id) DO UPDATE SET record=excluded.record", params![r.actor,r.request.request_id,serde_json::to_string(&r.request).map_err(db)?,serde_json::to_string(r).map_err(db)?]).map_err(db)?;
-    Ok(())
+    app.store
+        .lock()
+        .unwrap()
+        .save_restart(
+            &r.actor,
+            &r.request.request_id,
+            &serde_json::to_string(&r.request).map_err(db)?,
+            r,
+        )
+        .map_err(db)
 }
 fn pending(r: &Record) -> bool {
     matches!(r.phase.as_str(), "draining" | "dispatching")
@@ -149,7 +149,11 @@ pub fn allow_start(app: &App) -> Result<(), (StatusCode, String)> {
     }
 }
 pub fn initialize(app: &App) -> Result<(), String> {
-    app.store.lock().unwrap().connection.execute_batch("CREATE TABLE IF NOT EXISTS service_restarts(actor TEXT NOT NULL,request_id TEXT NOT NULL,payload TEXT NOT NULL,record TEXT NOT NULL,UNIQUE(actor,request_id));").map_err(|e|e.to_string())?;
+    app.store
+        .lock()
+        .unwrap()
+        .initialize_restarts()
+        .map_err(|e| e.to_string())?;
     // Every start consumes the ticket, so a later cold start never reuses it.
     let ticket = app.restart.control.as_ref().and_then(|dir| {
         let path = dir.join("dispatch.json");
@@ -271,17 +275,11 @@ pub async fn request(app: &App, actor: &str, req: Request) -> Result<Value, (Sta
         communication::require(app, session(app, actor)?.as_ref(), "restart_service")?;
     }
     let payload = serde_json::to_string(&req).map_err(db)?;
-    let prior: Option<(String, String)> = app
+    let prior = app
         .store
         .lock()
         .unwrap()
-        .connection
-        .query_row(
-            "SELECT payload,record FROM service_restarts WHERE actor=?1 AND request_id=?2",
-            params![actor, req.request_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()
+        .restart_request(actor, &req.request_id)
         .map_err(db)?;
     if let Some((old, record)) = prior {
         if old != payload {
@@ -430,12 +428,8 @@ fn backup(app: &App, r: &Record) -> Result<(), String> {
     let store = app.store.lock().unwrap();
     let destination = root.join("sessions.sqlite3");
     store
-        .connection
-        .execute("VACUUM INTO ?1", [destination.to_string_lossy().as_ref()])
+        .snapshot_verified(&destination)
         .map_err(|e| e.to_string())?;
-    let copy = rusqlite::Connection::open(&destination).map_err(|e| e.to_string())?;
-    crate::recovery::compare(&store.connection, &copy).map_err(|e| e.to_string())?;
-    drop(copy);
     let bytes = serde_json::to_vec_pretty(&catalog.data).map_err(|e| e.to_string())?;
     let _: catalog::CatalogData = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     std::fs::write(root.join("catalog.json"), bytes).map_err(|e| e.to_string())?;

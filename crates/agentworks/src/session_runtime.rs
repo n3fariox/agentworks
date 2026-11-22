@@ -513,7 +513,7 @@ pub async fn run(
     let saved_config = s.data.lock().unwrap().session_config.clone();
     let import_pending = s.data.lock().unwrap().import_pending;
     let host_profile = s.data.lock().unwrap().opencode_host;
-    let secrets = crate::secrets::environment(&s.store.lock().unwrap().connection, &s.id)
+    let secrets = crate::secrets::environment(&s.store.lock().unwrap(), &s.id)
         .map_err(|_| "Could not read session secrets")?;
     crate::secrets::register(&s.id, &secrets.vars);
     crate::secrets::mark_delivered(&s.id, &secrets.vars);

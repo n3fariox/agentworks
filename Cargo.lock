@@ -116,6 +116,7 @@ name = "agentworks"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol 3.4.0",
+ "agentworks-database",
  "agentworks-presentation",
  "agentworks-runtime",
  "agentworks-scripting",
@@ -168,6 +169,18 @@ dependencies = [
  "agent-client-protocol 3.4.0",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "agentworks-database"
+version = "0.1.0"
+dependencies = [
+ "agentworks-session",
+ "blake3",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -229,6 +242,7 @@ dependencies = [
 name = "agentworks-scripting"
 version = "0.1.0"
 dependencies = [
+ "agentworks-database",
  "agentworks-presentation",
  "agentworks-starlark",
  "rusqlite",
@@ -245,7 +259,6 @@ dependencies = [
  "base64 0.22.1",
  "libc",
  "ring",
- "rusqlite",
  "serde",
  "serde_json",
  "tokio",

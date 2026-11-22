@@ -3,9 +3,12 @@
 //! per-session scrubbing. Storage, sealing and assignment rules are in
 //! `agentworks_secrets`.
 use crate::{ApiResult, App, Session, communication as mail, fail};
+use agentworks_database::secrets::{SealedSecret, SealedValue, SecretAssignment, SecretGrant};
 use agentworks_secrets::{
-    model::{Approval, Assignment, Delivery, validate_description, validate_name, validate_value},
-    store::{self, Grant, Secret},
+    model::{
+        Approval, Assignment, Delegation, Delivery, validate_description, validate_name,
+        validate_value,
+    },
     vault::Vault,
 };
 use axum::{
@@ -13,7 +16,6 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -23,8 +25,6 @@ use std::{
 };
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
-
-pub use agentworks_secrets::store::SCHEMA;
 
 const MAX_ASSIGNMENTS: usize = 64;
 
@@ -76,31 +76,49 @@ fn db_error(_: impl std::fmt::Display) -> (StatusCode, String) {
         "Could not save or read secrets",
     )
 }
-fn audit(db: &rusqlite::Connection, action: &str, name: &str) -> rusqlite::Result<usize> {
-    db.execute(
-        "INSERT INTO agent_audit(actor,action,target,outcome,created) VALUES ('human',?1,?2,'ok',?3)",
-        params![action, format!("secret:{name}"), now()],
-    )
-}
-
 /// Public view of a secret: never the value. `readable` is false when the value was
 /// stored under a different key file and must be entered again.
-fn view(secret: &Secret, vault: Option<&Vault>) -> Value {
+fn view(secret: &SealedSecret, vault: Option<&Vault>) -> Value {
     json!({"id":secret.id,"name":secret.name,"description":secret.description,"length":secret.length,
-        "created":secret.created,"updated":secret.updated,"readable":secret.readable(vault)})
+        "created":secret.created,"updated":secret.updated,"readable":readable(secret, vault)})
 }
-fn find(db: &rusqlite::Connection, id: &str) -> Result<Secret, (StatusCode, String)> {
-    store::find(db, id)
+fn value(secret: &SealedSecret, vault: &Vault) -> Option<Zeroizing<String>> {
+    vault.open_value(&secret.id, &secret.name, &secret.sealed)
+}
+/// `None` without a vault.
+fn readable(secret: &SealedSecret, vault: Option<&Vault>) -> Option<bool> {
+    vault.map(|vault| value(secret, vault).is_some())
+}
+fn not_found() -> (StatusCode, String) {
+    fail(StatusCode::NOT_FOUND, "Secret not found")
+}
+/// Stored policy names that no longer parse fall back to the most restrictive policy.
+fn assignment(row: SecretAssignment) -> Assignment {
+    Assignment {
+        delivery: Delivery::parse(&row.delivery).unwrap_or(Delivery::Tool),
+        delegation: Delegation::parse(&row.delegation).unwrap_or(Delegation::Restricted),
+        approval: Approval::parse(&row.approval).unwrap_or(Approval::EachUse),
+        secret_id: row.secret_id,
+        name: row.name,
+        origin: row.origin,
+    }
+}
+fn assignments(store: &agentworks_database::Store, session: &str) -> mail::Result<Vec<Assignment>> {
+    Ok(store
+        .secret_assignments(session)
         .map_err(db_error)?
-        .ok_or_else(|| fail(StatusCode::NOT_FOUND, "Secret not found"))
+        .into_iter()
+        .map(assignment)
+        .collect())
 }
 
 pub async fn list(State(app): State<App>) -> ApiResult {
     let storage = STORAGE.get();
     let vault = loaded();
     let store = app.store.lock().unwrap();
-    let counts = store::session_counts(&store.connection).map_err(db_error)?;
-    let secrets: Vec<Value> = store::all(&store.connection)
+    let counts = store.secret_session_counts().map_err(db_error)?;
+    let secrets: Vec<Value> = store
+        .secrets()
         .map_err(db_error)?
         .iter()
         .map(|secret| {
@@ -132,18 +150,26 @@ pub async fn create(State(app): State<App>, Json(input): Json<Create>) -> ApiRes
     validate_value(&input.value).map_err(bad)?;
     let description = validate_description(&input.description).map_err(bad)?;
     let id = uuid::Uuid::new_v4().to_string();
-    let mut store = app.store.lock().unwrap();
-    let tx = store.connection.transaction().map_err(db_error)?;
-    if store::find_by_name(&tx, name).map_err(db_error)?.is_some() {
-        return Err(fail(
-            StatusCode::CONFLICT,
-            format!("A secret named {name} already exists"),
-        ));
-    }
-    store::insert(&tx, vault, &id, name, &description, &input.value, now()).map_err(db_error)?;
-    audit(&tx, "secret.create", name).map_err(db_error)?;
-    let saved = find(&tx, &id)?;
-    tx.commit().map_err(db_error)?;
+    let (nonce, body) = vault
+        .seal_value(&id, name, &input.value)
+        .map_err(|e| unavailable(&e))?;
+    let sealed = SealedValue {
+        nonce: &nonce,
+        body: &body,
+        length: input.value.len(),
+    };
+    let saved = app
+        .store
+        .lock()
+        .unwrap()
+        .create_secret(&id, name, &description, &sealed, now())
+        .map_err(db_error)?
+        .ok_or_else(|| {
+            fail(
+                StatusCode::CONFLICT,
+                format!("A secret named {name} already exists"),
+            )
+        })?;
     Ok(Json(view(&saved, Some(vault))))
 }
 
@@ -171,39 +197,80 @@ pub async fn update(
         }
         None => None,
     };
-    let mut store = app.store.lock().unwrap();
-    let tx = store.connection.transaction().map_err(db_error)?;
-    let current = find(&tx, &id)?;
-    let updated = now();
-    if let Some(description) = description {
-        store::set_description(&tx, &id, &description, updated).map_err(db_error)?;
-        audit(&tx, "secret.update", &current.name).map_err(db_error)?;
+    /// Sealing failures are storage-unavailable errors, not database errors.
+    enum Failure {
+        Database,
+        Seal(String),
     }
-    if let (Some(vault), Some(value)) = (vault, &input.value) {
-        store::set_value(&tx, vault, &current, value, updated).map_err(db_error)?;
-        audit(&tx, "secret.value", &current.name).map_err(db_error)?;
+    impl From<agentworks_database::StorageError> for Failure {
+        fn from(_: agentworks_database::StorageError) -> Self {
+            Self::Database
+        }
     }
-    let saved = find(&tx, &id)?;
-    tx.commit().map_err(db_error)?;
+    let seal = |current: &SealedSecret| -> Result<(Vec<u8>, Vec<u8>, usize), Failure> {
+        let (vault, value) = (vault.unwrap(), input.value.as_ref().unwrap());
+        let (nonce, body) = vault
+            .seal_value(&current.id, &current.name, value)
+            .map_err(Failure::Seal)?;
+        Ok((nonce, body, value.len()))
+    };
+    let saved = app
+        .store
+        .lock()
+        .unwrap()
+        .update_secret(
+            &id,
+            description.as_deref(),
+            vault.map(|_| &seal as &dyn Fn(&SealedSecret) -> Result<_, Failure>),
+            now(),
+        )
+        .map_err(|failure| match failure {
+            Failure::Database => db_error(""),
+            Failure::Seal(error) => unavailable(&error),
+        })?
+        .ok_or_else(not_found)?;
     Ok(Json(view(&saved, loaded())))
 }
 
 pub async fn delete(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
-    let mut store = app.store.lock().unwrap();
-    let tx = store.connection.transaction().map_err(db_error)?;
-    let current = find(&tx, &id)?;
-    store::delete(&tx, &id).map_err(db_error)?;
-    audit(&tx, "secret.delete", &current.name).map_err(db_error)?;
-    tx.commit().map_err(db_error)?;
+    if !app
+        .store
+        .lock()
+        .unwrap()
+        .delete_secret(&id, now())
+        .map_err(db_error)?
+    {
+        return Err(not_found());
+    }
     Ok(Json(json!({"deleted": id})))
 }
 
 /// A session's `environment` secrets, decrypted for one harness start.
-pub fn environment(
-    db: &rusqlite::Connection,
-    session: &str,
-) -> rusqlite::Result<store::Environment> {
-    store::environment(db, session, loaded())
+#[derive(Default)]
+pub struct Environment {
+    pub vars: Vec<(String, Zeroizing<String>)>,
+    /// Names that could not be decrypted (storage unavailable or value needs re-entry).
+    pub unavailable: Vec<String>,
+}
+pub fn environment(store: &agentworks_database::Store, session: &str) -> mail::Result<Environment> {
+    let mut out = Environment::default();
+    for a in assignments(store, session)? {
+        if a.delivery != Delivery::Environment {
+            continue;
+        }
+        let plain = match loaded() {
+            Some(vault) => store
+                .secret(&a.secret_id)
+                .map_err(db_error)?
+                .and_then(|secret| value(&secret, vault)),
+            None => None,
+        };
+        match plain {
+            Some(plain) => out.vars.push((a.name, plain)),
+            None => out.unavailable.push(a.name),
+        }
+    }
+    Ok(out)
 }
 /// Forms of each value delivered to a session, replaced in everything the session
 /// stores or publishes.
@@ -244,11 +311,15 @@ fn allowed_uses() -> std::sync::MutexGuard<'static, HashMap<String, HashSet<Stri
 /// `list_session_secrets`: assigned secrets with instructions. Never values.
 pub fn agent_list(app: &App, session: &str) -> mail::Result<Value> {
     let store = app.store.lock().unwrap();
-    let assigned = store::assignments(&store.connection, session).map_err(db_error)?;
+    let assigned = assignments(&store, session)?;
     let environment = delivered().get(session).cloned().unwrap_or_default();
     let mut out = Vec::new();
     for a in &assigned {
-        let description = find(&store.connection, &a.secret_id)?.description;
+        let description = store
+            .secret(&a.secret_id)
+            .map_err(db_error)?
+            .ok_or_else(not_found)?
+            .description;
         out.push(
             json!({"name":a.name,"description":description,"delivery":a.delivery,
             "approval":a.approval,"usage":a.usage(environment.contains(&a.name))}),
@@ -319,8 +390,7 @@ pub fn resolve_use(app: &App, s: &Arc<Session>, arguments: Value) -> mail::Resul
 }
 /// Every name must be assigned to this session; unassigned and missing look the same.
 fn checked(app: &App, s: &Session, names: &[String]) -> mail::Result<Vec<Assignment>> {
-    let assigned =
-        store::assignments(&app.store.lock().unwrap().connection, &s.id).map_err(db_error)?;
+    let assigned = assignments(&app.store.lock().unwrap(), &s.id)?;
     names
         .iter()
         .map(|name| {
@@ -444,9 +514,10 @@ fn release(app: &App, s: &Session, names: &[String]) -> mail::Result<Value> {
     {
         let store = app.store.lock().unwrap();
         for name in names {
-            let value = store::find_by_name(&store.connection, name)
+            let value = store
+                .secret_named(name)
                 .map_err(db_error)?
-                .and_then(|secret| secret.value(vault))
+                .and_then(|secret| value(&secret, vault))
                 .ok_or_else(|| {
                     fail(
                         StatusCode::CONFLICT,
@@ -472,13 +543,14 @@ pub async fn get_assignments(State(app): State<App>, Path(id): Path<String>) -> 
     crate::session(&app, &id)?;
     let vault = loaded();
     let store = app.store.lock().unwrap();
-    let assigned = store::assignments(&store.connection, &id).map_err(db_error)?;
-    let secrets: Vec<Value> = store::all(&store.connection)
+    let assigned = assignments(&store, &id)?;
+    let secrets: Vec<Value> = store
+        .secrets()
         .map_err(db_error)?
         .iter()
         .map(|secret| {
             json!({"id":secret.id,"name":secret.name,"description":secret.description,
-                "readable":secret.readable(vault)})
+                "readable":readable(secret, vault)})
         })
         .collect();
     Ok(Json(json!({"assignments": assigned, "secrets": secrets})))
@@ -488,6 +560,18 @@ pub async fn get_assignments(State(app): State<App>, Path(id): Path<String>) -> 
 #[serde(deny_unknown_fields)]
 pub struct AssignmentsInput {
     assignments: Vec<Grant>,
+}
+/// What a human grants; unset fields take the safest default.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Grant {
+    secret_id: String,
+    #[serde(default)]
+    delivery: Delivery,
+    #[serde(default)]
+    delegation: Delegation,
+    #[serde(default)]
+    approval: Approval,
 }
 
 /// Replaces a session's assignments. Only humans reach this route; retained secrets
@@ -509,38 +593,38 @@ pub async fn set_assignments(
     {
         return Err(bad("Each secret can be assigned once"));
     }
-    let (before, after) = {
-        let mut store = app.store.lock().unwrap();
-        let tx = store.connection.transaction().map_err(db_error)?;
-        let before = store::assignments(&tx, &id).map_err(db_error)?;
-        let created = now();
-        store::clear_assignments(&tx, &id).map_err(db_error)?;
-        for a in &input.assignments {
-            find(&tx, &a.secret_id).map_err(|(code, _)| {
-                fail(
-                    code,
-                    "A selected secret no longer exists. Reopen session settings",
-                )
-            })?;
-            let origin = before
-                .iter()
-                .find(|b| b.secret_id == a.secret_id)
-                .map_or("human", |b| b.origin.as_str());
-            store::assign(&tx, &id, a, origin, created).map_err(db_error)?;
-        }
-        let after = store::assignments(&tx, &id).map_err(db_error)?;
-        let summary =
-            |list: &[Assignment]| list.iter().map(Assignment::describe).collect::<Vec<_>>();
-        if summary(&before) != summary(&after) {
-            tx.execute(
-                "INSERT INTO agent_audit(actor,action,target,outcome,created) VALUES ('human','secrets',?1,?2,?3)",
-                params![id, summary(&after).join(", "), created],
-            )
-            .map_err(db_error)?;
-        }
-        tx.commit().map_err(db_error)?;
-        (before, after)
+    let grants: Vec<SecretGrant> = input
+        .assignments
+        .iter()
+        .map(|a| SecretGrant {
+            secret_id: &a.secret_id,
+            delivery: a.delivery.as_str(),
+            delegation: a.delegation.as_str(),
+            approval: a.approval.as_str(),
+        })
+        .collect();
+    let summary = |list: &[SecretAssignment]| {
+        list.iter()
+            .cloned()
+            .map(|row| assignment(row).describe())
+            .collect::<Vec<_>>()
     };
+    let (before, after) = app
+        .store
+        .lock()
+        .unwrap()
+        .replace_secret_assignments(&id, &grants, "human", now(), summary)
+        .map_err(db_error)?
+        .ok_or_else(|| {
+            fail(
+                StatusCode::NOT_FOUND,
+                "A selected secret no longer exists. Reopen session settings",
+            )
+        })?;
+    let (before, after): (Vec<Assignment>, Vec<Assignment>) = (
+        before.into_iter().map(assignment).collect(),
+        after.into_iter().map(assignment).collect(),
+    );
     let names = |list: &[Assignment]| list.iter().map(Assignment::describe).collect::<Vec<_>>();
     if names(&before) != names(&after) {
         allowed_uses().remove(&id);

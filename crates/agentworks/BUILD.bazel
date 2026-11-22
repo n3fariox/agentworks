@@ -17,6 +17,7 @@ rust_binary(
     proc_macro_deps = all_crate_deps(proc_macro = True),
     version = "0.1.0",
     deps = [
+        "//crates/agentworks-database",
         "//crates/agentworks-runtime",
         "//crates/agentworks-session",
         "//crates/agentworks-starlark",
@@ -31,7 +32,24 @@ rust_binary(
 
 rust_test(
     name = "unit_test",
-    crate = ":agentworks",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/main.rs",
+    aliases = aliases(normal = True, normal_dev = True),
+    edition = "2024",
+    version = "0.1.0",
+    compile_data = ["//scripts:embedded_scripts", "//web:assets"],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    deps = [
+        "//crates/agentworks-database:test_support",
+        "//crates/agentworks-runtime",
+        "//crates/agentworks-session",
+        "//crates/agentworks-starlark",
+        "//crates/agentworks-terminal",
+        "//crates/agentworks-presentation",
+        "//crates/agentworks-scripting:test_support",
+        "//crates/agentworks-worker",
+        "//crates/agentworks-workspace",
+    ] + all_crate_deps(normal = True, normal_dev = True),
     data = [
         "//tests:fixtures/codex-quota.mjs",
         "@nodejs_host//:node_bin",

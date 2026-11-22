@@ -1,12 +1,12 @@
 //! Browser-independent PR tracking and a durable observation journal. Events
 //! describe differences between snapshots, not exact GitHub delivery/actor facts.
 use crate::{ApiResult, App, Session, fail, session};
+use agentworks_database::Store;
 use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::{
@@ -14,11 +14,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-pub const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS github_pr_tracking(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,scope TEXT,snapshot TEXT NOT NULL DEFAULT '{}',status TEXT NOT NULL DEFAULT 'unknown',observed_at INTEGER,next_poll INTEGER NOT NULL DEFAULT 0,hooks TEXT NOT NULL DEFAULT '');
-CREATE TABLE IF NOT EXISTS github_pr_events(id INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,payload TEXT NOT NULL,created INTEGER NOT NULL,delivered INTEGER NOT NULL DEFAULT 0);
-CREATE INDEX IF NOT EXISTS github_pr_events_by_session ON github_pr_events(session_id,id);
-";
 const POLL_MS: i64 = crate::github::DEFAULT_POLL_MS as i64;
 fn now() -> i64 {
     SystemTime::now()
@@ -44,31 +39,22 @@ fn scope(context: &Value) -> Option<String> {
 fn material(pr: &Value) -> Value {
     json!({"number":pr["number"],"url":pr["url"],"state":pr["state"],"draft":pr["draft"],"headSha":pr["headSha"],"headMatches":pr["headMatches"],"review":pr["reviewSummary"]["state"].as_str().or(pr["reviewDecision"].as_str()).unwrap_or("UNKNOWN"),"reviewComplete":pr["reviewSummary"]["complete"],"ci":pr["checks"]["state"],"checksComplete":pr["checks"]["complete"]})
 }
-fn hook_fingerprint(db: &Connection) -> rusqlite::Result<String> {
+fn hook_fingerprint(db: &Store) -> agentworks_database::StorageResult<String> {
     use sha2::{Digest, Sha256};
-    let mut rows = db.prepare("SELECT name,hash FROM scripts WHERE enabled=1 ORDER BY name")?;
-    let values = rows
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let values = db.script_versions_by_name()?;
     Ok(format!("{:x}", Sha256::digest(json!(values).to_string())))
 }
 /// Store the baseline and its new events in one transaction. A failed read is
 /// availability information, never an empty PR list or a false review/check result.
 fn observe(
-    db: &mut Connection,
+    db: &mut Store,
     id: &str,
     context: &Value,
     at: i64,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
     let hooks = hook_fingerprint(db)?;
     let tx = db.transaction()?;
-    let previous: Option<(Option<String>, String, String, String)> = tx
-        .query_row(
-            "SELECT scope,snapshot,status,hooks FROM github_pr_tracking WHERE session_id=?1",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )
-        .optional()?;
+    let previous = tx.tracking().baseline(id)?;
     let status = context["status"].as_str().unwrap_or("unavailable");
     let prior_status = previous.as_ref().map(|(_, _, s, _)| s.as_str());
     let mut baseline: Map<String, Value> = previous
@@ -160,11 +146,7 @@ fn observe(
             event["repository"] = context["repository"].clone();
             event["connection"] = context["connection"].clone();
         }
-        tx.execute(
-            "INSERT INTO github_pr_events(session_id,payload,created) VALUES (?1,?2,?3)",
-            params![id, event.to_string(), at],
-        )?;
-        event["id"] = json!(tx.last_insert_rowid());
+        event["id"] = json!(tx.tracking().append_event(id, &event.to_string(), at)?);
     }
     let retry = context["retryAt"]
         .as_i64()
@@ -182,20 +164,24 @@ fn observe(
     } else {
         previous.map(|(_, _, _, h)| h).unwrap_or_default()
     };
-    tx.execute("INSERT INTO github_pr_tracking(session_id,scope,snapshot,status,observed_at,next_poll,hooks) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(session_id) DO UPDATE SET scope=excluded.scope,snapshot=excluded.snapshot,status=excluded.status,observed_at=excluded.observed_at,next_poll=excluded.next_poll,hooks=excluded.hooks",params![id,saved_scope,json!(baseline).to_string(),status,at,retry,saved_hooks])?;
+    tx.tracking()
+        .save_baseline(&agentworks_database::tracking::BaselineWrite {
+            session: id,
+            scope: saved_scope.as_deref(),
+            snapshot: &json!(baseline).to_string(),
+            status,
+            observed_at: at,
+            next_poll: retry,
+            hooks: &saved_hooks,
+        })?;
     tx.commit()?;
     Ok(events)
 }
 async fn deliver(s: &Arc<Session>) -> Result<(), String> {
     let pending = {
         let store = s.store.lock().unwrap();
-        let mut query = store.connection.prepare("SELECT id,payload FROM github_pr_events WHERE session_id=?1 AND delivered=0 ORDER BY id LIMIT 100").map_err(|_|"Could not read PR events")?;
-        query
-            .query_map([&s.id], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-            })
-            .map_err(|_| "Could not read PR events")?
-            .collect::<rusqlite::Result<Vec<_>>>()
+        store
+            .pending_pr_events(&s.id)
             .map_err(|_| "Could not read PR events")?
     };
     for (id, payload) in pending {
@@ -217,11 +203,11 @@ async fn deliver(s: &Arc<Session>) -> Result<(), String> {
         }
         let store = s.store.lock().unwrap();
         store
-            .connection
-            .execute("UPDATE github_pr_events SET delivered=1 WHERE id=?1", [id])
+            .acknowledge_pr_event(id)
             .map_err(|_| "Could not acknowledge PR event")?;
-        // Keep pending work and the latest 100 acknowledged observations per session.
-        store.connection.execute("DELETE FROM github_pr_events WHERE session_id=?1 AND delivered=1 AND id < (SELECT COALESCE(min(id),0) FROM (SELECT id FROM github_pr_events WHERE session_id=?1 ORDER BY id DESC LIMIT 100))",[&s.id]).map_err(|_|"Could not prune PR events")?;
+        store
+            .prune_pr_events(&s.id)
+            .map_err(|_| "Could not prune PR events")?;
     }
     Ok(())
 }
@@ -232,20 +218,7 @@ pub async fn refresh(app: &App, id: &str, query: crate::github::Refresh) -> ApiR
     let Json(mut context) =
         crate::github::context(State(app.clone()), Path(id.into()), Query(query)).await?;
     if context.get("pollIntervalMs").is_none() {
-        let old_scope: Option<String> = s
-            .store
-            .lock()
-            .unwrap()
-            .connection
-            .query_row(
-                "SELECT scope FROM github_pr_tracking WHERE session_id=?1",
-                [id],
-                |r| r.get::<_, Option<String>>(0),
-            )
-            .optional()
-            .ok()
-            .flatten()
-            .flatten();
+        let old_scope = s.store.lock().unwrap().pr_scope(id).ok().flatten();
         let old_host = old_scope
             .and_then(|s| serde_json::from_str::<Value>(&s).ok())
             .and_then(|s| s[0].as_str().map(str::to_owned));
@@ -267,13 +240,12 @@ pub async fn refresh(app: &App, id: &str, query: crate::github::Refresh) -> ApiR
     });
     crate::session_badges::sync_github(&s, &context)
         .map_err(|m| fail(StatusCode::INSUFFICIENT_STORAGE, m))?;
-    let events =
-        observe(&mut s.store.lock().unwrap().connection, id, &context, now()).map_err(|_| {
-            fail(
-                StatusCode::INSUFFICIENT_STORAGE,
-                "Could not persist PR observations",
-            )
-        })?;
+    let events = observe(&mut s.store.lock().unwrap(), id, &context, now()).map_err(|_| {
+        fail(
+            StatusCode::INSUFFICIENT_STORAGE,
+            "Could not persist PR observations",
+        )
+    })?;
     for event in events {
         let _ = s.tx.send(json!({"kind":"github_event","data":event}));
     }
@@ -302,28 +274,12 @@ pub async fn events(
 ) -> ApiResult {
     let s = session(&app, &id)?;
     let store = s.store.lock().unwrap();
-    let mut stmt = store.connection.prepare("SELECT id,payload,created FROM github_pr_events WHERE session_id=?1 AND id>?2 ORDER BY id LIMIT 100").map_err(|_|fail(StatusCode::INTERNAL_SERVER_ERROR,"Could not read PR events"))?;
-    let rows = stmt
-        .query_map(params![id, query.after.max(0)], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, i64>(2)?,
-            ))
-        })
-        .map_err(|_| {
-            fail(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Could not read PR events",
-            )
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|_| {
-            fail(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Could not read PR events",
-            )
-        })?;
+    let rows = store.pr_events(&id, query.after.max(0)).map_err(|_| {
+        fail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not read PR events",
+        )
+    })?;
     let events: Vec<_> = rows
         .into_iter()
         .filter_map(|(id, payload, _)| {
@@ -375,22 +331,19 @@ async fn tick(app: &App) -> Result<(), String> {
             .store
             .lock()
             .unwrap()
-            .connection
-            .query_row(
-                "SELECT next_poll<=?2 FROM github_pr_tracking WHERE session_id=?1",
-                params![s.id, now()],
-                |r| r.get::<_, bool>(0),
-            )
-            .optional()
-            .map_err(|_| "Could not read PR tracking schedule")?
-            .unwrap_or(true);
+            .pr_due(&s.id, now())
+            .map_err(|_| "Could not read PR tracking schedule")?;
         if due {
             if refresh(app, &s.id, crate::github::Refresh::default())
                 .await
                 .is_err()
             {
                 // Root/remote-host failures are not an empty GitHub snapshot.
-                s.store.lock().unwrap().connection.execute("INSERT INTO github_pr_tracking(session_id,next_poll) VALUES (?1,?2) ON CONFLICT(session_id) DO UPDATE SET next_poll=excluded.next_poll",params![s.id,now()+POLL_MS]).map_err(|_|"Could not delay PR refresh")?;
+                s.store
+                    .lock()
+                    .unwrap()
+                    .delay_pr(&s.id, now() + POLL_MS)
+                    .map_err(|_| "Could not delay PR refresh")?;
             }
         } else {
             deliver(&s).await?;
@@ -408,10 +361,14 @@ pub(crate) mod tests {
     fn context(resource: Value) -> Value {
         json!({"status":"ready","repository":{"host":"github.com","owner":"team","name":"repo"},"connection":{"host":"github.com","login":"fixture"},"branch":"main","commit":"abc","snapshot":{"fetchedAt":now(),"complete":true,"resources":[resource]}})
     }
-    fn db() -> Connection {
-        let db = Connection::open_in_memory().unwrap();
-        db.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE sessions(id TEXT PRIMARY KEY); INSERT INTO sessions VALUES ('s'); CREATE TABLE scripts(name TEXT,hash TEXT,enabled INTEGER);").unwrap();
-        db.execute_batch(SCHEMA).unwrap();
+    fn db() -> Store {
+        let db = Store::memory().unwrap();
+        db.test_connection()
+            .execute(
+                "INSERT INTO sessions(id,metadata,state) VALUES ('s','{}','{}')",
+                [],
+            )
+            .unwrap();
         db
     }
     #[test]
@@ -449,6 +406,7 @@ pub(crate) mod tests {
             assert!(observe(&mut db, "s", &value, 31).unwrap().is_empty());
         }
         let count: i64 = db
+            .test_connection()
             .query_row("SELECT count(DISTINCT id) FROM github_pr_events", [], |r| {
                 r.get(0)
             })
@@ -477,7 +435,11 @@ pub(crate) mod tests {
         partial["snapshot"]["complete"] = json!(false);
         partial["snapshot"]["resources"] = json!([]);
         assert!(observe(&mut db, "s", &partial, 5).unwrap().is_empty());
-        db.execute("INSERT INTO scripts VALUES ('new.star','version',1)", [])
+        db.test_connection()
+            .execute(
+                "INSERT INTO scripts VALUES ('new.star','hooks','source','version',1,0,1)",
+                [],
+            )
             .unwrap();
         let events = observe(&mut db, "s", &value, 6).unwrap();
         assert_eq!(events[0]["kind"], "pr.snapshot");
@@ -544,7 +506,7 @@ pub(crate) mod tests {
             let catalog = Arc::new(Mutex::new(
                 crate::Catalog::open(root.join("catalog.json")).unwrap(),
             ));
-            let scripts = crate::scripting::start(&store.lock().unwrap().connection).unwrap();
+            let scripts = crate::scripting::start(&store.lock().unwrap()).unwrap();
             let app = App {
                 sessions: Default::default(),
                 roots: Arc::new(vec![root.clone()]),
@@ -637,7 +599,7 @@ agent.register_github(changed)
             .store
             .lock()
             .unwrap()
-            .connection
+            .test_connection()
             .execute("UPDATE github_pr_tracking SET next_poll=0", [])
             .unwrap();
         tick(&f.app).await.unwrap();
@@ -657,7 +619,7 @@ agent.register_github(changed)
                 .any(|b| b["label"] == "PR#17" && b["tone"] == "success")
         );
         // Lost acknowledgement after hook execution: replay retains event IDs and setters are idempotent.
-        f.app.store.lock().unwrap().connection.execute("UPDATE github_pr_events SET delivered=0 WHERE json_extract(payload,'$.kind')='pr.status_changed'",[]).unwrap();
+        f.app.store.lock().unwrap().test_connection().execute("UPDATE github_pr_events SET delivered=0 WHERE json_extract(payload,'$.kind')='pr.status_changed'",[]).unwrap();
         let before = badges["badgeRevision"].clone();
         deliver(&f.s).await.unwrap();
         assert_eq!(
@@ -669,7 +631,7 @@ agent.register_github(changed)
             .store
             .lock()
             .unwrap()
-            .connection
+            .test_connection()
             .query_row("SELECT count(*) FROM github_pr_events", [], |r| r.get(0))
             .unwrap();
         // A fresh in-memory hub observes the persisted baseline after restart.
@@ -679,7 +641,7 @@ agent.register_github(changed)
             .store
             .lock()
             .unwrap()
-            .connection
+            .test_connection()
             .execute("UPDATE github_pr_tracking SET next_poll=0", [])
             .unwrap();
         tick(&f.app).await.unwrap();
@@ -688,7 +650,7 @@ agent.register_github(changed)
                 .store
                 .lock()
                 .unwrap()
-                .connection
+                .test_connection()
                 .query_row("SELECT count(*) FROM github_pr_events", [], |r| r
                     .get::<_, i64>(0))
                 .unwrap(),
@@ -699,7 +661,7 @@ agent.register_github(changed)
             .store
             .lock()
             .unwrap()
-            .connection
+            .test_connection()
             .execute("UPDATE github_pr_tracking SET next_poll=0", [])
             .unwrap();
         tick(&f.app).await.unwrap();
@@ -708,7 +670,7 @@ agent.register_github(changed)
                 .store
                 .lock()
                 .unwrap()
-                .connection
+                .test_connection()
                 .query_row("SELECT count(*) FROM github_pr_events", [], |r| r
                     .get::<_, i64>(0))
                 .unwrap(),

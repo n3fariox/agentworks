@@ -58,6 +58,7 @@
     "test:terminal": "playwright test tests/terminal.spec.mjs tests/terminal-links.spec.mjs",
     "test:transcript-history": "playwright test tests/transcript-history.spec.mjs",
     "test:presentation": "scripts/mise-cargo.sh test --locked -p agentworks-presentation",
+    "test:database": "scripts/mise-cargo.sh test --locked -p agentworks-database",
     "test:scripting": "scripts/mise-cargo.sh test --locked -p agentworks-scripting",
     "test:starlark": "cargo test --locked -p agentworks-starlark",
     "test:progress": "node --test tests/bazel-progress.test.mjs && node scripts/progress-smoke.mjs",

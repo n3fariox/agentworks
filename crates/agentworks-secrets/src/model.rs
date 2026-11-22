@@ -101,6 +101,23 @@ pub enum Approval {
     EachUse,
 }
 
+macro_rules! names {
+    ($type:ident { $($variant:ident => $name:literal),+ }) => {
+        impl $type {
+            /// The stored and serialized name.
+            pub fn as_str(self) -> &'static str {
+                match self { $(Self::$variant => $name),+ }
+            }
+            pub fn parse(name: &str) -> Option<Self> {
+                match name { $($name => Some(Self::$variant),)+ _ => None }
+            }
+        }
+    };
+}
+names!(Delivery { Environment => "environment", Tool => "tool" });
+names!(Delegation { Restricted => "restricted", Passable => "passable" });
+names!(Approval { None => "none", EachUse => "eachUse" });
+
 /// One secret granted to one session. `origin` is `human` or the delegating session's ID.
 #[derive(Clone, Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -179,5 +196,22 @@ mod tests {
         assert!(validate_value("a\0b").is_err());
         assert!(validate_value(&"x".repeat(MAX_VALUE_BYTES + 1)).is_err());
         assert!(validate_value("ok").is_ok());
+    }
+
+    #[test]
+    fn policy_names_match_their_serialized_form() {
+        for d in [Delivery::Environment, Delivery::Tool] {
+            assert_eq!(serde_json::to_value(d).unwrap(), d.as_str());
+            assert_eq!(Delivery::parse(d.as_str()), Some(d));
+        }
+        for d in [Delegation::Restricted, Delegation::Passable] {
+            assert_eq!(serde_json::to_value(d).unwrap(), d.as_str());
+            assert_eq!(Delegation::parse(d.as_str()), Some(d));
+        }
+        for a in [Approval::None, Approval::EachUse] {
+            assert_eq!(serde_json::to_value(a).unwrap(), a.as_str());
+            assert_eq!(Approval::parse(a.as_str()), Some(a));
+        }
+        assert_eq!(Delivery::parse("other"), None);
     }
 }

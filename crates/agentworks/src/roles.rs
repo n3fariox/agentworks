@@ -7,6 +7,7 @@
 //! deleting a role does not change running sessions.
 
 use crate::{ApiResult, App, fail};
+use agentworks_database::Store;
 use agentworks_session::model::RoleSnapshot;
 use agentworks_workspace::sha256;
 use axum::{
@@ -14,13 +15,9 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
-
-pub const SCHEMA: &str =
-    "CREATE TABLE IF NOT EXISTS roles(id TEXT PRIMARY KEY,definition TEXT NOT NULL);";
 
 const MAX_NAME: usize = 80;
 const MAX_DESCRIPTION: usize = 200;
@@ -118,26 +115,17 @@ fn builtins() -> impl Iterator<Item = Role> {
         })
 }
 
-pub fn list(db: &Connection) -> rusqlite::Result<Vec<Role>> {
-    let mut stmt = db.prepare("SELECT definition FROM roles")?;
-    let mut custom = stmt
-        .query_map([], |r| r.get::<_, String>(0))?
-        .filter_map(|d| d.ok().and_then(|d| serde_json::from_str::<Role>(&d).ok()))
-        .collect::<Vec<_>>();
+pub fn list(db: &Store) -> agentworks_database::StorageResult<Vec<Role>> {
+    let mut custom = db.custom_roles::<Role>()?;
     custom.sort_by_key(|r| r.name.to_lowercase());
     Ok(builtins().chain(custom).collect())
 }
 
-pub fn get(db: &Connection, id: &str) -> rusqlite::Result<Option<Role>> {
+pub fn get(db: &Store, id: &str) -> agentworks_database::StorageResult<Option<Role>> {
     if let Some(role) = builtins().find(|r| r.id == id) {
         return Ok(Some(role));
     }
-    Ok(db
-        .query_row("SELECT definition FROM roles WHERE id=?1", [id], |r| {
-            r.get::<_, String>(0)
-        })
-        .optional()?
-        .and_then(|d| serde_json::from_str(&d).ok()))
+    db.custom_role(id)
 }
 
 pub fn snapshot(role: &Role) -> RoleSnapshot {
@@ -151,7 +139,7 @@ pub fn snapshot(role: &Role) -> RoleSnapshot {
 
 /// The role a new session is created with, checked against its harness.
 pub fn resolve(
-    db: &Connection,
+    db: &Store,
     id: Option<&str>,
     provider: &str,
 ) -> Result<Option<RoleSnapshot>, (StatusCode, String)> {
@@ -236,13 +224,8 @@ fn validated(id: String, input: Input) -> Result<Role, (StatusCode, String)> {
     })
 }
 
-fn save(db: &Connection, role: &Role) -> Result<(), (StatusCode, String)> {
-    db.execute(
-        "INSERT INTO roles(id,definition) VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET definition=excluded.definition",
-        params![role.id, serde_json::to_string(role).map_err(storage)?],
-    )
-    .map_err(storage)?;
-    Ok(())
+fn save(db: &Store, role: &Role) -> Result<(), (StatusCode, String)> {
+    db.save_role(&role.id, role).map_err(storage)
 }
 
 fn read_only() -> (StatusCode, String) {
@@ -254,12 +237,12 @@ fn read_only() -> (StatusCode, String) {
 
 pub async fn get_roles(State(app): State<App>) -> ApiResult {
     let store = app.store.lock().unwrap();
-    Ok(Json(json!(list(&store.connection).map_err(storage)?)))
+    Ok(Json(json!(list(&store).map_err(storage)?)))
 }
 
 pub async fn create(State(app): State<App>, Json(input): Json<Input>) -> ApiResult {
     let role = validated(Uuid::new_v4().to_string(), input)?;
-    save(&app.store.lock().unwrap().connection, &role)?;
+    save(&app.store.lock().unwrap(), &role)?;
     Ok(Json(json!(role)))
 }
 
@@ -269,12 +252,12 @@ pub async fn update(
     Json(input): Json<Input>,
 ) -> ApiResult {
     let store = app.store.lock().unwrap();
-    match get(&store.connection, &id).map_err(storage)? {
+    match get(&store, &id).map_err(storage)? {
         None => Err(fail(StatusCode::NOT_FOUND, "Role not found")),
         Some(r) if r.builtin => Err(read_only()),
         Some(_) => {
             let role = validated(id, input)?;
-            save(&store.connection, &role)?;
+            save(&store, &role)?;
             Ok(Json(json!(role)))
         }
     }
@@ -285,10 +268,7 @@ pub async fn delete(State(app): State<App>, Path(id): Path<String>) -> ApiResult
     if builtins().any(|r| r.id == id) {
         return Err(read_only());
     }
-    let removed = store
-        .connection
-        .execute("DELETE FROM roles WHERE id=?1", [&id])
-        .map_err(storage)?;
+    let removed = store.delete_role(&id).map_err(storage)?;
     if removed == 0 {
         return Err(fail(StatusCode::NOT_FOUND, "Role not found"));
     }
@@ -299,9 +279,8 @@ pub async fn delete(State(app): State<App>, Path(id): Path<String>) -> ApiResult
 mod tests {
     use super::*;
 
-    fn db() -> Connection {
-        let db = Connection::open_in_memory().unwrap();
-        db.execute_batch(SCHEMA).unwrap();
+    fn db() -> Store {
+        let db = Store::memory().unwrap();
         db
     }
     fn input(name: &str, instructions: &str) -> Input {

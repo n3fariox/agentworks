@@ -21,10 +21,6 @@ use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// The compaction cursor per session, and when storage maintenance (vacuum) last ran.
-pub const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS event_compaction(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,through INTEGER NOT NULL);
-  CREATE TABLE IF NOT EXISTS maintenance(name TEXT PRIMARY KEY,at INTEGER NOT NULL);";
-
 /// Stored rows read and rewritten per lock hold.
 const BATCH: usize = 5000;
 const CHUNKS: [&str; 3] = [
@@ -660,7 +656,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("aw-compact-{}", uuid::Uuid::new_v4()));
         let mut store = crate::store::Store::open(&dir.join("s.sqlite3")).unwrap();
         store
-            .connection
+            .test_connection()
             .execute_batch(
                 "INSERT INTO sessions VALUES ('a','{}','{}');
                  INSERT INTO sessions VALUES ('b','{}','{}');",
@@ -676,7 +672,7 @@ mod tests {
         for id in ["a", "b"] {
             for e in &events {
                 store
-                    .connection
+                    .test_connection()
                     .execute(
                         "INSERT INTO events VALUES (?1,?2,?3)",
                         rusqlite::params![id, e["seq"].as_i64(), e.to_string()],
@@ -748,7 +744,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("aw-vacuum-{}", uuid::Uuid::new_v4()));
         let mut store = crate::store::Store::open(&dir.join("s.sqlite3")).unwrap();
         store
-            .connection
+            .test_connection()
             .execute_batch("INSERT INTO sessions VALUES ('a','{}','{}');")
             .unwrap();
         let day = 24 * 60 * 60 * 1000;
@@ -757,14 +753,17 @@ mod tests {
         assert_eq!(store.maintained("vacuum").unwrap(), Some(10 * day));
         for seq in 1..=2000 {
             store
-                .connection
+                .test_connection()
                 .execute(
                     "INSERT INTO events VALUES ('a',?1,?2)",
                     rusqlite::params![seq, "x".repeat(500)],
                 )
                 .unwrap();
         }
-        store.connection.execute("DELETE FROM events", []).unwrap();
+        store
+            .test_connection()
+            .execute("DELETE FROM events", [])
+            .unwrap();
         assert!(
             store.pages().unwrap().1 > 0,
             "deleted rows leave free pages"

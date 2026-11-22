@@ -1,6 +1,7 @@
 //! Offline recovery tools. No command opens the configured live store or starts a harness.
 use crate::{catalog::CatalogData, store::Store};
-use rusqlite::{Connection, OpenFlags};
+#[cfg(test)]
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -83,24 +84,7 @@ pub fn lock(root: &Path) -> Result<fs::File> {
         .map_err(|_| "Backup maintenance is already running")?;
     Ok(file)
 }
-fn check_db(db: &Connection) -> Result<()> {
-    let mut q = db.prepare("PRAGMA integrity_check")?;
-    let rows = q
-        .query_map([], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    if rows != ["ok"] {
-        return Err(format!("SQLite integrity check failed: {rows:?}").into());
-    }
-    if db.prepare("PRAGMA foreign_key_check")?.exists([])? {
-        return Err("SQLite foreign key check failed".into());
-    }
-    let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if !(0..=crate::store::SCHEMA_VERSION).contains(&version) {
-        return Err("Unsupported session database schema version".into());
-    }
-    Ok(())
-}
-fn source_db(root: &Path) -> Result<Connection> {
+fn source_db(root: &Path) -> Result<agentworks_database::Snapshot> {
     let path = root.join("sessions.sqlite3");
     regular(&path)?;
     for suffix in ["-wal", "-shm", "-journal"] {
@@ -108,21 +92,7 @@ fn source_db(root: &Path) -> Result<Connection> {
             return Err("Backup has SQLite sidecars; use a completed standalone snapshot".into());
         }
     }
-    // Immutable URI prevents even read-only SQLite from creating WAL/SHM files.
-    // Percent-encode raw path bytes so '?'/'#' and non-UTF8 names stay literal.
-    use std::os::unix::ffi::OsStrExt;
-    let encoded: String = fs::canonicalize(path)?
-        .as_os_str()
-        .as_bytes()
-        .iter()
-        .map(|byte| format!("%{byte:02X}"))
-        .collect();
-    let db = Connection::open_with_flags(
-        format!("file:{encoded}?immutable=1"),
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-    )?;
-    check_db(&db)?;
-    Ok(db)
+    agentworks_database::Snapshot::open(&path)
 }
 fn validate(root: &Path, require_manifest: bool) -> Result<()> {
     directory(root)?;
@@ -176,38 +146,6 @@ pub fn publish(root: &Path) -> Result<()> {
     Ok(())
 }
 /// Compare all tables, including future additive tables and SQLite sequence state.
-pub fn compare(source: &Connection, copy: &Connection) -> Result<()> {
-    let schema = |db: &Connection| -> rusqlite::Result<Vec<(String, String)>> {
-        db.prepare("SELECT name,sql FROM sqlite_master WHERE type='table' ORDER BY name")?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect()
-    };
-    let tables = schema(source)?;
-    if tables != schema(copy)? {
-        return Err("Backup schema mismatch".into());
-    }
-    for (table, _) in tables {
-        let sql = format!(
-            "SELECT * FROM \"{}\" ORDER BY rowid",
-            table.replace('"', "\"\"")
-        );
-        let rows = |db: &Connection| -> rusqlite::Result<Vec<Vec<String>>> {
-            let mut q = db.prepare(&sql)?;
-            let count = q.column_count();
-            q.query_map([], |r| {
-                (0..count)
-                    .map(|i| r.get_ref(i).map(|v| format!("{v:?}")))
-                    .collect()
-            })?
-            .collect()
-        };
-        if rows(source)? != rows(copy)? {
-            return Err(format!("Backup content mismatch: {table}").into());
-        }
-    }
-    Ok(())
-}
-
 /// Retain newest N *completed* snapshots. Unknown/incomplete entries are protected.
 fn retain(root: &Path, keep: usize, apply: bool) -> Result<serde_json::Value> {
     if keep == 0 {
@@ -309,7 +247,7 @@ fn restore(source: &Path, destination: &Path) -> Result<serde_json::Value> {
         }
         let db_path = destination.join("sessions.sqlite3");
         let store = Store::open(&db_path)?;
-        check_db(&store.connection)?;
+        store.check_integrity()?;
         // The same deserializers as startup validate saved sessions and definitions.
         let restored = store.load()?;
         for (metadata, _) in &restored {
@@ -317,9 +255,7 @@ fn restore(source: &Path, destination: &Path) -> Result<serde_json::Value> {
         }
         let sessions = restored.len();
         store.automations()?;
-        store
-            .connection
-            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;")?;
+        store.finish_restore()?;
         drop(store);
         fs::File::open(&db_path)?.sync_all()?;
         let report = serde_json::json!({"format":1,"sessions":sessions,"schemaVersion":crate::store::SCHEMA_VERSION,"source":source,"catalog":destination.join("catalog.json"),"database":db_path});
@@ -383,13 +319,13 @@ mod tests {
             let metadata = json!({"id":"session","provider":"demo","cwd":"/tmp","title":"Retain me","initial_model":null,"created":1,"host_id":"local","location_id":"local"});
             let state = json!({"status":"idle","seq":1,"requests":[],"models":null,"available_commands":[],"turn_active":false,"project_id":null,"provider_session_id":"native-context"});
             store
-                .connection
+                .test_connection()
                 .execute(
                     "INSERT INTO sessions VALUES ('session',?1,?2)",
                     [metadata.to_string(), state.to_string()],
                 )
                 .unwrap();
-            store.connection.execute_batch(r#"
+            store.test_connection().execute_batch(r#"
                 INSERT INTO events VALUES ('session',1,'{"seq":1,"kind":"user","text":"history"}');
                 INSERT INTO agent_access VALUES ('session','{"communicate":true}');
                 INSERT INTO agent_completions(author,author_title,request_id,payload,report,created) VALUES ('session','Test','done','{}','{"status":"completed"}',1);
@@ -465,7 +401,7 @@ mod tests {
         let report = restore(&source, &dest).unwrap();
         assert_eq!(report["sessions"], 1);
         let db = source_db(&dest).unwrap();
-        compare(&source_db(&source).unwrap(), &db).unwrap();
+        source_db(&source).unwrap().compare(&db).unwrap();
         assert_eq!(before, hash(&source.join("sessions.sqlite3")).unwrap());
         assert_eq!(
             fs::metadata(&dest).unwrap().permissions().mode() & 0o777,
@@ -532,20 +468,15 @@ mod tests {
         );
         let source_conn = source_db(&source).unwrap();
         let store = Store::open(&dest.join("sessions.sqlite3")).unwrap();
-        assert_eq!(
-            source_conn
-                .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
-                .unwrap(),
-            10
-        );
+        assert_eq!(source_conn.schema_version().unwrap(), 10);
         assert_eq!(
             store
-                .connection
+                .test_connection()
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
             crate::store::SCHEMA_VERSION
         );
-        compare(&source_conn, &store.connection).unwrap();
+        store.compare_snapshot(&source_conn).unwrap();
         assert_eq!(store.schedule_cursor("weekly").unwrap(), Some(3000));
         assert_eq!(
             store
@@ -565,7 +496,7 @@ mod tests {
         assert_eq!(store.load().unwrap().len(), 1); // Restore never dispatches the enabled runOnce policy.
         drop(store);
         let reopened = Store::open(&dest.join("sessions.sqlite3")).unwrap();
-        compare(&source_conn, &reopened.connection).unwrap();
+        reopened.compare_snapshot(&source_conn).unwrap();
         assert_eq!(before, hash(&source.join("sessions.sqlite3")).unwrap());
     }
 
@@ -620,7 +551,7 @@ mod tests {
         assert_eq!(store.schedule_cursor("missing").unwrap(), None);
         assert_eq!(
             store
-                .connection
+                .test_connection()
                 .query_row("SELECT count(*) FROM automation_slots", [], |r| r
                     .get::<_, i64>(0))
                 .unwrap(),
@@ -652,7 +583,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .connection
+                .test_connection()
                 .query_row("SELECT grants FROM agent_access", [], |r| r
                     .get::<_, String>(0))
                 .unwrap(),
@@ -660,7 +591,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .connection
+                .test_connection()
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
             crate::store::SCHEMA_VERSION

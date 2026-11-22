@@ -42,8 +42,7 @@ pub async fn save_polling(State(app): State<App>, Json(mut input): Json<Polling>
     app.store
         .lock()
         .unwrap()
-        .connection
-        .execute("UPDATE github_pr_tracking SET next_poll=0 WHERE json_extract(scope,'$[0]')=?1 OR scope IS NULL", [&input.host])
+        .invalidate_host_tracking(&input.host)
         .map_err(|_| {
             fail(
                 StatusCode::INSUFFICIENT_STORAGE,

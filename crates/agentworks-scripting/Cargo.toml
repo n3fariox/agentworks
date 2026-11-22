@@ -7,9 +7,13 @@ publish.workspace = true
 description = "Installed Agentworks hooks and their interpreter lifecycle."
 
 [dependencies]
+agentworks-database = { path = "../agentworks-database" }
 agentworks-presentation = { path = "../agentworks-presentation" }
 agentworks-starlark = { path = "../agentworks-starlark" }
 serde.workspace = true
 serde_json.workspace = true
-rusqlite = { version = "0.39.0", features = ["bundled"] }
 tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+rusqlite = { version = "0.39.0", features = ["bundled"] }
+agentworks-database = { path = "../agentworks-database", features = ["test-support"] }

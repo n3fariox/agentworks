@@ -18,7 +18,7 @@ const SALT_LEN: usize = 16;
 const WRAP_AAD: &[u8] = b"agentworks-secrets-key:v1";
 
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Debug)]
-pub(crate) struct KdfParams {
+struct KdfParams {
     m: u32,
     t: u32,
     p: u32,
@@ -159,7 +159,7 @@ fn unwrap(file: &KeyFile, password: &[u8]) -> Result<Zeroizing<Vec<u8>>, String>
         .ok_or_else(|| "the key file could not be unwrapped".to_owned())
 }
 
-pub(crate) fn open_or_create(path: &Path, kdf: KdfParams) -> Result<Vault, String> {
+fn open_or_create(path: &Path, kdf: KdfParams) -> Result<Vault, String> {
     match std::fs::read(path) {
         Ok(bytes) => {
             let file: KeyFile = serde_json::from_slice(&bytes)
@@ -205,15 +205,15 @@ fn value_aad(id: &str, name: &str) -> Vec<u8> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
     use serde_json::Value;
     use std::path::PathBuf;
 
     // Minimum Argon2 cost keeps debug-build tests fast; production uses DEFAULT_KDF.
-    pub(crate) const TEST_KDF: KdfParams = KdfParams { m: 8, t: 1, p: 1 };
+    const TEST_KDF: KdfParams = KdfParams { m: 8, t: 1, p: 1 };
 
-    pub(crate) fn temp() -> PathBuf {
+    fn temp() -> PathBuf {
         std::env::temp_dir().join(format!("agentworks-secrets-{}", uuid::Uuid::new_v4()))
     }
 

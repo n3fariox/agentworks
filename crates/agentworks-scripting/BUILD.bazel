@@ -13,12 +13,22 @@ rust_library(
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
     version = "0.1.0",
-    deps = ["//crates/agentworks-presentation", "//crates/agentworks-starlark"] + all_crate_deps(normal = True),
+    deps = ["//crates/agentworks-database", "//crates/agentworks-presentation", "//crates/agentworks-starlark"] + all_crate_deps(normal = True),
 )
 
 rust_test(
     name = "unit_test",
-    crate = ":agentworks-scripting",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    aliases = aliases(normal = True, normal_dev = True),
+    edition = "2024",
+    version = "0.1.0",
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    deps = [
+        "//crates/agentworks-database:test_support",
+        "//crates/agentworks-presentation",
+        "//crates/agentworks-starlark",
+    ] + all_crate_deps(normal = True, normal_dev = True),
     compile_data = [
         "//tests:fixtures/bazel-events.json",
         "//tests:fixtures/bazel-progress-events.json",
@@ -33,7 +43,24 @@ rust_test(
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     deps = [
         ":agentworks-scripting",
+        "//crates/agentworks-database",
         "//crates/agentworks-presentation",
         "//crates/agentworks-starlark",
     ] + all_crate_deps(normal = True, normal_dev = True),
+)
+
+rust_library(
+    name = "test_support",
+    testonly = True,
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    crate_name = "agentworks_scripting",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    version = "0.1.0",
+    deps = [
+        "//crates/agentworks-database:test_support",
+        "//crates/agentworks-presentation",
+        "//crates/agentworks-starlark",
+    ] + all_crate_deps(normal = True),
 )

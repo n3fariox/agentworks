@@ -91,8 +91,8 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::Instrument;
 use uuid::Uuid;
 
-const MAX_EVENTS: usize = 3000;
-const MAX_EVENT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_EVENTS: usize = agentworks_database::MAX_EVENTS;
+const MAX_EVENT_BYTES: usize = agentworks_database::MAX_EVENT_BYTES;
 type ApiResult = Result<Json<Value>, (StatusCode, String)>;
 
 fn add_mise_shims_to_path() {
@@ -837,7 +837,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     inbox_delivery::reconcile(&mut store).map_err(|(_, e)| e)?;
     event_compaction::startup(&mut store);
     let restored = store.load().map_err(|e| e.to_string())?;
-    let scripts = scripting::start(&store.connection)?;
+    let scripts = scripting::start(&store)?;
     let attachment_root = db_path.with_extension("attachments");
     attachments::prune_orphans(
         &attachment_root,
@@ -3190,7 +3190,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
         let requested_role = if let Some(role) = &req.inherited_role {
             Some((role.name.clone(), None))
         } else if let Some(role_id) = req.role.as_deref().filter(|r| !r.is_empty()) {
-            let role = roles::get(&app.store.lock().unwrap().connection, role_id)
+            let role = roles::get(&app.store.lock().unwrap(), role_id)
                 .map_err(|_| fail(StatusCode::INTERNAL_SERVER_ERROR, "Could not read role"))?
                 .ok_or_else(|| fail(StatusCode::BAD_REQUEST, "Role not found"))?;
             Some((role.name, Some(role.description)))
@@ -3237,7 +3237,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
     let role = match req.inherited_role.clone() {
         Some(role) => Some(role),
         None => roles::resolve(
-            &app.store.lock().unwrap().connection,
+            &app.store.lock().unwrap(),
             req.role.as_deref(),
             &req.provider,
         )?,
