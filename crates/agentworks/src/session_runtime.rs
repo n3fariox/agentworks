@@ -604,6 +604,9 @@ pub async fn run(
             if !permission_sessions.lock().unwrap().contains(&request.session_id.to_string()) {
                 return responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
             }
+            if let Some(option)=crate::permission_modes::own_tool_approval(&permission_s.provider,&value) {
+                return responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option))));
+            }
             let (tx,rx)=oneshot::channel();
             {
                 let mut approvals = permission_s.approvals.lock().unwrap();

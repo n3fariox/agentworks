@@ -17,6 +17,31 @@ pub fn initial_antigravity_default(
 ) -> Option<AntigravityDefault> {
     (provider == "antigravity" && !external).then(|| setting.unwrap_or_default())
 }
+/// Name prefix `agy acp` gives the tools of the MCP server Agentworks attaches
+/// (`agentworks`, see `crate::mcp::configuration`).
+const ANTIGRAVITY_OWN_TOOL_PREFIX: &str = "mcp_agentworks_";
+
+/// Option that approves an Antigravity permission request for one of Agentworks'
+/// own MCP tools. agy's Auto-mode safety monitor asks before every MCP tool call
+/// and `agy acp` ignores `permissions.allow` in settings.json, so the client
+/// answers these itself. The tools are already limited by the session's grants.
+pub fn own_tool_approval(provider: &str, request: &Value) -> Option<String> {
+    if provider != "antigravity" {
+        return None;
+    }
+    let name = request["toolCall"]["name"].as_str()?;
+    if !name.starts_with(ANTIGRAVITY_OWN_TOOL_PREFIX) {
+        return None;
+    }
+    let options = request["options"].as_array()?;
+    ["allow_always", "allow_once"].iter().find_map(|kind| {
+        options
+            .iter()
+            .find(|o| o["kind"] == *kind)
+            .and_then(|o| o["optionId"].as_str())
+            .map(str::to_owned)
+    })
+}
 pub fn initial_codex_default(
     provider: &str,
     external: bool,
@@ -153,6 +178,34 @@ pub async fn set(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn antigravity_own_tools_are_approved_without_asking() {
+        let request = |name: &str| json!({"sessionId":"s","toolCall":{"toolCallId":"c","kind":"other","name":name,"title":format!("Run {name}")},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"},{"optionId":"deny","name":"Deny","kind":"reject_once"}]});
+        assert_eq!(
+            own_tool_approval("antigravity", &request("mcp_agentworks_send_message")),
+            Some("allow".into())
+        );
+        // Other servers, built-in tools and other harnesses still ask.
+        for name in [
+            "mcp_chrome-devtools_click",
+            "run_command",
+            "mcp_agentworksx",
+        ] {
+            assert_eq!(
+                own_tool_approval("antigravity", &request(name)),
+                None,
+                "{name}"
+            );
+        }
+        assert_eq!(
+            own_tool_approval("claude", &request("mcp_agentworks_send_message")),
+            None
+        );
+        // No allow option offered: leave it to the person.
+        let mut deny_only = request("mcp_agentworks_read_inbox");
+        deny_only["options"] = json!([{"optionId":"deny","kind":"reject_once"}]);
+        assert_eq!(own_tool_approval("antigravity", &deny_only), None);
+    }
     fn advertised(current: &str) -> Value {
         json!({"configOptions":[{"id":"mode","category":"mode","currentValue":current,"options":[{"value":"default"},{"value":"auto"},{"value":"plan"}]}]})
     }
