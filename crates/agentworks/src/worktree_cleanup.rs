@@ -645,6 +645,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deleting_a_ref_after_inspection_invalidates_the_confirmation() {
+        let f = Fixture::new();
+        f.app.sessions.lock().unwrap().remove("early");
+        let owner = f.owner();
+        let commit = [
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+        ];
+        git(&f.worktree, &[&commit[..], &["kept by a branch"]].concat());
+        git(&f.worktree, &["branch", "keep"]);
+        git(&f.worktree, &["switch", "-q", "--detach"]);
+        // Only `keep` (and `owned`) reach the commit, so nothing is at risk yet.
+        let shown = inspect(&f.app, &owner).await;
+        assert_eq!(shown.detached.as_ref().unwrap().orphaned, 0);
+        assert!(!shown.needs_confirmation());
+
+        // HEAD and the status stay the same, but deleting refs orphans the commit.
+        git(&f.worktree, &["switch", "-q", "--detach", "owned"]);
+        git(&f.worktree, &["branch", "-q", "-f", "owned", "HEAD~1"]);
+        git(&f.worktree, &["branch", "-q", "-D", "keep"]);
+        let now = inspect(&f.app, &owner).await;
+        assert_eq!(now.detached.as_ref().unwrap().orphaned, 1);
+        assert_ne!(now.fingerprint, shown.fingerprint);
+
+        // The stale fingerprint is refused by the filesystem owner and by cleanup.
+        let owned = owner.data.lock().unwrap().worktree.clone().unwrap();
+        let err = remove_in(&f.app, &owned, shown.fingerprint.as_deref(), false)
+            .await
+            .unwrap_err();
+        assert!(err.1.contains("changed while preparing removal"));
+        let err = cleanup(
+            &f.app,
+            &owner,
+            Cleanup::Remove,
+            shown.fingerprint.as_deref(),
+            &[],
+        )
+        .await
+        .unwrap_err();
+        assert!(err.1.contains("confirm again"));
+        let kept = cleanup(&f.app, &owner, Cleanup::Auto, None, &[])
+            .await
+            .unwrap();
+        assert_eq!(kept["outcome"], "retained");
+        assert!(f.worktree.is_dir());
+    }
+
+    #[tokio::test]
+    async fn switching_branches_at_the_same_head_changes_the_fingerprint() {
+        let f = Fixture::new();
+        let owner = f.owner();
+        let before = inspect(&f.app, &owner).await;
+        git(&f.worktree, &["switch", "-q", "-c", "same-head"]);
+        let after = inspect(&f.app, &owner).await;
+        assert_eq!(after.checked_out.as_deref(), Some("same-head"));
+        assert_ne!(after.fingerprint, before.fingerprint);
+        git(&f.worktree, &["switch", "-q", "--detach"]);
+        assert_ne!(inspect(&f.app, &owner).await.fingerprint, after.fingerprint);
+    }
+
+    #[tokio::test]
     async fn switched_branch_is_removed_and_restored_from_the_checked_out_branch() {
         let f = Fixture::new();
         f.app.sessions.lock().unwrap().remove("early");

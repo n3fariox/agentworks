@@ -233,10 +233,16 @@ pub async fn inspect_in(
             Some(_) => None,
             None => {
                 let not = ["HEAD", "--not", "--branches", "--tags", "--remotes"];
-                let count =
-                    worktrees::git(app, &o.path, &[&["rev-list", "--count"][..], &not].concat())
-                        .await
-                        .map_err(|e| format!("Could not inspect detached HEAD: {}", e.1))?;
+                // The full orphan set goes into the fingerprint: a ref deleted after the
+                // dialog can orphan more commits without moving HEAD.
+                let ids = worktrees::git_limit(
+                    app,
+                    &o.path,
+                    &[&["rev-list"][..], &not].concat(),
+                    4 * 1024 * 1024,
+                )
+                .await
+                .map_err(|e| format!("Could not inspect detached HEAD: {}", e.1))?;
                 let log = worktrees::git(
                     app,
                     &o.path,
@@ -244,11 +250,14 @@ pub async fn inspect_in(
                 )
                 .await
                 .map_err(|e| format!("Could not inspect detached HEAD: {}", e.1))?;
-                Some(Detached {
-                    head: head.clone(),
-                    orphaned: count.trim().parse().unwrap_or(0),
-                    commits: log.lines().map(str::to_owned).collect(),
-                })
+                Some((
+                    Detached {
+                        head: head.clone(),
+                        orphaned: ids.lines().count(),
+                        commits: log.lines().map(str::to_owned).collect(),
+                    },
+                    ids,
+                ))
             }
         };
         let (mut dirty, paths) = parse_status(&raw);
@@ -279,7 +288,14 @@ pub async fn inspect_in(
                 dirty.truncated = true;
             }
         }
-        let mut material = format!("{head}\0{raw}\0{stranded}");
+        // The checked-out branch decides what restore recreates; the orphan set what is lost.
+        let checkout = match (&branch, &detached) {
+            (Some(b), _) => format!("branch {b}"),
+            (None, Some((_, ids))) => format!("detached\0{ids}"),
+            (None, None) => "detached".into(),
+        };
+        let detached = detached.map(|(d, _)| d);
+        let mut material = format!("{head}\0{raw}\0{stranded}\0{checkout}");
         for path in paths {
             if let Ok(meta) = std::fs::symlink_metadata(o.path.join(path)) {
                 let modified = meta
