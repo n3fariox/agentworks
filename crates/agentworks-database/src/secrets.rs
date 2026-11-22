@@ -179,6 +179,30 @@ impl Store {
     pub fn secret_assignments(&self, session: &str) -> rusqlite::Result<Vec<SecretAssignment>> {
         assignments(&self.connection, session)
     }
+    /// A session's assignments with their sealed values, read in one statement so
+    /// authorization and the value it releases come from the same state.
+    pub fn assigned_secrets(
+        &self,
+        session: &str,
+    ) -> rusqlite::Result<Vec<(SecretAssignment, SealedSecret)>> {
+        self.connection
+            .prepare("SELECT s.id,s.name,s.description,s.nonce,s.value,s.length,s.created,s.updated,a.delivery,a.delegation,a.approval,a.origin FROM session_secrets a JOIN secrets s ON s.id=a.secret_id WHERE a.session_id=?1 ORDER BY s.name")?
+            .query_map([session], |r| {
+                let secret = row(r)?;
+                Ok((
+                    SecretAssignment {
+                        secret_id: secret.id.clone(),
+                        name: secret.name.clone(),
+                        delivery: r.get(8)?,
+                        delegation: r.get(9)?,
+                        approval: r.get(10)?,
+                        origin: r.get(11)?,
+                    },
+                    secret,
+                ))
+            })?
+            .collect()
+    }
     /// Replaces a session's assignments and returns them (before, after). Retained
     /// secrets keep their origin; new ones get `origin`. When `summary` of the
     /// assignments changes, `summary` of the result is audited as `secrets`. `None`, with
@@ -327,6 +351,15 @@ mod tests {
             .unwrap();
         assert_eq!(kept[0].origin, "human");
         assert_eq!(db.secret_session_counts().unwrap()["1"], 1);
+        let assigned = db.assigned_secrets("s").unwrap();
+        assert_eq!(
+            assigned.len(),
+            1,
+            "only assigned secrets, with their values"
+        );
+        assert_eq!(assigned[0].0, kept[0]);
+        assert_eq!(assigned[0].1.sealed, b"mmchanged");
+        assert!(db.assigned_secrets("other").unwrap().is_empty());
         assert!(db.delete_secret("1", 6).unwrap());
         assert!(!db.delete_secret("1", 6).unwrap());
         assert!(

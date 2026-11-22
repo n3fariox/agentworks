@@ -375,37 +375,91 @@ pub fn resolve_use(app: &App, s: &Arc<Session>, arguments: Value) -> mail::Resul
     if names.is_empty() || names.len() > MAX_NAMES_PER_USE {
         return Err(bad("Use between 1 and 16 secrets in one call"));
     }
-    let assigned = checked(app, s, &names)?;
-    let asked = {
-        let allowed = allowed_uses();
-        let allowed = allowed.get(&s.id);
-        assigned.iter().any(|a| {
-            a.approval == Approval::EachUse && !allowed.is_some_and(|set| set.contains(&a.name))
-        })
-    };
-    if asked {
-        return ask(s, names, &request);
+    match authorize(app, s, &names, Approved::No)? {
+        Some(released) => Ok(released),
+        None => ask(s, names, &request),
     }
-    release(app, s, &names)
 }
-/// Every name must be assigned to this session; unassigned and missing look the same.
-fn checked(app: &App, s: &Session, names: &[String]) -> mail::Result<Vec<Assignment>> {
-    let assigned = assignments(&app.store.lock().unwrap(), &s.id)?;
+/// Whether the human approved this call, and for how long.
+#[derive(Clone, Copy, PartialEq)]
+enum Approved {
+    No,
+    Once,
+    ForSession,
+}
+/// The assignment rows for `names`; every name must be assigned to this session, and
+/// unassigned and missing look the same.
+fn pick<'a, T>(
+    rows: &'a [(Assignment, T)],
+    names: &[String],
+) -> mail::Result<Vec<&'a (Assignment, T)>> {
     names
         .iter()
         .map(|name| {
-            assigned
-                .iter()
-                .find(|a| &a.name == name)
-                .cloned()
-                .ok_or_else(|| {
-                    fail(
-                        StatusCode::FORBIDDEN,
-                        format!("{name} is not assigned to this session"),
-                    )
-                })
+            rows.iter().find(|(a, _)| &a.name == name).ok_or_else(|| {
+                fail(
+                    StatusCode::FORBIDDEN,
+                    format!("{name} is not assigned to this session"),
+                )
+            })
         })
         .collect()
+}
+/// Whether an unapproved use must ask the human first.
+fn needs_approval<T>(picked: &[&(Assignment, T)], allowed: Option<&HashSet<String>>) -> bool {
+    picked.iter().any(|(a, _)| {
+        a.approval == Approval::EachUse && !allowed.is_some_and(|set| set.contains(&a.name))
+    })
+}
+/// Checks the current assignments and releases their values under one store lock.
+/// Assignment changes take the same lock and clear session-wide approvals before
+/// releasing it, so a use is always judged and served by one state. `None` means the
+/// human must be asked first; nothing was released.
+fn authorize(
+    app: &App,
+    s: &Session,
+    names: &[String],
+    approved: Approved,
+) -> mail::Result<Option<Value>> {
+    let store = app.store.lock().unwrap();
+    let rows: Vec<(Assignment, SealedSecret)> = store
+        .assigned_secrets(&s.id)
+        .map_err(db_error)?
+        .into_iter()
+        .map(|(row, secret)| (assignment(row), secret))
+        .collect();
+    let picked = pick(&rows, names)?;
+    {
+        let mut allowed = allowed_uses();
+        if approved == Approved::No && needs_approval(&picked, allowed.get(&s.id)) {
+            return Ok(None);
+        }
+        if approved == Approved::ForSession {
+            allowed
+                .entry(s.id.clone())
+                .or_default()
+                .extend(names.iter().cloned());
+        }
+    }
+    let vault = vault()?;
+    let mut values = Vec::new();
+    for (a, secret) in picked {
+        let plain = value(secret, vault).ok_or_else(|| {
+            fail(
+                StatusCode::CONFLICT,
+                format!("{} must be entered again in Settings → Secrets", a.name),
+            )
+        })?;
+        values.push((a.name.clone(), plain));
+    }
+    store.audit(&s.id, "secret.use", &names.join(","), "released")?;
+    drop(store);
+    register(&s.id, &values);
+    let map: serde_json::Map<String, Value> = values
+        .iter()
+        .map(|(name, value)| (name.clone(), json!(value.as_str())))
+        .collect();
+    Ok(Some(json!({"values":map,"cwd":s.cwd()})))
 }
 fn ask(s: &Arc<Session>, names: Vec<String>, request: &UseRequest) -> mail::Result<Value> {
     let id = uuid::Uuid::new_v4().to_string();
@@ -479,15 +533,15 @@ fn poll_use(app: &App, s: &Session, id: &str) -> mail::Result<Value> {
     };
     match answer {
         Ok(Some(Value::String(option))) if option == "allow-once" || option == "allow-session" => {
-            // Assignments may have changed while the human was deciding.
-            checked(app, s, &names)?;
-            if option == "allow-session" {
-                allowed_uses()
-                    .entry(s.id.clone())
-                    .or_default()
-                    .extend(names.iter().cloned());
-            }
-            let mut released = release(app, s, &names)?;
+            // Assignments may have changed while the human was deciding; they are
+            // checked again with the release.
+            let approved = if option == "allow-session" {
+                Approved::ForSession
+            } else {
+                Approved::Once
+            };
+            let mut released =
+                authorize(app, s, &names, approved)?.expect("an approved use is never asked again");
             released["approval"] = json!(if option == "allow-session" {
                 "The user approved this use, and further uses of these secrets in this session."
             } else {
@@ -508,37 +562,6 @@ fn poll_use(app: &App, s: &Session, id: &str) -> mail::Result<Value> {
         }
     }
 }
-fn release(app: &App, s: &Session, names: &[String]) -> mail::Result<Value> {
-    let vault = vault()?;
-    let mut values = Vec::new();
-    {
-        let store = app.store.lock().unwrap();
-        for name in names {
-            let value = store
-                .secret_named(name)
-                .map_err(db_error)?
-                .and_then(|secret| value(&secret, vault))
-                .ok_or_else(|| {
-                    fail(
-                        StatusCode::CONFLICT,
-                        format!("{name} must be entered again in Settings → Secrets"),
-                    )
-                })?;
-            values.push((name.clone(), value));
-        }
-    }
-    register(&s.id, &values);
-    app.store
-        .lock()
-        .unwrap()
-        .audit(&s.id, "secret.use", &names.join(","), "released")?;
-    let map: serde_json::Map<String, Value> = values
-        .iter()
-        .map(|(name, value)| (name.clone(), json!(value.as_str())))
-        .collect();
-    Ok(json!({"values":map,"cwd":s.cwd()}))
-}
-
 pub async fn get_assignments(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     crate::session(&app, &id)?;
     let vault = loaded();
@@ -609,25 +632,30 @@ pub async fn set_assignments(
             .map(|row| assignment(row).describe())
             .collect::<Vec<_>>()
     };
-    let (before, after) = app
-        .store
-        .lock()
-        .unwrap()
-        .replace_secret_assignments(&id, &grants, "human", now(), summary)
-        .map_err(db_error)?
-        .ok_or_else(|| {
-            fail(
-                StatusCode::NOT_FOUND,
-                "A selected secret no longer exists. Reopen session settings",
-            )
-        })?;
+    let (before, after) = {
+        let mut store = app.store.lock().unwrap();
+        let (before, after) = store
+            .replace_secret_assignments(&id, &grants, "human", now(), summary)
+            .map_err(db_error)?
+            .ok_or_else(|| {
+                fail(
+                    StatusCode::NOT_FOUND,
+                    "A selected secret no longer exists. Reopen session settings",
+                )
+            })?;
+        // Before the store lock is released, so no use can pair the new assignments
+        // with an earlier "allow for this session".
+        if summary(&before) != summary(&after) {
+            allowed_uses().remove(&id);
+        }
+        (before, after)
+    };
     let (before, after): (Vec<Assignment>, Vec<Assignment>) = (
         before.into_iter().map(assignment).collect(),
         after.into_iter().map(assignment).collect(),
     );
     let names = |list: &[Assignment]| list.iter().map(Assignment::describe).collect::<Vec<_>>();
     if names(&before) != names(&after) {
-        allowed_uses().remove(&id);
         s.emit("secret_assignments", json!({"secrets": names(&after)}));
     }
     // The process environment is fixed at start: restart an idle harness now, a busy one
@@ -653,4 +681,43 @@ pub async fn set_assignments(
     Ok(Json(
         json!({"assignments": after, "environmentChanged": restart}),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(name: &str, approval: Approval) -> (Assignment, ()) {
+        (
+            Assignment {
+                secret_id: name.to_lowercase(),
+                name: name.into(),
+                delivery: Delivery::Tool,
+                delegation: Delegation::Restricted,
+                approval,
+                origin: "human".into(),
+            },
+            (),
+        )
+    }
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn uses_are_judged_against_the_rows_they_release() {
+        let rows = [row("A", Approval::None), row("B", Approval::EachUse)];
+        let picked = pick(&rows, &names(&["A"])).unwrap();
+        assert!(!needs_approval(&picked, None));
+        // A revoked assignment is refused even after the human approved it.
+        assert_eq!(
+            pick(&rows[..1], &names(&["A", "B"])).unwrap_err().0,
+            StatusCode::FORBIDDEN
+        );
+        // A policy changed to eachUse asks, unless allowed for this session.
+        let picked = pick(&rows, &names(&["A", "B"])).unwrap();
+        assert!(needs_approval(&picked, None));
+        assert!(needs_approval(&picked, Some(&HashSet::from(["A".into()]))));
+        assert!(!needs_approval(&picked, Some(&HashSet::from(["B".into()]))));
+    }
 }

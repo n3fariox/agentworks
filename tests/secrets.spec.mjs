@@ -258,6 +258,22 @@ test('agents discover secrets and use them through the facade without seeing val
     await expect(conversation).toContainText('no-prompt-run [redacted:API_TOKEN]');
     await expect(card).toHaveCount(0);
 
+    // Changing the assignment withdraws "allow for this session": the next use asks again.
+    expect((await api(path,{assignments:[{secretId:secret.id,approval:'eachUse',delegation:'passable'}]},'PUT')).ok).toBe(true);
+    await send(run(['echo','asks-again-run','{{secret:API_TOKEN}}']));
+    await answer('Allow once');
+    await expect(conversation).toContainText('asks-again-run [redacted:API_TOKEN]');
+    await expect(page.locator('#session-state')).toHaveText('Ready');
+
+    // An assignment revoked while its approval is pending is not released when approved.
+    await send(run(['echo','revoked-run','{{secret:API_TOKEN}}']));
+    await expect(card).toContainText('Run a command with API_TOKEN');
+    expect((await api(path,{assignments:[]},'PUT')).ok).toBe(true);
+    await card.getByRole('button',{name:'Allow once'}).click();
+    await expect(conversation).toContainText('API_TOKEN is not assigned to this session');
+    await expect(conversation).not.toContainText('revoked-run [redacted');
+    await expect(page.locator('#session-state')).toHaveText('Ready');
+
     const db=await stored();
     expect(db.includes(Buffer.from(value))).toBe(false);
     const audit=await (await api(`/api/sessions/${session.id}/agent-audit`)).text();
