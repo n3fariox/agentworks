@@ -73,6 +73,7 @@ test('archived sessions offer removal of a retained dirty worktree',async({page}
   await row(page).click({button:'right'});await item(page,'Remove worktree…').click();
   await expect(dialog(page).getByRole('heading')).toHaveText('Uncommitted worktree changes');
   await expect(page.locator('#worktree-archive-keep')).toBeHidden();
+  await expect(page.locator('#worktree-archive-kept')).toHaveText('Branch agentworks/two and its commits are kept either way; nothing is merged.');
   await expect(page.locator('#worktree-archive-in-use')).toBeHidden();
   await page.locator('#worktree-archive-remove').click();
   await expect.poll(()=>writes.length).toBe(1);
@@ -90,6 +91,7 @@ test('archiving a detached HEAD with commits on no branch asks before discarding
   await expect(page.locator('#worktree-archive-commits li')).toHaveText(['0123456 second','89abcde first']);
   await expect(page.locator('#worktree-archive-paths')).toBeHidden();
   await expect(page.locator('#worktree-archive-loss')).toContainText('recovered only by hash');
+  await expect(page.locator('#worktree-archive-kept')).toHaveText('HEAD is detached; recorded branch agentworks/two is kept for restore, but commits only on the detached HEAD are not. Nothing is merged.');
   await page.locator('#worktree-archive-remove').click();
   await expect.poll(()=>writes.length).toBe(1);
   expect(writes[0]).toEqual({path:'/api/sessions/two',body:{archived:true,worktree:'remove',confirmDirty:'fp-1'}});

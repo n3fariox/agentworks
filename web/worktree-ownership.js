@@ -27,7 +27,11 @@ export function setupWorktreeOwnership({api,toast}){
     $('worktree-archive-users').replaceChildren(...status.sharedWith.map(other=>{const item=document.createElement('li');item.textContent=other.title||other.id;return item;}));
     $('worktree-archive-unused').checked=false;
     $('worktree-archive-loss').textContent=[dirty&&'Deleting removes these staged, unstaged and untracked changes permanently, along with ignored files in the checkout.',lost&&`The listed commits are on no branch; after removal they can be recovered only by hash (git branch <name> ${status.detached.head.slice(0,10)}) until Git garbage-collects them.`,!risky&&'Removing deletes the checkout directory, including ignored files.'].filter(Boolean).join(' ');
-    $('worktree-archive-branch').textContent=status.checkedOut||status.branch;
+    // A detached HEAD is not a branch: only the recorded branch is kept for restore, not the detached commits.
+    const code=document.createElement('code');code.id='worktree-archive-branch';code.textContent=status.checkedOut||status.branch;
+    $('worktree-archive-kept').replaceChildren(...(status.detached
+      ?['HEAD is detached; recorded branch ',code,' is kept for restore, but commits only on the detached HEAD are not. Nothing is merged.']
+      :['Branch ',code,' and its commits are kept either way; nothing is merged.']));
     $('worktree-archive-keep').hidden=archived;
     $('worktree-archive-remove').textContent=archived?(risky?'Remove, discard work':'Remove worktree'):(risky?'Archive, discard work':'Archive, remove worktree');
     $('worktree-archive-remove').disabled=inUse;
