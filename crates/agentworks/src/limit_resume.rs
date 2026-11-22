@@ -129,8 +129,11 @@ pub async fn scheduler(app: App) {
         }
         let sessions: Vec<Arc<Session>> = app.sessions.lock().unwrap().values().cloned().collect();
         for s in &sessions {
-            let p = s.data.lock().unwrap().continuation.clone();
-            if !p.limited || p.due_at.is_none() {
+            let (p, archived) = {
+                let data = s.data.lock().unwrap();
+                (data.continuation.clone(), data.lifecycle.archived)
+            };
+            if archived || !p.limited || p.due_at.is_none() {
                 continue;
             }
             if !p.eligible(now()) || !lineage(&app, s) {
@@ -164,6 +167,7 @@ pub async fn scheduler(app: App) {
                 s.emit("continuation",json!({"decision":"workspace or harness unavailable; manual intervention required"}));
                 continue;
             }
+            let limit = crate::active_limit(&app);
             let active_capacity = sessions
                 .iter()
                 .filter(|other| {
@@ -189,7 +193,7 @@ pub async fn scheduler(app: App) {
                 continue;
             }
             if matches!(data.status.as_str(), "suspended" | "error") {
-                if active_capacity >= 12 {
+                if active_capacity >= limit {
                     continue;
                 }
                 // Clear deadline before opening: failed native resume must not loop or create context.

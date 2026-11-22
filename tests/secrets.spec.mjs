@@ -116,6 +116,7 @@ test('assigns secrets to a session; deleting a secret or the session removes ass
   await expect(page.locator('#session-state')).toHaveText('Ready');
   const openSettings=async()=>{
     if(await page.locator('#session-more').isVisible())await page.locator('#session-more').click();
+    await page.locator('#lifecycle-menu > summary').click();
     await page.locator('#session-settings').click();
     await expect(page.locator('#session-settings-dialog')).toBeVisible();
     return page.locator('#session-secret-controls');
@@ -168,7 +169,7 @@ test('environment secrets reach the harness; changing them restarts an idle sess
   const path=`/api/sessions/${session.id}/secrets`;
   const ask=async(expected)=>{
     await expect(page.locator('#session-state')).toHaveText('Ready');
-    await page.locator('#prompt').fill('env? GITHUB_TOKEN');await page.locator('#prompt').press('Enter');
+    await page.locator('#prompt-editor .cm-content').fill('env? GITHUB_TOKEN');await page.locator('#prompt-editor .cm-content').press('Enter');
     await expect(page.locator('#conversation')).toContainText(expected);
   };
   try{
@@ -183,7 +184,7 @@ test('environment secrets reach the harness; changing them restarts an idle sess
     await ask(`GITHUB_TOKEN is set (${github.length} bytes).`);
 
     // A harness that prints the value has it replaced before storage or display.
-    await page.locator('#prompt').fill('env! GITHUB_TOKEN');await page.locator('#prompt').press('Enter');
+    await page.locator('#prompt-editor .cm-content').fill('env! GITHUB_TOKEN');await page.locator('#prompt-editor .cm-content').press('Enter');
     await expect(page.locator('#conversation')).toContainText('GITHUB_TOKEN = [redacted:GITHUB_TOKEN] ([redacted:GITHUB_TOKEN]');
     await expect(page.locator('#conversation')).not.toContainText(REPLACED);
     expect((await stored()).includes(Buffer.from(REPLACED))).toBe(false);
@@ -194,7 +195,7 @@ test('environment secrets reach the harness; changing them restarts an idle sess
 
     expect((await api(path,{assignments:[]},'PUT')).ok).toBe(true);
     await expect(page.locator('#conversation')).toContainText('Session secrets removed');
-    await page.locator('#prompt').fill('env? GITHUB_TOKEN');await page.locator('#prompt').press('Enter');
+    await page.locator('#prompt-editor .cm-content').fill('env? GITHUB_TOKEN');await page.locator('#prompt-editor .cm-content').press('Enter');
     await expect(page.locator('#conversation .message').last()).toContainText('GITHUB_TOKEN is not set.');
     expect((await stored()).includes(Buffer.from(REPLACED))).toBe(false);
   }finally{await api(`/api/sessions/${session.id}`,undefined,'DELETE');}
@@ -206,7 +207,7 @@ test('agents discover secrets and use them through the facade without seeing val
   const session=await (await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Secret tool'})).json();
   const path=`/api/sessions/${session.id}/secrets`;
   const conversation=page.locator('#conversation');
-  const send=async text=>{await page.locator('#prompt').fill(text);await page.locator('#prompt').press('Enter');};
+  const send=async text=>{await page.locator('#prompt-editor .cm-content').fill(text);await page.locator('#prompt-editor .cm-content').press('Enter');};
   const run=argv=>'mcp run_with_secrets '+JSON.stringify({argv});
   const measure=['sh','-c','printf "%s" "$1" | wc -c; echo "$1"','sh','{{secret:API_TOKEN}}'];
   try{
@@ -280,7 +281,7 @@ test('values stored with a lost key file need re-entry after restart',async({pag
   expect((await api(`/api/sessions/${session.id}/secrets`,{assignments:[{secretId:github.id,delivery:'environment'}]},'PUT')).ok).toBe(true);
   await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),session.id);
   await page.goto('/');
-  await page.locator('#prompt').fill('env? GITHUB_TOKEN');await page.locator('#prompt').press('Enter');
+  await page.locator('#prompt-editor .cm-content').fill('env? GITHUB_TOKEN');await page.locator('#prompt-editor .cm-content').press('Enter');
   await expect(page.locator('#conversation')).toContainText('Not available to this harness: GITHUB_TOKEN');
   await expect(page.locator('#conversation')).toContainText('GITHUB_TOKEN is not set.');
   await api(`/api/sessions/${session.id}`,undefined,'DELETE');

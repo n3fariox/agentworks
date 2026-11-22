@@ -40,6 +40,10 @@ struct Proposed {
     project: Option<String>,
     prompt: Option<String>,
     outcome: Option<String>,
+    target: Option<String>,
+    settings: Option<Json>,
+    workspace: Option<Json>,
+    detail: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -69,6 +73,9 @@ impl Decision {
             outcome: None,
         };
         for a in result.result {
+            if a.target.is_some() || a.settings.is_some() || a.workspace.is_some() || a.detail.is_some() {
+                return Err("automation primitives require the production automation dispatcher".into());
+            }
             match (a.kind.as_str(), a.project, a.prompt, a.outcome) {
                 ("finish", None, None, Some(outcome)) => {
                     if outcome.is_empty() || outcome.len() > 64 {

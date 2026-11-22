@@ -311,7 +311,11 @@ fn restore(source: &Path, destination: &Path) -> Result<serde_json::Value> {
         let store = Store::open(&db_path)?;
         check_db(&store.connection)?;
         // The same deserializers as startup validate saved sessions and definitions.
-        let sessions = store.load()?.len();
+        let restored = store.load()?;
+        for (metadata, _) in &restored {
+            crate::store::window(store.recent(&metadata.id)?)?;
+        }
+        let sessions = restored.len();
         store.automations()?;
         store
             .connection
@@ -521,7 +525,7 @@ mod tests {
         publish(&source).unwrap();
         assert_eq!(retain(&f.0, 1, false).unwrap()["remove"], json!([]));
         let before = hash(&source.join("sessions.sqlite3")).unwrap();
-        let dest = f.0.join("v11");
+        let dest = f.0.join("current");
         assert_eq!(
             restore(&source, &dest).unwrap()["schemaVersion"],
             crate::store::SCHEMA_VERSION
@@ -551,6 +555,11 @@ mod tests {
             Some("session")
         );
         assert_eq!(store.automation_runs("weekly").unwrap().len(), 3);
+        // v12's agent request ledger is added empty.
+        assert_eq!(
+            store.automation_request("controller:any", "any").unwrap(),
+            None
+        );
         let saved = store.automations().unwrap().pop().unwrap();
         assert_eq!(serde_json::to_value(saved).unwrap(), definition);
         assert_eq!(store.load().unwrap().len(), 1); // Restore never dispatches the enabled runOnce policy.
@@ -604,7 +613,10 @@ mod tests {
         );
         let store = Store::open(&dest.join("sessions.sqlite3")).unwrap();
         assert_eq!(store.load().unwrap()[0].0.title, "Retain me");
-        assert_eq!(store.load().unwrap()[0].1.events.len(), 1);
+        assert_eq!(
+            store.recent(&store.load().unwrap()[0].0.id).unwrap().len(),
+            1
+        );
         assert_eq!(store.schedule_cursor("missing").unwrap(), None);
         assert_eq!(
             store
@@ -634,7 +646,10 @@ mod tests {
             store.load().unwrap()[0].1.provider_session_id.as_deref(),
             Some("native-context")
         );
-        assert_eq!(store.load().unwrap()[0].1.events.len(), 1);
+        assert_eq!(
+            store.recent(&store.load().unwrap()[0].0.id).unwrap().len(),
+            1
+        );
         assert_eq!(
             store
                 .connection

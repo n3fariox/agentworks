@@ -42,24 +42,24 @@ try{
   for(const parent of [outside,join(root,'escape'),'relative'])assert.notEqual((await call('/api/directories',{parent,name:'x'})).status,200,parent);
   await assert.rejects(stat(join(outside,'x')));
   // Projects: the directory is optional, explicit, and validated before anything is saved.
-  const plain=await api('/api/projects',{name:'Plain'});assert.equal(plain.defaultLocationId,undefined);
-  assert.notEqual((await call('/api/projects',{name:'Escapes',defaultLocation:{hostId:'local',path:outside}})).status,200);
+  const plain=await api('/api/projects',{name:'Plain'});assert.equal(plain.defaultLocations,undefined);
+  assert.notEqual((await call('/api/projects',{name:'Escapes',defaultLocations:{local:outside}})).status,200);
   assert(!(await api('/api/catalog')).projects.some(p=>p.name==='Escapes'),'a rejected directory creates no project');
-  const thing=await api('/api/projects',{name:'Thing',defaultLocation:{hostId:'local',path:created.path}});
+  const thing=await api('/api/projects',{name:'Thing',defaultLocations:{local:created.path}});
   const catalog=await api('/api/catalog');
-  assert.equal(catalog.locations.find(l=>l.id===thing.defaultLocationId).path,created.path);
-  assert.deepEqual(thing.locationIds,[thing.defaultLocationId]);
-  assert.equal(catalog.projects.find(p=>p.id===plain.id).defaultLocationId,undefined,'other projects are unchanged');
+  assert.equal(catalog.locations.find(l=>l.id===thing.defaultLocations.local).path,created.path);
+  assert.deepEqual(thing.locationIds,[thing.defaultLocations.local]);
+  assert.equal(catalog.projects.find(p=>p.id===plain.id).defaultLocations,undefined,'other projects are unchanged');
   const renamed=await api('/api/projects/'+thing.id,{name:'Thing renamed'},'PATCH');
-  assert.equal(renamed.defaultLocationId,thing.defaultLocationId,'omitting the directory keeps it');
+  assert.deepEqual(renamed.defaultLocations,thing.defaultLocations,'omitting the directory keeps it');
   // Sessions without a directory start in the project directory; explicit ones still win.
   const s=await api('/api/sessions',{provider:'demo',cwd:'',projectId:thing.id,hostId:'local'});sessions.push(s.id);
-  assert.equal(s.cwd,created.path);assert.equal(s.locationId,thing.defaultLocationId);
+  assert.equal(s.cwd,created.path);assert.equal(s.locationId,thing.defaultLocations.local);
   const explicit=await api('/api/sessions',{provider:'demo',cwd:join(root,'existing'),projectId:thing.id,hostId:'local'});sessions.push(explicit.id);
   assert.equal(explicit.cwd,join(root,'existing'));
   assert.equal((await call('/api/sessions',{provider:'demo',cwd:'',projectId:plain.id,hostId:'local'})).status,400);
-  const cleared=await api('/api/projects/'+thing.id,{name:'Thing renamed',defaultLocation:null},'PATCH');
-  assert.equal(cleared.defaultLocationId,undefined);
+  const cleared=await api('/api/projects/'+thing.id,{name:'Thing renamed',defaultLocations:{local:null}},'PATCH');
+  assert.equal(cleared.defaultLocations,undefined);
 
   // Remote: the same operations run on the host's worker against its working directories.
   const box=await api('/api/hosts',{name:'Box',destination:'dev@box',command:binary});
@@ -73,11 +73,18 @@ try{
   assert.deepEqual((await api(`/api/directories?hostId=${box.id}&path=${encodeURIComponent(remoteRoot)}`)).entries.map(e=>e.name),['remote thing']);
   assert.notEqual((await call('/api/directories',{hostId:box.id,parent:root,name:'x'})).status,200,'local roots do not apply on the host');
   assert.notEqual((await call(`/api/directories?hostId=${box.id}&path=${encodeURIComponent(outside)}`)).status,200);
-  const remoteProject=await api('/api/projects',{name:'Remote thing',defaultLocation:{hostId:box.id,path:remoteCreated.path}});
-  const remoteLocation=(await api('/api/catalog')).locations.find(l=>l.id===remoteProject.defaultLocationId);
+  const remoteProject=await api('/api/projects',{name:'Remote thing',defaultLocations:{[box.id]:remoteCreated.path}});
+  const remoteLocation=(await api('/api/catalog')).locations.find(l=>l.id===remoteProject.defaultLocations[box.id]);
   assert.equal(remoteLocation.hostId,box.id);assert.equal(remoteLocation.path,remoteCreated.path);
   // The project directory belongs to its host; a local session there must name its directory.
   assert.equal((await call('/api/sessions',{provider:'demo',cwd:'',projectId:remoteProject.id,hostId:'local'})).status,400);
+  // Each host keeps its own project directory; setting or clearing one leaves the others.
+  const both=await api('/api/projects/'+remoteProject.id,{name:'Remote thing',defaultLocations:{local:created.path}},'PATCH');
+  assert.equal(both.defaultLocations[box.id],remoteProject.defaultLocations[box.id]);
+  const local=await api('/api/sessions',{provider:'demo',cwd:'',projectId:remoteProject.id,hostId:'local'});sessions.push(local.id);
+  assert.equal(local.cwd,created.path);
+  const remoteOnly=await api('/api/projects/'+remoteProject.id,{name:'Remote thing',defaultLocations:{local:null}},'PATCH');
+  assert.deepEqual(Object.keys(remoteOnly.defaultLocations),[box.id]);
   console.log('PASS: local and remote folder browsing/creation stay inside roots; project directories are explicit and seed new sessions');
 }finally{
   for(const id of sessions)await call('/api/sessions/'+id,undefined,'DELETE');

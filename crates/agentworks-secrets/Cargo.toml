@@ -1,0 +1,19 @@
+[package]
+name = "agentworks-secrets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Session secrets: redaction of delivered values and commands run with secret templates."
+
+[dependencies]
+base64 = "0.22"
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-util", "process", "rt", "time"] }
+uuid.workspace = true
+zeroize = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

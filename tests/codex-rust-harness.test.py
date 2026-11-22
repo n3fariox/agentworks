@@ -26,7 +26,7 @@ class HarnessTests(unittest.TestCase):
             sock.bind(("127.0.0.1",0))
             port=sock.getsockname()[1]
         self.base=f"http://127.0.0.1:{port}"
-        self.env=dict(os.environ, AGENTWORKS_PORT=str(port),AGENTWORKS_BIND="127.0.0.1",AGENTWORKS_ROOTS=str(self.cwd),AGENTWORKS_CATALOG_PATH=str(self.cwd/"catalog.json"),AGENTWORKS_DB_PATH=str(self.cwd/"sessions.sqlite3"),AGENTWORKS_AUTH_MODE="existing",ACP_FIXTURE_ASYNC="1",AGENTWORKS_NODE="/nonexistent/node",CODEX_PATH=str(self.root/"tests/codex-acp.test.py"))
+        self.env=dict(os.environ, AGENTWORKS_PORT=str(port),AGENTWORKS_BIND="127.0.0.1",AGENTWORKS_ROOTS=str(self.cwd),AGENTWORKS_CATALOG_PATH=str(self.cwd/"catalog.json"),AGENTWORKS_DB_PATH=str(self.cwd/"sessions.sqlite3"),AGENTWORKS_AUTH_MODE="existing",ACP_FIXTURE_ASYNC="1",CODEX_PATH=str(self.root/"tests/codex-acp.test.py"))
         self.env["ACP_FIXTURE_CWD"]=str(self.cwd)
         self.env["ACP_FIXTURE_NATIVE_LOG"]=str(self.cwd/"native.jsonl")
         self.log=tempfile.TemporaryFile(mode="w+")
@@ -36,7 +36,7 @@ class HarnessTests(unittest.TestCase):
         self.until(lambda:self.request("/api/status"))
 
     def start(self):
-        self.process=subprocess.Popen([str(self.root/"target/debug/agentworks")],env=self.env,stdin=subprocess.DEVNULL,stdout=self.log,stderr=self.log)
+        self.process=subprocess.Popen([os.environ.get("AGENTWORKS_TEST_BIN",str(self.root/"target/debug/agentworks"))],env=self.env,stdin=subprocess.DEVNULL,stdout=self.log,stderr=self.log)
 
     def stop(self):
         if self.process.poll() is None:
@@ -76,8 +76,8 @@ class HarnessTests(unittest.TestCase):
     def test_selected_harness_discovers_models_and_handles_commands(self):
         status=self.request("/api/status")
         providers={p["id"]:p for p in status["providers"]}
-        self.assertIn("codex",providers)
-        self.assertIn("Rust ACP",providers["codex-rust"]["name"])
+        self.assertNotIn("codex",providers)
+        self.assertEqual(providers["codex-rust"]["name"],"Codex")
         self.assertTrue(providers["codex-rust"]["installed"])
         models=self.request("/api/models","POST",dict(provider="codex-rust",cwd=str(self.cwd)))
         self.assertEqual(models["options"][0]["value"],"test-model")
@@ -108,13 +108,88 @@ class HarnessTests(unittest.TestCase):
         self.request(path+"/resume","POST",{})
         self.until(lambda:self.request(path)["session"]["status"]=="idle")
 
+    def test_native_rename_names_the_session_in_both_places(self):
+        created=self.request("/api/sessions","POST",dict(provider="codex-rust",cwd=str(self.cwd),title="Before rename"))
+        path="/api/sessions/"+created["id"]
+        self.until(lambda:self.request(path)["session"]["status"]=="idle")
+        turns=lambda n:(s if (s:=self.request(path))["session"]["status"]=="idle" and len([e for e in s["events"] if e["kind"]=="turn_end"])>=n else None)
+        # The fixture app-server accepts only this name for thread/name/set.
+        self.request(path+"/prompt","POST",dict(text="/rename New conversation name",requestId=str(uuid4())))
+        snapshot=self.until(lambda:turns(1))
+        self.assertEqual(snapshot["session"]["title"],"New conversation name")
+        native=[json.loads(line) for line in (self.cwd/"native.jsonl").read_text().splitlines()]
+        self.assertTrue(any(v.get("method")=="thread/name/set" for v in native))
+        # Codex refuses a bare /rename, so the session keeps its name.
+        self.request(path+"/prompt","POST",dict(text="/rename",requestId=str(uuid4())))
+        self.until(lambda:self.request(path)["session"]["status"] in ("idle","error"))
+        self.assertEqual(self.request(path)["session"]["title"],"New conversation name")
+
+    def test_legacy_codex_sessions_run_the_rust_bridge(self):
+        created=self.request("/api/sessions","POST",dict(provider="codex",cwd=str(self.cwd),title="Saved under the npm adapter ID"))
+        path="/api/sessions/"+created["id"]
+        self.until(lambda:self.request(path)["session"]["status"]=="idle")
+        self.assertEqual(self.request(path)["session"]["provider"],"codex")
+        self.assertTrue(any(v.get("method")=="thread/start" for v in self.native_lifecycle()))
+
     def native_lifecycle(self):
         return [v for line in (self.cwd/"native.jsonl").read_text().splitlines() if (v:=json.loads(line)).get("method") in ("thread/start","thread/resume","thread/fork")]
+
+    def test_discovery_works_when_thread_sandbox_cannot_start(self):
+        self.stop()
+        self.env["ACP_FIXTURE_NO_THREAD"]="1"
+        self.start()
+        self.until(lambda:self.request("/api/status"))
+        models=self.request("/api/models","POST",dict(provider="codex-rust",cwd=str(self.cwd)))
+        self.assertEqual(models["options"][0]["value"],"test-model")
+        self.assertEqual(self.native_lifecycle(),[])
+
+    def test_full_access_default_is_sent_before_open_and_saved_policy_wins_on_resume(self):
+        self.stop()
+        self.env["ACP_FIXTURE_REQUIRE_OPEN_SANDBOX"]="danger-full-access"
+        self.start()
+        self.until(lambda:self.request("/api/status"))
+        created=self.request("/api/sessions","POST",dict(provider="codex-rust",cwd=str(self.cwd)))
+        path="/api/sessions/"+created["id"]
+        snapshot=self.until(lambda:(s if (s:=self.request(path))["session"]["status"]=="idle" else None))
+        self.assertEqual(snapshot["permissionModes"]["currentValue"],"agent-full-access")
+        self.assertEqual(self.native_lifecycle()[-1]["params"]["sandbox"],"danger-full-access")
+        self.request(path+"/suspend","POST",{})
+        self.until(lambda:self.request(path)["session"]["status"]=="suspended")
+        settings=self.request("/api/settings")
+        settings["codexDefaultPermissionMode"]="read-only"
+        self.request("/api/settings","PUT",settings)
+        self.stop()
+        self.start()
+        self.until(lambda:self.request(path))
+        self.request(path+"/resume","POST",{})
+        self.until(lambda:self.request(path)["session"]["status"]=="idle")
+        self.assertEqual(self.native_lifecycle()[-1]["method"],"thread/resume")
+        self.assertEqual(self.native_lifecycle()[-1]["params"]["sandbox"],"danger-full-access")
+
+    def test_restrictive_default_is_sent_before_open_and_not_broadened_on_resume(self):
+        settings=self.request("/api/settings")
+        settings["codexDefaultPermissionMode"]="read-only"
+        self.request("/api/settings","PUT",settings)
+        self.stop()
+        self.env["ACP_FIXTURE_REQUIRE_OPEN_SANDBOX"]="read-only"
+        self.start()
+        self.until(lambda:self.request("/api/status"))
+        created=self.request("/api/sessions","POST",dict(provider="codex-rust",cwd=str(self.cwd)))
+        path="/api/sessions/"+created["id"]
+        self.until(lambda:self.request(path)["session"]["status"]=="idle")
+        self.assertEqual(self.native_lifecycle()[-1]["params"]["sandbox"],"read-only")
+        settings["codexDefaultPermissionMode"]="agent-full-access"
+        self.request("/api/settings","PUT",settings)
+        self.request(path+"/suspend","POST",{})
+        self.until(lambda:self.request(path)["session"]["status"]=="suspended")
+        self.request(path+"/resume","POST",{})
+        snapshot=self.until(lambda:(s if (s:=self.request(path))["session"]["status"]=="idle" else None))
+        self.assertEqual(snapshot["permissionModes"]["currentValue"],"read-only")
+        self.assertEqual(self.native_lifecycle()[-1]["params"]["sandbox"],"read-only")
 
     def test_role_and_shared_context_survive_resume_restart_and_native_fork(self):
         providers={p["id"]:p for p in self.request("/api/status")["providers"]}
         self.assertTrue(providers["codex-rust"]["roles"])
-        self.assertFalse(providers["codex"]["roles"])
         role=self.request("/api/roles","POST",dict(name="Test role",instructions="Keep the original role."))
         created=self.request("/api/sessions","POST",dict(provider="codex-rust",cwd=str(self.cwd),role=role["id"]))
         path="/api/sessions/"+created["id"]
@@ -164,20 +239,24 @@ class HarnessTests(unittest.TestCase):
         self.assertIn("call list_session_secrets",text)
 
     def test_secret_restart_before_the_first_prompt_starts_a_new_thread(self):
-        # Codex keeps no thread until its first turn, so resuming it would fail.
+        # Codex writes no rollout until a thread's first turn, so resuming it fails.
+        self.stop()
+        self.env["ACP_FIXTURE_ROLLOUTS"]=str(self.cwd/"rollouts")
+        self.start()
+        self.until(lambda:self.request("/api/status"))
         created=self.request("/api/sessions","POST",dict(provider="codex-rust",cwd=str(self.cwd)))
         path="/api/sessions/"+created["id"]
         self.until(lambda:self.request(path)["session"]["status"]=="idle")
         secret=self.request("/api/secrets","POST",dict(name="FIXTURE_TOKEN",value="fixture-value"))
         changed=self.request(path+"/secrets","PUT",dict(assignments=[dict(secretId=secret["id"],delivery="environment")]))
         self.assertTrue(changed["environmentChanged"])
-        self.until(lambda:len(self.native_lifecycle())==2 and self.request(path)["session"]["status"]=="idle")
-        self.assertEqual([c["method"] for c in self.native_lifecycle()],["thread/start","thread/start"])
+        self.until(lambda:len(self.native_lifecycle())==3 and self.request(path)["session"]["status"]=="idle")
+        self.assertEqual([c["method"] for c in self.native_lifecycle()],["thread/start","thread/resume","thread/start"])
         # Once a prompt was sent, a restart resumes the same thread.
         self.request(path+"/prompt","POST",dict(text="hello",requestId=str(uuid4())))
         self.until(lambda:any(e["kind"]=="turn_end" for e in self.request(path)["events"]))
         self.request(path+"/secrets","PUT",dict(assignments=[]))
-        self.until(lambda:len(self.native_lifecycle())==3 and self.request(path)["session"]["status"]=="idle")
+        self.until(lambda:len(self.native_lifecycle())==4 and self.request(path)["session"]["status"]=="idle")
         self.assertEqual(self.native_lifecycle()[-1]["method"],"thread/resume")
 
     def test_import_load_receives_shared_context(self):

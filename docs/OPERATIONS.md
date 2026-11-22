@@ -17,7 +17,7 @@ Use **＋** beside Sessions to create a project, or create one in the new-sessio
 
 Sidebar view and collapse state are remembered per browser. Switching views preserves the selected session, stream connection, draft, and scroll position. Drafts are remembered per session in the browser tab. Running/waiting counts appear on the parent groups.
 
-Projects, settings, and host-local location IDs are saved in `.agentworks/catalog.json`; session metadata and transcripts are saved in `.agentworks/catalog.sessions.sqlite3`. `AGENTWORKS_CATALOG_PATH` can point to another catalog file. This catalog provides organization; file access still follows the server's allowed roots.
+Projects, settings, and host-local location IDs are saved in the catalog; session metadata and transcripts are saved in the session database beside it. Without `AGENTWORKS_CATALOG_PATH` and `AGENTWORKS_DB_PATH`, a server uses `.agentworks/dev/catalog.json` and `.agentworks/dev/catalog.sessions.sqlite3` in the checkout it was built from. That default is for development runs: `agentworks service --install` refuses a `service.env` that does not set both paths, so a test binary never opens the live store. Each server holds exclusive locks on the catalog (`catalog.json.lock`) and the database (`*.sqlite3.lock`); a second server pointed at either exits at startup. This catalog provides organization; file access still follows the server's allowed roots.
 
 [Secrets](SECRETS.md) are stored encrypted in the session database. Their key file sits beside it (`catalog.sessions.secrets.key` by default, or `AGENTWORKS_SECRETS_KEY_PATH`) and is not part of recovery backups, so back it up separately if you want stored values to survive losing this machine.
 
@@ -29,10 +29,30 @@ In the Hosts view, **＋** opens host setup. Enter a name and an SSH destination
 
 1. A live xterm.js terminal shows SSH's host fingerprint prompt and accepts a password, key passphrase, or keyboard-interactive authentication. Existing SSH keys/agents/configuration are tried by SSH. Passwords and terminal input/output are not persisted.
 2. Agentworks generates a dedicated Ed25519 key for this host, appends its public key to `~/.ssh/authorized_keys` with `restrict`, and verifies another connection. The private key stays on this server, in a `0700` directory under `host-keys/` beside the catalog; the key file is `0600`. It is unencrypted so a restarted service can reconnect without an SSH agent. Host keys are pinned in that directory's own `known_hosts`; reconnects reject changed keys.
-3. The server copies its running binary and a small launch script to a unique directory under `~/.local/share/agentworks/releases/`. The SHA-256 checksum is verified before extraction. The host needs `tar` and `sha256sum` or `shasum`; it needs no Node, npm or mise, and nothing is downloaded. Setup requires no sudo. Automatic copying currently supports a matching server/remote OS and CPU; incompatible binary loaders/libc fail during installation. The binary includes the demo agent and the Rust Claude and Codex adapters; the JavaScript **Claude** and **Codex** adapters are not installed on enrolled hosts. If mise is installed, the launcher runs the worker through it so CLIs that mise manages are found.
+3. The server detects the host's OS and CPU (`uname -sm`, or `PROCESSOR_ARCHITECTURE` on Windows) and copies the matching worker binary from its [worker bundle](#worker-bundle), with a small launch script, to a unique directory under `~/.local/share/agentworks/releases/`. The SHA-256 checksum is verified before extraction, and the installed worker must report this server's worker protocol. The host needs `tar` and `sha256sum` or `shasum`; it needs no Node, npm or mise, and nothing is downloaded. Setup requires no sudo. A host whose platform has no worker in the bundle is refused with the list of platforms the server has; an incompatible libc or loader fails during installation. The worker is installed as `agentworks`. The worker includes the demo agent, the Rust Claude and Codex adapters and, unless built with `--no-default-features`, embedded Goose and model-provider profiles; the JavaScript **Claude** and **Codex** adapters are not installed on enrolled hosts. If mise is installed, the launcher runs the worker through it so CLIs that mise manages are found.
 4. The server waits for the worker handshake, shows the available providers, and offers **Choose working directories**. Provider account sign-ins still belong to the remote user; this flow does not copy provider credentials.
 
 Reconnects use the release's explicit launch path, so shell startup files and PATH changes are unnecessary. A convenience `~/.local/bin/agentworks` symlink is created if that path is unused; add `~/.local/bin` to your interactive PATH if desired. Closing setup cancels its local SSH/subprocesses. Failed/cancelled attempts remove temporary local keys, but can leave a remote installation or a public authorized-key entry labelled `agentworks:<attempt UUID>`; those can be removed manually. An installed host whose worker fails to connect remains saved with an error and can be reconnected.
+
+#### Worker bundle
+
+The server looks for host workers beside its own executable, one per platform:
+
+```text
+agentworks                                          the server
+workers/linux-x86_64/agentworks-worker
+workers/linux-aarch64/agentworks-worker
+workers/macos-aarch64/agentworks-worker
+workers/windows-x86_64/agentworks-worker.exe
+```
+
+Platform names are `<os>-<arch>` as workers report them (`linux`, `macos`, `windows`, …; `x86_64`, `aarch64`). `npm run build:bundle` builds this server, its own platform's worker, and one worker per `--target` triple (for example `--target x86_64-pc-windows-gnu --target aarch64-unknown-linux-gnu`; cross targets need their linkers), into `target/bundle/agentworks-<platform>.tar.gz` and also into `target/<profile>/workers/`. Without `--target`, it adds the Windows worker when MinGW-w64 is installed. `service --install` copies the bundle into the release directory as `<release>-workers/`, so each release keeps its own workers; a server checks that copy before `workers/`. Without a bundle entry, the server falls back to a `<server executable>-worker` sibling for its own platform (from `npm run build`), a `<server executable>-worker.exe` sibling for `windows-x86_64`, and finally the full server binary for its own platform, which serves the same worker commands.
+
+**Versions and out-of-date workers.** Every server and worker build is versioned `<major>.<minor>.<commit count>`: the major and minor version from `Cargo.toml`, and the number of commits in the checkout's history (`git rev-list --count HEAD`) as the last digit, for example `0.1.376`. Set `AGENTWORKS_BUILD_NUMBER` when building without a full git checkout; shallow clones and builds without git are versioned `<major>.<minor>.0-dev`. The sidebar shows this server's version, workers report theirs when they connect, and a worker whose version differs from the server's is out of date: its status dot gets an amber ring and **⋯ → Connection** shows **Update available**. A different version still connects; only the worker protocol number must match. `-dev` versions are never flagged. Uncommitted changes, and different branches with the same number of commits, share a version.
+
+**Host settings.** **⋯** on a host opens its settings. **General** renames the host or changes its SSH destination (and, for a worker you set up, its remote command); changing how the host is reached reconnects it. Sessions keep their host when it is renamed. **Remove host** is there too, once the host has no sessions. **Directories** edits the host's working directories; **Browse…** picks a folder inside the host's home directory (Local's directories in Settings have the same button). **Harness tools** shows the CLI paths the worker found and how to sign in. **Connection** shows status, the worker's build and platform, and **Reconnect** and **Update worker**.
+
+**Updating an installed worker.** After upgrading this server, open **⋯** on the host and choose **Connection → Update worker**. It uses the host's dedicated key, so there is no prompt. It detects the host's platform again and copies and checks the matching worker exactly as setup does, into a new release directory, and installs it beside the old one. Only after that install succeeds does the host switch to the new launch path and reconnect, so a failed copy or install leaves the host on its current worker. Once the new worker connects, the previous release directory is removed and a `~/.local/bin/agentworks` shortcut that pointed at it is repointed. The reconnect interrupts running turns on that host; resume them afterwards. Workers set up with **Use an existing worker** are not updated this way: replace the binary on the host and reconnect.
 
 **Use an existing worker** keeps the manual flow: provide the destination and optionally the command to run Agentworks there. The server runs:
 
@@ -42,7 +62,7 @@ ssh -T -o BatchMode=yes … <destination> '<command> agent --stdio'
 
 The remote `agentworks agent` prints a ready line and then talks to the server over WebSocket on ssh's own stdin and stdout. Anything the remote shell prints before the ready line, such as a login banner, is skipped. All session state stays on this server. The worker only runs processes on its own machine. If the link drops, the worker stops the process groups it started and exits, and the server reconnects with backoff, the same as a server restart. A connected host reports its hostname, platform, version, and the providers that can actually start there. The worker also stops its process groups after 45 seconds without server frames, so a half-open SSH connection does not keep them running indefinitely. Protocol 3 requires the worker to hold an exclusive per-host lock before reporting ready; replacements wait until the old worker has finished cleanup. Zero-byte lock files live under `~/.cache/agentworks/workers/` and stay in place after exit; they store no session state.
 
-**Chat sessions on a remote host.** Use **⋯** on the host to set its working directories, using the host's own paths (`~/` is the remote user's home). Then start a session with **＋** on the host, or choose the host in the new-session dialog. The worker starts the agent's adapter in that directory on the host and relays its ACP traffic. The server keeps the conversation, approvals, and history as for local sessions, and the agent uses the host's own sign-ins. If the link drops, the host's sessions are suspended with a notice and the interrupted turn is not retried. Resume them once the host reconnects.
+**Chat sessions on a remote host.** Use **⋯** on the host to set its working directories, using the host's own paths (`~/` is the remote user's home; Windows paths such as `C:\work` are stored as `C:/work`). Then start a session with **＋** on the host, or choose the host in the new-session dialog. The worker starts the agent's adapter in that directory on the host and relays its ACP traffic. The server keeps the conversation, approvals, and history as for local sessions, and the agent uses the host's own sign-ins. If the link drops, the host's sessions are suspended with a notice and the interrupted turn is not retried. Resume them once the host reconnects.
 
 Remote sessions support chat, model discovery in the new-session dialog, and creating/selecting Git worktrees on the host. Host settings show discovered CLI paths and where to sign in. Remote worktrees honor project isolation policies and host roots. Archiving removes clean owned worktrees, asks before deleting dirty changes, and retains branches; unarchiving restores the checkout from its retained branch. Locked, shared, running or replaced worktrees are retained. Deleting a session keeps its worktree, as on Local. Update and reconnect older workers to enable worktrees and cleanup.
 
@@ -53,11 +73,21 @@ Remote Agentworks MCP supports peer discovery and inbox read/send/acknowledgment
 Manual setup requirements:
 
 - SSH from this server's user to the destination works non-interactively, using key or agent authentication and a host key already in `known_hosts`. Ports, users, and jump hosts come from `~/.ssh/config`. The manual flow uses the server user’s SSH configuration and credentials.
-- The server process can use your key. A passphrase-protected key needs an SSH agent reachable through `SSH_AUTH_SOCK` in the server's environment. Services, including the Agentworks supervisor, often start without one. Either start the server with `SSH_AUTH_SOCK` pointing at a long-lived agent, such as systemd's `ssh-agent.service` socket at `$XDG_RUNTIME_DIR/ssh-agent.socket` with your key added, or use a dedicated key without a passphrase that is authorized only on the hosts you add. If a host reports `Permission denied` while `SSH_AUTH_SOCK` is unset, the status message says so.
-- Agentworks is built on the remote host from the same version, with `npm ci --ignore-scripts` run there. The remote command defaults to `agentworks` on the remote `PATH`; set it to a full path such as `~/agentworks/target/release/agentworks` otherwise. Provider detection uses the adapter paths of the checkout the binary was built from.
-- Tools on the host, such as the `opencode`, `codex`, and `claude` CLIs (and node, for the JavaScript adapters), come from its PATH. A non-interactive ssh command does not run shell startup files, so tools installed with mise would be missing. The worker therefore applies `mise env` for each session's directory itself, including that project's own mise configuration, falling back to the global configuration if the project's cannot be used (for example, if it is not trusted).
+- The server process can use your key. A passphrase-protected key needs an SSH agent reachable through `SSH_AUTH_SOCK` in the server's environment. Services, including the Agentworks user service, often start without one. Either start the server with `SSH_AUTH_SOCK` pointing at a long-lived agent, such as systemd's `ssh-agent.service` socket at `$XDG_RUNTIME_DIR/ssh-agent.socket` with your key added, or use a dedicated key without a passphrase that is authorized only on the hosts you add. If a host reports `Permission denied` while `SSH_AUTH_SOCK` is unset, the status message says so.
+- Agentworks is built on the remote host from the same version. The remote command defaults to `agentworks` on the remote `PATH`; set it to a full path such as `~/agentworks/target/release/agentworks` otherwise.
+- Tools on the host, such as the `opencode`, `codex`, and `claude` CLIs, come from its PATH. A non-interactive ssh command does not run shell startup files, so tools installed with mise would be missing. The worker therefore applies `mise env` for each session's directory itself, including that project's own mise configuration, falling back to the global configuration if the project's cannot be used (for example, if it is not trusted).
 
 No ports or socket files are opened on either machine. SSH provides authentication and encryption, so there is no separate enrollment secret. Hover a host's status dot for details. When a host is offline, the reason, including ssh's last output, also appears under it. **↻** reconnects immediately, and **×** removes a host with no sessions, stops its worker, and deletes its managed private key from this server. Remote files and its public authorized-key entry remain; remove them manually if desired. `AGENTWORKS_SSH` selects a different ssh program.
+
+### Windows hosts
+
+Choose **Windows** under **Host OS**. There is no detection: the dialog's choice decides which bootstrap runs. The host needs the built-in OpenSSH Server, x86_64, and Windows 10 1803 or later (for `tar.exe`); any default SSH shell works, because every step runs as an encoded Windows PowerShell 5.1 command that cmd.exe and PowerShell parse the same way.
+
+- The server needs a Windows worker in its [bundle](#worker-bundle): `npm run build:bundle` adds `windows-x86_64` when MinGW-w64 is installed (`pacman -S mingw-w64-gcc`, `apt install gcc-mingw-w64-x86-64`), and `npm run build:windows-worker -- --release` builds just that worker into `target/release/workers/windows-x86_64/`. Other Windows CPUs need a worker built for that target. The debug build links but is over 1 GB, so use release builds for Windows hosts.
+- The dedicated key goes where sshd reads it: for members of Administrators under the default `sshd_config` (`Match Group administrators`), `%ProgramData%\ssh\administrators_authorized_keys`, otherwise `%USERPROFILE%\.ssh\authorized_keys`. A new administrators file gets the SYSTEM/Administrators-only ACL sshd requires.
+- The bundle is copied with `scp` (SFTP), because Windows PowerShell takes over redirected stdin. It is verified with `Get-FileHash`, extracted with `%SystemRoot%\System32\tar.exe` into `%USERPROFILE%\AppData\Local\agentworks\releases\<attempt UUID>\`, and checked with `agentworks.exe --worker-protocol`.
+- The saved worker command is `cmd.exe /d /c "%USERPROFILE%\…\launch.cmd"`; `launch.cmd` sets the runtime directory and uses mise when installed, like the Unix launcher. No `agentworks` shim is added to PATH.
+- Paths are stored and shown with `/` separators on every host, which Windows accepts: a working directory entered as `C:\work\` is saved as `C:/work`, and the worker reports canonical paths such as `C:/Users/me/project`, without the `\\?\` prefix. `~` is the user's profile directory.
 
 ## Multiple project directories
 
@@ -75,7 +105,27 @@ Use `AGENTWORKS_PORT=4318` to choose a different port. The default bind address 
 AGENTWORKS_BIND=0.0.0.0 ./target/debug/agentworks
 ```
 
-Open `http://<host-address>:4317` remotely. Network binding accepts the hostnames/IPs used to reach this listener and still requires matching browser origins for commands and WebSockets. The prototype relies on your private network for access; application login remains later work.
+Open `http://<host-address>:4317` remotely. Network binding accepts the hostnames/IPs used to reach this listener and still requires matching browser origins for commands and WebSockets. Without the options below, access control relies on your private network.
+
+### HTTPS, client certificates and sign-in
+
+All three are off by default and set through the server's environment (or `service.env`):
+
+| Variable | Effect |
+| --- | --- |
+| `AGENTWORKS_TLS_CERT`, `AGENTWORKS_TLS_KEY` | PEM certificate chain and private key. The listener then serves HTTPS only (`https://<host>:4317`). Set both or neither. |
+| `AGENTWORKS_TLS_CLIENT_CA` | PEM bundle of CAs. Requires TLS. Every connection must then present a client certificate signed by one of them; the TLS handshake fails otherwise, before any HTTP is processed. |
+| `AGENTWORKS_PAM_SERVICE` | Enables password sign-in through this PAM service, such as `login` or a dedicated `/etc/pam.d/agentworks`. Requires TLS, or `AGENTWORKS_TRUSTED_PROXIES` for a proxy that terminates HTTPS. The service must have its own file in `/etc/pam.d`, `/usr/lib/pam.d` or `/usr/etc/pam.d`; startup refuses otherwise, so a typo never falls through to PAM's `other` service. Linux only. |
+| `AGENTWORKS_PAM_USERS` | Comma-separated accounts allowed to sign in. Defaults to the user running the server. Anyone signed in controls the agents, which run as the server's user. |
+| `AGENTWORKS_TRUSTED_PROXIES` | Comma-separated proxy addresses or CIDR ranges, such as `127.0.0.1,::1` or `10.0.0.5/32`. `X-Forwarded-*` headers are then honoured only from these peers; unset, any peer's are (see [hosting](HOSTING.md#public-mount-and-proxy-contract)). |
+| `AGENTWORKS_PAM_CONFDIR` | Reads PAM configuration from this directory instead of `/etc/pam.d`. Used by tests. |
+
+Invalid or partial settings stop startup rather than falling back to plain HTTP. Certificates are read at startup; restart the service after renewing them. A certificate for a LAN name or VPN address can come from your own CA (the same one can issue client certificates) or, for example, from `tailscale cert`.
+
+With PAM sign-in, every page and API request needs a session cookie, apart from the sign-in page and the files the browser fetches without credentials while installing the app. Signing in runs the PAM service's `auth` and `account` stacks with the browser's address as `PAM_RHOST`; behind a trusted proxy that is the last `X-Forwarded-For` hop, the one the proxy appended. Attempts are serialized and each failure waits two seconds, in addition to any delay or lockout the PAM stack applies (for example `pam_faillock`). Failures are logged with the username and address. A successful sign-in lasts 30 days. Settings → **Service** shows the account and a **Sign out** button, which revokes the session. Sessions survive service restarts: only SHA-256 hashes of the cookies are kept, in `web-sign-ins.json` beside the catalog (`0600`); delete that file and restart to sign out every browser. The cookie is `Secure`, `HttpOnly` and `SameSite=Lax`. Its name comes from the app's public URL and its `Path` is the public mount, both reported by the browser at sign-in (a stripping proxy hides the mount from the server). Instances on different ports, or at different mounts of one domain, therefore keep separate sign-ins, and a mount's cookie is not sent to its siblings. libpam is loaded only when sign-in is enabled. A non-root server can usually verify only its own user's password through `pam_unix`, which matches the default allow list.
+
+Behind a proxy that terminates HTTPS, set `AGENTWORKS_TRUSTED_PROXIES` to the proxy's address and keep the backend reachable only by it, for example bound to loopback. Without the listener's own TLS, every request must then come from a listed proxy with a single `X-Forwarded-Proto: https`; anything else, including direct plain-HTTP access from the same machine, gets 403 before any password or cookie is read. The proxy must overwrite `X-Forwarded-Proto` and `X-Forwarded-Host` and append the client to `X-Forwarded-For`. Alternatively, keep the listener's own TLS and accept only the proxy's client certificate with `AGENTWORKS_TLS_CLIENT_CA`; client addresses are then logged as the proxy's.
+
 
 For HTTPS at a public subpath, configure the proxy to normalize the trailing slash,
 strip the public prefix, preserve WebSocket upgrades, and overwrite forwarded
@@ -88,11 +138,28 @@ Traefik example](HOSTING.md).
 
 ## Runtime limits
 
-- At most 12 active harnesses; saved inactive sessions do not count toward that limit.
+- At most 32 active harnesses by default (Settings → Models & permissions → Active sessions, 1–256); saved inactive sessions do not count toward that limit.
 - The browser loads the most recent 3,000 events / approximately 4 MB. The full event log stays in SQLite, without automatic transcript expiration.
 - One ACP adapter process per session. Cancellation clears pending approvals; stopping the server ends its harness processes and terminals.
 - File previews follow live paths rather than keeping artifact snapshots. Concurrent filesystem replacement is outside the trusted-project boundary.
-- Image output, chat attachments, and supported question forms are available. Application login and native Windows delivery remain future work.
+- Image output, chat attachments, and supported question forms are available. Native Windows delivery remains future work.
+
+## Harness environment
+
+Every harness process, local or remote, gets `AGENTWORKS_SESSION_ID` and `AGENTWORKS_SESSION_URI` (`agentworks://sessions/<id>`), so scripts, hooks and tools it runs can tell which session they serve. Remote workers older than this release omit them. The service's own configuration and process-manager state are withheld: listen address and port, TLS and sign-in settings, roots, catalog and database paths, auth mode, model-provider directory, PWA switch, supervisor and release settings, and systemd variables such as `NOTIFY_SOCKET` and `INVOCATION_ID` (the full list is `SERVICE_ENVIRONMENT` in `crates/agentworks-runtime/src/provider.rs`). An Agentworks server or test started from inside a harness therefore does not inherit the live service's store, port or supervisor. Its defaults still apply: the default store is `.agentworks/` in the checkout the binary was built from, so a build in the checkout that also holds the live store opens that store unless the paths are set. Local harnesses also read your current login environment on each start; see [lifecycle](LIFECYCLE.md).
+
+## Logs
+
+The server logs timestamped lines to stderr, which the service unit sends to its journal: `journalctl --user -u agentworks.service`. A remote worker logs to its stderr, which arrives over ssh. The server writes those lines into its own log under the host's name, with the worker's timestamp after the server's. Both machines' activity for a session therefore appears in one place.
+
+`AGENTWORKS_LOG` sets the filter in `RUST_LOG` syntax; the default is `info`. Workers use the server's setting unless their own environment sets `AGENTWORKS_LOG`. Server lines carry the session ID and host. Worker lines carry the session ID.
+
+At `info`, starting a session logs each step with its duration (`elapsed_ms`, or `total_ms` since the start):
+
+- Server: checking the directory, preparing the workspace, waiting for locks and running the enter hook, reading the login environment (local) or asking the host to start the agent (remote), then ACP `initialize`, opening the provider session, and ready.
+- Worker: preparing the provider, `mise env`, and starting the agent process.
+
+Gaps between consecutive timestamps show where startup time goes. At `debug`, every request to a host is logged with its duration, along with each worker workspace operation, including time spent queued behind another one. `debug` also logs harness stderr and the time from spawning a remote agent to its first output. `debug,agent_client_protocol=info` leaves out the ACP library's own debug output.
 
 ## Persistent sessions
 

@@ -4,6 +4,37 @@
 
 Run commands from the repository root.
 
+## Rust library loops
+
+Use `scripts/mise-cargo.sh test --locked --workspace` for every Rust crate.
+Plain `cargo test` selects the server's default workspace member and does not run
+dependency crates' unit tests. For focused loops:
+
+```sh
+scripts/mise-cargo.sh test --locked -p agentworks-presentation
+scripts/mise-cargo.sh test --locked -p agentworks-scripting
+scripts/mise-cargo.sh test --locked -p agentworks
+```
+
+`npm run test:presentation` and `npm run test:scripting` run the first two commands.
+`npm run verify` includes both libraries alongside the Starlark engine tests.
+With the Bazel baseline available, the corresponding targets are
+`//crates/agentworks-presentation:unit_test`,
+`//crates/agentworks-presentation:chat_test`,
+`//crates/agentworks-scripting:unit_test`, and
+`//crates/agentworks-scripting:reload_test`; `bazel test //crates/...` covers the
+whole workspace.
+
+If machine-local Cargo configuration shares intermediates across worktrees,
+override **both** paths for branch-specific checks:
+
+```sh
+scripts/mise-cargo.sh --config 'build.build-dir=".cache/rust-build"' test --locked \
+  --target-dir .cache/rust-target -p agentworks-presentation -p agentworks-scripting
+```
+
+`--target-dir` alone does not override a configured `build.build-dir`.
+
 ## Checks
 
 Use `mise exec --` before direct Cargo commands to select the pinned Rust and Zig toolchains. For example, `mise exec -- cargo test --locked`.
@@ -33,9 +64,13 @@ AGENTWORKS_ENROLL_REAL_MISE=1 npm run test:host-enrollment
 
 The browser flow is covered by `npx playwright test tests/hosts.spec.mjs`, including mobile layout, terminal input, setup errors/retries, cancellation, and directory selection.
 
+`npm run test:git-settings` owns ports 4531–4533 and disposable repositories: local and fake-SSH CoW/hooks checks plus desktop/mobile Git settings. It uses only the demo harness.
+
 The smoke test uses the demo agent to exercise ACP streaming, multiple turns, disconnect survival, idempotency, approval allow/stale/invalid responses, cancellation, Markdown sanitization, and directory/origin checks. Workspace checks also cover file boundaries, manual automation runs, approval/concurrency handling, and retained run history. They make no paid model requests.
 
 Compact tool snapshots, tool bodies on demand, reconnect resume and tool headers: `npm run test:tool-bodies` (smoke against `AGENTWORKS_URL`, then an isolated browser check on port 4458).
+
+`npm run test:github` owns port 4541 and disposable repositories, a fake main-host `gh`, and an isolated catalog/database. It covers account/host selection, worktrees, persistence and desktop/mobile GitHub context without live GitHub access.
 
 For browser checks:
 
@@ -64,7 +99,7 @@ npm run test:persistence
 AGENTWORKS_KEEP_TEST_FIXTURES=1 AGENTWORKS_TEST_HARNESS_RESUME=1 npm run test:persistence
 ```
 
-Isolated smoke fixtures (catalogs, databases, demo state and Git worktrees) are removed after server shutdown, including on assertion failures. Set `AGENTWORKS_KEEP_TEST_FIXTURES=1` to retain them for inspection; remove the printed fixture directory when finished. Verification also uses a fresh fixture root on every run. Browser screenshots and failure reports remain in `.cache`. Run full verification serially: several suites use fixed ports. Cleanup cannot run if the test runner is killed with SIGKILL.
+Isolated smoke fixtures (catalogs, databases, demo state and Git worktrees) are removed after server shutdown, including on assertion failures. Set `AGENTWORKS_KEEP_TEST_FIXTURES=1` to retain them for inspection; remove the printed fixture directory when finished. Verification also uses a fresh fixture root on every run. Browser screenshots and failure reports remain in `.cache`. `npm run verify` runs smoke scripts in concurrent lanes that keep fixed ports apart, but do not start two verification runs at once. Cleanup cannot run if the test runner is killed with SIGKILL.
 
 To check native history import without new inference, reuse the populated test fixtures from a prior native persistence run:
 

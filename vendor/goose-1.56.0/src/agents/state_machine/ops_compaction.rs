@@ -19,10 +19,36 @@ use crate::providers::base::Provider;
 use crate::session::Session;
 use goose_providers::errors::ProviderError;
 use goose_providers::model::ModelConfig;
+use serde_json::{json, Value};
+use uuid::Uuid;
 
 const COMPACTION_THINKING_TEXT: &str = "goose is compacting the conversation...";
 
 pub(super) const MAX_CONTEXT_ERROR_COMPACTIONS: usize = 2;
+
+/// Agentworks patch (vendor/GOOSE-SOURCES.md): notification data that the ACP server
+/// reports as a `compaction_update`. Clients without compaction support see no change.
+fn lifecycle(id: &str, status: &str, details: Value) -> Value {
+    let mut compaction = json!({"id": id, "status": status});
+    if let (Some(target), Value::Object(details)) = (compaction.as_object_mut(), details) {
+        target.extend(details);
+    }
+    json!({ "compaction": compaction })
+}
+
+fn finished(
+    id: &str,
+    trigger: &str,
+    pre: Option<i32>,
+    result: &crate::context_mgmt::CompactionResult,
+) -> Value {
+    lifecycle(
+        id,
+        "completed",
+        json!({"trigger": trigger, "preTokens": pre, "postTokens": result.retained_context_tokens,
+            "summary": result.summary}),
+    )
+}
 
 /// Reported usage stops at the inference that requested the tools, so the
 /// results that answered it are not counted until the next request.
@@ -145,6 +171,13 @@ impl Operation<Session, GooseEffect> for CompactionOperation {
             _ => return not_applicable(),
         }
 
+        let id = Uuid::new_v4().to_string();
+        let pre = self.context_tokens(session, conversation).await.ok();
+        emit.message(Message::assistant().with_system_notification_with_data(
+            SystemNotificationType::ProgressMessage,
+            COMPACTION_THINKING_TEXT,
+            lifecycle(&id, "in_progress", json!({"trigger": "manual"})),
+        ));
         let span = chat_span(
             self.provider.as_ref(),
             &self.model_config,
@@ -164,9 +197,19 @@ impl Operation<Session, GooseEffect> for CompactionOperation {
             Ok(result) => result,
             Err(error) => {
                 span.record("error.type", "compaction_error");
+                emit.message(Message::assistant().with_system_notification_with_data(
+                    SystemNotificationType::ProgressMessage,
+                    "Compaction failed",
+                    lifecycle(&id, "failed", json!({"error": error.to_string()})),
+                ));
                 return Self::command_error(conversation, error.to_string(), emit);
             }
         };
+        emit.message(Message::assistant().with_system_notification_with_data(
+            SystemNotificationType::ProgressMessage,
+            "Compaction complete",
+            finished(&id, "manual", pre, &result),
+        ));
         let compacted = result.conversation;
         let usage = result.usage;
         record_chat_usage(&span, &usage);
@@ -241,6 +284,8 @@ impl Operation<Session, GooseEffect> for CompactionOperation {
             conversation
         };
 
+        let id = Uuid::new_v4().to_string();
+        let pre = self.context_tokens(session, conversation).await.ok();
         let threshold_k_tokens = (self.context_limit as f64 * self.threshold / 1000.0) as usize;
         emit.message(Message::assistant().with_system_notification(
             SystemNotificationType::InlineMessage,
@@ -249,9 +294,10 @@ impl Operation<Session, GooseEffect> for CompactionOperation {
                      Performing auto-compaction..."
             ),
         ));
-        emit.message(Message::assistant().with_system_notification(
+        emit.message(Message::assistant().with_system_notification_with_data(
             SystemNotificationType::ThinkingMessage,
             COMPACTION_THINKING_TEXT,
+            lifecycle(&id, "in_progress", json!({"trigger": "auto"})),
         ));
 
         let span = chat_span(
@@ -271,13 +317,14 @@ impl Operation<Session, GooseEffect> for CompactionOperation {
         .await
         {
             Ok(result) => {
+                emit.message(Message::assistant().with_system_notification_with_data(
+                    SystemNotificationType::InlineMessage,
+                    "Compaction complete",
+                    finished(&id, "auto", pre, &result),
+                ));
                 let compacted = result.conversation;
                 let usage = result.usage;
                 record_chat_usage(&span, &usage);
-                emit.message(Message::assistant().with_system_notification(
-                    SystemNotificationType::InlineMessage,
-                    "Compaction complete",
-                ));
                 applied([GooseEffect::CompactConversation {
                     conversation: compacted,
                     usage: Some(usage),
@@ -285,6 +332,11 @@ impl Operation<Session, GooseEffect> for CompactionOperation {
             }
             Err(e) => {
                 span.record("error.type", "compaction_error");
+                emit.message(Message::assistant().with_system_notification_with_data(
+                    SystemNotificationType::ProgressMessage,
+                    "Compaction failed",
+                    lifecycle(&id, "failed", json!({"error": e.to_string()})),
+                ));
                 let message = emit.message(compaction_failure_message(&e));
                 yielded_with([message.into()])
             }

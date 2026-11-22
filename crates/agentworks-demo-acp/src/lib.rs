@@ -405,15 +405,19 @@ impl Demo {
             .ok_or(())?;
         let file = std::fs::read(self.state_dir.join(format!("{session}.json"))).map_err(|_| ())?;
         let mut state: Value = serde_json::from_slice(&file).map_err(|_| ())?;
-        if !state.is_object() || state["cwd"] != params["cwd"] {
+        if !state.is_object() || !params["cwd"].is_string() {
             return Err(());
         }
+        // Like Codex, a saved session reopens in whichever directory the client names.
+        state["cwd"] = params["cwd"].clone();
+        state["additionalDirectories"] = or_array(&params["additionalDirectories"]);
         state["cancelled"] = json!(false);
         let history = state["history"].as_array().cloned().unwrap_or_default();
         let (fail_load, resume_delay) =
             (truthy(&state["failLoad"]), state["resumeDelayMs"].as_u64());
         let config = model_config(&state["model"], &state["mode"]);
         self.sessions.lock().unwrap().insert(session.into(), state);
+        self.save(session);
         self.mcp_configs
             .lock()
             .unwrap()
@@ -470,6 +474,9 @@ impl Demo {
                     Ordering::Relaxed,
                 );
                 let mut sessions = json!({"resume":{},"list":{},"systemPrompt":{}});
+                if env_is("AGENTWORKS_DEMO_ADDITIONAL_DIRECTORIES", "1") {
+                    sessions["additionalDirectories"] = json!({});
+                }
                 if self.lifecycle {
                     sessions["close"] = json!({});
                     sessions["delete"] = json!({});
@@ -485,6 +492,16 @@ impl Demo {
                 );
             }
             "session/new" => {
+                // Test hook: startup waits while this file exists; the content "fail" refuses it.
+                if let Some(gate) = env("AGENTWORKS_DEMO_START_GATE") {
+                    while let Ok(content) = std::fs::read_to_string(&gate) {
+                        if content.trim() == "fail" {
+                            self.error(&id, -32603, "Demo startup failed", None);
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                }
                 let session = uuid::Uuid::new_v4().to_string();
                 self.mcp_configs
                     .lock()
@@ -496,7 +513,7 @@ impl Demo {
                     .insert(session.clone(), system_prompt(&params));
                 self.sessions.lock().unwrap().insert(
                     session.clone(),
-                    json!({"cwd":params["cwd"],"turn":0,"cancelled":false,"model":"demo/steady"}),
+                    json!({"cwd":params["cwd"],"additionalDirectories":or_array(&params["additionalDirectories"]),"turn":0,"cancelled":false,"model":"demo/steady"}),
                 );
                 self.trace("session/new", &json!(session), "request");
                 self.save(&session);

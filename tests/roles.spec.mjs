@@ -1,9 +1,11 @@
 import {serverReady} from './support/cleanup.mjs';
 import {test,expect} from '@playwright/test';
+import {openCreateSections} from './support/create-sections.mjs';
 import {spawn} from 'node:child_process';
 import {mkdtemp,mkdir,rm} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 
+openCreateSections(test);
 // Own server and data: never touch the user's sessions or settings.
 const base='http://127.0.0.1:4493';
 test.use({baseURL:base});
@@ -39,7 +41,7 @@ test('new session applies a chosen role; unsupported agents disable the picker',
   await expect(page.locator('#create-dialog')).toBeHidden();
   const [created]=await api('/api/sessions');
   expect(created.role.name).toBe('Release captain');
-  await page.locator('#prompt').fill('role?');await page.locator('#prompt').press('Enter');
+  await page.locator('#prompt-editor .cm-content').fill('role?');await page.locator('#prompt-editor .cm-content').press('Enter');
   await expect(page.locator('#messages')).toContainText('Always tag the release.');
 
   // A fork keeps its parent's snapshot and cannot select an unsupported agent.
@@ -47,7 +49,7 @@ test('new session applies a chosen role; unsupported agents disable the picker',
   await page.locator('#fork-session').click();
   await expect(page.locator('#create-role')).toBeDisabled();
   await expect(page.locator('#create-role-note')).toContainText("Forks keep the parent's role · Release captain");
-  await page.locator('#provider').selectOption('codex');
+  await page.locator('#provider').selectOption('opencode');
   await expect(page.locator('#create-submit')).toBeDisabled();
   await expect(page.locator('#create-role-note')).toContainText('must keep the “Release captain” role');
   await page.locator('#provider').selectOption('demo');
@@ -57,10 +59,10 @@ test('new session applies a chosen role; unsupported agents disable the picker',
   // Unsupported agents disable the picker instead of sending a role they would drop.
   await page.locator('#new-session').click();
   await page.locator('#create-role').selectOption({label:'Reviewer'});
-  await page.locator('#provider').selectOption('codex');
+  await page.locator('#provider').selectOption('opencode');
   await expect(page.locator('#create-role')).toBeDisabled();
   await expect(page.locator('#create-role')).toHaveValue('');
-  await expect(page.locator('#create-role-note')).toContainText('Codex does not accept role instructions');
+  await expect(page.locator('#create-role-note')).toContainText('OpenCode does not accept role instructions');
   await page.locator('#provider').selectOption('demo');
   await expect(page.locator('#create-role')).toBeEnabled();
   await page.locator('#dismiss-create').click();

@@ -40,7 +40,7 @@ async function openSession(page){
   await page.goto('/');
   await expect(page.locator('#session-state')).toHaveText('Ready');
 }
-async function type(page,text){await page.locator('#prompt').fill(text);await page.locator('#prompt').press('Enter');}
+async function type(page,text){await page.locator('#prompt-editor .cm-content').fill(text);await page.locator('#send').click();}
 const card=page=>page.locator('form.question');
 const transcriptText=page=>page.locator('#messages').innerText();
 

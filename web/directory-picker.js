@@ -15,12 +15,13 @@ export function breadcrumbs(root,path){
 // the server's canonical answers, never trusted browser input.
 export function setupDirectoryPicker({$,api}) {
   let state=null,generation=0;
-  const query=(hostId,path)=>`/api/directories?${new URLSearchParams({...(hostId!=='local'?{hostId}:{}),...(path?{path}:{})})}`;
+  // scope 'home' browses beneath the host's home directory, for choosing allowed roots.
+  const query=(hostId,path,scope)=>`/api/directories?${new URLSearchParams({...(hostId!=='local'?{hostId}:{}),...(path?{path}:{}),...(scope==='home'?{scope}:{})})}`;
   function render(listing){
     const at=listing.path;state.path=at;state.root=listing.root;
     const crumbs=$('directory-picker-crumbs');crumbs.replaceChildren();
     const crumb=(label,path)=>{const b=document.createElement('button');b.type='button';b.className='text-button';b.textContent=label;b.onclick=()=>load(path);crumbs.append(b);};
-    crumb('Allowed roots',null);
+    if(state.scope!=='home')crumb('Allowed roots',null);
     if(at){
       for(const [label,path] of breadcrumbs(listing.root,at))crumb(label,path);
       crumbs.lastElementChild.setAttribute('aria-current','location');
@@ -40,18 +41,18 @@ export function setupDirectoryPicker({$,api}) {
     // Actions wait for the listing so they never apply to the previous folder.
     const gen=++generation;$('directory-picker-error').textContent='';
     $('directory-picker-select').disabled=true;$('directory-picker-create').disabled=true;
-    try{const listing=await api(query(state.hostId,path));if(gen===generation&&state)render(listing);}
+    try{const listing=await api(query(state.hostId,path,state.scope));if(gen===generation&&state)render(listing);}
     catch(error){
       if(gen!==generation||!state)return;if(path&&path===state.start){state.start=null;return load(null);}
       $('directory-picker-error').textContent=error.message;$('directory-picker-select').disabled=!state.path;$('directory-picker-create').disabled=!state.path;
     }
   }
   // Resolves to the chosen canonical path, or null when dismissed.
-  function pick({hostId='local',hostName='Local',start=''}={}){
+  function pick({hostId='local',hostName='Local',start='',scope='roots'}={}){
     state?.resolve(null);
     return new Promise(resolve=>{
-      state={hostId,start:start||null,path:null,root:null,resolve};
-      $('directory-picker-host').textContent=`Folders on ${hostName}. Only folders inside allowed roots are shown.`;
+      state={hostId,scope,start:start||null,path:null,root:null,resolve};
+      $('directory-picker-host').textContent=scope==='home'?`Folders on ${hostName}, inside its home directory.`:`Folders on ${hostName}. Only folders inside allowed roots are shown.`;
       $('directory-picker-name').value='';$('directory-picker-list').replaceChildren();
       $('directory-picker-select').disabled=true;$('directory-picker-create').disabled=true;
       $('directory-picker-dialog').showModal();load(state.start);
@@ -66,44 +67,84 @@ export function setupDirectoryPicker({$,api}) {
     const name=$('directory-picker-name').value.trim();if(!state?.path||!name)return;
     const button=$('directory-picker-create');button.disabled=true;$('directory-picker-error').textContent='';
     try{
-      const created=await api('/api/directories',{method:'POST',body:JSON.stringify({...(state.hostId!=='local'?{hostId:state.hostId}:{}),parent:state.path,name})});
+      const created=await api('/api/directories',{method:'POST',body:JSON.stringify({...(state.hostId!=='local'?{hostId:state.hostId}:{}),...(state.scope==='home'?{scope:'home'}:{}),parent:state.path,name})});
       $('directory-picker-name').value='';await load(created.path);
     }catch(error){$('directory-picker-error').textContent=error.message;}finally{button.disabled=!state?.path;}
   };
   return {pick};
 }
 
+// One editable folder in a list: path, Browse… (the shared picker) and remove. Allowed
+// roots, host working directories and session additional directories all use it.
+// `browse.unavailable` returns why browsing is off, or '' when it is usable; an empty row
+// starts browsing at `browse.start`, when given.
+export function directoryRow(picker,{value='',label,removeLabel='Remove '+label.toLowerCase(),placeholder='',required=false,browse,onRemove}){
+  const row=document.createElement('div');row.className='root-item';
+  const input=document.createElement('input');input.value=value;input.placeholder=placeholder;input.required=required;
+  input.setAttribute('aria-label',label);input.autocomplete='off';input.spellcheck=false;
+  const find=document.createElement('button');find.type='button';find.className='text-button';find.textContent='Browse…';
+  find.setAttribute('aria-label','Browse for '+label.toLowerCase());
+  const why=browse.unavailable?.()||'';
+  if(why){find.disabled=true;find.title=why;}
+  find.onclick=async()=>{
+    const path=await picker.pick({hostId:browse.hostId,hostName:browse.hostName(),start:input.value.trim()||browse.start||'',scope:browse.scope});
+    if(path){input.value=path;input.dispatchEvent(new Event('input',{bubbles:true}));input.focus();}
+  };
+  const remove=document.createElement('button');remove.type='button';remove.className='icon-button';remove.textContent='×';
+  remove.setAttribute('aria-label',removeLabel);remove.onclick=()=>{row.remove();onRemove?.();};
+  row.append(input,find,remove);
+  return row;
+}
+
 // Project directory field: optional, explicit, and only sent when changed,
 // so saving other project settings never moves an existing project.
 export function setupProjectDirectory({$,picker,hosts}) {
-  let original={hostId:'local',path:''};
+  // Saved and edited directories, keyed by host id. The field shows the
+  // selected host's directory; switching hosts keeps edits to the others.
+  let original={},edits={},shown='local';
+  const hostName=id=>id==='local'?'Local':hosts().find(h=>h.id===id)?.name||id;
+  const current=id=>id===shown?$('project-directory').value.trim():(edits[id]??original[id]??'');
   function fill(selected){
     const select=$('project-directory-host');select.replaceChildren(new Option('Local','local'));
     for(const host of hosts().filter(h=>h.kind==='remote'))select.append(new Option(host.name+(host.status==='connected'?'':' · offline'),host.id));
     select.value=[...select.options].some(o=>o.value===selected)?selected:'local';
+    shown=select.value;
   }
   function note(){
-    const changed=dirty();
-    $('project-directory-note').textContent=$('project-directory').value.trim()?(changed?'New sessions in this project will start here. Existing sessions keep their directories.':'New sessions in this project start here unless you choose another directory.'):(original.path&&changed?'The project directory will be cleared. Sessions keep their directories.':'Optional. Choose an existing folder or create one beneath an allowed root.');
+    const path=current(shown),saved=original[shown]||'',changed=path!==saved;
+    const text=path?(changed?'New sessions in this project on this host will start here. Existing sessions keep their directories.':'New sessions in this project on this host start here unless you choose another directory.'):(saved&&changed?'This host\'s project directory will be cleared. Sessions keep their directories.':'Optional. Choose an existing folder or create one beneath an allowed root.');
+    const others=[...new Set([...Object.keys(original),...Object.keys(edits)])].filter(id=>id!==shown&&current(id)).map(hostName);
+    $('project-directory-note').textContent=text+(others.length?' Also set on: '+others.join(', ')+'.':'');
   }
-  function open(location){
-    original={hostId:location?.hostId||'local',path:location?.path||''};
-    fill(original.hostId);$('project-directory').value=original.path;note();
+  // `paths` maps host ids to saved directories; `hostId` is the host to show first.
+  function open({paths={},hostId}={}){
+    original={...paths};edits={};
+    fill(hostId||(original.local||!Object.keys(original).length?'local':Object.keys(original)[0]));
+    $('project-directory').value=original[shown]||'';note();
   }
-  function dirty(){const path=$('project-directory').value.trim();return path!==original.path||(path&&$('project-directory-host').value!==original.hostId);}
-  // `undefined` leaves the saved directory unchanged; `null` clears it.
+  // `undefined` leaves every saved directory unchanged. Otherwise a map of
+  // the hosts that changed: a path sets that host's directory, `null` clears it.
   function value(){
-    if(!dirty())return undefined;
-    const path=$('project-directory').value.trim();
-    return path?{hostId:$('project-directory-host').value,path}:null;
+    const changes={};
+    for(const id of new Set([...Object.keys(original),...Object.keys(edits),shown])){
+      const path=current(id);if(path!==(original[id]||''))changes[id]=path||null;
+    }
+    return Object.keys(changes).length?changes:undefined;
   }
   $('project-directory').addEventListener('input',note);
-  $('project-directory-host').onchange=()=>{$('project-directory').value='';note();};
+  $('project-directory-host').onchange=()=>{
+    edits[shown]=$('project-directory').value.trim();shown=$('project-directory-host').value;
+    $('project-directory').value=edits[shown]??original[shown]??'';note();
+  };
   $('project-directory-clear').onclick=()=>{$('project-directory').value='';note();};
   $('project-directory-browse').onclick=async()=>{
     const hostId=$('project-directory-host').value,host=hosts().find(h=>h.id===hostId);
     const path=await picker.pick({hostId,hostName:host?.name||'Local',start:$('project-directory').value.trim()});
     if(path){$('project-directory').value=path;note();}
   };
-  return {open,value,saved:()=>({...original}),commit:()=>{original={hostId:$('project-directory-host').value,path:$('project-directory').value.trim()};note();}};
+  return {open,value,commit:()=>{
+    const saved={};
+    for(const id of new Set([...Object.keys(original),...Object.keys(edits),shown])){const path=current(id);if(path)saved[id]=path;}
+    original=saved;edits={};note();
+  }};
 }

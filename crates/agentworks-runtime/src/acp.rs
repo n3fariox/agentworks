@@ -4,10 +4,10 @@ use agent_client_protocol::schema::{
     ProtocolVersion,
     v1::{
         AuthenticateRequest, BooleanConfigOptionCapabilities, ClientCapabilities,
-        ClientSessionCapabilities, ElicitationCapabilities, ElicitationFormCapabilities,
-        InitializeRequest, ListSessionsRequest, NewSessionRequest, RequestPermissionOutcome,
-        RequestPermissionRequest, RequestPermissionResponse, SessionConfigOptionsCapabilities,
-        SubagentCapabilities,
+        ClientSessionCapabilities, CompactionCapabilities, ElicitationCapabilities,
+        ElicitationFormCapabilities, InitializeRequest, ListSessionsRequest, NewSessionRequest,
+        RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+        SessionConfigOptionsCapabilities, SubagentCapabilities,
     },
 };
 use agent_client_protocol::{Agent, Client, ConnectionTo, DynConnectTo};
@@ -19,10 +19,12 @@ pub fn initialize_request() -> InitializeRequest {
     InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
         ClientCapabilities::new()
             .session(
-                ClientSessionCapabilities::new().config_options(
-                    SessionConfigOptionsCapabilities::new()
-                        .boolean(BooleanConfigOptionCapabilities::new()),
-                ),
+                ClientSessionCapabilities::new()
+                    .config_options(
+                        SessionConfigOptionsCapabilities::new()
+                            .boolean(BooleanConfigOptionCapabilities::new()),
+                    )
+                    .compaction(CompactionCapabilities::new()),
             )
             .subagents(SubagentCapabilities::new())
             .elicitation(ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()))
@@ -64,13 +66,25 @@ pub async fn initialize_on(
     }
     Ok(serde_json::to_value(init).unwrap_or(Value::Null))
 }
-async fn new_session(
+async fn discovery_config(
     connection: &ConnectionTo<Agent>,
     provider: &str,
     cwd: PathBuf,
     api_key: bool,
 ) -> Result<(Value, Value), agent_client_protocol::Error> {
     let init = initialize_on(connection, provider, api_key).await?;
+    // The Rust Codex bridge can discover models without creating a native thread.
+    // Only use the extension when advertised, including on remote workers.
+    if init["_meta"]["agentworks"]["modelDiscovery"] == true {
+        let config = connection
+            .send_request(agent_client_protocol::UntypedMessage {
+                method: "_agentworks/models/list".into(),
+                params: json!({}),
+            })
+            .block_task()
+            .await?;
+        return Ok((config, Value::Null));
+    }
     let created = connection
         .send_request(NewSessionRequest::new(cwd))
         .block_task()
@@ -105,7 +119,7 @@ pub async fn discover(
                 transport,
                 move |connection: ConnectionTo<Agent>| async move {
                     let (created, capabilities) =
-                        new_session(&connection, &provider, cwd, api_key).await?;
+                        discovery_config(&connection, &provider, cwd, api_key).await?;
                     let config = parse_model_config(&created, free_only);
                     if capabilities["sessionCapabilities"]["close"].is_object() {
                         if let Some(id) = created["sessionId"].as_str() {
@@ -226,4 +240,52 @@ pub async fn delete_session(
         }
     )).await.map_err(|_| "Provider-history deletion timed out; its outcome is uncertain. The Agentworks transcript was retained; inspect provider history before retrying")??;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_client_protocol::{AcpAgent, AcpAgentConfig};
+
+    #[tokio::test]
+    async fn discovery_negotiates_threadless_listing_and_keeps_legacy_fallback() {
+        for mode in ["extension", "legacy", "error"] {
+            let script = r#"
+import json,sys
+mode=sys.argv[1]
+for line in sys.stdin:
+ r=json.loads(line); m=r['method']
+ if m=='initialize':
+  out={'protocolVersion':1,'agentCapabilities':{'sessionCapabilities':{'close':{}}},'authMethods':[]}
+  if mode!='legacy':out['_meta']={'agentworks':{'modelDiscovery':True}}
+ elif m=='session/close':
+  assert mode=='legacy';out={}
+ elif m in ('session/new','_agentworks/models/list'):
+  assert m==('session/new' if mode=='legacy' else '_agentworks/models/list'), 'Discovery tried to create a thread'
+  if mode=='error':
+   print(json.dumps({'jsonrpc':'2.0','id':r['id'],'error':{'code':-32603,'message':'Model listing refused'}}),flush=True);continue
+  out={'configOptions':[{'id':'model','name':'Model','category':'model','type':'select','currentValue':'test-model','options':[{'value':'test-model','name':'Test'}]}]}
+  if mode=='legacy':out['sessionId']='temporary'
+ else:raise Exception('Unexpected method '+m)
+ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':out}),flush=True)
+"#;
+            let transport = DynConnectTo::new(AcpAgent::new(
+                AcpAgentConfig::new("python3")
+                    .arg("-c")
+                    .arg(script)
+                    .arg(mode),
+            ));
+            let result = discover(transport, "codex-rust", std::env::temp_dir(), false).await;
+            if mode == "error" {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("Model listing refused")
+                );
+            } else {
+                assert_eq!(result.unwrap()["options"][0]["value"], "test-model");
+            }
+        }
+    }
 }

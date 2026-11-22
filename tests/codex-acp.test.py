@@ -109,8 +109,17 @@ def harness():
             background_mode="normal"
             send(dict(id=old_id,result=dict(data=old_entries,nextCursor=None)))
         if method in ("thread/start", "thread/resume", "thread/fork"):
+            required_sandbox = os.environ.get("ACP_FIXTURE_REQUIRE_OPEN_SANDBOX")
+            if os.environ.get("ACP_FIXTURE_NO_THREAD") or (required_sandbox and p.get("sandbox") != required_sandbox):
+                send(dict(id=v["id"], error=dict(code=-32603, message="fs sandbox helper failed: bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted")))
+                continue
             assert p["cwd"].startswith("/")
             assert p["cwd"] in p["runtimeWorkspaceRoots"]
+            rollouts = os.environ.get("ACP_FIXTURE_ROLLOUTS")
+            if method == "thread/resume" and rollouts and p["threadId"] not in (open(rollouts).read().split() if os.path.exists(rollouts) else []):
+                # Codex writes a thread's rollout at its first turn.
+                send(dict(id=v["id"], error=dict(code=-32600, message="no rollout found for thread id " + p["threadId"])))
+                continue
             if method == "thread/resume" and p["threadId"] in deleted:
                 send(dict(id=v["id"], error=dict(code=-32602, message="Thread was deleted")))
                 continue
@@ -123,6 +132,10 @@ def harness():
             thread_id = "thread-2" if method == "thread/fork" else p.get("threadId", "thread-1")
             if method == "thread/fork" and "lastTurnId" in p:
                 assert p["lastTurnId"] == "turn-old", "Wrong fork boundary"
+            if "sandbox" in p:
+                settings["sandbox"] = dict(type={"read-only":"readOnly", "workspace-write":"workspaceWrite", "danger-full-access":"dangerFullAccess"}[p["sandbox"]])
+            for key in ("approvalPolicy", "approvalsReviewer"):
+                if key in p: settings[key] = p[key]
             result = dict(settings, thread=dict(id=thread_id))
         elif method == "config/read":
             if os.environ.get("ACP_FIXTURE_CONFIG_ERROR"):
@@ -131,6 +144,9 @@ def harness():
             assert p["cwd"].startswith("/") and p["includeLayers"] is False
             result = dict(config=dict(developer_instructions="Configured developer guidance."))
         elif method == "model/list":
+            if os.environ.get("ACP_FIXTURE_MODEL_ERROR"):
+                send(dict(id=v["id"],error=dict(code=-32603,message="Model discovery unavailable")))
+                continue
             result = dict(data=[dict(model="test-model", displayName="Test Model", additionalSpeedTiers=["fast"], supportedReasoningEfforts=[dict(reasoningEffort="medium"), dict(reasoningEffort="high")], defaultReasoningEffort="medium")])
         elif method == "thread/list":
             result = dict(data=[dict(id="thread-1", cwd=os.environ.get("ACP_FIXTURE_CWD","/tmp"), preview="Previous chat")], nextCursor=None)
@@ -187,8 +203,11 @@ def harness():
                 send(dict(id=v["id"], result={}))
             continue
         elif method == "skills/list":
+            if os.environ.get("ACP_FIXTURE_SKILLS_ERROR"):
+                send(dict(id=v["id"],error=dict(code=-32603,message="Skill discovery unavailable")))
+                continue
             assert p["cwds"]
-            result=dict(data=[dict(skills=[dict(name="check",description="Check the project")])])
+            result=dict(data=[dict(skills=[dict(name="check",description="Check the project",path="/tmp/check/SKILL.md",enabled=True),dict(name="disabled",description="Disabled skill",path="/tmp/disabled/SKILL.md",enabled=False)])])
         elif method == "mcpServerStatus/list":
             assert p["threadId"]
             assert p["detail"] == "toolsAndAuthOnly"
@@ -200,6 +219,9 @@ def harness():
         elif method == "thread/name/set":
             assert p["name"]=="New conversation name"
         elif method == "turn/start":
+            if os.environ.get("ACP_FIXTURE_ROLLOUTS"):
+                with open(os.environ["ACP_FIXTURE_ROLLOUTS"], "a") as rollouts:
+                    rollouts.write(p["threadId"] + "\n")
             active_thread = p["threadId"]
             turn += 1
             active = f"turn-{turn}"
@@ -308,6 +330,8 @@ class BridgeTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         binary = os.environ.get("CODEX_ACP_TEST_BIN", str(root / "target/debug/agentworks-codex-acp"))
         env=dict(os.environ, CODEX_PATH=str(Path(__file__).resolve()))
+        if self._testMethodName == "test_skill_discovery_failure_keeps_session_usable":
+            env["ACP_FIXTURE_SKILLS_ERROR"]="1"
         if self._testMethodName=="test_cancel_native_compaction":
             env["ACP_FIXTURE_HOLD_COMPACT"]="1"
         if self._testMethodName=="test_subagents_missing_child_history_keeps_parent_loadable":
@@ -323,6 +347,12 @@ class BridgeTests(unittest.TestCase):
             env["CODEX_CONFIG"]=json.dumps(dict(developer_instructions="Explicit host guidance.", model="test-model"))
         if self._testMethodName == "test_system_prompt_config_failure_does_not_open_thread":
             env["ACP_FIXTURE_CONFIG_ERROR"]="1"
+        if self._testMethodName.startswith("test_model_discovery_"):
+            env["ACP_FIXTURE_NO_THREAD"]="1"
+            if self._testMethodName == "test_model_discovery_forwards_errors":
+                env["ACP_FIXTURE_MODEL_ERROR"]="1"
+        if self._testMethodName == "test_full_access_policy_precedes_native_initialization":
+            env["ACP_FIXTURE_REQUIRE_OPEN_SANDBOX"]="danger-full-access"
         self.process = subprocess.Popen([binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
         self.addCleanup(self.close)
         self.messages = queue.Queue()
@@ -345,6 +375,7 @@ class BridgeTests(unittest.TestCase):
         if capabilities_async:
             capabilities["_meta"]=dict(jetbrains=dict(air=dict(version=1,capabilities=["asyncTasks"])))
         init = self.call("initialize", dict(protocolVersion=1, clientCapabilities=capabilities))
+        self.assertEqual(init["_meta"]["agentworks"],dict(modelDiscovery=True,permissionModeOnOpen=True))
         self.assertEqual("asyncTasks" in init.get("_meta",{}).get("jetbrains",{}).get("air",{}).get("capabilities",[]),capabilities_async)
         self.assertTrue(init["agentCapabilities"]["loadSession"])
         self.assertEqual(init["agentCapabilities"]["sessionCapabilities"]["systemPrompt"], {})
@@ -398,6 +429,48 @@ class BridgeTests(unittest.TestCase):
 
     def prompt(self, text):
         return self.call("session/prompt", dict(sessionId="thread-1", prompt=[dict(type="text", text=text)]))
+
+    def test_model_discovery_never_opens_a_thread(self):
+        result=self.call("_agentworks/models/list", {})
+        self.assertEqual(result["configOptions"][0]["options"][0]["value"], "test-model")
+        self.assertEqual([v["method"] for v in self.native_requests()], ["initialize","initialized","model/list"])
+
+    def test_model_discovery_forwards_errors(self):
+        rid=self.send("_agentworks/models/list", {})
+        result=self.until(lambda v:v.get("id")==rid)
+        self.assertIn("Model discovery unavailable",str(result["error"]))
+        self.assertFalse(any(v["method"].startswith("thread/") for v in self.native_requests()))
+
+    def test_full_access_policy_precedes_native_initialization(self):
+        for method in ("session/new", "session/load", "session/resume", "session/fork"):
+            params=dict(cwd="/tmp",mcpServers=[],_meta=dict(agentworks=dict(permissionMode="agent-full-access")))
+            if method!="session/new":params["sessionId"]="thread-1"
+            result=self.call(method,params)
+            mode=next(o for o in result["configOptions"] if o["id"]=="mode")
+            self.assertEqual(mode["currentValue"],"agent-full-access")
+        calls=[v for v in self.native_requests() if v["method"] in ("thread/start","thread/resume","thread/fork")]
+        self.assertEqual(len(calls),4)
+        for call in calls:
+            self.assertEqual(call["params"]["sandbox"],"danger-full-access")
+            self.assertEqual(call["params"]["approvalPolicy"],"never")
+            self.assertEqual(call["params"]["approvalsReviewer"],"user")
+
+    def test_open_policy_validation_and_host_default(self):
+        for mode in ("read-only","workspace-write","agent","host"):
+            self.call("session/new",dict(cwd="/tmp",mcpServers=[],_meta=dict(agentworks=dict(permissionMode=mode))))
+            params=[v for v in self.native_requests() if v["method"]=="thread/start"][-1]["params"]
+            if mode=="host":
+                self.assertNotIn("sandbox",params)
+                self.assertNotIn("approvalPolicy",params)
+            else:
+                self.assertEqual(params["sandbox"],"workspace-write" if mode=="agent" else mode)
+                self.assertEqual(params["approvalPolicy"],"on-request")
+                self.assertEqual(params["approvalsReviewer"],"auto_review" if mode=="agent" else "user")
+        before=len(self.native_requests())
+        for mode in ("danger-full-access",42,None):
+            rid=self.send("session/new",dict(cwd="/tmp",mcpServers=[],_meta=dict(agentworks=dict(permissionMode=mode))))
+            self.assertIn("error",self.until(lambda v:v.get("id")==rid))
+        self.assertEqual(len(self.native_requests()),before)
 
     def test_system_prompt_lifecycle_mapping_and_replay(self):
         prompt=dict(mode="append",content=[dict(type="text",text="Role guidance."),dict(type="text",text="Shared context.")])
@@ -657,6 +730,26 @@ class BridgeTests(unittest.TestCase):
         self.assertTrue(any("one" in c and "two" in c for c in chunks))
         self.assertIn(dict(type="baseBranch",branch="main"),[json.loads(c) for c in chunks if c.startswith('{')])
         self.assertEqual(self.prompt("normal")["stopReason"],"end_turn")
+
+    def test_skills_are_advertised_and_invoke_native_skill_inputs(self):
+        self.session()
+        announced=[v["params"]["update"] for v in self.seen if v.get("method")=="session/update" and v["params"]["update"]["sessionUpdate"]=="available_commands_update"]
+        names={c["name"] for c in announced[-1]["availableCommands"]}
+        self.assertIn("$check", names)
+        self.assertNotIn("$disabled", names)
+        for text in ["$check", "Please use $check for this task", "/check do this", "$check and $check"]:
+            self.assertEqual(self.prompt(text)["stopReason"], "end_turn")
+            native=[v for v in self.native_requests() if v.get("method")=="turn/start"][-1]
+            self.assertEqual(native["params"]["input"], [
+                dict(type="text",text=text.replace("/check", "$check", 1),text_elements=[]),
+                dict(type="skill",name="check",path="/tmp/check/SKILL.md")])
+        self.prompt("$disabled word$check $checking")
+        native=[v for v in self.native_requests() if v.get("method")=="turn/start"][-1]
+        self.assertEqual(len(native["params"]["input"]), 1)
+
+    def test_skill_discovery_failure_keeps_session_usable(self):
+        self.session()
+        self.assertEqual(self.prompt("normal")["stopReason"], "end_turn")
 
     def test_invalid_commands_fail_without_starting_a_model_turn(self):
         self.session()

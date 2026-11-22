@@ -1,4 +1,4 @@
-import {appUrl, socketUrl, deploymentKey} from './hosting.js';
+import {appUrl, socketUrl, deploymentKey, localState as localStorage} from './hosting.js';
 // U-02 browser notifications.
 //
 // The server applies policy and only sends noteworthy, allowed events; this
@@ -7,6 +7,13 @@ import {appUrl, socketUrl, deploymentKey} from './hosting.js';
 // reconnects, and opening the session that produced it.
 const CATEGORIES=['turnEnd','approval','error'];
 const RECONNECT_MS=1000;
+
+export function isAutoDismissEnabled(storage=localStorage){
+  try{return storage.getItem('agentworks-notification-auto-dismiss')!=='false';}catch{return true;}
+}
+export function setAutoDismissEnabled(enabled,storage=localStorage){
+  try{storage.setItem('agentworks-notification-auto-dismiss',String(enabled));}catch{}
+}
 
 // A unique IndexedDB key is an atomic claim shared by all tabs, including when
 // Web Locks or BroadcastChannel are unavailable. Commit before displaying, so a
@@ -134,6 +141,12 @@ export function setupNotifications({getSessions,getActive,selectSession,toast}={
     const state=support();
     fieldset.replaceChildren();
     const legend=document.createElement('legend');legend.textContent='Notifications';fieldset.append(legend);
+    const autoDismissRow=document.createElement('label');autoDismissRow.className='workspace-check';
+    const autoDismissToggle=document.createElement('input');autoDismissToggle.type='checkbox';autoDismissToggle.id='notifications-auto-dismiss';
+    autoDismissToggle.checked=isAutoDismissEnabled();
+    autoDismissToggle.onchange=()=>{setAutoDismissEnabled(autoDismissToggle.checked);};
+    autoDismissRow.append(autoDismissToggle,document.createTextNode('Automatically dismiss alerts when opening a session'));
+    fieldset.append(autoDismissRow);
     if(!state.ok){
       const note=document.createElement('p');note.className='field-note';note.setAttribute('role','status');note.textContent=state.reason;fieldset.append(note);return;
     }

@@ -18,10 +18,14 @@ putting a UUID into backend API routing or trusting `X-Forwarded-Prefix`.
 The proxy must overwrite `X-Forwarded-Proto` and `X-Forwarded-Host` with singular
 values and preserve the browser's `Origin`, including on WebSocket upgrades. The
 backend validates writes and WebSocket origins against the resulting public
-origin. It currently trusts well-formed forwarded headers without checking the
-proxy peer against an allowlist, so backend isolation and header overwriting are
-required. Origin checks and UUID paths are not authentication: retain the hosting
-layer's authentication/access control. `AGENTWORKS_AUTH_MODE` controls provider
+origin. By default it trusts well-formed forwarded headers from any peer, so
+backend isolation and header overwriting are required. Set
+`AGENTWORKS_TRUSTED_PROXIES` to the proxy's addresses or CIDR ranges to honour
+them only from the proxy. Origin checks and UUID paths are not authentication:
+retain the hosting layer's authentication/access control, or enable PAM sign-in
+behind the trusted proxy ([operations](OPERATIONS.md#https-client-certificates-and-sign-in)).
+Its session cookie is scoped to the mount the browser reports, so mounts on one
+origin sign in separately. `AGENTWORKS_AUTH_MODE` controls provider
 credentials; it does not authenticate public web clients. The internal MCP bridge
 remains private and does not use the public mount.
 

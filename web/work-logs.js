@@ -16,12 +16,12 @@ const read=(key,fallback)=>{try{return JSON.parse(localStorage.getItem(key))??fa
 // so choices survive replay; transcript item ids are random per replay and are never used as keys.
 // A turn without turn_end is complete only when a later turn exists or the session is idle/closed,
 // so imported history lacking turn_end markers is never closed early.
-// Errors, images and notices (interruption, agent-initiated turns) split a turn into separate
+// Errors, images, compactions and notices (interruption, agent-initiated turns) split a turn into separate
 // segments so they are never folded away.
 // Background-job results (`job` items, one per persisted async_task_finished event) fold with the
 // tools around them; outside that range a run of them gets its own log, so a job ending after
 // the final answer never folds the answer away.
-const SEPARATORS=new Set(['error','image','notice']);
+const SEPARATORS=new Set(['error','image','notice','compaction']);
 const JOB_FAILED=new Set(['failed']);
 export function buildWorkLogs(items,{sessionIdle=false,scope='',turnEnds=new Map()}={}){
   const turns=[];let turn=null;

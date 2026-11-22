@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     io,
     path::{Path, PathBuf},
 };
@@ -10,6 +10,10 @@ use uuid::Uuid;
 pub struct Project {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub slug: String,
+    #[serde(default, rename = "tasksEnabled")]
+    pub tasks_enabled: bool,
     #[serde(default, rename = "workspacePolicy")]
     pub workspace_policy: crate::worktrees::Policy,
     #[serde(
@@ -18,16 +22,27 @@ pub struct Project {
         skip_serializing_if = "Option::is_none"
     )]
     pub default_communication_role: Option<crate::communication::Role>,
-    #[serde(default, rename = "locationIds")]
-    pub location_ids: Vec<String>,
-    /// Where new sessions in this project start unless the request names a
-    /// directory. Set only explicitly; grouping never depends on it.
     #[serde(
         default,
-        rename = "defaultLocationId",
+        rename = "sessionRouting",
         skip_serializing_if = "Option::is_none"
     )]
-    pub default_location_id: Option<String>,
+    pub session_routing: Option<crate::routing::ProjectSettings>,
+    #[serde(default, rename = "locationIds")]
+    pub location_ids: Vec<String>,
+    /// Where new sessions in this project start on each host, keyed by host
+    /// id, unless the request names a directory. Set only explicitly; grouping
+    /// never depends on it.
+    #[serde(
+        default,
+        rename = "defaultLocations",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub default_locations: BTreeMap<String, String>,
+    /// Pre-per-host catalogs saved one directory; `Catalog::open` moves it
+    /// into `default_locations` under its location's host.
+    #[serde(default, rename = "defaultLocationId", skip_serializing)]
+    legacy_default_location_id: Option<String>,
     #[serde(default)]
     pub archived: bool,
 }
@@ -42,6 +57,8 @@ pub use agentworks_runtime::remote::{DEFAULT_REMOTE_COMMAND, Host};
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<agentworks_workspace::config::Settings>,
     pub roots: Option<Vec<PathBuf>>,
     #[serde(default)]
     pub default_models: HashMap<String, String>,
@@ -51,37 +68,81 @@ pub struct Settings {
     pub claude_default_permission_mode: Option<crate::permission_modes::ClaudeDefault>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_default_permission_mode: Option<crate::permission_modes::CodexDefault>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub antigravity_default_permission_mode: Option<crate::permission_modes::AntigravityDefault>,
     /// L-07 saved default; absent keeps the built-in default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeouts: Option<crate::timeouts::Policy>,
     /// U-02 saved notification policy; absent keeps the default (off).
     #[serde(default)]
     pub notifications: crate::notifications::Settings,
+    /// Harnesses allowed to run at once; absent keeps the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_active_sessions: Option<u32>,
+    /// Minutes an idle harness runs before it is put to sleep; 0 never sleeps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_sleep_minutes: Option<u32>,
+    /// Harnesses left out of the new-session picker; their sessions still run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_providers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_routing: Option<crate::routing::Settings>,
 }
+pub const DEFAULT_ACTIVE_SESSIONS: u32 = 32;
+pub const MAX_ACTIVE_SESSIONS: u32 = 256;
+/// Longer than the 1-hour extended prompt-cache lifetime, so sleeping never
+/// discards a cache that is still warm.
+pub const DEFAULT_IDLE_SLEEP_MINUTES: u32 = 120;
+pub const MIN_IDLE_SLEEP_MINUTES: u32 = 60;
+pub const MAX_IDLE_SLEEP_MINUTES: u32 = 7 * 24 * 60;
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct CatalogData {
+    #[serde(default)]
+    pub notification_inbox: Vec<crate::notifications::Alert>,
+    #[serde(default)]
+    pub github: crate::github::Config,
     pub projects: Vec<Project>,
     pub locations: Vec<Location>,
     #[serde(default)]
     pub hosts: Vec<Host>,
     #[serde(default)]
     pub settings: Settings,
+    #[serde(default)]
+    pub tasks: HashMap<String, crate::tasks::ProjectTasks>,
 }
 pub struct Catalog {
     path: PathBuf,
     pub data: CatalogData,
 }
 impl Catalog {
+    pub fn notification_inbox(
+        &mut self,
+        alerts: Vec<crate::notifications::Alert>,
+    ) -> io::Result<()> {
+        let mut data = self.data.clone();
+        data.notification_inbox = alerts;
+        self.save(data)
+    }
     pub fn open(path: PathBuf) -> io::Result<Self> {
-        let data = match std::fs::read(&path) {
+        let mut data: CatalogData = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
             Err(e) if e.kind() == io::ErrorKind::NotFound => CatalogData::default(),
             Err(e) => return Err(e),
         };
+        // The retired npm harnesses' default models carry over to their Rust bridges.
+        let models = &mut data.settings.default_models;
+        for (legacy, native) in [("claude", "claude-rust"), ("codex", "codex-rust")] {
+            if let Some(model) = models.get(legacy).cloned() {
+                models.entry(native.into()).or_insert(model);
+            }
+        }
+        migrate_slugs(&mut data)?;
+        migrate_default_locations(&mut data);
+        crate::tasks::validate_catalog(&data)?;
         Ok(Self { path, data })
     }
-    fn save(&mut self, data: CatalogData) -> io::Result<()> {
+    pub(crate) fn save(&mut self, data: CatalogData) -> io::Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -105,6 +166,11 @@ impl Catalog {
         data.settings.notifications = notifications;
         self.save(data)
     }
+    pub fn github(&mut self, github: crate::github::Config) -> io::Result<()> {
+        let mut data = self.data.clone();
+        data.github = github;
+        self.save(data)
+    }
     pub fn contains(&self, id: &str) -> bool {
         self.data.projects.iter().any(|p| p.id == id)
     }
@@ -115,12 +181,45 @@ impl Catalog {
             .or(self.data.settings.default_communication_role)
             .unwrap_or_default()
     }
+    #[cfg(test)]
     pub fn project(
         &mut self,
         id: Option<&str>,
         name: &str,
         role: Option<Option<crate::communication::Role>>,
     ) -> Result<Project, String> {
+        self.project_with_slug(id, name, role, None)
+    }
+    #[cfg(test)]
+    pub fn project_with_slug(
+        &mut self,
+        id: Option<&str>,
+        name: &str,
+        role: Option<Option<crate::communication::Role>>,
+        slug: Option<&str>,
+    ) -> Result<Project, String> {
+        self.project_with_options(id, name, role, slug, None)
+    }
+    /// Save project identity and the optional ticket opt-in in one atomic write.
+    pub fn project_with_options(
+        &mut self,
+        id: Option<&str>,
+        name: &str,
+        role: Option<Option<crate::communication::Role>>,
+        slug: Option<&str>,
+        tasks_enabled: Option<bool>,
+    ) -> Result<Project, String> {
+        if let Some(slug) = slug {
+            if !valid_slug(slug)
+                || self
+                    .data
+                    .projects
+                    .iter()
+                    .any(|p| Some(p.id.as_str()) != id && p.slug == slug)
+            {
+                return Err("Use a unique uppercase project slug (2-20 letters/digits, starting with a letter)".into());
+            }
+        }
         let name = name.trim();
         if name.is_empty() || name.chars().count() > 80 {
             return Err("Use a project name between 1 and 80 characters".into());
@@ -152,15 +251,36 @@ impl Catalog {
             let project = Project {
                 id: Uuid::new_v4().to_string(),
                 name: name.into(),
+                slug: unique_slug(&data, name),
                 location_ids: Vec::new(),
-                default_location_id: None,
+                default_locations: BTreeMap::new(),
+                legacy_default_location_id: None,
                 workspace_policy: Default::default(),
                 archived: false,
+                tasks_enabled: false,
                 default_communication_role: role.flatten(),
+                session_routing: None,
             };
             data.projects.push(project.clone());
             project
         };
+        let mut project = project;
+        if let Some(slug) = slug {
+            project.slug = slug.into();
+            data.projects
+                .iter_mut()
+                .find(|p| p.id == project.id)
+                .unwrap()
+                .slug = slug.into();
+        }
+        if let Some(enabled) = tasks_enabled {
+            project.tasks_enabled = enabled;
+            data.projects
+                .iter_mut()
+                .find(|p| p.id == project.id)
+                .unwrap()
+                .tasks_enabled = enabled;
+        }
         self.save(data)
             .map_err(|_| "Could not save project metadata")?;
         Ok(project)
@@ -178,6 +298,23 @@ impl Catalog {
             .workspace_policy = policy;
         self.save(data)
             .map_err(|_| "Could not save workspace policy".into())
+    }
+    pub fn set_project_session_routing(
+        &mut self,
+        id: &str,
+        routing: Option<crate::routing::ProjectSettings>,
+    ) -> Result<Project, String> {
+        let mut data = self.data.clone();
+        let project = data
+            .projects
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or("Project not found")?;
+        project.session_routing = routing;
+        let updated = project.clone();
+        self.save(data)
+            .map_err(|_| "Could not save project routing settings".to_owned())?;
+        Ok(updated)
     }
     pub fn set_archived(&mut self, id: &str, archived: bool) -> Result<Project, String> {
         let mut data = self.data.clone();
@@ -198,18 +335,26 @@ impl Catalog {
         }
         let mut data = self.data.clone();
         data.projects.retain(|p| p.id != id);
+        data.tasks.remove(id);
         self.save(data)
             .map_err(|_| "Could not save project metadata".into())
     }
-    /// Sets or clears the project's default location, recording it as one of
-    /// the project's locations. `None` leaves the location list untouched.
+    /// Sets or clears the project's default location on one host, recording
+    /// a new location as one of the project's locations. Other hosts keep
+    /// theirs, and clearing leaves the location list untouched.
     pub fn set_default_location(
         &mut self,
         project_id: &str,
+        host_id: &str,
         location_id: Option<&str>,
     ) -> Result<Project, String> {
         let mut data = self.data.clone();
-        if location_id.is_some_and(|id| !data.locations.iter().any(|l| l.id == id)) {
+        if let Some(id) = location_id
+            && !data
+                .locations
+                .iter()
+                .any(|l| l.id == id && l.host_id == host_id)
+        {
             return Err("Directory not found".into());
         }
         let project = data
@@ -217,26 +362,35 @@ impl Catalog {
             .iter_mut()
             .find(|p| p.id == project_id)
             .ok_or("Project not found")?;
-        project.default_location_id = location_id.map(String::from);
-        if let Some(id) = location_id
-            && !project.location_ids.iter().any(|l| l == id)
-        {
-            project.location_ids.push(id.into());
+        match location_id {
+            Some(id) => {
+                project.default_locations.insert(host_id.into(), id.into());
+                if !project.location_ids.iter().any(|l| l == id) {
+                    project.location_ids.push(id.into());
+                }
+            }
+            None => {
+                project.default_locations.remove(host_id);
+            }
         }
         let project = project.clone();
         self.save(data)
             .map_err(|_| "Could not save project directory")?;
         Ok(project)
     }
-    /// The project's default location, if one is set.
-    pub fn default_location(&self, project_id: Option<&str>) -> Option<Location> {
+    /// The project's default location on a host, if one is set.
+    pub fn default_location(&self, project_id: Option<&str>, host_id: &str) -> Option<Location> {
         let project = self
             .data
             .projects
             .iter()
             .find(|p| Some(p.id.as_str()) == project_id)?;
-        let id = project.default_location_id.as_deref()?;
-        self.data.locations.iter().find(|l| l.id == id).cloned()
+        let id = project.default_locations.get(host_id)?;
+        self.data
+            .locations
+            .iter()
+            .find(|l| &l.id == id && l.host_id == host_id)
+            .cloned()
     }
     pub fn attach_location(&mut self, project_id: &str, location_id: &str) -> io::Result<()> {
         let mut data = self.data.clone();
@@ -306,6 +460,26 @@ impl Catalog {
         destination: &str,
         command: &str,
     ) -> Result<Host, String> {
+        let (name, destination, command) = self.check_host(None, name, destination, command)?;
+        Ok(Host {
+            id: Uuid::new_v4().to_string(),
+            name,
+            destination,
+            identity_file: None,
+            known_hosts_file: None,
+            command,
+            roots: Vec::new(),
+        })
+    }
+    /// Validates a host's editable fields; `id` is the host being edited, whose
+    /// own name does not count as taken.
+    fn check_host(
+        &self,
+        id: Option<&str>,
+        name: &str,
+        destination: &str,
+        command: &str,
+    ) -> Result<(String, String, String), String> {
         let name = name.trim();
         if name.is_empty() || name.chars().count() > 80 {
             return Err("Use a host name between 1 and 80 characters".into());
@@ -317,7 +491,7 @@ impl Catalog {
             .data
             .hosts
             .iter()
-            .any(|h| h.name.to_lowercase() == name.to_lowercase())
+            .any(|h| Some(h.id.as_str()) != id && h.name.to_lowercase() == name.to_lowercase())
         {
             return Err("A host with that name already exists".into());
         }
@@ -339,15 +513,37 @@ impl Catalog {
         if command.len() > 400 || command.chars().any(char::is_control) {
             return Err("Use a single-line remote command under 400 characters".into());
         }
-        let host = Host {
-            id: Uuid::new_v4().to_string(),
-            name: name.into(),
-            destination: destination.into(),
-            identity_file: None,
-            known_hosts_file: None,
-            command: command.into(),
-            roots: Vec::new(),
-        };
+        Ok((name.into(), destination.into(), command.into()))
+    }
+    /// Renames a host or changes how it is reached. A host this server
+    /// installed keeps its own launch command; `command` applies to others.
+    pub fn update_host(
+        &mut self,
+        id: &str,
+        name: &str,
+        destination: &str,
+        command: Option<&str>,
+    ) -> Result<Host, String> {
+        let current = self
+            .data
+            .hosts
+            .iter()
+            .find(|h| h.id == id)
+            .ok_or("Host not found")?;
+        let command = match command {
+            Some(c) if current.identity_file.is_none() => c,
+            _ => current.command.as_str(),
+        }
+        .to_owned();
+        let (name, destination, command) =
+            self.check_host(Some(id), name, destination, &command)?;
+        let mut data = self.data.clone();
+        let host = data.hosts.iter_mut().find(|h| h.id == id).unwrap();
+        host.name = name;
+        host.destination = destination;
+        host.command = command;
+        let host = host.clone();
+        self.save(data).map_err(|_| "Could not save host")?;
         Ok(host)
     }
     pub fn set_host_roots(&mut self, id: &str, roots: Vec<String>) -> Result<Host, String> {
@@ -356,18 +552,15 @@ impl Catalog {
             if root.trim().is_empty() {
                 return Err("Working directory cannot be empty".into());
             }
-            let root = root.trim().trim_end_matches('/').to_string();
-            let root = if root.is_empty() {
-                "/".to_string()
-            } else {
-                root
+            // Stored `/`-separated for every host OS; Windows workers accept that form.
+            let Some(root) = agentworks_workspace::paths::normalize(&root)
+                .filter(|r| r.len() <= 4096 && !r.chars().any(char::is_control))
+            else {
+                return Err(format!(
+                    "Use absolute paths (/srv/work, C:/work) or ~/… paths, not {}",
+                    root.trim()
+                ));
             };
-            if !(root.starts_with('/') || root == "~" || root.starts_with("~/"))
-                || root.len() > 4096
-                || root.chars().any(char::is_control)
-            {
-                return Err(format!("Use absolute paths or ~/… paths, not {root}"));
-            }
             if !cleaned.contains(&root) {
                 cleaned.push(root);
             }
@@ -382,6 +575,19 @@ impl Catalog {
             .find(|h| h.id == id)
             .ok_or("Host not found")?;
         host.roots = cleaned;
+        let host = host.clone();
+        self.save(data).map_err(|_| "Could not save host")?;
+        Ok(host)
+    }
+    /// Points a host at a newly installed worker release.
+    pub fn set_host_command(&mut self, id: &str, command: &str) -> Result<Host, String> {
+        let mut data = self.data.clone();
+        let host = data
+            .hosts
+            .iter_mut()
+            .find(|h| h.id == id)
+            .ok_or("Host not found")?;
+        host.command = command.into();
         let host = host.clone();
         self.save(data).map_err(|_| "Could not save host")?;
         Ok(host)
@@ -402,16 +608,26 @@ impl Catalog {
         data.locations.retain(|l| l.host_id != id);
         for project in &mut data.projects {
             project.location_ids.retain(|l| !gone.contains(l));
-            if project
-                .default_location_id
-                .as_ref()
-                .is_some_and(|l| gone.contains(l))
-            {
-                project.default_location_id = None;
-            }
+            project.default_locations.remove(id);
         }
         data.hosts.retain(|h| h.id != id);
         self.save(data).map_err(|_| "Could not save host".into())
+    }
+}
+
+/// Moves a pre-per-host project directory under the host its location is on.
+/// A dangling legacy id is dropped, as the old lookup would have ignored it.
+fn migrate_default_locations(data: &mut CatalogData) {
+    for project in &mut data.projects {
+        let Some(id) = project.legacy_default_location_id.take() else {
+            continue;
+        };
+        if let Some(location) = data.locations.iter().find(|l| l.id == id) {
+            project
+                .default_locations
+                .entry(location.host_id.clone())
+                .or_insert(id);
+        }
     }
 }
 
@@ -424,22 +640,35 @@ mod tests {
         let mut catalog = Catalog::open(path.clone()).unwrap();
         let existing = catalog.project(None, "Existing", None).unwrap();
         let project = catalog.project(None, "Thing", None).unwrap();
-        assert!(catalog.default_location(Some(&project.id)).is_none());
+        assert!(
+            catalog
+                .default_location(Some(&project.id), "local")
+                .is_none()
+        );
         let location = catalog.location(Path::new("/srv/thing")).unwrap();
         assert!(
             catalog
-                .set_default_location(&project.id, Some("missing"))
+                .set_default_location(&project.id, "local", Some("missing"))
+                .is_err()
+        );
+        // A location is only a default on the host it lives on.
+        assert!(
+            catalog
+                .set_default_location(&project.id, "mac", Some(&location.id))
                 .is_err()
         );
         catalog
-            .set_default_location(&project.id, Some(&location.id))
+            .set_default_location(&project.id, "local", Some(&location.id))
             .unwrap();
         catalog
             .project(Some(&project.id), "Renamed thing", None)
             .unwrap();
         let mut catalog = Catalog::open(path.clone()).unwrap();
         assert_eq!(
-            catalog.default_location(Some(&project.id)).unwrap().path,
+            catalog
+                .default_location(Some(&project.id), "local")
+                .unwrap()
+                .path,
             Path::new("/srv/thing")
         );
         let saved = catalog
@@ -450,9 +679,96 @@ mod tests {
             .unwrap();
         assert_eq!(saved.location_ids, [location.id.clone()]);
         // Other projects are never changed by setting one project's directory.
-        assert!(catalog.default_location(Some(&existing.id)).is_none());
-        catalog.set_default_location(&project.id, None).unwrap();
-        assert!(catalog.default_location(Some(&project.id)).is_none());
+        assert!(
+            catalog
+                .default_location(Some(&existing.id), "local")
+                .is_none()
+        );
+        catalog
+            .set_default_location(&project.id, "local", None)
+            .unwrap();
+        assert!(
+            catalog
+                .default_location(Some(&project.id), "local")
+                .is_none()
+        );
+        let _ = std::fs::remove_file(path);
+    }
+    #[test]
+    fn default_locations_are_per_host() {
+        let path = std::env::temp_dir().join(format!("agentworks-hosts-{}.json", Uuid::new_v4()));
+        let mut catalog = Catalog::open(path.clone()).unwrap();
+        let project = catalog.project(None, "Thing", None).unwrap();
+        let linux = catalog.location(Path::new("/home/me/thing")).unwrap();
+        let mac = catalog
+            .location_on("mac", Path::new("/Users/me/src/thing"))
+            .unwrap();
+        catalog
+            .set_default_location(&project.id, "local", Some(&linux.id))
+            .unwrap();
+        catalog
+            .set_default_location(&project.id, "mac", Some(&mac.id))
+            .unwrap();
+        let catalog = Catalog::open(path.clone()).unwrap();
+        assert_eq!(
+            catalog
+                .default_location(Some(&project.id), "local")
+                .unwrap()
+                .id,
+            linux.id
+        );
+        assert_eq!(
+            catalog
+                .default_location(Some(&project.id), "mac")
+                .unwrap()
+                .id,
+            mac.id
+        );
+        assert!(
+            catalog
+                .default_location(Some(&project.id), "other")
+                .is_none()
+        );
+        let mut catalog = catalog;
+        // Clearing one host keeps the others.
+        catalog
+            .set_default_location(&project.id, "mac", None)
+            .unwrap();
+        assert!(catalog.default_location(Some(&project.id), "mac").is_none());
+        assert!(
+            catalog
+                .default_location(Some(&project.id), "local")
+                .is_some()
+        );
+        let _ = std::fs::remove_file(path);
+    }
+    #[test]
+    fn legacy_default_location_moves_under_its_host() {
+        let path = std::env::temp_dir().join(format!("agentworks-legacy-{}.json", Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            r#"{"projects":[
+                {"id":"a","name":"A","slug":"AA","locationIds":["l1"],"defaultLocationId":"l1"},
+                {"id":"b","name":"B","slug":"BB","locationIds":[],"defaultLocationId":"gone"}],
+              "locations":[{"id":"l1","hostId":"box","path":"/srv/a"}]}"#,
+        )
+        .unwrap();
+        let mut catalog = Catalog::open(path.clone()).unwrap();
+        assert_eq!(
+            catalog.default_location(Some("a"), "box").unwrap().path,
+            Path::new("/srv/a")
+        );
+        assert!(catalog.default_location(Some("a"), "local").is_none());
+        assert!(catalog.data.projects[1].default_locations.is_empty());
+        catalog.save(catalog.data.clone()).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("defaultLocationId"));
+        assert!(
+            Catalog::open(path.clone())
+                .unwrap()
+                .default_location(Some("a"), "box")
+                .is_some()
+        );
         let _ = std::fs::remove_file(path);
     }
     #[test]
@@ -473,7 +789,6 @@ mod tests {
                 && !access.cancel_sessions
                 && !access.run_automations
                 && !access.restart_service
-                && !access.manage_review_queue
         );
         catalog
             .settings(Settings {
@@ -538,6 +853,7 @@ mod tests {
             let saved = Catalog::open(path.clone()).unwrap().data.settings;
             assert_eq!(saved.codex_default_permission_mode, Some(mode));
             assert_eq!(saved.default_models["claude"], "unchanged");
+            assert_eq!(saved.default_models["claude-rust"], "unchanged");
             assert_eq!(
                 serde_json::to_value(saved).unwrap()["codexDefaultPermissionMode"],
                 mode.id()
@@ -618,11 +934,19 @@ mod tests {
                 timeouts: None,
                 claude_default_permission_mode: None,
                 codex_default_permission_mode: None,
+                antigravity_default_permission_mode: None,
                 default_communication_role: None,
                 notifications: Default::default(),
+                max_active_sessions: Some(48),
+                idle_sleep_minutes: Some(0),
+                git: None,
+                hidden_providers: None,
+                session_routing: None,
             })
             .unwrap();
         let mut reopened = Catalog::open(path.clone()).unwrap();
+        assert_eq!(reopened.data.settings.max_active_sessions, Some(48));
+        assert_eq!(reopened.data.settings.idle_sleep_minutes, Some(0));
         assert_eq!(reopened.data.projects[0].name, "Renamed");
         assert!(reopened.data.projects[0].archived);
         assert_eq!(
@@ -636,6 +960,50 @@ mod tests {
         assert_eq!(reopened.data.locations.len(), 2);
         reopened.remove(&project.id).unwrap();
         assert_eq!(reopened.data.locations.len(), 2);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn hosts_can_be_renamed_and_repointed() {
+        let path = std::env::temp_dir().join(format!("agentworks-hosts-{}.json", Uuid::new_v4()));
+        let mut catalog = Catalog::open(path.clone()).unwrap();
+        let manual = catalog.add_host("Box", "me@box", "").unwrap();
+        let managed = catalog
+            .add_managed_host(
+                "Rock",
+                "me@rock",
+                "\"$HOME/x\"/launch",
+                Some("/k".into()),
+                None,
+            )
+            .unwrap();
+        // Its own name is not taken; another host's is, in any case.
+        let renamed = catalog
+            .update_host(&manual.id, "box", "me@box2", Some("~/bin/agentworks"))
+            .unwrap();
+        assert_eq!(
+            (renamed.name.as_str(), renamed.destination.as_str()),
+            ("box", "me@box2")
+        );
+        assert_eq!(renamed.command, "~/bin/agentworks");
+        assert!(
+            catalog
+                .update_host(&manual.id, "ROCK", "me@box", None)
+                .is_err()
+        );
+        assert!(
+            catalog
+                .update_host(&manual.id, "box", "-oProxyCommand=sh", None)
+                .is_err()
+        );
+        // A host this server installed keeps the launch command it wrote.
+        let moved = catalog
+            .update_host(&managed.id, "Rock 2", "me@rock.lan", Some("evil"))
+            .unwrap();
+        assert_eq!(moved.command, managed.command);
+        assert!(catalog.update_host("missing", "x", "x", None).is_err());
+        let reopened = Catalog::open(path.clone()).unwrap();
+        assert_eq!(reopened.data.hosts[1].name, "Rock 2");
         std::fs::remove_file(path).unwrap();
     }
 
@@ -676,6 +1044,22 @@ mod tests {
             )
             .unwrap();
         assert_eq!(rooted.roots, ["~/projects", "/srv/app"]);
+        // Windows hosts: either separator, stored `/`-separated and deduplicated.
+        let windows = catalog
+            .set_host_roots(
+                &host.id,
+                vec!["C:\\work\\".into(), "c:/work".into(), "D:".into()],
+            )
+            .unwrap();
+        assert_eq!(windows.roots, ["C:/work", "D:/"]);
+        assert!(
+            catalog
+                .set_host_roots(&host.id, vec!["C:work".into()])
+                .is_err()
+        );
+        catalog
+            .set_host_roots(&host.id, vec!["~/projects".into(), "/srv/app".into()])
+            .unwrap();
         let remote = catalog
             .location_on(&host.id, Path::new("/srv/app"))
             .unwrap();
@@ -685,11 +1069,177 @@ mod tests {
         );
         let project = catalog.project(None, "Spans hosts", None).unwrap();
         catalog.attach_location(&project.id, &remote.id).unwrap();
+        let local = catalog.location(Path::new("/srv/app")).unwrap();
+        catalog
+            .set_default_location(&project.id, &host.id, Some(&remote.id))
+            .unwrap();
+        catalog
+            .set_default_location(&project.id, "local", Some(&local.id))
+            .unwrap();
         catalog.remove_host(&host.id).unwrap();
+        // Only the removed host's project directory is cleared.
+        assert!(
+            catalog
+                .default_location(Some(&project.id), &host.id)
+                .is_none()
+        );
+        assert!(
+            catalog
+                .default_location(Some(&project.id), "local")
+                .is_some()
+        );
         assert!(catalog.remove_host(&host.id).is_err());
         assert!(catalog.data.locations.iter().all(|l| l.host_id != host.id));
-        assert!(catalog.data.projects[0].location_ids.is_empty());
+        assert_eq!(catalog.data.projects[0].location_ids, [local.id.as_str()]);
         assert_eq!(catalog.data.hosts.len(), 1);
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+fn valid_slug(s: &str) -> bool {
+    (2..=20).contains(&s.len())
+        && s.as_bytes()[0].is_ascii_uppercase()
+        && s.bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+fn unique_slug(data: &CatalogData, name: &str) -> String {
+    let mut base: String = name
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_uppercase())
+        .take(12)
+        .collect();
+    if base.is_empty() || !base.as_bytes()[0].is_ascii_uppercase() {
+        base.insert_str(0, "P");
+    }
+    if base.len() < 2 {
+        base.push('X');
+    }
+    let mut slug = base.clone();
+    let mut n = 2u64;
+    while data.projects.iter().any(|p| p.slug == slug) {
+        slug = format!("{base}{n}");
+        n += 1;
+    }
+    slug
+}
+fn migrate_slugs(data: &mut CatalogData) -> io::Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for p in &data.projects {
+        if !seen.insert(p.id.clone()) || (!p.slug.is_empty() && !valid_slug(&p.slug)) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid project metadata",
+            ));
+        }
+    }
+    let mut slugs = std::collections::HashSet::new();
+    for p in &data.projects {
+        if !p.slug.is_empty() && !slugs.insert(p.slug.clone()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Duplicate project slug",
+            ));
+        }
+    }
+    let mut missing: Vec<_> = data
+        .projects
+        .iter()
+        .filter(|p| p.slug.is_empty())
+        .map(|p| p.id.clone())
+        .collect();
+    missing.sort();
+    for id in missing {
+        let index = data.projects.iter().position(|p| p.id == id).unwrap();
+        data.projects[index].slug = unique_slug(data, &data.projects[index].name);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod ticket_slug_tests {
+    use super::*;
+    #[test]
+    fn tickets_opt_in_defaults_migrates_and_saves_atomically() {
+        let path = std::env::temp_dir().join(format!("opt-in-{}.json", Uuid::new_v4()));
+        let mut c = Catalog::open(path.clone()).unwrap();
+        let p = c.project(None, "Default", None).unwrap();
+        assert!(!p.tasks_enabled);
+        let mut legacy = serde_json::to_value(&c.data).unwrap();
+        legacy["projects"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("tasksEnabled");
+        std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        c = Catalog::open(path.clone()).unwrap();
+        assert!(!c.data.projects[0].tasks_enabled);
+        let enabled = c
+            .project_with_options(Some(&p.id), "Enabled", None, Some("ON"), Some(true))
+            .unwrap();
+        assert!(enabled.tasks_enabled);
+        c = Catalog::open(path.clone()).unwrap();
+        assert!(c.data.projects[0].tasks_enabled);
+        assert!(
+            c.project(Some(&p.id), "Renamed", None)
+                .unwrap()
+                .tasks_enabled
+        );
+        let before = serde_json::to_value(&c.data).unwrap();
+        assert!(
+            c.project_with_options(Some(&p.id), "Invalid", None, Some("bad"), Some(false))
+                .is_err()
+        );
+        assert_eq!(serde_json::to_value(&c.data).unwrap(), before);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(
+            c.project_with_options(Some(&p.id), "Unsaved", None, Some("OFF"), Some(false))
+                .is_err()
+        );
+        assert_eq!(serde_json::to_value(&c.data).unwrap(), before);
+        std::fs::remove_dir(&path).unwrap();
+        let _ = std::fs::remove_file(path.with_extension("json.tmp"));
+    }
+    #[test]
+    fn legacy_slugs_are_deterministic_unique_and_stable() {
+        let path = std::env::temp_dir().join(format!("slugs-{}.json", Uuid::new_v4()));
+        let mut c = Catalog::open(path.clone()).unwrap();
+        let a = c.project(None, "hello world", None).unwrap();
+        let b = c.project(None, "hello-world", None).unwrap();
+        assert_ne!(a.slug, b.slug);
+        assert_eq!(
+            c.project(Some(&a.id), "renamed", None).unwrap().slug,
+            a.slug
+        );
+        assert!(
+            c.project_with_slug(Some(&a.id), "renamed", None, Some(&b.slug))
+                .is_err()
+        );
+        assert!(
+            c.project_with_slug(Some(&a.id), "renamed", None, Some("bad-slug"))
+                .is_err()
+        );
+        let mut v = serde_json::to_value(&c.data).unwrap();
+        for p in v["projects"].as_array_mut().unwrap() {
+            p.as_object_mut().unwrap().remove("slug");
+        }
+        std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+        let first = Catalog::open(path.clone()).unwrap();
+        v["projects"].as_array_mut().unwrap().reverse();
+        std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+        let second = Catalog::open(path.clone()).unwrap();
+        for p in &first.data.projects {
+            assert_eq!(
+                p.slug,
+                second
+                    .data
+                    .projects
+                    .iter()
+                    .find(|q| q.id == p.id)
+                    .unwrap()
+                    .slug
+            );
+        }
         std::fs::remove_file(path).unwrap();
     }
 }

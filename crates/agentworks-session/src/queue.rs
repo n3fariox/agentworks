@@ -53,6 +53,9 @@ pub struct Queue {
     /// The current turn is a status-only diagnostic probe; it never triggers dispatch.
     #[serde(default)]
     pub diagnostic: bool,
+    /// Input was typed during session startup; dispatch once the session is ready.
+    #[serde(default)]
+    pub after_startup: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -125,6 +128,29 @@ impl Queue {
         });
         Ok((id, false))
     }
+    /// Human input typed while the session starts. Resuming the session was deliberate,
+    /// so a pause with nothing pending has nothing left to protect; any other pause holds.
+    pub fn enqueue_during_startup(
+        &mut self,
+        request_id: &str,
+        text: &str,
+        now: u64,
+    ) -> Res<(String, bool)> {
+        let nothing_pending = !self.has_pending();
+        let added = self.enqueue(request_id, text, now)?;
+        if nothing_pending {
+            self.resume();
+        }
+        self.after_startup = self.paused.is_none();
+        Ok(added)
+    }
+    /// The session became idle after starting. A usage limit leaves held input queued
+    /// for the continuation turn's outcome to release.
+    pub fn startup_finished(&mut self, limited: bool) {
+        if std::mem::take(&mut self.after_startup) && !limited && self.paused.is_none() {
+            self.ready = self.items.iter().any(|i| i.state == ItemState::Queued);
+        }
+    }
     /// Edits a pending (or errored, deliberately re-queued) item if `revision` matches.
     /// The durable request-ID binding keeps the original payload.
     pub fn edit(&mut self, id: &str, revision: u32, text: &str) -> Res<()> {
@@ -187,6 +213,7 @@ impl Queue {
     /// even if the queue is empty or the turn later ends with `end_turn`.
     pub fn block(&mut self, reason: &str) {
         self.ready = false;
+        self.after_startup = false;
         self.pause(reason);
         self.paused = Some(reason.into());
     }
@@ -212,23 +239,35 @@ impl Queue {
     /// Called at every turn acceptance (direct, automation or queued).
     pub fn begin_turn(&mut self, text: &str) {
         self.ready = false;
+        self.after_startup = false;
         self.diagnostic = is_diagnostic(text);
     }
-    /// Records the finished turn's outcome for the item in flight.
+    /// Called only after the command channel accepts this dispatch.
+    pub fn command_handed_off(&mut self, request_id: &str) {
+        for item in &mut self.items {
+            if item.state == ItemState::Sending && item.dispatch_id() == request_id {
+                item.state = ItemState::Sent;
+            }
+        }
+    }
+    /// Records the turn outcome. Accepted inputs stay sent regardless of outcome;
+    /// a claim that failed before acceptance is still unresolved.
     pub fn finish_turn(&mut self, outcome: &Outcome) {
         let diagnostic = std::mem::take(&mut self.diagnostic);
         self.ready = false;
+        let mut unconfirmed = false;
         for item in &mut self.items {
             if item.state == ItemState::Sending {
-                if *outcome == Outcome::Success {
-                    item.state = ItemState::Sent;
-                } else {
-                    item.state = ItemState::Error;
-                    item.note = Some(format!("Turn ended: {outcome:?}; not resent"));
-                }
+                item.state = ItemState::Error;
+                item.note = Some(format!(
+                    "Command handoff unconfirmed; turn ended: {outcome:?}; not resent"
+                ));
+                unconfirmed = true;
             }
         }
-        if *outcome != Outcome::Success {
+        if unconfirmed {
+            self.block("Command handoff unconfirmed. Inspect queued inputs, then resume.");
+        } else if *outcome != Outcome::Success {
             self.pause(&format!(
                 "Previous turn ended: {outcome:?}. Inspect, then resume."
             ));
@@ -262,6 +301,7 @@ impl Queue {
     pub fn recover(&mut self) {
         self.ready = false;
         self.diagnostic = false;
+        self.after_startup = false;
         let mut ambiguous = false;
         for item in &mut self.items {
             if item.state == ItemState::Sending {
@@ -309,6 +349,7 @@ mod tests {
         let (text, id) = q.claim().unwrap();
         assert_eq!((text.as_str(), id.as_str()), ("one!", "queue:q1:r1"));
         assert!(q.claim().is_none(), "only one in flight");
+        q.command_handed_off(&id);
         q.finish_turn(&Outcome::Success);
         assert!(q.ready);
         assert_eq!(q.claim().unwrap().0, "three");
@@ -342,15 +383,69 @@ mod tests {
             assert!(q.claim().is_none(), "{outcome:?} blocks dispatch");
             assert_eq!(q.items[0].state, ItemState::Error);
             q.resume();
-            assert_eq!(
-                q.claim().unwrap().0,
-                "second",
-                "errored item is not replayed"
-            );
+            let (text, id) = q.claim().unwrap();
+            assert_eq!(text, "second", "errored item is not replayed");
+            q.command_handed_off(&id);
             q.finish_turn(&Outcome::Success);
             q.edit(&a, 0, "first again").unwrap();
             assert_eq!(q.claim().unwrap().1, "queue:q1:r1");
         }
+    }
+
+    #[test]
+    fn accepted_input_is_sent_before_the_turn_finishes() {
+        for outcome in [
+            Outcome::Success,
+            Outcome::Cancelled,
+            Outcome::Error,
+            Outcome::Quota,
+        ] {
+            let mut q = q();
+            q.enqueue("r1", "first", 1).unwrap();
+            q.enqueue("r2", "second", 2).unwrap();
+            let (text, id) = q.claim().unwrap();
+            q.begin_turn(&text);
+            assert_eq!(q.items[0].state, ItemState::Sending);
+            q.command_handed_off("unrelated-request");
+            assert_eq!(q.items[0].state, ItemState::Sending);
+            q.command_handed_off(&id);
+            assert_eq!(q.items[0].state, ItemState::Sent);
+            assert!(!q.ready, "acceptance must not dispatch the next input");
+            assert!(q.edit("q1", 0, "retry").is_err());
+            q.finish_turn(&outcome);
+            assert_eq!(q.items[0].state, ItemState::Sent);
+            assert_eq!(q.ready, outcome == Outcome::Success);
+            assert_eq!(q.paused.is_some(), outcome != Outcome::Success);
+        }
+    }
+
+    #[test]
+    fn successful_outcome_cannot_confirm_an_ambiguous_handoff() {
+        let mut q = q();
+        q.enqueue("r1", "first", 1).unwrap();
+        q.enqueue("r2", "second", 2).unwrap();
+        let (text, _) = q.claim().unwrap();
+        q.begin_turn(&text);
+        q.finish_turn(&Outcome::Success);
+        assert_eq!(q.items[0].state, ItemState::Error);
+        assert_eq!(q.items[1].state, ItemState::Paused);
+        assert!(!q.ready);
+        assert!(q.has_pending());
+    }
+
+    #[test]
+    fn restart_preserves_accepted_delivery() {
+        let mut q = q();
+        q.enqueue("r1", "first", 1).unwrap();
+        q.enqueue("r2", "second", 2).unwrap();
+        let (text, id) = q.claim().unwrap();
+        q.begin_turn(&text);
+        q.command_handed_off(&id);
+        let mut restored: Queue = serde_json::from_value(serde_json::to_value(q).unwrap()).unwrap();
+        restored.recover();
+        assert_eq!(restored.items[0].state, ItemState::Sent);
+        assert_eq!(restored.items[1].state, ItemState::Paused);
+        assert!(!restored.ready);
     }
 
     #[test]
@@ -429,6 +524,54 @@ mod tests {
             q.enqueue(&format!("r{i}"), "x", 1).unwrap();
         }
         assert!(q.enqueue("over", "x", 1).is_err(), "count bounded");
+    }
+
+    #[test]
+    fn startup_input_dispatches_only_after_a_clean_start() {
+        let mut started = q();
+        started.enqueue_during_startup("r1", "a", 1).unwrap();
+        assert!(!started.ready, "held until the session is ready");
+        started.startup_finished(false);
+        assert!(started.ready);
+        assert_eq!(started.claim().unwrap().0, "a");
+
+        let mut limited = q();
+        limited.enqueue_during_startup("r1", "a", 1).unwrap();
+        limited.startup_finished(true);
+        assert!(!limited.ready, "a usage limit is not bypassed");
+        assert!(!limited.after_startup);
+
+        let mut failed = q();
+        failed.enqueue_during_startup("r1", "a", 1).unwrap();
+        failed.block("did not start");
+        failed.startup_finished(false);
+        assert!(!failed.ready);
+        assert_eq!(failed.items[0].state, ItemState::Paused);
+
+        let mut restarted = q();
+        restarted.enqueue_during_startup("r1", "a", 1).unwrap();
+        restarted.recover();
+        restarted.startup_finished(false);
+        assert!(!restarted.ready, "restart during startup needs inspection");
+        assert_eq!(restarted.items[0].state, ItemState::Paused);
+    }
+
+    #[test]
+    fn startup_input_clears_only_an_empty_pause() {
+        let mut empty = q();
+        empty.block("Suspended");
+        empty.enqueue_during_startup("r1", "a", 1).unwrap();
+        assert!(empty.paused.is_none());
+        assert_eq!(empty.items[0].state, ItemState::Queued);
+        assert!(empty.after_startup);
+
+        let mut held = q();
+        held.enqueue("r1", "older", 1).unwrap();
+        held.block("Suspended");
+        held.enqueue_during_startup("r2", "newer", 2).unwrap();
+        assert!(held.paused.is_some(), "older input still needs inspection");
+        assert_eq!(held.items[1].state, ItemState::Paused);
+        assert!(!held.after_startup);
     }
 
     #[test]

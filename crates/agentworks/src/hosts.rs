@@ -22,6 +22,9 @@ pub fn view(hosts: &Hosts, host: &Host) -> Value {
         "status": link.status,
         "detail": link.detail,
         "since": link.since,
+        "outdated": link.worker.as_ref().and_then(|w| {
+            agentworks_runtime::remote::outdated(w["build"].as_str())
+        }),
         "worker": link.worker,
     })
 }
@@ -80,7 +83,7 @@ pub async fn remove(State(app): State<App>, Path(id): Path<String>) -> ApiResult
                     .is_some_and(|name| uuid::Uuid::parse_str(&name.to_string_lossy()).is_ok())
             {
                 if tokio::fs::remove_dir_all(dir).await.is_err() {
-                    eprintln!("Could not remove a deleted host's managed SSH key directory");
+                    tracing::warn!("Could not remove a deleted host's managed SSH key directory");
                 }
             }
         }
@@ -145,13 +148,18 @@ pub(crate) async fn remote_directory(
         "That directory is outside this host's working directories.",
     ))
 }
-/// Browse or create directories on a host; the worker enforces the host's roots.
+/// Browse or create directories on a host; the worker enforces the host's roots,
+/// or `roots` when given (the home directory, for choosing roots).
 pub(crate) async fn directories(
     app: &App,
     host_id: &str,
     mut request: Value,
+    roots: Option<Vec<String>>,
 ) -> Result<Value, (StatusCode, String)> {
-    let roots = host_roots(app, host_id)?;
+    let roots = match roots {
+        Some(roots) => roots,
+        None => host_roots(app, host_id)?,
+    };
     let live = connected(app, host_id)?;
     if live.worker()["directories"] != true {
         return Err(fail(
@@ -200,8 +208,8 @@ pub(crate) async fn validate_session(
     if s.host_id == "local" && !crate::installed(&s.provider) {
         return Err(fail(StatusCode::CONFLICT, "Harness is unavailable"));
     }
-    let cwd = directory_on(app, &s.host_id, &s.provider, &s.cwd.to_string_lossy()).await?;
-    if cwd != s.cwd {
+    let cwd = directory_on(app, &s.host_id, &s.provider, &s.cwd().to_string_lossy()).await?;
+    if cwd != s.cwd() {
         return Err(fail(
             StatusCode::CONFLICT,
             "Session directory no longer resolves to its saved location",
@@ -275,6 +283,17 @@ pub(crate) fn diagnostic(app: &App, host: &str, provider: &str, message: &str) -
     )
 }
 
+/// A host's display name for logs; `local` and unknown hosts keep their ID.
+pub(crate) fn name(app: &App, host_id: &str) -> String {
+    app.catalog
+        .lock()
+        .unwrap()
+        .data
+        .hosts
+        .iter()
+        .find(|h| h.id == host_id)
+        .map_or_else(|| host_id.to_owned(), |h| h.name.clone())
+}
 fn host_roots(app: &App, host_id: &str) -> Result<Vec<String>, (StatusCode, String)> {
     app.catalog
         .lock()
@@ -317,11 +336,39 @@ pub(crate) async fn worktree_operation(
             "Update the worker on this host to enable worktree cleanup and restore",
         ));
     }
+    if matches!(operation, "gitConfig" | "runWorktreeHooks") && live.worker()["gitSettings"] != true
+    {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "Update this host's worker to enable Git settings and worktree hooks",
+        ));
+    }
+    worker_git_settings(live.worker(), &mut request["gitSettings"]);
     request["operation"] = json!(operation);
     request["roots"] = json!(roots);
     live.workspace(request)
         .await
         .map_err(|e| fail(StatusCode::CONFLICT, e))
+}
+
+/// Fills a worktree that `prepare_workspace` reserved on the host.
+pub(crate) async fn populate_worktree(
+    app: &App,
+    host: &str,
+    owned: &crate::worktree_cleanup::Owned,
+) -> Result<crate::worktree_cleanup::Owned, (StatusCode, String)> {
+    let roots = host_roots(app, host)?;
+    let live = connected(app, host)?;
+    let result = live
+        .workspace(json!({"operation":"populateWorktree","owned":owned,"roots":roots}))
+        .await
+        .map_err(|e| fail(StatusCode::CONFLICT, e))?;
+    serde_json::from_value(result["owned"].clone()).map_err(|_| {
+        fail(
+            StatusCode::BAD_GATEWAY,
+            "Invalid remote workspace ownership",
+        )
+    })
 }
 
 pub(crate) async fn prepare_workspace(
@@ -377,11 +424,30 @@ pub(crate) async fn prepare_workspace(
             "Update the worker on this host to enable remote worktrees.",
         ));
     }
+    if mode == crate::worktrees::Mode::NewWorktree && live.worker()["gitSettings"] != true {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "Update this host's worker to create worktrees with Git settings",
+        ));
+    }
+    let git_settings = app
+        .catalog
+        .lock()
+        .unwrap()
+        .data
+        .settings
+        .git
+        .clone()
+        .unwrap_or_default();
+    let mut git_settings = json!(git_settings);
+    worker_git_settings(live.worker(), &mut git_settings);
     // Reserve durably before the worker can mutate Git. Never replay a lost mutation.
     if mode == crate::worktrees::Mode::NewWorktree {
         crate::worktrees::arm_creation(app, key)?;
     }
-    let result = live.workspace(json!({"operation":"prepare","cwd":source,"roots":roots,"policy":policy,"workspace":if req.external_id.is_some() { json!({"mode":"directory"}) } else { json!(req.workspace) }})).await
+    // Workers that can reserve a worktree let the session fill it while it starts.
+    let defer = live.worker()["deferredWorktree"] == true;
+    let result = live.workspace(json!({"gitSettings":git_settings,"operation":"prepare","defer":defer,"cwd":source,"roots":roots,"policy":policy,"workspace":if req.external_id.is_some() { json!({"mode":"directory"}) } else { json!(req.workspace) }})).await
         .map_err(|e| fail(StatusCode::CONFLICT, format!("{e} Inspect retained remote branches/files before retrying.")))?;
     let path = result["cwd"]
         .as_str()
@@ -414,6 +480,38 @@ pub async fn set_roots(
         .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
     Ok(Json(view(&app.hosts, &host)))
 }
+#[derive(Deserialize)]
+pub struct HostEdit {
+    name: String,
+    destination: String,
+    command: Option<String>,
+}
+/// Renames a host or changes how it is reached; sessions keep their host. A
+/// changed destination or command reconnects, which interrupts running turns.
+pub async fn update(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(req): Json<HostEdit>,
+) -> ApiResult {
+    let (before, host) = {
+        let mut catalog = app.catalog.lock().unwrap();
+        let before = catalog
+            .data
+            .hosts
+            .iter()
+            .find(|h| h.id == id)
+            .cloned()
+            .ok_or_else(|| fail(StatusCode::NOT_FOUND, "Host not found"))?;
+        let host = catalog
+            .update_host(&id, &req.name, &req.destination, req.command.as_deref())
+            .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+        (before, host)
+    };
+    if before.destination != host.destination || before.command != host.command {
+        app.hosts.start(host.clone());
+    }
+    Ok(Json(view(&app.hosts, &host)))
+}
 /// Drops the current link, if any, and connects again immediately.
 pub async fn reconnect(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     let host = app
@@ -428,4 +526,36 @@ pub async fn reconnect(State(app): State<App>, Path(id): Path<String>) -> ApiRes
         .ok_or_else(|| fail(StatusCode::NOT_FOUND, "Host not found"))?;
     app.hosts.start(host.clone());
     Ok(Json(view(&app.hosts, &host)))
+}
+
+/// Read Git metadata remotely; GitHub authentication always stays on the server.
+pub(crate) async fn git_context(
+    app: &App,
+    host: &str,
+    cwd: &str,
+) -> Result<Value, (StatusCode, String)> {
+    let roots = host_roots(app, host)?;
+    let live = app
+        .hosts
+        .live(host)
+        .ok_or_else(|| fail(StatusCode::CONFLICT, "Host is not connected"))?;
+    if live.worker()["gitContext"] != true {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "Update this host's worker to enable Git context",
+        ));
+    }
+    live.workspace(json!({"operation":"gitContext","cwd":cwd,"roots":roots}))
+        .await
+        .map_err(|_| fail(StatusCode::CONFLICT, "Remote Git context is unavailable"))
+}
+
+/// An older worker fails to parse `localSubmodules` and silently falls back to
+/// default copy and hook settings; leave it out so those still apply there.
+fn worker_git_settings(worker: &serde_json::Value, settings: &mut serde_json::Value) {
+    if worker["localSubmodules"] != true {
+        if let Some(settings) = settings.as_object_mut() {
+            settings.remove("localSubmodules");
+        }
+    }
 }

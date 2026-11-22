@@ -17,7 +17,7 @@ async function api(path,body,method){
 const script=async name=>(await api('/api/scripts')).scripts.find(s=>s.name===name);
 test.beforeAll(async()=>{
   await mkdir('.cache',{recursive:true});fixture=await mkdtemp(resolve('.cache/parser-scripts-'));
-  server=spawn(resolve('target/debug/agentworks'),[],{env:{...process.env,
+  server=spawn(process.env.AGENTWORKS_TEST_BINARY||resolve('target/debug/agentworks'),[],{env:{...process.env,
     AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:'4474',AGENTWORKS_ROOTS:fixture,
     AGENTWORKS_CATALOG_PATH:join(fixture,'catalog.json'),AGENTWORKS_DB_PATH:join(fixture,'sessions.sqlite3'),AGENTWORKS_DEMO_STATE_DIR:join(fixture,'demo')},stdio:['ignore','pipe','pipe']});
   server.on('error',e=>{log+=e.message;exited=true;});server.on('exit',()=>exited=true);
@@ -62,7 +62,8 @@ test('built-in parser can be disabled and enabled; Settings stays open',async({p
 test('inbox formatter can be edited, checked and restored',async({page})=>{
   const panel=await openPanel(page),name='inbox_message.star';
   expect((await script(name)).capability).toBe('hooks');
-  expect((await script(name)).hooks[0]).toMatchObject({hook:'formatter',message_type:'inbox.peer',pattern:'.*'});
+  expect((await script(name)).hooks[0]).toMatchObject({hook:'formatter',message_type:'inbox.peer'});
+  expect((await script(name)).hooks[0].pattern).toBeUndefined();
   await row(panel,name).getByRole('button',{name:`Edit ${name}`}).click();
   const source=panel.locator('[data-source]'),original=await source.inputValue();
   await expect(source).toHaveValue(/def format_message/);
@@ -81,6 +82,43 @@ test('inbox formatter can be edited, checked and restored',async({page})=>{
   expect((await script(name)).source).toBe(original);
 });
 
+test('chat line formatter starter links ticket keys in agent messages only',async({page})=>{
+  const panel=await openPanel(page);
+  await panel.getByRole('button',{name:'＋ New script'}).click();
+  await panel.locator('[data-starter]').selectOption('chat');
+  await panel.locator('[data-name]').fill('tickets.star');
+  await panel.getByRole('button',{name:'Save and check'}).click();
+  const entry=panel.locator('[data-script-entry="tickets.star"]');
+  await expect(entry.locator('.parser-script-hooks')).toContainText('Formatter · chat.agent · text:');
+  const session=await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Tickets'},'POST');
+  const render=body=>api('/api/markdown',body,'POST').then(r=>r.html);
+  const text='Fixed OPS-12 and `OPS-13`\n\n```\nOPS-14\n```';
+  const html=await render({text,sessionId:session.id});
+  expect(html).toContain('<a href="https://jira.example.com/browse/OPS-12" rel="noopener noreferrer">OPS-12</a>');
+  expect(html).toContain('<code>OPS-13</code>');
+  expect(html).toContain('OPS-14\n</code></pre>');
+  expect(await render({text})).not.toContain('<a ');
+  // User Markdown must not run the agent's formatter.
+  expect(await render({text,sessionId:session.id,user:true})).not.toContain('<a ');
+  // User prompts: nothing until a chat.user formatter exists, then only rewritten lines.
+  const userFormat=body=>api(`/api/sessions/${session.id}/user-format`,body,'POST');
+  expect((await userFormat({text:'Fixed OPS-12'})).lines).toBeNull();
+  await panel.getByRole('button',{name:'＋ New script'}).click();
+  await panel.locator('[data-starter]').selectOption('chat-user');
+  await panel.locator('[data-name]').fill('user_tickets.star');
+  await panel.getByRole('button',{name:'Save and check'}).click();
+  await expect(panel.locator('[data-script-entry="user_tickets.star"] .parser-script-hooks')).toContainText('Formatter · chat.user · text:');
+  expect((await userFormat({text:'*kept* OPS-12\nplain\n```\nOPS-14\n```'})).lines).toEqual([
+    '<em>kept</em> <a href="https://jira.example.com/browse/OPS-12" rel="noopener noreferrer">OPS-12</a>',null,null,null,null]);
+  const userHtml=await render({text:'**Fixed** OPS-12\n\n```\nOPS-14\n```',sessionId:session.id,user:true});
+  expect(userHtml).toContain('<strong>Fixed</strong>');
+  expect(userHtml).toContain('href="https://jira.example.com/browse/OPS-12"');
+  expect(userHtml).toContain('OPS-14\n</code></pre>');
+  await api('/api/sessions/'+session.id,undefined,'DELETE');
+  await api('/api/scripts/tickets.star',undefined,'DELETE');
+  await api('/api/scripts/user_tickets.star',undefined,'DELETE');
+});
+
 test('one arbitrarily named script exposes progress and formatter registrations',async({page})=>{
   const panel=await openPanel(page);
   await panel.getByRole('button',{name:'＋ New script'}).click();
@@ -97,7 +135,7 @@ test('one arbitrarily named script exposes progress and formatter registrations'
   await row(panel,'a_handlers.star').getByRole('button',{name:'Edit a_handlers.star'}).click();
   await panel.locator('[data-source]').fill(saved.source.replace(/^agent\.register.*$/gm,''));
   await panel.getByRole('button',{name:'Save and check'}).click();
-  await expect(panel.locator('[data-error]')).toContainText('no hooks registered');
+  await expect(panel.locator('[data-error]')).toContainText('no handlers registered');
   expect((await script('a_handlers.star')).source).toBe(saved.source);
   await panel.getByRole('button',{name:'Cancel'}).click();
   await api('/api/scripts/a_handlers.star',undefined,'DELETE');

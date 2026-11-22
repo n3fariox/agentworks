@@ -48,7 +48,7 @@ async function fixture(page,{withProjects=false}={}){
     if(path==='/api/catalog')return json({projects,hosts:[{id:'local',name:'Local'}],locations:[]});
     if(path==='/api/sessions')return json(sessions);
     if(path==='/api/automations')return json([]);
-    if(path==='/api/markdown')return json({html:'<p>A useful answer</p>'});
+    if(path==='/api/markdown/batch')return json({results:route.request().postDataJSON().items.map(()=>({html:'<p>A useful answer</p>'}))});
     const session=sessions.find(s=>path===`/api/sessions/${s.id}`);if(session)return json(snapshot(session));
     return json({});
   });
@@ -70,12 +70,35 @@ test('session menu archives and deletes the pressed session without switching ch
   await expect(page.locator('#header-title')).toHaveText('Current session');
 });
 test('keyboard navigation forks the pressed session',async({page})=>{
-  await fixture(page);await row(page).focus();await page.keyboard.press('Shift+F10');
+  await fixture(page);await row(page).locator('.session-select').focus();await page.keyboard.press('Shift+F10');
   await expect(menu(page)).toBeVisible();await page.keyboard.press('End');await expect(menu(page).getByRole('menuitem',{name:'Delete history…'})).toBeFocused();
-  await page.keyboard.press('Escape');await expect(row(page)).toBeFocused();
+  await page.keyboard.press('Escape');await expect(row(page).locator('.session-select')).toBeFocused();
   await page.keyboard.press('Shift+F10');await page.keyboard.press('Enter');
   await expect(page.locator('#session-title')).toHaveValue('Other session (fork)');
   await expect(page.locator('#header-title')).toHaveText('Current session');
+});
+test('right-click menu renames the pressed session without switching chats',async({page})=>{
+  const writes=await fixture(page);
+  await row(page).click({button:'right'});
+  await menu(page).getByRole('menuitem',{name:'Rename session…',exact:true}).click();
+  await expect(page.locator('#rename-dialog')).toBeVisible();
+  await expect(page.locator('#rename-title')).toHaveValue('Other session');
+  await page.locator('#rename-title').fill('Other session (renamed)');
+  await page.locator('#rename-form').getByRole('button',{name:'Save name'}).click();
+  await expect.poll(()=>writes.length).toBe(1);
+  expect(writes[0]).toMatchObject({path:'/api/sessions/two',method:'PATCH',body:{title:'Other session (renamed)'}});
+  await expect(row(page)).toContainText('Other session (renamed)');
+  await expect(page.locator('#header-title')).toHaveText('Current session');
+  await expect(page.locator('#rename-dialog')).toBeHidden();
+});
+test('keyboard menu navigation renames the pressed session',async({page})=>{
+  const writes=await fixture(page);
+  await row(page).locator('.session-select').focus();
+  await page.keyboard.press('Shift+F10');await page.keyboard.press('ArrowDown');
+  await expect(menu(page).getByRole('menuitem',{name:'Rename session…',exact:true})).toBeFocused();
+  await page.keyboard.press('Enter');await expect(page.locator('#rename-dialog')).toBeVisible();
+  await page.locator('#rename-title').fill('Other session (renamed)');await page.keyboard.press('Enter');
+  await expect(writes).toHaveLength(1);expect(writes[0]).toMatchObject({path:'/api/sessions/two',method:'PATCH',body:{title:'Other session (renamed)'}});
 });
 test('long press opens on mobile, suppresses activation, and movement cancels it',async({page})=>{
   await page.setViewportSize({width:390,height:844});await fixture(page);await page.locator('#session-home').click();
@@ -93,8 +116,8 @@ test('message menu copies source text and quotes while preserving a draft and na
   const message=page.locator('article.message.assistant');
   await message.click({button:'right'});await menu(page).getByRole('menuitem',{name:'Copy message'}).click();
   expect(await page.evaluate(()=>navigator.clipboard.readText())).toBe('A useful answer');
-  await page.locator('#prompt').fill('Existing draft');await message.click({button:'right'});await menu(page).getByRole('menuitem',{name:'Quote in reply'}).click();
-  await expect(page.locator('#prompt')).toHaveValue('Existing draft\n\n> A useful answer\n\n');await expect(page.locator('#prompt')).toBeFocused();
+  await page.locator('#prompt-editor .cm-content').fill('Existing draft');await message.click({button:'right'});await menu(page).getByRole('menuitem',{name:'Quote in reply'}).click();
+  await expect(page.locator('#prompt')).toHaveValue('Existing draft\n\n> A useful answer\n\n');await expect(page.locator('#prompt-editor .cm-content')).toBeFocused();
   await message.evaluate(node=>{const range=document.createRange();range.selectNodeContents(node.querySelector('.message-body'));getSelection().removeAllRanges();getSelection().addRange(range);});
   const intercepted=await message.evaluate(node=>{const event=new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:100,clientY:100});node.dispatchEvent(event);return event.defaultPrevented;});
   expect(intercepted).toBe(false);await expect(menu(page)).toBeHidden();
@@ -106,7 +129,7 @@ test('touch messages offer quoting, links retain native context menus, and outsi
   await message.dispatchEvent('pointerdown',{pointerType:'touch',isPrimary:true,button:0,pointerId:2,clientX:350,clientY:300});
   await expect(menu(page).getByRole('menuitem',{name:'Quote in reply'})).toBeVisible();
   await message.dispatchEvent('pointerup',{pointerType:'touch',pointerId:2});
-  await page.locator('#prompt').click();await expect(menu(page)).toBeHidden();
+  await page.locator('#prompt-editor .cm-content').click();await expect(menu(page)).toBeHidden();
   const intercepted=await message.evaluate(node=>{
     const link=document.createElement('a');link.href='https://example.com';link.textContent='Example';node.querySelector('.message-body').append(link);
     const event=new MouseEvent('contextmenu',{bubbles:true,cancelable:true});link.dispatchEvent(event);return event.defaultPrevented;

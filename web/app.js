@@ -5,7 +5,8 @@ import {hostEnrollment} from './host-enrollment.js';
 import {appUrl, socketUrl, localState as localStorage, sessionState as sessionStorage} from './hosting.js';
 import {setupInboxDelivery} from './inbox-delivery.js';
 import {setupDiff} from './diff.js';
-import {setupWorktreeControls,setupPolicyEditor} from './worktree-controls.js';
+import {setupWorktreeControls,setupPolicyEditor,setupGitSettings} from './worktree-controls.js';
+import {setupGithub} from './github.js';
 import {setupGitContext} from './git-context.js';
 import {setupWorktreeOwnership} from './worktree-ownership.js';
 import {setupControllers} from './controllers.js';
@@ -15,9 +16,11 @@ import {createWorkspace} from './workspace.js';
 import {setupCommunication} from './communication.js';
 import {setupPalettes} from './palettes.js';
 import {enhanceMermaid} from './mermaid.js';
+import {setupMarkdownComposer} from './markdown-composer.bundle.js';
 import {setupDisplayPreferences} from './display-preferences.js';
 import {setupWorkLogs,observeTool} from './work-logs.js';
-import {setupUsageStatus} from './usage-status.js';
+import {applyCompaction,renderCompaction} from './compaction.js';
+import {setupUsageStatus, watchSharedQuota, quotaFamily} from './usage-status.js';
 import {setupFlyout} from './flyout.js';
 import {setupResize,setupPromptResize} from './resize-handle.js';
 import {setupSidebarPin} from './sidebar-pin.js';
@@ -26,18 +29,49 @@ import {setupContextMenu} from './context-menu.js';
 import {setupTimeoutControls} from './timeout-controls.js';
 import {setupParserScripts} from './parser-scripts.js';
 import {setupSecrets,setupSessionSecrets} from './secrets.js';
-import {setupInputQueue,setupPromptRecovery,BUSY} from './input-queue.js';
+import {setupInputQueue,setupPromptRecovery,BUSY,STARTING} from './input-queue.js';
 import {setupNotifications} from './notifications.js';
+import {setupNotificationTray, isAutoDismissEnabled} from './notification-tray.js';
+let notificationTray=null;
+function updateNotificationIndicators(alerts=notificationTray?.getAlerts?.()||[]){
+  if(isAutoDismissEnabled()&&active?.id&&document.hasFocus()){
+    const activeAlerts=alerts.filter(a=>a.sessionId===active.id);
+    if(activeAlerts.length){
+      notificationTray?.dismissSessionAlerts(active.id);
+      return;
+    }
+  }
+  const activeIds=new Set(alerts.map(a=>a.sessionId));
+  for(const row of document.querySelectorAll('#sessions .session-item[data-session-id]')){
+    row.classList.toggle('has-notifications',activeIds.has(row.dataset.sessionId));
+  }
+  const boldProjectIds=new Set();
+  for(const s of sessions){
+    if(!s.archived&&activeIds.has(s.id)){
+      boldProjectIds.add(s.projectId||'ungrouped');
+    }
+  }
+  for(const heading of document.querySelectorAll('#sessions .tree-heading[data-project-group]')){
+    heading.classList.toggle('has-notifications',boldProjectIds.has(heading.dataset.projectGroup));
+  }
+}
 import {setupQuestions} from './questions.js';
 import {setupMentions} from './mentions.js';
+import {setupTaskMentions} from './task-mentions.js';
+import {setupTasks} from './tasks.js';
 import {setupAttachments} from './attachments.js';
 import {setupModelProviders} from './model-providers.js';
-import {setupDirectoryPicker,setupProjectDirectory} from './directory-picker.js';
+import {setupDirectoryPicker,setupProjectDirectory,directoryRow} from './directory-picker.js';
+import {setupAdditionalDirectories} from './additional-directories.js';
+import {setupCreateSections} from './create-sections.js';
+import {setupCreatePlace} from './create-place.js';
 const $ = id => document.getElementById(id);
 // randomUUID is unavailable on plain HTTP remote origins; getRandomValues is supported.
 const uuid = () => globalThis.crypto.randomUUID?.() ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
-const labels = {goose:'Goose · embedded',demo:'Demo agent',claude:'Claude','claude-rust':'Claude · Rust ACP',codex:'Codex','codex-rust':'Codex · Rust ACP',opencode:'OpenCode'};
-const icons = {goose:'◉',demo:'◈',claude:'✳','claude-rust':'✳',codex:'⌘','codex-rust':'⌘',opencode:'▣'};
+const labels = {goose:'Goose · embedded',demo:'Demo agent',claude:'Claude','claude-rust':'Claude',codex:'Codex','codex-rust':'Codex',opencode:'OpenCode',antigravity:'Antigravity'};
+// Sessions saved under the retired npm adapter IDs now run the Rust bridges.
+const currentProvider=id=>({claude:'claude-rust',codex:'codex-rust'})[id]||id;
+const icons = {goose:'◉',demo:'◈',claude:'✳','claude-rust':'✳',codex:'⌘','codex-rust':'⌘',opencode:'▣',antigravity:'△'};
 function readStorage(storage,key,fallback){try{return JSON.parse(storage.getItem(key))??fallback;}catch{return fallback;}}
 let workspace;
 let projects=[],locations=[],hosts=[{id:'local',name:'Local',status:'connected'}];
@@ -47,27 +81,51 @@ let editingProject=null,savingProject=false;
 const drafts=readStorage(sessionStorage,'agentworks-drafts',{});
 const scrollPositions=new Map();let restoreScroll=null;
 let config, sessions=[], active=null, socket=null, generation=0, connected=false;
-// U-07: per-session composer usage statusline; only this session's own events feed it.
-const usageStatus=setupUsageStatus({root:$('usage-status'),getProvider:()=>active?.provider,chip:$('composer-info')});
+// U-07: per-session composer usage statusline. Context and cost come only from this
+// session's events; account quota also takes newer reports from sessions sharing its account.
+let modelConfig=null;
+const sharedQuota=watchSharedQuota(socketUrl('/api/account-quota/events'),()=>usageStatus.render());
+const usageStatus=setupUsageStatus({root:$('usage-status'),getProvider:()=>active?.provider,getModel:()=>modelConfig?.currentValue,chip:$('composer-info'),
+  getShared:()=>active?sharedQuota.get(active.hostId,quotaFamily(active.provider,active.modelProvider)):null});
 const composerMenu=setupFlyout({menu:$('composer-menu'),triggers:[$('composer-more'),$('composer-info')]});
 const sessionMenu=setupFlyout({menu:$('session-menu'),triggers:[$('session-more')]});
+// Unacknowledged inbound peer messages: a dot on both ⋯ triggers and on Agents & inbox.
+function renderUnread(){
+  const n=active?.unacknowledged||0,label=n?`${n} unacknowledged message${n===1?'':'s'}`:'';
+  for(const id of ['session-more','lifecycle-menu','session-agents'])$(id).classList.toggle('has-unread',n>0);
+  $('session-more').setAttribute('aria-label',n?`Session options, ${label}`:'Session options');
+  $('lifecycle-menu').querySelector('summary').title=n?`Session actions · ${label}`:'Session actions';
+  $('session-agents').title=label;
+}
 setupResize({handle:$('sidebar-resize'),target:document.querySelector('.layout'),panel:$('sidebar'),variable:'--sidebar-width',key:'agentworks-sidebar-width',min:200,max:560,initial:228});
 const sidebarPin=setupSidebarPin({sidebar:$('sidebar'),button:$('sidebar-pin'),trigger:$('nav-sessions')});
 setupResize({handle:$('side-panel-resize'),target:$('side-panel'),panel:$('side-panel'),variable:'--side-panel-width',key:'agentworks-side-panel-width',min:300,max:960,initial:420,edge:'left'});
+const composerKeyboard=matchMedia('(pointer:coarse), (max-width:800px)');
+function updateComposerKeyboard(){
+  $('prompt').setAttribute('enterkeyhint',composerKeyboard.matches?'enter':'send');
+  $('composer-hint').textContent=composerKeyboard.matches?'Enter for a new line · Tap Send to send':'Enter to send · Shift + Enter for a new line';
+}
+updateComposerKeyboard();
+composerKeyboard.addEventListener('change',()=>{updateComposerKeyboard();renderComposer();});
 const promptResize=setupPromptResize($('prompt'));
+const markdownComposer=setupMarkdownComposer({area:$('prompt'),host:$('prompt-editor'),toggle:$('composer-source'),storage:localStorage});
 const promptRecovery=setupPromptRecovery({area:$('prompt'),storage:sessionStorage,getSession:()=>active?.id,onChange:()=>{$('prompt').dispatchEvent(new Event('input'));}});
 let currentUserSeq=null;
 let sidePanel=null;
 setInterval(()=>usageStatus.render(),60000);
 let timeoutControls=null,parserScripts=null,secrets=null,sessionSecrets=null;
-let transcript=[], tools=new Map(), approvals=new Map(), assistant=null, status='starting';
+let transcript=[], tools=new Map(), compactions=new Map(), approvals=new Map(), assistant=null, status='starting';
 const backgroundJobs=createBackgroundJobs({root:$('background-jobs'),api,getActive:()=>active,isConnected:()=>connected,onChange:()=>scheduleDraw()});
-const subagents=createSubagents({jobResult:job=>[`${job.name||'Background job'} · ${backgroundJobs.label(job.state)}`,...jobResultLines(job)].join('\n'),append:()=>{},tabs:$('session-tabs'),panel:$('subagent-view'),messages:$('messages'),onSelect:view=>{sessionTerminal.select(view);scheduleDraw();},uuid,applyToolUpdate,renderToolActivity,renderMessage:(body,item)=>{if(item.role==='Agent')updateMarkdown(item,body);else body.textContent=item.text;},el});
+const subagents=createSubagents({storage:localStorage,getSessionId:()=>active?.id,jobResult:job=>[`${job.name||'Background job'} · ${backgroundJobs.label(job.state)}`,...jobResultLines(job)].join('\n'),append:()=>{},tabs:$('session-tabs'),panel:$('subagent-view'),messages:$('messages'),onSelect:view=>{sessionTerminal.select(view);scheduleDraw();},uuid,applyToolUpdate,renderToolActivity,renderMessage:(body,item)=>{if(item.role==='Agent')updateMarkdown(item,body);else body.textContent=item.text;},el});
 // L-05 hook: activity indicator and explicit queued inputs (server-owned state).
 const questions=setupQuestions({api,uuid:()=>uuid(),storage:localStorage,getActive:()=>active,isConnected:()=>connected,agentName:request=>subagents.name(request?.sessionId)||labels[active?.provider]||'the agent'});
 const inputQueue=setupInputQueue({$,api,uuid:()=>uuid(),getActive:()=>active,getStatus:()=>status,toolActive:()=>[...tools.values()].some(t=>['pending','in_progress'].includes(t.status))});
 let permissionModes=null,sessionConfig=null;
 const mentions=setupMentions({prompt:$('prompt'),list:$('mention-list'),getActive:()=>active,getSessions:()=>sessions});
+const taskMentions=setupTaskMentions({prompt:$('prompt'),list:$('mention-list'),api,getActive:()=>active,getProject:id=>projects.find(p=>p.id===id)});
+const projectTasks=setupTasks({api,uuid,getProject:id=>projects.find(p=>p.id===id),decorate:node=>decorateMarkdown(node),onWrite:()=>taskMentions.refresh()});
+$('project-tasks').onclick=()=>{if(editingProject)projectTasks.open(editingProject);};
+$('session-tasks').onclick=()=>{if(active?.projectId){sessionMenu.close();projectTasks.open(active.projectId);}else toast('Assign this session to a project to view tickets.');};
 let replaying=false,workLogs=null,turnEnds=new Map();
 // Older transcript pages. `storedEvents` holds the stored events behind the current transcript
 // (older pages + snapshot window + live events, unique and ascending by seq) so prepending a
@@ -75,7 +133,7 @@ let replaying=false,workLogs=null,turnEnds=new Map();
 // `older.mode`: 'none' (snapshot is complete), 'more' (server reported truncation) or
 // 'begin' (the server confirmed there is nothing earlier).
 let storedEvents=[],older={mode:'none',loading:false,error:''},rebuilding=false,itemKey=null,itemCount=0,eventTime=null;
-let modelConfig=null, availableCommands=[], commandsOpen=false;
+let availableCommands=[], commandsOpen=false;
 let discoveryGeneration=0;
 let externalSessions=[], externalSelection=null, externalCursor=null, externalGeneration=0, externalLoading=false, externalImporting=false;
 let externalFetch=Promise.resolve();
@@ -87,10 +145,15 @@ let pendingCreate=readStorage(sessionStorage,'agentworks-pending-create',null);
 // L-08: set only while the new-session dialog is pre-filled from an existing session.
 let forkSource=null,forkGeneration=0,modelPicked=false,roleLibrary=[];
 const worktrees=setupWorktreeControls({$,api,onChange:()=>{if(config)providerNote();}});
+const createSections=setupCreateSections({$,storage:localStorage});
+// A place counts as used when it has a saved or remembered directory or a session.
+const createPlace=setupCreatePlace({$,el,used:(hostId,projectId)=>!!(projectDirectoryOn(hostId,projectId)||rememberedDirectory(hostId,projectId)||sessions.some(s=>(s.projectId||null)===projectId&&(s.hostId||'local')===hostId))});
 const policyEditor=setupPolicyEditor({$,api});
 const directoryPicker=setupDirectoryPicker({$,api});
+const additionalDirectories=setupAdditionalDirectories({$,api,picker:directoryPicker,getActive:()=>active,toast:(...a)=>toast(...a),
+  host:session=>{const id=session.hostId||'local';return {id,name:hosts.find(h=>h.id===id)?.name||'Local'};}});
 const projectDirectory=setupProjectDirectory({$,picker:directoryPicker,hosts:()=>hosts});
-const display=setupDisplayPreferences();display.mount($('display-preferences'));
+const display=setupDisplayPreferences({onChange:()=>{draw();renderComposer();}});display.mount($('display-preferences'));
 workLogs=setupWorkLogs({el});workLogs.mount($('display-preferences'),()=>scheduleDraw());
 // U-02: policy lives on the server; the browser only requests permission and shows.
 const notifications=setupNotifications({getSessions:()=>sessions,getActive:()=>active,selectSession,toast});
@@ -108,18 +171,47 @@ function toast(message,tone='error') {
 }
 function el(tag,className,text) {const node=document.createElement(tag);if(className)node.className=className;if(text!==undefined)node.textContent=text;return node;}
 function basename(path) {return path.replaceAll('\\','/').split('/').filter(Boolean).at(-1)||path;}
+function effectiveSessionRouting(projectId=$('create-project')?.value||null){
+  const global=config?.sessionRouting||{mode:'off',approach:'quota_round_robin',candidates:[]};
+  if((global.mode||'off')==='off')return {...global,mode:'off'};
+  const project=projectId?projects.find(p=>p.id===projectId)?.sessionRouting:null;
+  if(!project)return global;
+  return {
+    mode:project.mode||global.mode,
+    approach:project.approach||global.approach,
+    candidates:project.candidates||global.candidates,
+    decisionModel:project.decisionModel||global.decisionModel,
+  };
+}
 function providerNote() {
-  const p=config.providers.find(p=>p.id===$('provider').value);
-  const remote=createHost();
+  const value=$('provider').value,remote=createHost(),effective=effectiveSessionRouting();
+  if(value==='auto'){
+    const modeNote=effective.mode==='always'
+      ?'Always routed is enabled: the session router chooses the agent and model automatically.'
+      :'Auto routed (default): the session router chooses the best available agent and model.';
+    if(remote){
+      const ok=remote.status==='connected'&&!!remote.roots?.length;
+      $('provider-note').textContent=ok?`${modeNote} Runs on ${remote.name}.`:`${remote.name} is unavailable or has no allowed directories.`;
+      $('create-submit').disabled=!ok||creating||worktrees.blocked();
+    }else{
+      $('provider-note').textContent=modeNote;
+      $('create-submit').disabled=creating||worktrees.blocked();
+    }
+    createChanged();return;
+  }
+  const p=config.providers.find(p=>p.id===value);
   if(remote){
     const available=remote.status==='connected'&&remote.worker?.providers?.includes(p.id);
     $('provider-note').textContent=available?`Uses ${labels[p.id]} and its provider configuration on ${remote.name}.`:`${labels[p.id]} is unavailable on ${remote.name}.`;
     $('create-submit').disabled=!available||!remote.roots?.length||(p.id==='goose'&&$('create-model-provider').disabled)||creating||worktrees.blocked()||!!(forkSource?.role&&!p.roles);
-    return;
+    createChanged();return;
   }
-  $('provider-note').textContent=p.id==='demo'?'Local test agent. No model calls, API key, or file changes.':p.id==='goose'?'Uses the model provider configured for Goose on this host.':p.id==='opencode'?(p.installed?'Native ACP. Choose an advertised free model. Availability and limits may change.':'Install OpenCode on this host or set AGENTWORKS_OPENCODE_PATH.'):!p.installed?(p.id==='codex-rust'?'Install native Codex on this host or set CODEX_PATH.':p.id==='claude-rust'?'Install native Claude Code on this host or set CLAUDE_CODE_EXECUTABLE.':'Adapter not installed. Run npm ci --ignore-scripts.'):p.authMode==='existing'?'Uses the existing agent sign-in on this host. If it has expired, sign in with the CLI and try again.':!p.keyPresent?`Set ${['claude','claude-rust'].includes(p.id)?'ANTHROPIC_API_KEY':'OPENAI_API_KEY or CODEX_API_KEY'} before starting the server.`:'API key available on the host. Messages use your provider account.';
+  $('provider-note').textContent=p.id==='demo'?'Local test agent. No model calls, API key, or file changes.':p.id==='goose'?'Uses the model provider configured for Goose on this host.':p.id==='antigravity'?(p.installed?'Official ACP using your Antigravity sign-in. Sign in with agy on this host first.':'Install Antigravity CLI on this host or set AGENTWORKS_ANTIGRAVITY_PATH.'):p.id==='opencode'?(p.installed?'Native ACP. Choose an advertised free model. Availability and limits may change.':'Install OpenCode on this host or set AGENTWORKS_OPENCODE_PATH.'):!p.installed?(p.id==='codex-rust'?'Install native Codex on this host or set CODEX_PATH.':'Install native Claude Code on this host or set CLAUDE_CODE_EXECUTABLE.'):p.authMode==='existing'?'Uses the existing agent sign-in on this host. If it has expired, sign in with the CLI and try again.':!p.keyPresent?`Set ${['claude','claude-rust'].includes(p.id)?'ANTHROPIC_API_KEY':'OPENAI_API_KEY or CODEX_API_KEY'} before starting the server.`:'API key available on the host. Messages use your provider account.';
   $('create-submit').disabled=!p.installed||(p.authMode==='api_key'&&!p.keyPresent)||(p.id==='goose'&&$('create-model-provider').disabled)||creating||worktrees.blocked()||!!(forkSource?.role&&!p.roles);
+  createChanged();
 }
+// Keeps the folded section summaries and the place field in step with the form.
+function createChanged(){createSections.summarize();createPlace.sync();}
 // Roles add instructions to the agent's system prompt; they never change Agentworks access.
 function renderRoles(){
   const select=$('create-role'),previous=select.value;select.replaceChildren(new Option('No role',''));
@@ -131,11 +223,12 @@ function renderRoles(){
   select.value=roleLibrary.some(r=>r.id===previous)?previous:'';updateRoleNote();
 }
 function updateRoleNote(){
-  const select=$('create-role'),p=config.providers.find(p=>p.id===$('provider').value);
-  if(forkSource){select.disabled=true;select.value='';$('create-role-note').textContent=!forkSource.role?'The parent has no role.':p?.roles?`Forks keep the parent's role · ${forkSource.role.name}`:`${labels[p?.id]||'This agent'} cannot fork this session because it must keep the “${forkSource.role.name}” role.`;return;}
-  select.disabled=!p?.roles;if(!p?.roles)select.value='';
+  const select=$('create-role'),val=$('provider').value,isAuto=val==='auto',p=config.providers.find(p=>p.id===val);
+  if(forkSource){select.disabled=true;select.value='';$('create-role-note').textContent=!forkSource.role?'The parent has no role.':(isAuto||p?.roles)?`Forks keep the parent's role · ${forkSource.role.name}`:`${labels[p?.id]||'This agent'} cannot fork this session because it must keep the “${forkSource.role.name}” role.`;return;}
+  select.disabled=!isAuto&&!p?.roles;if(!isAuto&&!p?.roles)select.value='';
   const role=roleLibrary.find(r=>r.id===select.value);
-  $('create-role-note').textContent=!p?.roles?`${labels[p?.id]||'This agent'} does not accept role instructions yet.`:role?(role.description||'Custom role.')+' Added to the agent\'s system prompt.':'Adds instructions to the agent\'s system prompt. Roles do not change Agentworks access.';
+  $('create-role-note').textContent=isAuto?(role?(role.description||'Custom role.')+' Only harnesses supporting roles will be routed.':'Adds instructions to the agent\'s system prompt. Selecting a role narrows the routed pool.'):!p?.roles?`${labels[p?.id]||'This agent'} does not accept role instructions yet.`:role?(role.description||'Custom role.')+' Added to the agent\'s system prompt.':'Adds instructions to the agent\'s system prompt. Roles do not change Agentworks access.';
+  createChanged();
 }
 const communicationLabels={off:'Off',participant:'Participant',coordinator:'Coordinator'};
 function updateCommunicationDefault(){
@@ -143,25 +236,56 @@ function updateCommunicationDefault(){
   const role=project?.defaultCommunicationRole||config.defaultCommunicationRole||'participant';
   $('create-agent-access').querySelector('option[value=""]').textContent=`Use ${project?.defaultCommunicationRole?'project':'global'} default · ${communicationLabels[role]}`;
   $('create-communication-note').textContent='Participant exchanges project messages. Coordinator can also start sessions and turns, cancel turns, and run project automations. Change session access later in Agents & inbox.';
+  createChanged();
 }
+// Most recently used harness first; hidden harnesses stay out unless a fork keeps one.
+function renderProviderPicker(keep,projectId=$('create-project').value||null){
+  const effective=effectiveSessionRouting(projectId);
+  if(effective.mode==='always'){
+    const opt=el('option','','Auto · always routed');opt.value='auto';
+    $('provider').replaceChildren(opt);$('provider').value='auto';$('provider').disabled=true;
+    return;
+  }
+  $('provider').disabled=false;
+  const used=readStorage(localStorage,'agentworks-provider-used',{});
+  const shown=config.providers.filter(p=>!p.hidden||p.id===keep);
+  const items=(shown.length?shown:config.providers).map((p,i)=>({p,i})).sort((a,b)=>(used[b.p.id]||0)-(used[a.p.id]||0)||a.i-b.i);
+  const options=items.map(({p})=>{const option=el('option','',p.name+(p.authMode==='api_key'&&!p.keyPresent?' · API key needed':''));option.value=p.id;return option;});
+  if(effective.mode==='default'){
+    const auto=el('option','','Auto · routed (default)');auto.value='auto';
+    options.unshift(auto);
+  }
+  $('provider').replaceChildren(...options);
+}
+let githubCreate=null;
 function openCreate(context={}) {
   if(!config)return;
-  updateProjectControls();
+  githubCreate=context.githubPr||null;worktrees.setPrefill(context.worktreePrefill||null);
+  $('create-github-note').hidden=!githubCreate;$('create-github-note').textContent=githubCreate?`PR #${githubCreate.number} · ${githubCreate.host}/${githubCreate.owner}/${githubCreate.repo}. Choose a matching project/source directory. The worktree starts at this PR head; the session opens without a prompt.`:'';
+  if(context.provider)context.provider=currentProvider(context.provider);
   forkSource=context.fork||null;const generation=++forkGeneration;modelPicked=false;
   const workspaceContext=workspace?.context();
   const projectId=Object.hasOwn(context,'projectId')?context.projectId:workspaceContext?.projectId??active?.projectId??null;
   $('create-project').value=projectId||'';
+  renderProviderPicker(context.provider,projectId);
+  updateProjectControls();
   const remembered=readStorage(localStorage,'agentworks-project-locations',{});
   $('create-resume-policy').checked=false;
+  $('create-initial-prompt').value='';$('create-send-initial-prompt').checked=true;$('create-initial-prompt-field').hidden=!!forkSource;
   $('create-role').value='';api('/api/roles').then(list=>{roleLibrary=Array.isArray(list)?list:[];renderRoles();}).catch(()=>{});
-  $('create-agent-access').value='';updateCommunicationDefault();$('create-error').textContent='';$('directory').value=context.cwd||projectDirectoryOn('local',projectId)||workspaceContext?.cwd||remembered[projectId||'ungrouped']||(active?.hostId==='local'?active.cwd:null)||config.roots[0];$('session-title').value=context.title||'';
-  if(context.provider&&$('provider').querySelector(`option[value="${context.provider}"]`))$('provider').value=context.provider;
+  $('create-agent-access').value='';updateCommunicationDefault();$('create-error').textContent='';$('directory').value=context.cwd||(projectId?projectRoot('local',projectId):workspaceContext?.cwd||remembered.ungrouped||(active?.hostId==='local'?active.cwd:null))||config.roots[0];$('session-title').value=context.title||'';
+  const effective=effectiveSessionRouting(projectId);
+  if(effective.mode==='always')$('provider').value='auto';
+  else if(context.provider&&$('provider').querySelector(`option[value="${context.provider}"]`))$('provider').value=context.provider;
+  else if(effective.mode==='default'&&!forkSource)$('provider').value='auto';
   $('fork-boundary').replaceChildren(new Option('Latest completed turn at submission',''));$('fork-context').value='auto';$('fork-summary').value='';
   renderForkHeader();fillCreateHosts(context.hostId||'local',context.cwd);providerNote();updateRoleNote();
   // Forking suggests its own worktree so the new session starts from this one's
   // position; the base revision is filled in from Git once the policy has loaded.
   worktrees.projectChanged(context.workspaceMode);
   $('create-dialog').showModal();
+  // Typing a name and pressing Enter creates a session with the defaults.
+  $('session-title').focus();
   return generation;
 }
 // Remote hosts appear once connected; sessions there use the host's own
@@ -177,21 +301,33 @@ function fillCreateHosts(selected,cwd){
   createHostChanged(select.value===selected?(cwd||(select.value==='local'?$('directory').value:undefined)):undefined);
 }
 function createHost(){return hosts.find(h=>h.id===$('create-host').value&&h.kind==='remote')||null;}
-// A project's saved directory, when it is on this host. Sessions start there
-// unless the person chooses another directory.
+// A project's saved directory on this host. Sessions start there unless the
+// person chooses another directory.
 function projectDirectoryOn(hostId,projectId){
-  const id=projects.find(p=>p.id===projectId)?.defaultLocationId;
+  const id=projects.find(p=>p.id===projectId)?.defaultLocations?.[hostId];
   const location=id&&locations.find(l=>l.id===id);
   return location&&location.hostId===hostId?location.path:null;
 }
+// A project's saved directories, keyed by host id.
+function projectDirectories(project){
+  const paths={};
+  for(const [hostId,id] of Object.entries(project?.defaultLocations||{})){const location=locations.find(l=>l.id===id&&l.hostId===hostId);if(location)paths[hostId]=location.path;}
+  return paths;
+}
 // The last source directory chosen in this browser for a project on a host.
-function rememberedDirectory(){
-  const host=$('create-host').value||'local',project=$('create-project').value||'ungrouped';
+function rememberedDirectory(host=$('create-host').value||'local',projectId=$('create-project').value||null){
+  const project=projectId||'ungrouped';
   return readStorage(localStorage,'agentworks-project-locations',{})[host==='local'?project:host+':'+project];
+}
+// Where a project's sessions start on a host: its saved directory, the last
+// source chosen here, else its newest session's source checkout (never a worktree).
+function projectRoot(hostId,projectId){
+  const newest=projectId&&sessions.find(s=>s.projectId===projectId&&(s.hostId||'local')===hostId);
+  return projectDirectoryOn(hostId,projectId)||rememberedDirectory(hostId,projectId)||newest?.worktree?.mainTop||newest?.cwd||null;
 }
 function createHostChanged(cwd){
   const host=createHost(),roots=host?host.roots||[]:config.roots;
-  $('directory').value=cwd||projectDirectoryOn($('create-host').value||'local',$('create-project').value||null)||rememberedDirectory()||roots[0]||'';
+  $('directory').value=cwd||projectRoot($('create-host').value||'local',$('create-project').value||null)||roots[0]||'';
   $('create-resume-policy').disabled=false;
   worktrees.setHost(host?.id);
   $('project-roots').replaceChildren(...roots.map(root=>{const option=el('option');option.value=root;return option;}));
@@ -248,12 +384,20 @@ async function openFork(parent=active){
 function resetCreateModels(){
   discoveryGeneration++;
   const select=$('create-model');select.replaceChildren();
+  if($('provider').value==='auto'){
+    const option=el('option','','Router chooses model');option.value='';select.append(option);
+    select.disabled=true;$('load-models').disabled=true;
+    $('model-note').textContent='Model is chosen by the session router.';
+    createChanged();return;
+  }
+  select.disabled=false;
   // A forked session keeps the parent's model when it keeps the parent's harness.
   const carried=forkSource?.model&&forkSource.provider===$('provider').value&&(forkSource.modelProvider||null)===modelProviders.selection()?forkSource.model:null;
   const defaultId=carried||modelProviders.defaultModel()||config.defaultModels?.[$('provider').value];
   const option=el('option','',carried?`From “${forkSource.title}” · ${carried}`:defaultId?`Saved default · ${defaultId}`:'Harness default');option.value=defaultId||'';select.append(option);
   const remote=createHost();$('load-models').disabled=false;
   $('model-note').textContent=remote?`Load available models from ${remote.name} without sending a prompt.`:'Load available models from the agent without sending a prompt.';
+  createChanged();
 }
 async function loadCreateModels(){
   const gen=++discoveryGeneration,provider=$('provider').value,cwd=$('directory').value,hostId=$('create-host').value;
@@ -268,23 +412,44 @@ async function loadCreateModels(){
     select.value=[...select.options].some(o=>o.value===previous)?previous:'';
     $('model-note').textContent=result.options?.length?'Model is applied before the first turn.':'This harness did not advertise selectable models.';
   }catch(e){if(gen===discoveryGeneration)$('model-note').textContent=e.message;}
-  finally{if(gen===discoveryGeneration)$('load-models').disabled=false;}
+  finally{if(gen===discoveryGeneration){$('load-models').disabled=false;createChanged();}}
 }
 function commandText(command){return command.name.startsWith('$')?command.name:'/'+command.name.replace(/^\//,'');}
+function commandRange(){
+  const prompt=$('prompt'),caret=prompt.selectionStart;
+  if(caret!==prompt.selectionEnd)return null;
+  const before=prompt.value.slice(0,caret);
+  const match=/(?:^|\s)(\$[^\s$]*)$/.exec(before)||/^(\/\S*)$/.exec(before);
+  if(match)return {start:caret-match[1].length,end:caret,query:match[1].toLowerCase()};
+  // Claude and Antigravity skills are `/name` and work anywhere in the prompt,
+  // so complete them after whitespace too. Paths (`/a/b`) and non-matches never open the picker.
+  const inline=midTextSlash()&&/\s(\/[^\s/]*)$/.exec(before);
+  return inline?{start:caret-inline[1].length,end:caret,query:inline[1].toLowerCase(),inline:true}:null;
+}
+function midTextSlash(){const provider=currentProvider(active?.provider||'');return provider.startsWith('claude')||provider==='antigravity';}
+function matchingCommands(range){return availableCommands.filter(c=>!range||commandText(c).toLowerCase().includes(range.query)||range.query.startsWith('/')&&c.name.startsWith('$')&&('/'+c.name.slice(1)).toLowerCase().includes(range.query));}
+function updateCommands(){const range=commandRange();commandsOpen=!!range&&(!range.inline||matchingCommands(range).length>0);renderCommands();}
 function renderCommands(){
   const list=$('command-list');list.replaceChildren();list.hidden=!commandsOpen;
   if(!commandsOpen)return;
-  const query=$('prompt').value.trim().toLowerCase();
-  const items=availableCommands.filter(c=>!/^[/\$]\S*$/.test(query)||commandText(c).toLowerCase().includes(query));
+  const range=commandRange();
+  const items=matchingCommands(range);
   if(!items.length)list.append(el('p','field-note','No matching commands advertised by this harness.'));
   for(const command of items){
     const button=el('button','',commandText(command));button.type='button';button.append(el('small','',command.description||''));
-    button.onclick=()=>{$('prompt').value=commandText(command)+' ';commandsOpen=false;renderCommands();$('prompt').dispatchEvent(new Event('input'));$('prompt').focus();};list.append(button);
+    button.addEventListener('pointerdown',event=>event.preventDefault());
+    button.onclick=()=>{
+      const prompt=$('prompt'),value=prompt.value,insert=commandText(command)+' ';
+      const start=range?.start??0,end=range?.end??value.length;
+      prompt.value=value.slice(0,start)+insert+value.slice(end).replace(/^ /,'');
+      prompt.setSelectionRange(start+insert.length,start+insert.length);
+      commandsOpen=false;renderCommands();prompt.dispatchEvent(new Event('input'));prompt.focus();
+    };list.append(button);
   }
 }
 function importHost(){return hosts.find(h=>h.id===$('import-host').value&&h.kind==='remote')||null;}
 function importProviders(){
-  const host=importHost(),selected=$('import-provider').value||active?.provider||'claude';
+  const host=importHost(),selected=$('import-provider').value||currentProvider(active?.provider||'claude');
   $('import-provider').replaceChildren();
   for(const provider of config.providers){const option=el('option','',provider.name);option.value=provider.id;option.disabled=host?!host.worker?.providers?.includes(provider.id):!provider.installed;$('import-provider').append(option);}
   const available=[...$('import-provider').options].filter(o=>!o.disabled);
@@ -366,6 +531,7 @@ $('import-form').onsubmit=async event=>{
 };
 function projectName(id){return projects.find(p=>p.id===id)?.name||'Ungrouped';}
 function updateProjectControls(){
+  $('session-tasks').hidden=!projects.find(p=>p.id===active?.projectId)?.tasksEnabled;
   for(const id of ['create-project','session-project','import-project']){
     const select=$(id), current=id==='session-project'?active?.projectId:select.value;
     const ordered=projects.filter(p=>!p.archived||p.id===current).sort((a,b)=>a.name.localeCompare(b.name)), signature=JSON.stringify(ordered);
@@ -396,12 +562,13 @@ function hostState(host){
 function hostTitle(host){
   if(host.kind!=='remote')return 'Connected';
   const w=host.worker;
-  return [hostState(host),'ssh '+host.destination,w?.hostname,w?.platform,w?.providers?.length?'providers: '+w.providers.join(', '):'',w?.version?'v'+w.version:'',host.status==='offline'?host.detail:''].filter(Boolean).join(' · ');
+  return [hostState(host),'ssh '+host.destination,w?.hostname,w?.platform,w?.providers?.length?'providers: '+w.providers.join(', '):'',buildLabel(w?.build)||(w?.version?'v'+w.version:''),host.outdated?'worker update available':'',host.status==='offline'?host.detail:''].filter(Boolean).join(' · ');
 }
 function hostNote(host){
-  if(host.status==='offline')return host.detail||'Offline.';
+  if(host.status==='offline')return (host.detail||'Offline.')+(host.managed&&/\bUpdate\b/.test(host.detail||'')?' Use ⋯ → Connection → Update worker.':'');
   if(host.status==='connecting')return host.detail?'Reconnecting. Last attempt: '+host.detail:'Connecting over SSH…';
-  return host.roots?.length?'Connected. No sessions yet.':'Connected. Add working directories (⋯) to start sessions here.';
+  const update=host.outdated?' Worker update available (⋯ → Connection).':'';
+  return (host.roots?.length?'Connected. No sessions yet.':'Connected. Add working directories (⋯) to start sessions here.')+update;
 }
 async function hostAction(host,action){
   if(action==='remove'&&!confirm(`Remove host ${host.name}? Its worker stops; nothing on that machine is deleted.`))return;
@@ -412,10 +579,16 @@ function openHostTerminal(host){terminalHost=host;localStorage.setItem('agentwor
 function treeGroup(key,label,items,{host=null,projectId=null,level=0,archived=false}={}){
   const group=el('details','tree-group level-'+level);group.dataset.group=key;
   const stateKey=sidebarView+':'+key;group.open=!collapsedGroups.has(stateKey);
-  const heading=el('summary','tree-heading');if(!host&&projectId){heading.dataset.projectId=projectId;heading.setAttribute('aria-haspopup','menu');}heading.append(el('span','tree-chevron','›'));
+  const heading=el('summary','tree-heading');
+  if(!host&&(projectId!==undefined)){
+    if(projectId){heading.dataset.projectId=projectId;heading.setAttribute('aria-haspopup','menu');}
+    heading.dataset.projectGroup=projectId||'ungrouped';
+  }
+  heading.append(el('span','tree-chevron','›'));
   heading.append(el('span',host?'tree-icon host':'tree-icon',host?'▤':'◇'),el('span','tree-label',label),badges(items));
   if(archived)heading.append(el('span','group-total','Archived'));
-  if(host){const dot=el('span','connection-dot '+(host.status||'connected'));dot.title=hostTitle(host);dot.setAttribute('aria-label',hostTitle(host));heading.append(dot);}
+  // An out-of-date worker rings the status dot; the row has no room for a badge.
+  if(host){const dot=el('span','connection-dot '+(host.status||'connected')+(host.outdated?' host-update':''));dot.title=hostTitle(host);dot.setAttribute('aria-label',hostTitle(host));heading.append(dot);}
   if(!host&&projectId){
     const rename=el('button','group-action','⋯');rename.type='button';rename.setAttribute('aria-label','Edit project '+label);
     rename.onclick=event=>{event.preventDefault();event.stopPropagation();openProjectDialog(projects.find(p=>p.id===projectId));};heading.append(rename);
@@ -428,12 +601,12 @@ function treeGroup(key,label,items,{host=null,projectId=null,level=0,archived=fa
   if(host?.kind==='remote'){
     // Link controls and session creation belong to the owning host.
     if(level===0){
-      const actions=[['roots','⋯','Working directories on '+label],['reconnect','↻','Reconnect '+label]];if(!items.length)actions.push(['remove','×','Remove host '+label]);
+      const actions=[['roots','⋯','Settings for '+label],['reconnect','↻','Reconnect '+label]];if(!items.length)actions.push(['remove','×','Remove host '+label]);
       if(host.status==='connected'&&host.roots?.length)actions.unshift(['create','＋','New session in '+label]);
       actions.forEach(([action,text,name],index)=>{
         const button=el('button','group-action'+(index?'':' add-session'),text);button.type='button';button.setAttribute('aria-label',name);
         button.onclick=event=>{event.preventDefault();event.stopPropagation();
-          if(action==='create')openCreate({projectId,hostId:host.id});else if(action==='roots')openHostRoots(host);else hostAction(host,action);};
+          if(action==='create')openCreate({projectId,hostId:host.id});else if(action==='roots')openHostSettings(host);else hostAction(host,action);};
         heading.append(button);
       });
     }else if(host.status==='connected'&&host.roots?.length){
@@ -449,11 +622,15 @@ function treeGroup(key,label,items,{host=null,projectId=null,level=0,archived=fa
   return {group,children};
 }
 function sessionButton(s){
-  const button=el('button','session-item'+(active?.id===s.id&&document.body.dataset.workspaceView!=='host-terminal'?' selected':''));button.type='button';button.dataset.sessionId=s.id;button.title=s.cwd;
-  button.append(el('span','session-icon',icons[s.provider]));
-  const copy=el('span','session-copy');copy.append(el('strong','',s.title),el('small','',`${s.archived?'Archived · ':''}${s.automation?'Automation · ':''}${labels[s.provider]}${s.model?' · '+s.model:''}`));
-  button.append(copy,el('span','status-dot '+s.status));button.onclick=()=>selectSession(s);
-  if(active?.id===s.id)button.setAttribute('aria-current','true');return button;
+  const hasAlert=notificationTray?.hasSessionAlert?.(s.id);
+  const row=el('div','session-item'+(hasAlert?' has-notifications':'')+(active?.id===s.id&&document.body.dataset.workspaceView!=='host-terminal'?' selected':''));row.dataset.sessionId=s.id;row.title=s.cwd;
+  row.append(el('span','session-icon',icons[s.provider]));
+  const copy=el('span','session-copy'),select=el('button','session-select'),sessionBadges=el('span','session-badges');select.type='button';
+  select.append(el('strong','',s.title),el('small','',`${s.archived?'Archived · ':''}${s.automation?'Automation · ':''}${labels[s.provider]}${s.model?' · '+s.model:''}`));
+  copy.append(select,sessionBadges);row.append(copy,el('span','status-dot '+s.status));
+  select.onclick=()=>selectSession(s);
+  row.onclick=event=>{if(!event.target.closest('a,button'))selectSession(s);};
+  if(active?.id===s.id){row.setAttribute('aria-current','true');select.setAttribute('aria-current','true');}return row;
 }
 // Keep the session browser's model label in step with live model changes.
 function syncModelLabel(){
@@ -507,29 +684,42 @@ function sidebar(){
       area.append(top.group);
     }
   }
-  area.scrollTop=scroll;updateProjectControls();
+  area.scrollTop=scroll;updateProjectControls();github.refreshBadges();updateNotificationIndicators();
 }
 async function refreshSessions(){
   const [list,catalog]=await Promise.all([api('/api/sessions?archived=all'),api('/api/catalog')]);
   sessions=list;projects=catalog.projects;locations=catalog.locations||[];hosts=catalog.hosts;
   if(terminalHost&&!hosts.some(host=>host.id===terminalHost.id)){terminalHost=null;if(document.body.dataset.workspaceView==='host-terminal')workspace.showView('sessions');}
   if(active){const current=sessions.find(s=>s.id===active.id);if(current){active.projectId=current.projectId;active.hostId=current.hostId;active.automation=current.automation;active.archived=current.archived;}}
-  sidebar();workspace?.sync(catalog,sessions);
+  sidebar();workspace?.sync(catalog,sessions);taskMentions.refresh();
+}
+const routingModeLabels={off:'Off',default:'Default routed',always:'Always routed'};
+const routingApproachLabels={quota_round_robin:'Quota round-robin',decision_model:'Decision model'};
+function updateProjectRoutingNote(){
+  const globalMode=config?.sessionRouting?.mode||'off';
+  const globalApproach=config?.sessionRouting?.approach||'quota_round_robin';
+  $('project-routing-mode').querySelector('option[value=""]').textContent='Use global default · '+routingModeLabels[globalMode];
+  $('project-routing-approach').querySelector('option[value=""]').textContent='Use global default · '+routingApproachLabels[globalApproach];
+  $('project-routing-note').textContent=globalMode==='off'
+    ?'Global session routing is off, which overrides project routing settings.'
+    :'Overrides global session routing for new sessions in this project.';
 }
 function openProjectDialog(project=null){
   if(savingProject)return;
   editingProject=project?.id||null;$('project-dialog-title').textContent=project?'Project settings':'New project';
-  $('project-name').value=project?.name||'';$('project-communication-role').value=project?.defaultCommunicationRole||'';
+  $('project-name').value=project?.name||'';$('project-slug').value=project?.slug||'';$('project-tasks').hidden=!project?.tasksEnabled;$('project-tasks-enabled').checked=!!project?.tasksEnabled;updateProjectTicketFields();$('project-communication-role').value=project?.defaultCommunicationRole||'';
   $('project-communication-role').querySelector('option[value=""]').textContent='Use global default · '+communicationLabels[config.defaultCommunicationRole||'participant'];
+  $('project-routing-mode').value=project?.sessionRouting?.mode||'';
+  $('project-routing-approach').value=project?.sessionRouting?.approach||'';
+  updateProjectRoutingNote();
   $('project-error').textContent='';$('delete-project').hidden=!project;$('archive-project').hidden=!project;$('open-controllers').hidden=!project;
   $('archive-project').textContent=project?.archived?'Unarchive project':'Archive project';
-  const saved=project?.defaultLocationId&&locations.find(l=>l.id===project.defaultLocationId);
-  projectDirectory.open(saved||(!project&&$('create-dialog').open?{hostId:$('create-host').value||'local',path:''}:null));
+  projectDirectory.open({paths:projectDirectories(project),hostId:$('create-dialog').open?$('create-host').value||'local':undefined});
   policyEditor.open(editingProject);$('project-dialog').showModal();$('project-name').focus();
 }
-function resetTranscript(){eventSeq=null;backgroundJobs.reset();subagents.reset();transcript=[];tools=new Map();approvals=new Map();assistant=null;nodes.clear();turnEnds=new Map();workLogs?.reset();$('messages').replaceChildren();$('approval-area').replaceChildren();}
-// The desktop header and the phone session bar both show the session title.
-function setTitle(title){$('header-title').textContent=title;$('session-heading-title').textContent=title;}
+function resetTranscript(){eventSeq=null;backgroundJobs.reset();subagents.reset();transcript=[];tools=new Map();compactions=new Map();approvals=new Map();assistant=null;nodes.clear();turnEnds=new Map();workLogs?.reset();$('messages').replaceChildren();$('approval-area').replaceChildren();}
+// Keep the session identity in sync across desktop and phone layouts.
+function setTitle(title){$('header-title').textContent=title;$('session-heading-title').textContent=title;$('session-location-title').textContent=title;$('session-location-title').title=title;}
 // Phone navigation: the session browser and a chat are separate history
 // entries, so the system Back button returns from a chat to the browser.
 const phone=()=>matchMedia('(max-width:650px)').matches;
@@ -544,68 +734,84 @@ addEventListener('popstate',event=>{
   const entry=event.state?.agentworks;sidePanel?.popstate(entry);
   if(entry==='chat'||entry==='panel')document.body.classList.remove('menu-open');else showBrowser();
 });
+let notificationTarget=null;
+async function openNotificationAlert(alert){
+  if(alert.automationId){
+    const definitions=await api('/api/automations');
+    const definition=definitions.find(item=>item.id===alert.automationId);
+    if(!definition)throw new Error('This automation is no longer available.');
+    workspace.openAutomation(definition.id,definition.projectId);return;
+  }
+  const session=await api(`/api/sessions/${encodeURIComponent(alert.sessionId)}?view=meta`);
+  if(!session.id)throw new Error('This session is no longer available.');
+  selectSession(session);sessionTerminal.select('chat');
+  notificationTarget={...alert};
+  if(eventSeq!==null)revealNotificationTarget();
+}
+let revealingNotification=false;
+async function revealNotificationTarget(){
+  if(revealingNotification||!notificationTarget||notificationTarget.sessionId!==active?.id||eventSeq===null)return;
+  const target=notificationTarget;revealingNotification=true;
+  try{
+    while(notificationTarget===target&&active?.id===target.sessionId&&older.mode==='more'&&storedEvents[0]?.seq>target.seq){
+      if(older.loading){setTimeout(revealNotificationTarget,100);return;}
+      await loadOlder();if(older.error)throw new Error(older.error);
+    }
+    if(notificationTarget!==target||active?.id!==target.sessionId)return;
+    draw();
+    let node;
+    if(target.event==='approval'&&approvals.size){node=$('approval-area');}
+    else{
+      const item=transcript.findLast(item=>{const seq=Number(item.id.split(':').at(-2));return Number.isSafeInteger(seq)&&seq<=target.seq;});
+      node=item&&nodes.get(item.id);
+    }
+    node??=$('session-state');node.tabIndex=-1;node.classList.add('notification-target');node.scrollIntoView({block:'center'});node.focus({preventScroll:true});
+    setTimeout(()=>node.classList.remove('notification-target'),3000);notificationTarget=null;
+  }catch(error){toast('Could not locate the alert in session history: '+error.message);notificationTarget=null;}
+  finally{revealingNotification=false;if(notificationTarget&&notificationTarget!==target)requestAnimationFrame(revealNotificationTarget);}
+}
+// A moved session shows its new directory, whether it arrives live or in a reconnect snapshot.
+function showPlace(){
+  if(!active?.cwd)return;
+  const extra=active.additionalDirectories||[];
+  $('project-path').title=extra.length?'Also: '+extra.join(', '):'';
+  $('project-extra').textContent=extra.length?`+${extra.length} director${extra.length===1?'y':'ies'}`:'';
+  if($('project-path').textContent===active.cwd)return;
+  $('project-path').textContent=active.cwd;
+  if(sidePanel?.isOpen)sidePanel.open(sidePanel.tab,{history:false});
+}
 function selectSession(s) {
+  notificationTarget=null;
+  if(isAutoDismissEnabled())notificationTray?.dismissSessionAlerts(s.id);
   document.body.classList.remove('menu-open');enterChat();
   if(active?.id===s.id){$('welcome').hidden=true;$('conversation').hidden=false;workspace?.sessionSelected(s);sidePanel?.sessionChanged();sessionTerminal?.sessionChanged();return;}
   if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));scrollPositions.set(active.id,$('messages').scrollTop);}
   $('prompt').value=drafts[s.id]||'';restoreScroll=scrollPositions.get(s.id)??null;
   clearTimeout(retryTimer);generation++;socket?.close();socket=null;connected=false;
-  active=s;storedEvents=[];older={mode:'none',loading:false,error:''};currentUserSeq=null;promptRecovery.render();status=s.status;modelConfig=null;permissionModes=null;sessionConfig=null;availableCommands=[];commandsOpen=false;renderCommands();mentions.close();composerMenu.close();sessionMenu.close();resetTranscript();usageStatus.reset();inputQueue.reset();
+  active=s;storedEvents=[];older={mode:'none',loading:false,error:''};currentUserSeq=null;promptRecovery.render();status=s.status;modelConfig=null;permissionModes=null;sessionConfig=null;availableCommands=[];commandsOpen=false;renderCommands();mentions.close();taskMentions.close();taskMentions.refresh();composerMenu.close();sessionMenu.close();resetTranscript();usageStatus.reset();inputQueue.reset();
   localStorage.setItem('agentworks-session',s.id);$('welcome').hidden=true;$('conversation').hidden=false;
-  setTitle(s.title);$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;
+  github.sessionChanged();
+  setTitle(s.title);$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;showPlace();
   $('session-notice').hidden=true;document.body.classList.remove('menu-open');sidebarPin.close();sidebar();updateControls();connect(generation);
-  workspace?.sessionSelected(s);sidePanel?.sessionChanged();sessionTerminal?.sessionChanged();promptResize.size();
-  if(s.status==='suspended'&&!s.explicitlySuspended)resumeSession(s.id);
+  workspace?.sessionSelected(s);sidePanel?.sessionChanged();sessionTerminal?.sessionChanged();promptResize.size();renderComposer();
+  // Opening a dormant session only loads its transcript; the first message resumes it.
 }
+// Released but not deliberately stopped (asleep, or suspended by a server restart): sending resumes it.
+function dormant(){return status==='suspended'&&!!active&&!active.explicitlySuspended&&!active.archived&&!active.providerHistoryDeletion;}
 function connect(gen){
   if(gen!==generation||!active)return;
   $('connection').textContent='Connecting';
-  const ws=new WebSocket(socketUrl(`/api/sessions/${active.id}/events${eventSeq!==null?'?after='+eventSeq:''}`));socket=ws;
+  // Large messages (snapshots, big tool updates) arrive gzipped as binary frames.
+  // The server only gzips when it accepts the subprotocol; otherwise everything stays text.
+  const ws=new WebSocket(socketUrl(`/api/sessions/${active.id}/events${eventSeq!==null?'?after='+eventSeq:''}`),socketGzip?['agentworks.gzip']:[]);socket=ws;ws.binaryType='arraybuffer';
   ws.onopen=()=>{if(gen!==generation)return;connected=true;reconnectDelay=500;$('connection').textContent='Connected';updateControls();};
+  // Decoding is asynchronous, so every message goes through one queue to keep its order.
+  let inbound=Promise.resolve();
   ws.onmessage=event=>{
-    if(gen!==generation)return;
-    const e=JSON.parse(event.data);
-    if(e.kind==='input_queue'){inputQueue.set(e.data);updateControls();return;}
-    if(e.kind==='tool_progress'){if(applyToolProgress(tools.get(e.data.toolCallId),e.data,e.seq))scheduleDraw();return;}
-    if(e.kind==='tool_header'){
-      const d=e.data,tool=typeof d.parentSessionId==='string'?subagents.tool(d.acpSessionId,d.toolCallId):tools.get(d.toolCallId);
-      if(tool){tool.header=d.header;scheduleDraw();}return;
-    }
-    if(Number.isSafeInteger(e.seq)&&e.kind!=='snapshot')eventSeq=Math.max(eventSeq??0,e.seq);
-    if(e.kind==='snapshot'){
-      // A full snapshot replaces the transcript; a resumed one adds only newer events.
-      if(e.resumed===null||e.resumed===undefined){
-        resetTranscript();usageStatus.reset();
-        currentUserSeq=e.session.lastUserSeq??null;status=e.session.status;Object.assign(active,e.session);
-        // Keep loaded earlier pages when they meet the current retained window without a gap.
-        const first=e.events[0]?.seq,last=storedEvents.at(-1)?.seq;
-        const kept=Number.isSafeInteger(first)&&Number.isSafeInteger(last)&&last>=first-1?storedEvents.filter(item=>item.seq<first):[];
-        storedEvents=[...kept,...e.events];if(!kept.length)older={mode:e.truncated?'more':'none',loading:false,error:''};
-        replay(e.session.lastUserSeq);
-      }else{
-        eventSeq=e.seq;currentUserSeq=e.session.lastUserSeq??null;status=e.session.status;Object.assign(active,e.session);
-        const last=storedEvents.at(-1)?.seq??0;
-        storedEvents.push(...e.events.filter(item=>Number.isSafeInteger(item.seq)&&item.seq>last));
-        replaying=true;try{const latestUser=e.events.findLast(item=>item.kind==='user');for(const item of e.events)if(item.kind!=='session_updated'&&(item.kind!=='stop_requested'||item.data.userSeq===(e.session.lastUserSeq??latestUser?.seq)||(!e.session.lastUserSeq&&!latestUser)))consume(item);}finally{replaying=false;}
-      }
-      if(Number.isSafeInteger(e.seq))eventSeq=e.seq;
-      currentUserSeq=e.session.lastUserSeq??currentUserSeq;
-      backgroundJobs.set(e.asyncTasks);
-      if(e.toolHeaders){
-        for(const [id,tool] of tools)tool.header=e.toolHeaders[id]??null;
-        subagents.setHeaders(e.toolHeaders);
-      }
-      for(const [id,view] of Object.entries(e.toolProgress||{}))applyToolProgress(tools.get(id),view,view.seq);
-      Object.assign(active,e.session);setTitle(active.title);
-      active.continuation=e.session.continuation;
-      approvals=new Map(e.approvals.map(a=>[a.id,a]));status=e.session.status;modelConfig=e.models;syncModelLabel();permissionModes=e.permissionModes;sessionConfig=e.sessionConfig;active.providerCapabilities=e.providerCapabilities;attachments.setPolicy(e.attachments);if(status==='suspended'&&!e.session.explicitlySuspended&&!active.providerHistoryDeletion)resumeSession(active.id);availableCommands=e.commands||[];renderCommands();inputQueue.set(e.session.inputQueue);inputQueue.observe(status,{live:false});
-      if(active.providerHistoryDeletion){$('session-notice').textContent=active.providerHistoryDeletion==='deleted'?'Provider history was deleted. This Agentworks transcript remains because local cleanup did not finish; retry Delete everywhere or delete this transcript.':'Provider-history deletion was not confirmed. This transcript is retained and resume is blocked; inspect provider history, then retry Delete everywhere or delete only this transcript.';$('session-notice').hidden=false;}
-      if(e.storageError){$('session-notice').textContent=e.storageError;$('session-notice').hidden=false;}
-    }else{
-      if(Number.isSafeInteger(e.seq)&&e.kind!=='storage_error'&&!(e.seq<=storedEvents.at(-1)?.seq))storedEvents.push(e);
-      consume(e,true);
-    }
-    scheduleDraw();updateControls();renderContinuation();usageStatus.render();
+    inbound=inbound.then(async()=>{
+      const text=typeof event.data==='string'?event.data:await new Response(new Blob([event.data]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+      if(gen===generation)applySocketMessage(text);
+    }).catch(error=>console.error('Could not apply session event',error));
   };
   ws.onclose=()=>{
     if(gen!==generation)return;
@@ -622,6 +828,58 @@ function connect(gen){
     };
     retryTimer=setTimeout(retry,reconnectDelay);reconnectDelay=Math.min(5000,reconnectDelay*2);
   };
+}
+const socketGzip=typeof DecompressionStream==='function';
+function applySocketMessage(text){
+    const e=JSON.parse(text);
+    if(e.kind==='github_context'){github.updateContext(active.id,e.data);return;}
+    if(e.kind==='github_event'){document.dispatchEvent(new CustomEvent('github-event',{detail:{sessionId:active.id,...e.data}}));return;}
+    if(e.kind==='session_badges'){github.updateBadges(active.id,e.data);return;}
+    if(e.kind==='input_queue'){inputQueue.set(e.data);updateControls();return;}
+    if(e.kind==='startup'){active.startup=e.data.step;scheduleDraw();return;}
+    if(e.kind==='tool_progress'){if(applyToolProgress(tools.get(e.data.toolCallId),e.data,e.seq))scheduleDraw();return;}
+    if(e.kind==='tool_header'){
+      const d=e.data,tool=typeof d.parentSessionId==='string'?subagents.tool(d.acpSessionId,d.toolCallId):tools.get(d.toolCallId);
+      if(tool){tool.header=d.header;scheduleDraw();}return;
+    }
+    if(Number.isSafeInteger(e.seq)&&e.kind!=='snapshot')eventSeq=Math.max(eventSeq??0,e.seq);
+    if(e.kind==='mailbox_updated'){if(Number.isSafeInteger(e.data.unacknowledged)){active.unacknowledged=e.data.unacknowledged;renderUnread();}return;}
+    if(e.kind==='snapshot'){
+      // A full snapshot replaces the transcript; a resumed one adds only newer events.
+      if(e.resumed===null||e.resumed===undefined){
+        resetTranscript();usageStatus.reset();
+        currentUserSeq=e.session.lastUserSeq??null;status=e.session.status;Object.assign(active,e.session);showPlace();
+        // Keep loaded earlier pages when they meet the current retained window without a gap.
+        // A merged chunk run starts at its `from` sequence.
+        const first=e.events[0]?.from??e.events[0]?.seq,last=storedEvents.at(-1)?.seq;
+        const kept=Number.isSafeInteger(first)&&Number.isSafeInteger(last)&&last>=first-1?storedEvents.filter(item=>item.seq<first):[];
+        storedEvents=[...kept,...e.events];if(!kept.length)older={mode:e.truncated?'more':'none',loading:false,error:''};
+        replay(e.session.lastUserSeq);
+      }else{
+        eventSeq=e.seq;currentUserSeq=e.session.lastUserSeq??null;status=e.session.status;Object.assign(active,e.session);showPlace();
+        const last=storedEvents.at(-1)?.seq??0;
+        storedEvents.push(...e.events.filter(item=>Number.isSafeInteger(item.seq)&&item.seq>last));
+        replaying=true;try{const latestUser=e.events.findLast(item=>item.kind==='user');for(const item of e.events)if(item.kind!=='session_updated'&&(item.kind!=='stop_requested'||item.data.userSeq===(e.session.lastUserSeq??latestUser?.seq)||(!e.session.lastUserSeq&&!latestUser)))consume(item);}finally{replaying=false;}
+      }
+      if(Number.isSafeInteger(e.seq))eventSeq=e.seq;
+      currentUserSeq=e.session.lastUserSeq??currentUserSeq;
+      backgroundJobs.set(e.asyncTasks);
+      if(e.toolHeaders){
+        for(const [id,tool] of tools)tool.header=e.toolHeaders[id]??null;
+        subagents.setHeaders(e.toolHeaders);
+      }
+      for(const [id,view] of Object.entries(e.toolProgress||{}))applyToolProgress(tools.get(id),view,view.seq);
+      Object.assign(active,e.session);setTitle(active.title);renderUnread();
+      active.continuation=e.session.continuation;
+      approvals=new Map(e.approvals.map(a=>[a.id,a]));status=e.session.status;modelConfig=e.models;syncModelLabel();permissionModes=e.permissionModes;sessionConfig=e.sessionConfig;active.providerCapabilities=e.providerCapabilities;attachments.setPolicy(e.attachments);availableCommands=e.commands||[];renderCommands();inputQueue.set(e.session.inputQueue);inputQueue.observe(status,{live:false});
+      if(active.providerHistoryDeletion){$('session-notice').textContent=active.providerHistoryDeletion==='deleted'?'Provider history was deleted. This Agentworks transcript remains because local cleanup did not finish; retry Delete everywhere or delete this transcript.':'Provider-history deletion was not confirmed. This transcript is retained and resume is blocked; inspect provider history, then retry Delete everywhere or delete only this transcript.';$('session-notice').hidden=false;}
+      if(e.storageError){$('session-notice').textContent=e.storageError;$('session-notice').hidden=false;}
+    }else{
+      if(Number.isSafeInteger(e.seq)&&e.kind!=='storage_error'&&!(e.seq<=storedEvents.at(-1)?.seq))storedEvents.push(e);
+      consume(e,true);
+    }
+    scheduleDraw();updateControls();renderContinuation();usageStatus.render();
+    if(notificationTarget)requestAnimationFrame(revealNotificationTarget);
 }
 // Items get ids derived from their source event so a re-fold maps them onto the same DOM nodes.
 function itemId(){return itemKey?`${itemKey}:${itemCount++}`:uuid();}
@@ -843,7 +1101,7 @@ function consume(e,live=false){
   {const t=timeoutControls?.notice(e.kind,d)??sessionSecrets?.notice(e.kind,d);if(t){transcript.push({id:itemId(),type:'notice',text:t});assistant=null;}}
   if(rebuilding&&['session_updated','continuation','models','permission_modes','attachment_policy','commands','status','storage_error'].includes(e.kind)){}
   else if(e.kind==='session_updated'){
-    Object.assign(active,d);sessionTerminal?.sessionUpdated();setTitle(active.title);const row=sessions.find(s=>s.id===active.id);if(row)Object.assign(row,d);sidebar();
+    Object.assign(active,d);showPlace();sessionTerminal?.sessionUpdated();setTitle(active.title);const row=sessions.find(s=>s.id===active.id);if(row)Object.assign(row,d);sidebar();
   }
   else if(e.kind==='continuation'){renderContinuation();}
   else if(e.kind==='models'){modelConfig=d;syncModelLabel();}
@@ -855,9 +1113,9 @@ function consume(e,live=false){
   else if(e.kind==='provider_history_delete_failed'){$('session-notice').textContent='Provider-history deletion was not confirmed. The Agentworks transcript is retained. Inspect provider history, then retry Delete everywhere or delete only this transcript.';$('session-notice').hidden=false;}
   else if(e.kind==='attachment_policy'){attachments.setPolicy(d);}
   else if(e.kind==='commands'){availableCommands=Array.isArray(d)?d:[];renderCommands();}
-  else if(e.kind==='user'){assistant=null;if(d.inboxDelivery)transcript.push({id:itemId(),type:'notice',text:'Automatic inbox turn authorized by you; peer messages are untrusted context.'});else if(d.initiatedBy)transcript.push({id:itemId(),type:'notice',text:d.initiatedBy.startsWith('controller:')?'Turn started by external controller '+(d.initiatorTitle||d.initiatedBy):'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});const message=addMessage('user',d.text);message.seq=e.seq;message.inboxDelivery=!!d.inboxDelivery;if(d.attachments?.length)message.attachments=d.attachments;}
+  else if(e.kind==='user'){assistant=null;if(d.inboxDelivery)transcript.push({id:itemId(),type:'notice',text:'Automatic inbox turn; peer messages are untrusted context.'});else if(d.initiatedBy)transcript.push({id:itemId(),type:'notice',text:d.initiatedBy.startsWith('controller:')?'Turn started by external controller '+(d.initiatorTitle||d.initiatedBy):'Turn started by agent session '+(sessions.find(s=>s.id===d.initiatedBy)?.title||d.initiatedBy)});const message=addMessage('user',d.text);message.seq=e.seq;message.inboxDelivery=!!d.inboxDelivery;if(d.attachments?.length)message.attachments=d.attachments;}
   else if(e.kind==='status'){
-    status=d.status;if(!replaying)inputQueue.observe(status,{live});if(active){active.status=status;if(d.explicitlySuspended!==undefined)active.explicitlySuspended=d.explicitlySuspended;const s=sessions.find(s=>s.id===active.id);if(s)s.status=status;}sidebar();
+    status=d.status;if(!replaying)inputQueue.observe(status,{live});if(active){active.status=status;if(!['starting','resuming'].includes(status))active.startup=null;if(d.explicitlySuspended!==undefined)active.explicitlySuspended=d.explicitlySuspended;if(d.asleep!==undefined)active.asleep=d.asleep;const s=sessions.find(s=>s.id===active.id);if(s)s.status=status;}sidebar();
   }else if(e.kind==='approval'){approvals.set(d.id,d);}
   else if(e.kind==='approval_resolved'){
     const pending=approvals.get(d.id);approvals.delete(d.id);
@@ -879,6 +1137,9 @@ function consume(e,live=false){
       text:`Forked from “${d.parentTitle}” after ${d.boundaryTurn===1?'its first finished turn':`turn ${d.boundaryTurn}`}${d.parentProvider?` (${labels[d.parentProvider]||d.parentProvider})`:''}. The conversation below is recorded history. Context handoff uses the chosen native or fresh-session method.`});
     assistant=null;
   }
+  else if(e.kind==='directory_changed'){assistant=null;transcript.push({id:itemId(),type:'notice',text:`Working directory changed from ${d.from} to ${d.to}. The agent is told with its next message.`});}
+  else if(e.kind==='additional_directories_changed'){assistant=null;transcript.push({id:itemId(),type:'notice',text:d.directories.length?`Additional directories: ${d.directories.join(', ')}. The agent is told with its next message.`:'Additional directories removed. The agent is told with its next message.'});}
+  else if(e.kind==='additional_directories_ignored'){assistant=null;transcript.push({id:itemId(),type:'notice',text:`This harness does not support additional directories, so it was started without ${d.directories.join(', ')}.`});}
   else if(e.kind==='fork_mode'){assistant=null;transcript.push({id:itemId(),type:'notice',text:d.mode==='native'?'Provider native fork created at the recorded boundary.':`${d.detail}${d.truncated?' Available source history is truncated.':''}`});}
   else if(e.kind==='carried_context'){assistant=null;transcript.push({id:itemId(),type:'notice',text:'Context handoff dispatched with this message; interrupted delivery requires inspection.'});}
   else if(e.kind==='acp'){
@@ -905,6 +1166,11 @@ function consume(e,live=false){
       case 'tool_call_update':{
         let tool=tools.get(d.toolCallId);
         if(!tool){tool={id:d.toolCallId,type:'tool',title:'Tool activity'};tools.set(d.toolCallId,tool);transcript.push(tool);}if(applyToolUpdate(tool,d,e.seq,live&&!replaying?Date.now():null))observeTool(tool,{live:live&&!replaying});break;
+      }
+      case 'compaction_update':case 'compaction_summary_chunk':{
+        assistant=null;let item=compactions.get(d.compactionId);
+        if(!item){item={id:'compaction-'+d.compactionId,type:'compaction',meta:{}};compactions.set(d.compactionId,item);transcript.push(item);}
+        applyCompaction(item,d);break;
       }
       case 'plan':{
         const text=(d.entries||[]).map(p=>`- ${p.status==='completed'?'✓':'○'} ${p.content}`).join('\n');
@@ -957,12 +1223,17 @@ function renderSessionConfig(){
 function updateControls(){
   backgroundJobs.render();questions.refresh();
   $('archive-session').textContent=active?.archived?'Unarchive session':'Archive session';
+  $('archive-session').disabled=!active?.archived&&['running','waiting','cancelling'].includes(status);
   $('suspend-session').disabled=!connected||status==='suspended'||status==='closed';
+  $('restart-session').disabled=!connected||!['idle','suspended','error'].includes(status)||!!active?.providerHistoryDeletion;
+  $('change-directory').disabled=!connected||!['idle','suspended','error'].includes(status)||!!active?.providerHistoryDeletion||!!active?.archived;
+  $('additional-directories').disabled=$('change-directory').disabled||!supportsAdditional();
   $('resume-session').hidden=!['suspended','error'].includes(status);
   $('resume-session').disabled=!connected||!!active?.providerHistoryDeletion;
   $('show-commands').disabled=!connected||status!=='idle';
   const usage=usageCommand();
-  $('show-usage').hidden=!['claude','claude-rust','codex','codex-rust'].includes(active?.provider)||!usage;
+  $('show-usage').hidden=active?.provider!=='antigravity'&&(!['claude','claude-rust','codex','codex-rust'].includes(active?.provider)||!usage);
+  $('show-usage').textContent=active?.provider==='antigravity'?'Refresh quota':'Usage ↗';
   $('show-usage').disabled=!connected||status!=='idle';
   $('delete-provider-history').hidden=!active?.providerCapabilities?.delete;
   renderSessionConfig();
@@ -986,23 +1257,107 @@ function updateControls(){
     picker.disabled=!connected||status!=='idle';
   }
   const busy=['running','waiting','cancelling'].includes(status);
-  $('session-state').textContent=status==='waiting'?([...approvals.values()].some(a=>a.kind==='question')?'Needs your answer':'Needs your approval'):status==='idle'?'Ready':status[0]?.toUpperCase()+status.slice(1);
-  // Busy sessions keep the composer usable so input can be queued without losing the draft.
-  $('prompt').disabled=!connected||!(status==='idle'||busy);$('send').disabled=!connected||status==='cancelling'||!(status==='idle'||busy);
-  $('send').setAttribute('aria-label',busy?'Queue message':'Send message');$('send').textContent=busy?'＋':'↑';$('send').title=busy?'Queue to send after this turn ends':'';
+  $('session-state').textContent=status==='waiting'?([...approvals.values()].some(a=>a.kind==='question')?'Needs your answer':'Needs your approval'):status==='idle'?'Ready':status==='suspended'&&active?.asleep?'Asleep':status[0]?.toUpperCase()+status.slice(1);
+  // Busy and starting sessions keep the composer usable so input can be queued without losing the draft.
+  const asleep=dormant(),starting=STARTING.includes(status),queues=busy||starting;
+  $('prompt').disabled=!connected||!(status==='idle'||queues||asleep);$('send').disabled=!connected||status==='cancelling'||!(status==='idle'||queues||asleep);
+  $('send').setAttribute('aria-label',queues?'Queue message':'Send message');$('send').textContent=queues?'＋':'↑';$('send').title=starting?'Queue to send once the session is ready':busy?'Queue to send after this turn ends':'';
   inputQueue.render();inputQueue.renderActivity();$('stop').hidden=!busy&&!['starting','resuming','configuring'].includes(status)&&!active?.continuation?.enabled;$('stop').disabled=!connected||status==='cancelling';
   attachments.render();
-  $('prompt').placeholder=status==='starting'?'Starting your agent…':status==='waiting'?'Respond to the permission request above…':busy?'Your agent is working… type to queue a follow-up':status==='error'?'Session unavailable. Use Resume session to try again.':'What would you like to work on?';
+  $('prompt').placeholder=starting?`${status==='starting'?'Starting':'Resuming'} your agent… type to queue a message`:status==='waiting'?'Respond to the permission request above…':busy?'Your agent is working… type to queue a follow-up':status==='error'?'Session unavailable. Use Resume session to try again.':asleep?(active.asleep?'Asleep. Send a message to wake it.':'Suspended. Send a message to resume it.'):'What would you like to work on?';
   if(subagents.viewingChild())$('prompt').placeholder=busy?'Queue a message for the main agent…':'Message the main agent…';
+  renderComposer();
 }
 function scheduleDraw(){if(!drawTimer)drawTimer=setTimeout(()=>{drawTimer=null;draw();},70);}
 function fileUrl(path,download=false){return appUrl(`/api/sessions/${active.id}/file?path=${encodeURIComponent(path)}${download?'&download=true':''}`);}
 const imageViewer=setupImageViewer($('messages'));
-const attachments=setupAttachments({appUrl,el,toast,uuid,getSession:()=>active,canAttach:()=>!!active&&!$('prompt').disabled,button:$('attach'),input:$('attach-input'),list:$('attachment-list'),dropTarget:$('composer')});
+const attachments=setupAttachments({appUrl,el,toast,uuid,getSession:()=>active,canAttach:()=>!!active&&!$('prompt').disabled&&!STARTING.includes(status),button:$('attach'),input:$('attach-input'),list:$('attachment-list'),dropTarget:$('composer')});
 const decorateMarkdown=setupChatReferences({getSession:()=>active,getSessions:()=>sessions,openSession:async id=>{
   try{const target=sessions.find(s=>s.id===id)||(await api('/api/sessions/'+encodeURIComponent(id))).session;selectSession(target);}
   catch(e){toast('Cannot open session: '+e.message);}
-},openFile:(session,path,line)=>workspace?.openSideFile(session,path,line),fileUrl,imageViewer});
+},openTask:(projectId,number)=>projectTasks.open(projectId,number),openFile:(session,path,line)=>workspace?.openSideFile(session,path,line),fileUrl,imageViewer});
+// chat.user formatting is known per session after its first reply: off skips
+// further requests for this page load, and on asks once per user message.
+const userFormatting=new Map();
+async function formatUserLines(sessionId,text){
+  let state=userFormatting.get(sessionId);
+  if(state instanceof Promise){await state;state=userFormatting.get(sessionId);}
+  if(state==='off')return null;
+  const request=api(`/api/sessions/${sessionId}/user-format`,{method:'POST',body:JSON.stringify({text})}).then(r=>r.lines||null);
+  if(state===undefined)userFormatting.set(sessionId,request.then(lines=>userFormatting.set(sessionId,lines?'on':'off'),()=>userFormatting.delete(sessionId)));
+  return request;
+}
+// Plain-text mode keeps session links and sanitized chat.user formatter output.
+function paintUserLines(body,text,lines){
+  body.replaceChildren();
+  text.split('\n').forEach((line,i)=>{
+    if(i)body.append('\n');
+    if(lines?.[i]==null){const literal=document.createElement('span');renderUserReferences(literal,line);body.append(...literal.childNodes);return;}
+    const block=/^<(p|ul|ol|pre|h[1-6]|blockquote|table|hr)\b/.test(lines[i]);
+    const formatted=el(block?'div':'span','user-formatted');formatted.innerHTML=lines[i];body.append(formatted);
+  });
+}
+function renderUserMessage(message,body){
+  if(display.preferences().userMarkdown==='on'){updateUserMarkdown(message,body);return;}
+  body.classList.remove('markdown');
+  if(body.dataset.format!=='plain'){delete body.dataset.source;body.dataset.format='plain';}
+  if(body.dataset.source!==message.text){
+    body.dataset.source=message.text;paintUserLines(body,message.text,message.userLines);
+    const id=active?.id;
+    if(id&&message.userLines===undefined&&!message.userFormatPending){
+      message.userFormatPending=true;
+      formatUserLines(id,message.text).then(lines=>{
+        message.userLines=lines;
+        if(lines&&body.dataset.source===message.text&&body.dataset.format==='plain'){paintUserLines(body,message.text,lines);decorateMarkdown(body);}
+      }).catch(()=>{}).finally(()=>{message.userFormatPending=false;});
+    }
+  }
+  decorateMarkdown(body);
+}
+// Capture both the source and display mode so delayed responses cannot overwrite
+// a newer draft or a switch back to plain text.
+function updateUserMarkdown(message,body){
+  const format='user-markdown';
+  if(body.dataset.source===message.text&&body.dataset.format===format)return;
+  body.dataset.source=message.text;body.dataset.format=format;
+  body.classList.remove('markdown');body.textContent=message.text;
+  clearTimeout(message.markdownTimer);
+  const text=message.text,sessionId=active?.id;
+  message.markdownTimer=setTimeout(async()=>{
+    message.markdownTimer=null;
+    try{
+      const result=await renderMarkdown({text,user:true,...(sessionId?{sessionId}:{})});
+      if(body.dataset.source!==text||body.dataset.format!==format||active?.id!==sessionId)return;
+      message.html=result.html;body.innerHTML=result.html;body.classList.add('markdown');decorateMarkdown(body,message.referenceCwd?message.referenceCwd.replace(/\/$/,'')+'/':'');enhanceMermaid(body,result.mermaidClass);display.enhance(body,message.id);
+    }catch{/* The original text stays readable if rendering is unavailable. */}
+  },200);
+}
+// Messages rendered in the same tick share one request: opening a transcript renders
+// every message, and over a slow link one round trip each dominates the load.
+const markdownQueue=[];let markdownFlush=null;
+const MARKDOWN_BATCH_ITEMS=200,MARKDOWN_BATCH_BYTES=96*1024,utf8=new TextEncoder();
+// Each message's render timer fires as its own task, spread over a long draw, so
+// the queue waits briefly for the rest of them; that is small beside a round trip.
+const MARKDOWN_COALESCE_MS=20;
+function renderMarkdown(request){
+  return new Promise((resolve,reject)=>{markdownQueue.push({request,resolve,reject});markdownFlush??=setTimeout(flushMarkdown,MARKDOWN_COALESCE_MS);});
+}
+function flushMarkdown(){
+  markdownFlush=null;const pending=markdownQueue.splice(0);
+  while(pending.length){
+    // Stay under the server's 128 KiB request body limit, counted in UTF-8 bytes
+    // (`{"items":[...]}` plus a comma per item); an oversized message goes alone.
+    const batch=[];let bytes=12;
+    while(pending.length&&batch.length<MARKDOWN_BATCH_ITEMS){
+      const size=utf8.encode(JSON.stringify(pending[0].request)).byteLength+1;
+      if(batch.length&&bytes+size>MARKDOWN_BATCH_BYTES)break;
+      bytes+=size;batch.push(pending.shift());
+    }
+    api('/api/markdown/batch',{method:'POST',body:JSON.stringify({items:batch.map(b=>b.request)})}).then(
+      response=>batch.forEach((b,i)=>response?.results?.[i]?b.resolve(response.results[i]):b.reject(new Error('Markdown result missing'))),
+      error=>batch.forEach(b=>b.reject(error)));
+  }
+}
 function updateMarkdown(message,body){
   if(body.dataset.source===message.text)return;
   body.dataset.source=message.text;
@@ -1013,7 +1368,8 @@ function updateMarkdown(message,body){
     message.markdownTimer=null;
     const text=message.text;message.markdownPending=true;
     try{
-      const result=await api('/api/markdown',{method:'POST',body:JSON.stringify({text})});
+      // Agent messages name their session so its chat.agent formatters apply; inbox deliveries don't.
+      const result=await renderMarkdown({text,...(message.inboxDelivery||!active?{}:{sessionId:active.id})});
       message.html=result.html;body.innerHTML=result.html;body.classList.add('markdown');decorateMarkdown(body,message.referenceCwd?message.referenceCwd.replace(/\/$/,'')+'/':'');enhanceMermaid(body,result.mermaidClass);display.enhance(body,message.id);
     }catch{body.textContent=message.text;}finally{
       message.markdownPending=false;
@@ -1021,15 +1377,32 @@ function updateMarkdown(message,body){
     }
   },status==='idle'?0:250);
 }
+function renderComposer(){
+  markdownComposer.sync({markdown:display.preferences().userMarkdown==='on',sessionId:active?.id});
+}
+
+// What startup is doing now (“Creating worktree…”), until the agent is ready.
+function drawStartup(area){
+  const empty=area.querySelector('.session-empty'),starting=['starting','resuming'].includes(status);
+  if(empty)empty.querySelector('h3').textContent=starting?'Preparing your workspace':'Ready when you are';
+  let hint=area.querySelector('.startup-hint');
+  if(!starting||!active.startup){hint?.remove();return;}
+  if(!hint){hint=el('div','startup-hint');hint.setAttribute('role','status');}
+  hint.textContent=active.startup+'…';
+  const heading=empty?.querySelector('h3');
+  if(heading){if(heading.nextSibling!==hint)heading.after(hint);}else if(hint!==area.lastChild)area.append(hint);
+}
 function draw(){
   if(!active)return;
+  renderComposer();
   backgroundJobs.render();
   const area=$('messages'),visible=!area.hidden&&!$('session-chat').hidden;const atBottom=visible&&area.scrollHeight-area.scrollTop-area.clientHeight<100;
   const empty=area.querySelector('.session-empty');if(transcript.length)empty?.remove();
   if(older.mode==='none')historyControl.remove();else if(area.firstChild!==historyControl){renderHistoryControl();area.prepend(historyControl);}
   if(!transcript.length&&!empty){
-    const wrap=el('div','session-empty');wrap.append(el('div','empty-symbol',icons[active.provider]),el('h3','',status==='starting'?'Preparing your workspace':'Ready when you are'),el('p','',active.provider==='demo'?'Try “hello”, “approval”, or “slow”. This demo uses no API credits.':'Send a message to start working in this project.'));area.append(wrap);
+    const wrap=el('div','session-empty');wrap.append(el('div','empty-symbol',icons[active.provider]),el('h3'),el('p','',active.provider==='demo'?'Try “hello”, “approval”, or “slow”. This demo uses no API credits.':'Send a message to start working in this project.'));area.append(wrap);
   }
+  drawStartup(area);
   for(const item of transcript){
     let node=nodes.get(item.id);
     if(!node){
@@ -1047,15 +1420,20 @@ function draw(){
       }else if(item.type==='image'){
         node=el('div','message');const image=el('img','agent-image');
         if(/^image\/(png|jpeg|gif|webp)$/.test(item.content.mimeType)&&item.content.data.length<14*1024*1024){image.src=`data:${item.content.mimeType};base64,${item.content.data}`;image.alt='Image from agent';imageViewer.decorate(image);node.append(image);}else node.textContent='Unsupported image format';
+      }else if(item.type==='compaction'){
+        node=el('details','compaction-card');node.append(el('summary'),el('div','compaction-summary'));
+        // Nothing to expand without a summary.
+        node.querySelector('summary').onclick=event=>{if(!item.summary)event.preventDefault();};
       }else node=el('div',item.type==='error'?'error-card':'notice-card',item.text);
       nodes.set(item.id,node);area.append(node);
     }else if(!node.isConnected)area.append(node);
     if(item.type==='message'){
       const body=node.querySelector('.message-body');
-      if(item.role==='user'&&!item.inboxDelivery){renderUserReferences(body,item.text);decorateMarkdown(body);if(item.attachments&&!node.querySelector('.message-attachments')){const sent=el('div','message-attachments');attachments.renderSent(sent,active.id,item.attachments);for(const img of sent.querySelectorAll('img'))imageViewer.decorate(img);body.after(sent);}}else updateMarkdown(item,body);
+      if(item.role==='user'&&!item.inboxDelivery){renderUserMessage(item,body);if(item.attachments&&!node.querySelector('.message-attachments')){const sent=el('div','message-attachments');attachments.renderSent(sent,active.id,item.attachments);for(const img of sent.querySelectorAll('img'))imageViewer.decorate(img);body.after(sent);}}else updateMarkdown(item,body);
     }else if(item.type==='tool'){
       renderToolActivity(node,item,['running','waiting','cancelling'].includes(status));
     }else if(item.type==='job')renderJobResult(node,item);
+    else if(item.type==='compaction')renderCompaction(node,item);
   }
   subagents.sync(['running','waiting','cancelling'].includes(status));
   const pending=$('approval-area');for(const node of [...pending.children])if(!node.classList.contains('question'))node.remove();
@@ -1079,47 +1457,134 @@ function draw(){
 $('new-session').onclick=()=>openCreate();$('welcome-new').onclick=()=>openCreate();
 $('view-hosts').onclick=()=>setSidebarView('hosts');$('view-projects').onclick=()=>setSidebarView('projects');
 $('new-project').onclick=()=>sidebarView==='hosts'?openHostDialog():openProjectDialog();$('create-project-new').onclick=()=>openProjectDialog();
-let editingHostRoots=null;
-function openHostRoots(host){
-  editingHostRoots=host.id;$('host-roots-title').textContent='Settings for '+host.name;
+// Host settings follow the Settings dialog: categories, sections, one Save.
+let editingHost=null,editingHostView=null;
+const selectHostSettings=setupSettingsTabs($('host-settings-dialog'));
+function openHostSettings(host,category='general'){
+  editingHost=host.id;editingHostView=host;
+  $('host-settings-title').textContent=host.name;
+  $('host-settings-description').textContent=`Remote host · ${host.destination}`;
+  $('host-edit-name').value=host.name;$('host-edit-destination').value=host.destination;$('host-edit-command').value=host.command||'';
+  $('host-edit-command-field').hidden=!!host.managed;$('host-edit-managed').hidden=!host.managed;
+  const count=sessions.filter(s=>s.hostId===host.id).length;
+  $('remove-host').disabled=count>0;
+  $('host-remove-note').textContent=count?`Delete this host’s ${count} session${count===1?'':'s'} before removing it.`:host.managed?'Stops the worker and deletes this server’s SSH key for the host. The worker installation and its public key entry stay on the host.':'Stops the worker. Nothing on the host is deleted.';
+  $('host-roots').replaceChildren();for(const root of host.roots||[])addHostRoot(root);if(!host.roots?.length)addHostRoot();
+  renderHostTools(host);renderHostConnection(host);
+  $('host-settings-error').textContent='';
+  selectHostSettings(category);$('host-settings-dialog').showModal();
+  (category==='directories'?$('host-roots').querySelector('input'):category==='general'?$('host-edit-name'):null)?.focus();
+}
+// Roots are browsed under the host's home directory, so new roots can be found.
+function addHostRoot(value=''){
+  const host=editingHostView;
+  const row=directoryRow(directoryPicker,{value,label:'Working directory',placeholder:'~/projects',onRemove:()=>{if(!$('host-roots').children.length)addHostRoot();},
+    browse:{hostId:host?.id,hostName:()=>host?.name,scope:'home',unavailable:()=>host?.status!=='connected'?'Connect this host to browse folders.':!host.worker?.directories?'Update this host’s worker to browse folders.':''}});
+  $('host-roots').append(row);return row.querySelector('input');
+}
+$('add-host-root').onclick=()=>addHostRoot().focus();
+function renderHostTools(host){
   const tools=$('host-tools');tools.replaceChildren();
   tools.append(el('p','field-note',`Tools and sign-ins belong to ${host.destination}. Sign in over SSH as that user, then retry the session.`));
   for(const provider of ['codex','claude','opencode']){
-    const path=host.worker?.tools?.[provider];
-    const row=el('div','field-note');row.append(el('strong','',labels[provider]+': '),el('code','',path||(host.worker?.tools?'Not found by the worker':host.worker?'Update this worker to discover CLI paths':'Connect this host to discover CLI paths')));
-    if(path){const command=provider==='codex'?' login':' auth login';row.append(el('div','',`On ${host.destination}, run: `),el('code','',`'${path.replaceAll("'", "'\\''")}'${command}`));}
-    tools.append(row);
+    const path=host.worker?.tools?.[provider],item=el('div','host-tool');
+    item.append(el('h3','',labels[provider]));
+    if(path){
+      item.append(el('code','',path));
+      const command=provider==='codex'?' login':' auth login',sign=el('div','field-note','Sign in on the host: ');
+      sign.append(el('code','',`'${path.replaceAll("'", "'\\''")}'${command}`));item.append(sign);
+    }else item.append(el('div','field-note',host.worker?.tools?'Not found by the worker.':host.worker?'Update this worker to discover CLI paths.':'Connect this host to discover CLI paths.'));
+    tools.append(item);
   }
-  $('host-roots').value=(host.roots||[]).join('\n');$('host-roots-error').textContent='';$('host-roots-dialog').showModal();$('host-roots').focus();
 }
-$('dismiss-host-roots').onclick=()=>$('host-roots-dialog').close();
-$('host-roots-form').onsubmit=async event=>{
-  event.preventDefault();$('host-roots-error').textContent='';$('save-host-roots').disabled=true;
+function renderHostConnection(host){
+  const box=$('host-connection');box.replaceChildren();
+  const w=host.worker,facts=el('dl','host-facts');
+  const fact=(term,...value)=>{const dd=el('dd');dd.append(...value);facts.append(el('dt','',term),dd);};
+  const status=el('span','host-status');status.append(el('span','connection-dot '+(host.status||'connected')),host.status==='connected'?'Connected':host.status==='connecting'?'Connecting…':'Offline');
+  fact('Status',status);
+  if(host.status!=='connected'&&host.detail)fact('Last error',el('span','',host.detail));
+  fact('SSH destination',el('code','',host.destination));
+  const worker=el('span','',w?[buildLabel(w.build)||(w.version&&'v'+w.version),w.platform,w.hostname].filter(Boolean).join(' · ')||'Connected':'Not connected');
+  if(host.outdated)worker.append(el('span','update-badge','Update available'));
+  fact('Worker',worker);
+  fact('This server',buildLabel(config.build)||'Unknown build');
+  fact('Installed by',host.managed?'This server, with a dedicated SSH key':'You (existing worker)');
+  if(!host.managed)fact('Command',el('code','',host.command));
+  box.append(facts);
+  const actions=el('div','settings-actions'),result=el('span','host-action-result'),error=el('div','error-text host-action-error');result.setAttribute('role','status');
+  const action=(label,run)=>{const button=el('button','settings-action',label);button.type='button';button.onclick=()=>run(button);actions.append(button);return button;};
+  // Re-render from the refreshed host so status and worker details stay current.
+  const finish=async message=>{await refreshSessions();const fresh=hosts.find(h=>h.id===host.id);if(fresh&&editingHost===host.id){editingHostView=fresh;renderHostConnection(fresh);renderHostTools(fresh);}const live=$('host-connection').querySelector('.host-action-result');if(live)live.textContent=message;};
+  action('Reconnect',async button=>{button.disabled=true;error.textContent='';try{await api(`/api/hosts/${host.id}/reconnect`,{method:'POST'});await finish('Reconnecting…');}catch(e){error.textContent=e.message;button.disabled=false;}});
+  if(host.managed)action('Update worker',async button=>{
+    if(!confirm(`Install this server's worker on ${host.name} and reconnect? Running turns on this host are interrupted; resume them afterwards.`))return;
+    for(const b of actions.querySelectorAll('button'))b.disabled=true;error.textContent='';result.textContent='Copying and installing the worker…';
+    try{const updated=await api(`/api/hosts/${host.id}/update-worker`,{method:'POST'});await finish('Updated and connected'+(updated.worker?.version?' — v'+updated.worker.version:'')+'.');}
+    catch(e){result.textContent='';error.textContent=e.message;for(const b of actions.querySelectorAll('button'))b.disabled=false;}
+  });
+  actions.append(result);box.append(actions,error);
+  if(host.managed&&host.outdated)box.append(el('p','field-note','This host’s worker was built from a different commit than this server.'));
+  box.append(el('p','field-note',host.managed?'Update worker installs this server’s worker for the host’s OS and CPU beside the current one, then switches to it and reconnects. If the install fails, the host keeps its current worker. Reconnecting interrupts running turns on this host.':'This host runs a worker you set up. Update its Agentworks binary on the host, then reconnect.'));
+}
+$('dismiss-host-settings').onclick=()=>$('host-settings-dialog').close();
+$('host-settings-form').onsubmit=async event=>{
+  event.preventDefault();$('host-settings-error').textContent='';$('save-host-settings').disabled=true;
+  const host=editingHostView,edit={name:$('host-edit-name').value.trim(),destination:$('host-edit-destination').value.trim(),...(host.managed?{}:{command:$('host-edit-command').value.trim()})};
+  const relink=edit.destination!==host.destination||(!host.managed&&edit.command!==(host.command||''));
+  if(relink&&!confirm(`Reconnect ${host.name} with the new connection settings? Running turns on this host are interrupted; resume them afterwards.`)){$('save-host-settings').disabled=false;return;}
+  let step='general';
   try{
-    const roots=$('host-roots').value.split('\n').map(r=>r.trim()).filter(Boolean);
-    await api(`/api/hosts/${editingHostRoots}/roots`,{method:'PUT',body:JSON.stringify({roots})});
-    $('host-roots-dialog').close();await refreshSessions();
-  }catch(error){$('host-roots-error').textContent=error.message;}finally{$('save-host-roots').disabled=false;}
+    if(edit.name!==host.name||relink)await api(`/api/hosts/${host.id}`,{method:'PATCH',body:JSON.stringify(edit)});
+    step='directories';
+    const roots=[...$('host-roots').querySelectorAll('input')].map(input=>input.value.trim()).filter(Boolean);
+    await api(`/api/hosts/${host.id}/roots`,{method:'PUT',body:JSON.stringify({roots})});
+    $('host-settings-dialog').close();await refreshSessions();
+  }catch(error){selectHostSettings(step);$('host-settings-error').textContent=error.message;await refreshSessions();}finally{$('save-host-settings').disabled=false;}
 };
+$('remove-host').onclick=async()=>{
+  const host=editingHostView;if(!host||!confirm(`Remove host ${host.name}? Its worker stops; nothing on that machine is deleted.`))return;
+  $('remove-host').disabled=true;$('host-settings-error').textContent='';
+  try{await api(`/api/hosts/${host.id}`,{method:'DELETE'});$('host-settings-dialog').close();await refreshSessions();}
+  catch(error){$('host-settings-error').textContent=error.message;$('remove-host').disabled=false;}
+};
+// `0.1.376` → `v0.1.376`; the last digit is the commit count.
+function buildLabel(build){return build?'v'+build:'';}
 const enrollment=hostEnrollment({$,api,refresh:refreshSessions,directories:host=>{
-  $('host-dialog').close();openHostRoots(host);
+  $('host-dialog').close();openHostSettings(host,'directories');
 }});
 function openHostDialog(){enrollment.open();}
 $('dismiss-project').onclick=()=>{if(!savingProject)$('project-dialog').close();};
+function updateProjectTicketFields(){$('project-slug').disabled=savingProject||!$('project-tasks-enabled').checked;}
+$('project-tasks-enabled').onchange=updateProjectTicketFields;
 $('project-dialog').addEventListener('cancel',event=>{if(savingProject)event.preventDefault();});
-$('create-project').onchange=()=>{const remembered=projectDirectoryOn($('create-host').value||'local',$('create-project').value||null)||rememberedDirectory();if(remembered)$('directory').value=remembered;worktrees.projectChanged();updateCommunicationDefault();};
+function syncCreateRoutingForProject(projectId){
+  const prev=$('provider').value,effective=effectiveSessionRouting(projectId);
+  renderProviderPicker(forkSource?.provider||prev,projectId);
+  if(effective.mode==='always')$('provider').value='auto';
+  else if(effective.mode==='default'&&!forkSource&&(prev==='auto'||!$('provider').querySelector(`option[value="${prev}"]`)))$('provider').value='auto';
+  else if($('provider').querySelector(`option[value="${prev}"]`))$('provider').value=prev;
+  resetCreateModels();providerNote();modelProviders.loadCreate();updateRoleNote();
+}
+// Switching projects always moves the directory to the new project's root.
+$('create-project').onchange=()=>{const host=createHost(),projectId=$('create-project').value||null;$('directory').value=projectRoot(host?.id||'local',projectId)||(host?host.roots||[]:config.roots)[0]||'';$('directory').dispatchEvent(new Event('input'));worktrees.projectChanged();updateCommunicationDefault();syncCreateRoutingForProject(projectId);};
 $('project-form').onsubmit=async event=>{
   event.preventDefault();if(savingProject)return;savingProject=true;
-  for(const id of ['save-project','project-name','project-directory','project-directory-host','project-directory-browse','project-directory-clear','project-default-mode','project-require-worktree','project-communication-role','archive-project','delete-project','dismiss-project'])$(id).disabled=true;
+  for(const id of ['save-project','project-name','project-tasks-enabled','project-slug','project-directory','project-directory-host','project-directory-browse','project-directory-clear','project-default-mode','project-require-worktree','project-communication-role','project-routing-mode','project-routing-approach','archive-project','delete-project','dismiss-project'])$(id).disabled=true;
   $('project-error').textContent='';
   try{
     const policy=policyEditor.value(),directory=projectDirectory.value();
-    const project=await api(editingProject?`/api/projects/${editingProject}`:'/api/projects',{method:editingProject?'PATCH':'POST',body:JSON.stringify({name:$('project-name').value,defaultCommunicationRole:$('project-communication-role').value||null,...(directory!==undefined?{defaultLocation:directory}:{})})});
-    editingProject=project.id;projectDirectory.commit();$('delete-project').hidden=false;$('archive-project').hidden=false;
+    const existingRouting=editingProject?projects.find(p=>p.id===editingProject)?.sessionRouting:null;
+    const rMode=$('project-routing-mode').value||null,rApproach=$('project-routing-approach').value||null;
+    const nextRouting=(!rMode&&!rApproach&&!existingRouting?.candidates&&!existingRouting?.decisionModel)
+      ?null
+      :{...(existingRouting||{}),mode:rMode,approach:rApproach};
+    const project=await api(editingProject?`/api/projects/${editingProject}`:'/api/projects',{method:editingProject?'PATCH':'POST',body:JSON.stringify({name:$('project-name').value,tasksEnabled:$('project-tasks-enabled').checked,...($('project-tasks-enabled').checked&&$('project-slug').value?{slug:$('project-slug').value}:{}),defaultCommunicationRole:$('project-communication-role').value||null,sessionRouting:nextRouting,...(directory!==undefined?{defaultLocations:directory}:{})})});
+    editingProject=project.id;projects=projects.filter(p=>p.id!==project.id).concat(project);updateProjectControls();taskMentions.refresh();$('project-tasks').hidden=!project.tasksEnabled;projectDirectory.commit();$('delete-project').hidden=false;$('archive-project').hidden=false;
     try{await api(`/api/projects/${project.id}/workspace-policy`,{method:'PUT',body:JSON.stringify(policy)});}
     catch(error){throw new Error(`Project name saved. Workspace policy was not saved: ${error.message}. Retry Save project.`);}
-    await refreshSessions();if($('create-dialog').open){$('create-project').value=project.id;const start=projectDirectoryOn($('create-host').value||'local',project.id);if(start){$('directory').value=start;$('directory').dispatchEvent(new Event('input'));$('directory').dispatchEvent(new Event('change'));}worktrees.projectChanged();updateCommunicationDefault();}$('project-dialog').close();
-  }catch(error){$('project-error').textContent=error.message;}finally{savingProject=false;for(const id of ['save-project','project-name','project-directory','project-directory-host','project-directory-browse','project-directory-clear','project-default-mode','project-require-worktree','project-communication-role','archive-project','delete-project','dismiss-project'])$(id).disabled=false;}
+    await refreshSessions();if($('create-dialog').open){$('create-project').value=project.id;const start=projectDirectoryOn($('create-host').value||'local',project.id);if(start){$('directory').value=start;$('directory').dispatchEvent(new Event('input'));$('directory').dispatchEvent(new Event('change'));}worktrees.projectChanged();updateCommunicationDefault();syncCreateRoutingForProject(project.id);}$('project-dialog').close();
+  }catch(error){$('project-error').textContent=error.message;}finally{savingProject=false;for(const id of ['save-project','project-name','project-tasks-enabled','project-slug','project-directory','project-directory-host','project-directory-browse','project-directory-clear','project-default-mode','project-require-worktree','project-communication-role','project-routing-mode','project-routing-approach','archive-project','delete-project','dismiss-project'])$(id).disabled=false;updateProjectTicketFields();}
 };
 // Archive and delete apply to the project's sessions too unless the user keeps them in Ungrouped.
 let removingProject=null;
@@ -1138,6 +1603,7 @@ function describeProjectRemove(){
     ?`${verb} the project. Its ${count} ${plural} move to Ungrouped and keep running.`
     :action==='delete'?`Deletes the project and the saved history of its ${count} ${plural}, stopping any running work. Workspace files and branches remain. This cannot be undone.`
     :`Hides the project and archives its ${count} ${plural}. Archiving stops session terminals and keeps their saved history.`;
+  if(action==='delete')$('project-remove-description').textContent+=' All project tickets will be permanently deleted.';
 }
 $('project-remove-ungroup').onchange=describeProjectRemove;
 async function archiveProject(project){
@@ -1176,7 +1642,7 @@ $('show-commands').onclick=()=>{commandsOpen=!commandsOpen;renderCommands();};
 $('show-usage').onclick=async()=>{
   if(!active||status!=='idle')return;
   $('show-usage').disabled=true;
-  try{await api(`/api/sessions/${active.id}/prompt`,{method:'POST',body:JSON.stringify({text:active.provider.startsWith('claude')?'/usage':'/status',requestId:uuid()})});}
+  try{if(active.provider==='antigravity'){await api(`/api/sessions/${active.id}/quota/refresh`,{method:'POST',body:'{}'});}else{await api(`/api/sessions/${active.id}/prompt`,{method:'POST',body:JSON.stringify({text:active.provider.startsWith('claude')?'/usage':'/status',requestId:uuid()})});}}
   catch(e){toast(e.message);}finally{updateControls();}
 };
 $('permission-mode-picker').onchange=async event=>{
@@ -1191,10 +1657,11 @@ $('model-picker').onchange=async event=>{
 };
 $('create-form').onsubmit=async event=>{
   event.preventDefault();if(creating||worktrees.blocked())return;creating=true;providerNote();$('create-error').textContent='';
-  const fork=forkSource;
+  const fork=forkSource,githubPr=githubCreate;
   try{
-    const source=$('directory').value.trim();
-    const payload={resumePolicy:{enabled:$('create-resume-policy').checked},provider:$('provider').value,modelProvider:modelProviders.selection(),...worktrees.submission(),title:$('session-title').value,projectId:$('create-project').value||null,hostId:$('create-host').value,model:$('create-model').value,...(!fork&&$('create-role').value?{role:$('create-role').value}:{}),...($('create-agent-access').value?{agentAccess:{communicate:$('create-agent-access').value!=='off',...Object.fromEntries(['startSessions','promptSessions','cancelSessions','runAutomations'].map(key=>[key,$('create-agent-access').value==='coordinator']))}}:{})};
+    const source=$('directory').value.trim(),initialText=!fork?$('create-initial-prompt').value:'';
+    const sendPrompt=!!(initialText.trim()&&$('create-send-initial-prompt').checked);
+    const payload={resumePolicy:{enabled:$('create-resume-policy').checked},provider:$('provider').value,modelProvider:modelProviders.selection(),...worktrees.submission(),title:$('session-title').value,projectId:$('create-project').value||null,hostId:$('create-host').value,model:$('create-model').value,...(initialText.trim()?(sendPrompt?{prompt:initialText}:{description:initialText}):{}),...(!fork&&$('create-role').value?{role:$('create-role').value}:{}),...($('create-agent-access').value?{agentAccess:{communicate:$('create-agent-access').value!=='off',...Object.fromEntries(['startSessions','promptSessions','cancelSessions','runAutomations'].map(key=>[key,$('create-agent-access').value==='coordinator']))}}:{})};
     if(fork)Object.assign(payload,{boundarySeq:$('fork-boundary').value?Number($('fork-boundary').value):null,context:$('fork-context').value,summary:$('fork-context').value==='summary'?$('fork-summary').value:null});
     const signature=JSON.stringify({source:fork?.id||null,payload});
     if(!pendingCreate||pendingCreate.signature!==signature)pendingCreate={signature,requestId:uuid()};
@@ -1204,8 +1671,11 @@ $('create-form').onsubmit=async event=>{
     pendingCreate=null;sessionStorage.removeItem('agentworks-pending-create');
     // Remember the chosen source directory, never a worktree created from it.
     const remembered=readStorage(localStorage,'agentworks-project-locations',{});remembered[created.hostId&&created.hostId!=='local'?created.hostId+':'+(created.projectId||'ungrouped'):created.projectId||'ungrouped']=source;try{localStorage.setItem('agentworks-project-locations',JSON.stringify(remembered));}catch{}
+    const used=readStorage(localStorage,'agentworks-provider-used',{});used[created.provider]=Date.now();try{localStorage.setItem('agentworks-provider-used',JSON.stringify(used));}catch{}
+    if(githubPr){try{await api(`/api/sessions/${created.id}/github`,{method:'POST',body:JSON.stringify({links:[{host:githubPr.host,owner:githubPr.owner,repo:githubPr.repo,kind:'pullRequest',number:githubPr.number}]})});}catch(error){toast('Session created; could not attach PR: '+error.message);}}
     sessions.unshift(created);$('create-dialog').close();selectSession(created);
     if(fork)toast(`Forked from “${fork.title}”. Its recorded history and lineage are preserved; the selected context handoff is applied.`,'success');
+    else if(created.routing)toast(`Routed to ${labels[created.provider]||created.provider}${created.routing.model?` · ${created.routing.model}`:''}${created.routing.fallback?' (fallback)':''}`,'success');
   }catch(e){$('create-error').textContent=e.message;}finally{creating=false;providerNote();}
 };
 // L-05: one stable pending identity per session (survives switches, reloads and lost
@@ -1220,10 +1690,15 @@ function pendingFor(sid,text,attached=[]){
 // draft is the composer text; submission.text may carry resolved @mentions.
 function settle(sid,submission,draft=submission.text){
   const recovered=promptRecovery.recovered(sid,submission.requestId);
-  if(!recovered&&active?.id===sid&&$('prompt').value===draft){$('prompt').value='';promptResize.size();}
+  if(!recovered&&active?.id===sid&&$('prompt').value===draft){$('prompt').value='';promptResize.size();renderComposer();}
   if(!recovered&&drafts[sid]===draft)delete drafts[sid];sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));
   if(pendingSends[sid]?.requestId===submission.requestId){delete pendingSends[sid];sessionStorage.setItem('agentworks-pending-sends',JSON.stringify(pendingSends));}
 }
+// Keep the active mobile keyboard attached while Send handles the tap.
+// Keyboard activation of the button keeps its normal focus behavior.
+$('send').addEventListener('pointerdown',event=>{
+  if(composerKeyboard.matches&&event.isPrimary&&event.button===0&&markdownComposer.hasFocus())event.preventDefault();
+});
 $('composer').onsubmit=async event=>{
   event.preventDefault();const text=$('prompt').value;if(!active)return;
   const sid=active.id,attached=attachments.ids(sid);
@@ -1232,15 +1707,17 @@ $('composer').onsubmit=async event=>{
     if(attachments.failed(sid)){toast('Remove attachments that failed to upload');return;}
     if(!text.trim()){toast('Add a message to send with the attachments');return;}
     // Queued inputs are text-only; attachments are never held for a later turn.
-    if(BUSY.includes(status)){toast('Attachments can’t be queued. Send once the agent is idle; your draft is kept.');return;}
+    if(BUSY.includes(status)||STARTING.includes(status)){toast('Attachments can’t be queued. Send once the agent is idle; your draft is kept.');return;}
   }
   if(!text.trim())return;
-  if(status==='cancelling'||(!BUSY.includes(status)&&status!=='idle'))return;
-  const submission={...pendingFor(sid,mentions.expand(text),attached)};
+  // A dormant session resumes for the prompt on the server.
+  const asleep=dormant(),queues=BUSY.includes(status)||STARTING.includes(status);
+  if(status==='cancelling'||(!queues&&status!=='idle'&&!asleep))return;
+  const submission={...pendingFor(sid,taskMentions.expand(mentions.expand(text)),attached)};
   promptRecovery.submitted(sid,submission,text);
   $('send').disabled=true;
   try{
-    if(BUSY.includes(status))await inputQueue.enqueue(sid,submission);
+    if(queues)await inputQueue.enqueue(sid,submission);
     else try{await api(`/api/sessions/${sid}/prompt`,{method:'POST',body:JSON.stringify(submission)});}
     catch(e){
       // Send→Enter race: the session became busy first. Queue the same intended input.
@@ -1252,15 +1729,19 @@ $('composer').onsubmit=async event=>{
     if(attached.length)attachments.clear(sid,attached);
   }catch(e){toast(e.message);}finally{updateControls();}
 };
-$('prompt').oninput=()=>{mentions.update();commandsOpen=/^[/\$]\S*$/.test($('prompt').value);renderCommands();if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));}};
-$('prompt').onkeydown=event=>{if(mentions.keydown(event))return;if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault();$('composer').requestSubmit();}};
+function updateReferencePicker(){if(taskMentions.wants()){mentions.close();taskMentions.update();}else{taskMentions.close();mentions.update();}}
+$('prompt').addEventListener('click',updateReferencePicker);
+$('prompt').oninput=()=>{renderComposer();updateReferencePicker();updateCommands();if(active){drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));}};
+$('prompt').addEventListener('click',updateCommands);
+$('prompt').addEventListener('keyup',event=>{if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End'].includes(event.key)){updateCommands();if(!['ArrowUp','ArrowDown'].includes(event.key))updateReferencePicker();}});
+$('prompt').onkeydown=event=>{if(taskMentions.keydown(event)||mentions.keydown(event))return;if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing&&!composerKeyboard.matches){event.preventDefault();$('composer').requestSubmit();}};
 $('resume-session').onclick=()=>{if(active)resumeSession(active.id);};
 $('stop').onclick=async()=>{if(!active)return;const sid=active.id,seq=currentUserSeq;$('stop').disabled=true;try{await api(`/api/sessions/${sid}/cancel${seq!=null?'?userSeq='+seq:''}`,{method:'POST',body:'{}'});}catch(e){toast(e.message);}finally{updateControls();}};
 async function deleteSession(session,providerHistory=false){
   if(!session)return;
   const question=providerHistory
     ? `Permanently delete “${session.title}” from Agentworks and its provider’s conversation history? Its harness will stop. Worktree files and branches remain. This cannot be undone.`
-    : `Permanently delete “${session.title}” and its Agentworks transcript? Its harness will stop. Provider conversation history, worktree files and branches remain. This cannot be undone.`;
+    : `Permanently delete “${session.title}” and its Agentworks transcript? Its harness will stop. Provider conversation history remains. Worktree files and branches remain. This cannot be undone.`;
   if(!confirm(question))return;
   const id=session.id;
   try{
@@ -1271,7 +1752,7 @@ async function deleteSession(session,providerHistory=false){
 }
 $('close-session').onclick=()=>deleteSession(active);
 $('delete-provider-history').onclick=()=>deleteSession(active,true);
-function closeActive(){generation++;socket?.close();clearTimeout(retryTimer);active=null;localStorage.removeItem('agentworks-session');$('conversation').hidden=true;$('welcome').hidden=false;setTitle('Overview');}
+function closeActive(){generation++;socket?.close();clearTimeout(retryTimer);active=null;github.sessionChanged();localStorage.removeItem('agentworks-session');$('conversation').hidden=true;$('welcome').hidden=false;setTitle('Overview');}
 function applyRoots(){
   $('project-roots').replaceChildren();
   for(const root of config.roots){const option=el('option');option.value=root;$('project-roots').append(option);}
@@ -1279,42 +1760,110 @@ function applyRoots(){
 }
 function rootValues(){return [...$('settings-roots').querySelectorAll('input')].map(input=>input.value.trim());}
 function addRoot(value=''){
-  const row=el('div','root-item'),input=el('input');input.value=value;input.placeholder='/home/you/projects';input.setAttribute('aria-label','Allowed root directory');input.autocomplete='off';input.spellcheck=false;input.required=true;
-  const remove=el('button','icon-button','×');remove.type='button';remove.setAttribute('aria-label','Remove root directory');remove.onclick=()=>{row.remove();if(!$('settings-roots').children.length)addRoot();};
-  row.append(input,remove);$('settings-roots').append(row);return input;
+  const row=directoryRow(directoryPicker,{value,label:'Allowed root directory',removeLabel:'Remove root directory',placeholder:'/home/you/projects',required:true,
+    onRemove:()=>{if(!$('settings-roots').children.length)addRoot();},browse:{hostId:'local',hostName:()=>'Local',scope:'home'}});
+  $('settings-roots').append(row);return row.querySelector('input');
 }
 // Keep category contents mounted so switching sections preserves unsaved edits.
-const settingsTabs=[...document.querySelectorAll('[data-settings-category]')];
-function selectSettingsCategory(category){
-  for(const tab of settingsTabs){
-    const selected=tab.dataset.settingsCategory===category;
-    tab.setAttribute('aria-selected',String(selected));tab.tabIndex=selected?0:-1;
-    $(tab.getAttribute('aria-controls')).hidden=!selected;
+// Shared by Settings and Host settings; returns the dialog's category selector.
+function setupSettingsTabs(dialog){
+  const tabs=[...dialog.querySelectorAll('[data-settings-category]')],narrow=matchMedia('(max-width:900px)');
+  function select(category){
+    for(const tab of tabs){
+      const selected=tab.dataset.settingsCategory===category;
+      tab.setAttribute('aria-selected',String(selected));tab.tabIndex=selected?0:-1;
+      $(tab.getAttribute('aria-controls')).hidden=!selected;
+    }
+    dialog.querySelector('.settings-content').scrollTop=0;
   }
-  $('settings-dialog').querySelector('.settings-content').scrollTop=0;
+  const orientation=()=>dialog.querySelector('[role="tablist"]').setAttribute('aria-orientation',narrow.matches?'horizontal':'vertical');
+  orientation();narrow.addEventListener('change',orientation);
+  for(const [index,tab] of tabs.entries()){
+    tab.onclick=()=>{select(tab.dataset.settingsCategory);tab.scrollIntoView({block:'nearest',inline:'nearest'});};
+    tab.onkeydown=event=>{
+      const previous=narrow.matches?'ArrowLeft':'ArrowUp',next=narrow.matches?'ArrowRight':'ArrowDown';
+      let target;
+      if(event.key===previous)target=(index+tabs.length-1)%tabs.length;
+      else if(event.key===next)target=(index+1)%tabs.length;
+      else if(event.key==='Home')target=0;
+      else if(event.key==='End')target=tabs.length-1;
+      else return;
+      event.preventDefault();tabs[target].click();tabs[target].focus();
+    };
+  }
+  // Native form validation must reveal invalid fields in another category before focusing them.
+  dialog.querySelector('form').addEventListener('invalid',event=>{
+    const panel=event.target.closest('[role="tabpanel"]'),tab=tabs.find(t=>t.getAttribute('aria-controls')===panel?.id);
+    if(tab)select(tab.dataset.settingsCategory);
+  },true);
+  return select;
 }
-const settingsNarrow=matchMedia('(max-width:900px)');
-const settingsOrientation=()=>$('settings-dialog').querySelector('[role="tablist"]').setAttribute('aria-orientation',settingsNarrow.matches?'horizontal':'vertical');
-settingsOrientation();settingsNarrow.addEventListener('change',settingsOrientation);
-for(const [index,tab] of settingsTabs.entries()){
-  tab.onclick=()=>{selectSettingsCategory(tab.dataset.settingsCategory);tab.scrollIntoView({block:'nearest',inline:'nearest'});};
-  tab.onkeydown=event=>{
-    const previous=settingsNarrow.matches?'ArrowLeft':'ArrowUp',next=settingsNarrow.matches?'ArrowRight':'ArrowDown';
-    let target;
-    if(event.key===previous)target=(index+settingsTabs.length-1)%settingsTabs.length;
-    else if(event.key===next)target=(index+1)%settingsTabs.length;
-    else if(event.key==='Home')target=0;
-    else if(event.key==='End')target=settingsTabs.length-1;
-    else return;
-    event.preventDefault();settingsTabs[target].click();settingsTabs[target].focus();
+const selectSettingsCategory=setupSettingsTabs($('settings-dialog'));
+const gitSettings=setupGitSettings({$,api,picker:directoryPicker,getHosts:()=>hosts,getLocations:()=>locations,getActive:()=>active});
+$('project-git-settings').onclick=async()=>{const cwd=$('project-directory').value.trim(),host=$('project-directory-host').value||'local';await openSettings();selectSettingsCategory('git');await gitSettings.repository(cwd,host);};
+$('add-root').onclick=()=>addRoot().focus();
+let routingModelProfiles=[];
+function updateRoutingDecisionVisibility(){
+  $('routing-decision-settings').hidden=$('routing-approach').value!=='decision_model';
+  $('routing-decision-url-field').hidden=!!$('routing-decision-provider').value;
+}
+$('routing-approach').onchange=updateRoutingDecisionVisibility;
+$('routing-decision-provider').onchange=updateRoutingDecisionVisibility;
+function addRoutingCandidateRow(candidate={}){
+  const row=el('div','routing-candidate-row');
+  const provider=el('select');
+  for(const p of config.providers){const o=el('option','',p.name);o.value=p.id;provider.append(o);}
+  provider.value=candidate.provider&&config.providers.some(p=>p.id===candidate.provider)?candidate.provider:(config.providers[0]?.id||'demo');
+  const mp=el('select');mp.append(new Option('Host env',''));
+  for(const profile of routingModelProfiles)mp.append(new Option(profile.name,profile.id));
+  mp.value=candidate.modelProvider||'';
+  const model=el('input');model.placeholder='Default model';model.maxLength=256;model.value=candidate.model||'';
+  const notes=el('input');notes.placeholder='Optional routing hint (e.g. fast edits)';notes.maxLength=500;notes.value=candidate.notes||'';
+  const enabledLabel=el('label','workspace-check');const enabled=el('input');enabled.type='checkbox';enabled.checked=candidate.enabled!==false;enabledLabel.append(enabled,document.createTextNode('Enabled'));
+  const remove=el('button','text-button','Remove');remove.type='button';remove.onclick=()=>row.remove();
+  const syncMp=()=>{mp.hidden=provider.value!=='goose';};
+  provider.onchange=syncMp;syncMp();
+  row.append(provider,mp,model,notes,enabledLabel,remove);
+  $('routing-candidates').append(row);
+}
+$('add-routing-candidate').onclick=()=>addRoutingCandidateRow();
+function readRoutingSettings(){
+  const candidates=[...$('routing-candidates').querySelectorAll('.routing-candidate-row')].map(row=>{
+    const [provider,mp,model,notes]=row.querySelectorAll('select,input');
+    const enabled=row.querySelector('input[type="checkbox"]').checked;
+    return {
+      provider:provider.value,
+      ...(provider.value==='goose'&&mp.value?{modelProvider:mp.value}:{}),
+      ...(model.value.trim()?{model:model.value.trim()}:{}),
+      ...(notes.value.trim()?{notes:notes.value.trim()}:{}),
+      enabled,
+    };
+  });
+  const rrStrategy=$('routing-rr-strategy').value||'quota_and_sessions';
+  const rrQuotaLimit=Number.isInteger($('routing-rr-quota-limit').valueAsNumber)?Math.max(1,Math.min(100,$('routing-rr-quota-limit').valueAsNumber)):99;
+  const roundRobin={strategy:rrStrategy,quotaLimitPercent:rrQuotaLimit};
+  const protocol=$('routing-decision-protocol').value||'auto';
+  const providerId=$('routing-decision-provider').value||null;
+  const baseUrl=!providerId&&$('routing-decision-url').value.trim()?$('routing-decision-url').value.trim():null;
+  const dmModel=$('routing-decision-model').value.trim()||null;
+  const instructions=$('routing-decision-instructions').value.trim()||null;
+  const timeout=Number.isInteger($('routing-decision-timeout').valueAsNumber)?$('routing-decision-timeout').valueAsNumber:5000;
+  const decisionModel=(protocol!=='auto'||providerId||baseUrl||dmModel||instructions||timeout!==5000)?{
+    protocol,
+    ...(providerId?{modelProviderId:providerId}:{}),
+    ...(baseUrl?{baseUrl}:{}),
+    ...(dmModel?{model:dmModel}:{}),
+    ...(instructions?{instructions}:{}),
+    timeoutMs:timeout,
+  }:null;
+  return {
+    mode:$('routing-mode').value||'off',
+    approach:$('routing-approach').value||'quota_round_robin',
+    candidates,
+    roundRobin,
+    ...(decisionModel?{decisionModel}:{}),
   };
 }
-// Native form validation must reveal invalid fields in another category before focusing them.
-$('settings-form').addEventListener('invalid',event=>{
-  const panel=event.target.closest('[role="tabpanel"]');
-  if(panel)selectSettingsCategory(panel.id.replace('settings-panel-',''));
-},true);
-$('add-root').onclick=()=>addRoot().focus();
 async function openSettings(){
   const timeoutsReady=timeoutControls.load();
   parserScripts.load();
@@ -1322,47 +1871,89 @@ async function openSettings(){
   notifications.load().then(()=>notifications.mount($('notification-controls'))).catch(error=>notifications.mount($('notification-controls'),error));
   try{
     modelProviders.loadSettings();
-    const settings=await api('/api/settings');$('settings-roots').replaceChildren();for(const root of settings.roots)addRoot(root);$('settings-error').textContent='';$('settings-saved').textContent='Save applies global defaults and host settings. Display, notifications, model providers, secrets and parsers save immediately.';
+    const [settings,mpList]=await Promise.all([api('/api/settings'),api('/api/model-providers').catch(()=>({profiles:[]}))]);
+    routingModelProfiles=mpList.profiles||[];
+    $('settings-roots').replaceChildren();for(const root of settings.roots)addRoot(root);$('settings-error').textContent='';$('settings-saved').textContent='Save applies global defaults and host settings. Display, notifications, model providers, secrets and parsers save immediately.';
+    gitSettings.populate(settings.git);
     $('default-communication-role').value=settings.defaultCommunicationRole||'participant';
+    $('max-active-sessions').value=settings.maxActiveSessions;
+    $('idle-sleep-hours').value=settings.idleSleepMinutes/60;
+    const sr=settings.sessionRouting||{mode:'off',approach:'quota_round_robin',candidates:[]};
+    $('routing-mode').value=sr.mode||'off';
+    $('routing-approach').value=sr.approach||'quota_round_robin';
+    $('routing-rr-strategy').value=sr.roundRobin?.strategy||'quota_and_sessions';
+    $('routing-rr-quota-limit').value=sr.roundRobin?.quotaLimitPercent??99;
+    const dmSelect=$('routing-decision-provider');
+    $('routing-decision-protocol').value=sr.decisionModel?.protocol||'auto';
+    dmSelect.replaceChildren(new Option('Custom base URL (no stored key)',''));
+    for(const profile of routingModelProfiles.filter(p=>p.kind==='openai-compatible'))dmSelect.append(new Option(`${profile.name} (${profile.defaultModel})`,profile.id));
+    dmSelect.value=sr.decisionModel?.modelProviderId&&[...dmSelect.options].some(o=>o.value===sr.decisionModel.modelProviderId)?sr.decisionModel.modelProviderId:'';
+    $('routing-decision-url').value=sr.decisionModel?.baseUrl||'';
+    $('routing-decision-model').value=sr.decisionModel?.model||'';
+    $('routing-decision-timeout').value=sr.decisionModel?.timeoutMs||5000;
+    $('routing-decision-instructions').value=sr.decisionModel?.instructions||'';
+    $('routing-candidates').replaceChildren();
+    for(const c of sr.candidates||[])addRoutingCandidateRow(c);
+    updateRoutingDecisionVisibility();
     const fields=$('default-model-fields');fields.replaceChildren();
-    // Node and Rust harnesses for one CLI share its permission default; show the picker once per CLI.
-    const modeFamilies=new Set();
-    for(const provider of config.providers.filter(p=>p.id!=='demo')){
-      const family=provider.id.replace(/-rust$/,''),firstOfFamily=!modeFamilies.has(family);modeFamilies.add(family);
-      const id='default-model-'+provider.id,label=el('label','',provider.name+' default model');label.htmlFor=id;
-      const input=el('input');input.id=id;input.dataset.provider=provider.id;input.value=settings.defaultModels[provider.id]||'';input.placeholder='Harness default';input.maxLength=256;
-      const list=el('datalist');list.id=id+'-options';input.setAttribute('list',list.id);
-      const load=el('button','text-button','Load models');load.type='button';
-      load.onclick=async()=>{
-        load.disabled=true;load.textContent='Loading…';$('settings-error').textContent='';
-        try{
-          const cwd=rootValues().find(Boolean)||config.roots[0];
-          const result=await api('/api/models',{method:'POST',body:JSON.stringify({provider:provider.id,cwd})});
-          list.replaceChildren();for(const model of result.options||[]){const option=el('option');option.value=model.value;option.label=model.name||model.value;list.append(option);}
-          if(!result.options?.length)$('settings-error').textContent='This harness did not advertise selectable models.';
-        }catch(e){$('settings-error').textContent=e.message;}finally{load.disabled=false;load.textContent='Load models';}
-      };
-      const row=el('div','model-field');row.append(input,load);fields.append(label,row,list);
-      if(family==='codex'&&firstOfFamily){
-        const modeLabel=el('label','','Codex default sandbox / permission mode');modeLabel.htmlFor='codex-default-permission-mode';
+    const hidden=new Set(settings.hiddenProviders||[]);
+    for(const provider of config.providers){
+      // The power switch hides a harness from new sessions and collapses its defaults.
+      const section=el('section','settings-section harness-settings'),heading=el('div','harness-heading'),title=el('h3','',provider.name),state=el('span','harness-state');
+      title.id='harness-title-'+provider.id;section.setAttribute('aria-labelledby',title.id);
+      const power=el('button','harness-power');power.type='button';power.setAttribute('role','switch');power.dataset.visible=provider.id;
+      power.setAttribute('aria-label',`Show ${provider.name} in the new session picker`);power.append(el('span','harness-power-knob','⏻'));
+      const body=el('div','harness-body');
+      const setShown=on=>{power.setAttribute('aria-checked',String(on));section.classList.toggle('is-off',!on);body.hidden=!on;state.textContent=on?'':'Hidden from new sessions';};
+      power.onclick=()=>setShown(power.getAttribute('aria-checked')!=='true');
+      heading.append(title,state,power);section.append(heading,body);setShown(!hidden.has(provider.id));
+      if(provider.id!=='demo'){
+        const id='default-model-'+provider.id,label=el('label','','Default model');label.htmlFor=id;
+        const input=el('input');input.id=id;input.dataset.provider=provider.id;input.value=settings.defaultModels[provider.id]||'';input.placeholder='Harness default';input.maxLength=256;
+        const list=el('datalist');list.id=id+'-options';input.setAttribute('list',list.id);
+        const load=el('button','text-button','Load models');load.type='button';
+        load.onclick=async()=>{
+          load.disabled=true;load.textContent='Loading…';$('settings-error').textContent='';
+          try{
+            const cwd=rootValues().find(Boolean)||config.roots[0];
+            const result=await api('/api/models',{method:'POST',body:JSON.stringify({provider:provider.id,cwd})});
+            list.replaceChildren();for(const model of result.options||[]){const option=el('option');option.value=model.value;option.label=model.name||model.value;list.append(option);}
+            if(!result.options?.length)$('settings-error').textContent='This harness did not advertise selectable models.';
+          }catch(e){$('settings-error').textContent=e.message;}finally{load.disabled=false;load.textContent='Load models';}
+        };
+        const row=el('div','model-field');row.append(input,load);body.append(label,row,list);
+      }
+      if(provider.id==='codex-rust'){
+        const modeLabel=el('label','','Default sandbox / permission mode');modeLabel.htmlFor='codex-default-permission-mode';
         const mode=el('select');mode.id='codex-default-permission-mode';
         for(const [value,name] of [['agent-full-access','Full access'],['read-only','Read-only'],['workspace-write','Workspace access'],['agent','Auto review']]){
           const option=el('option','',name);option.value=value;mode.append(option);
         }
         mode.value=settings.codexDefaultPermissionMode||'agent-full-access';
-        const note=el('div','field-note',"Applies only to new Codex sessions, in both the Node and Rust harnesses. Full access allows unrestricted file and network access in the Codex harness. Existing sessions keep their saved mode. If the adapter does not advertise your choice, its current mode is kept and a note appears in Session options. This does not change Agentworks MCP/controller grants or host controls.");
-        fields.append(modeLabel,mode,note);
+        const note=el('div','field-note',"Applies only to new Codex sessions. Full access allows unrestricted file and network access in the Codex harness. Existing sessions keep their saved mode. If the adapter does not advertise your choice, its current mode is kept and a note appears in Session options. This does not change Agentworks MCP/controller grants or host controls.");
+        body.append(modeLabel,mode,note);
       }
-      if(family==='claude'&&firstOfFamily){
-        const modeLabel=el('label','','Claude default permission mode');modeLabel.htmlFor='claude-default-permission-mode';
+      if(provider.id==='claude-rust'){
+        const modeLabel=el('label','','Default permission mode');modeLabel.htmlFor='claude-default-permission-mode';
         const mode=el('select');mode.id='claude-default-permission-mode';
         for(const [value,name] of [['auto','Auto'],['default','Default'],['acceptEdits','Accept edits'],['plan','Plan']]){
           const option=el('option','',name);option.value=value;mode.append(option);
         }
         mode.value=settings.claudeDefaultPermissionMode||'auto';
-        const note=el('div','field-note',"Applies only to new Claude sessions, in both the Node and Rust harnesses. Auto uses Claude’s normal Auto mode. If the adapter does not advertise your choice, its current permission mode is kept and a note appears in Session options. Reconnected sessions keep their saved mode.");
-        fields.append(modeLabel,mode,note);
+        const note=el('div','field-note',"Applies only to new Claude sessions. Auto uses Claude’s normal Auto mode. If the adapter does not advertise your choice, its current permission mode is kept and a note appears in Session options. Reconnected sessions keep their saved mode.");
+        body.append(modeLabel,mode,note);
       }
+      if(provider.id==='antigravity'){
+        const modeLabel=el('label','','Default permission mode');modeLabel.htmlFor='antigravity-default-permission-mode';
+        const mode=el('select');mode.id='antigravity-default-permission-mode';
+        for(const [value,name] of [['auto','Auto'],['default','Default'],['accept-edits','Accept edits'],['plan','Plan']]){
+          const option=el('option','',name);option.value=value;mode.append(option);
+        }
+        mode.value=settings.antigravityDefaultPermissionMode||'auto';
+        const note=el('div','field-note',"Applies only to new Antigravity sessions. Auto approves edits and safe commands and asks before irreversible actions. If the adapter does not advertise your choice, its current mode is kept and a note appears in Session options. Reconnected sessions keep their saved mode.");
+        body.append(modeLabel,mode,note);
+      }
+      fields.append(section);
     }
     await timeoutsReady;
     $('settings-dialog').showModal();
@@ -1374,22 +1965,23 @@ $('dismiss-settings').onclick=()=>$('settings-dialog').close();
 $('settings-form').onsubmit=async event=>{
   event.preventDefault();$('save-settings').disabled=true;$('settings-error').textContent='';
   try{
-    const defaultModels={};for(const input of $('default-model-fields').querySelectorAll('input')){if(input.value.trim())defaultModels[input.dataset.provider]=input.value.trim();}
+    const defaultModels={};for(const input of $('default-model-fields').querySelectorAll('input[data-provider]')){if(input.value.trim())defaultModels[input.dataset.provider]=input.value.trim();}
+    const hiddenProviders=[...$('default-model-fields').querySelectorAll('[data-visible]')].filter(power=>power.getAttribute('aria-checked')!=='true').map(power=>power.dataset.visible);
     const timeouts=timeoutControls.pendingDefault();
-    const settings=await api('/api/settings',{method:'PUT',body:JSON.stringify({roots:rootValues().filter(Boolean),defaultModels,claudeDefaultPermissionMode:$('claude-default-permission-mode')?.value,codexDefaultPermissionMode:$('codex-default-permission-mode')?.value,defaultCommunicationRole:$('default-communication-role').value,...(timeouts?{timeouts}:{})})});
+    const settings=await api('/api/settings',{method:'PUT',body:JSON.stringify({git:gitSettings.value(),roots:rootValues().filter(Boolean),defaultModels,claudeDefaultPermissionMode:$('claude-default-permission-mode')?.value,codexDefaultPermissionMode:$('codex-default-permission-mode')?.value,antigravityDefaultPermissionMode:$('antigravity-default-permission-mode')?.value,hiddenProviders,defaultCommunicationRole:$('default-communication-role').value,sessionRouting:readRoutingSettings(),maxActiveSessions:Number.isInteger($('max-active-sessions').valueAsNumber)?$('max-active-sessions').valueAsNumber:undefined,idleSleepMinutes:Number.isFinite($('idle-sleep-hours').valueAsNumber)?Math.round($('idle-sleep-hours').valueAsNumber*60):undefined,...(timeouts?{timeouts}:{})})});
     if(timeouts)timeoutControls.acceptDefault(timeouts);
-    config.roots=settings.roots;config.defaultModels=settings.defaultModels;config.defaultCommunicationRole=settings.defaultCommunicationRole||'participant';applyRoots();
+    config.roots=settings.roots;config.defaultModels=settings.defaultModels;for(const p of config.providers)p.hidden=settings.hiddenProviders.includes(p.id);config.defaultCommunicationRole=settings.defaultCommunicationRole||'participant';config.sessionRouting=settings.sessionRouting;applyRoots();
     $('settings-dialog').close();toast('Settings saved. They apply to new sessions.','success');
   }catch(e){$('settings-error').textContent='Host settings were not saved: '+e.message+' Display preferences are stored separately in this browser.';}finally{$('save-settings').disabled=false;}
 };
-document.addEventListener('keydown',event=>{if(event.key==='n'&&!event.ctrlKey&&!event.metaKey&&!event.altKey&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)&&!document.querySelector('dialog[open]')){event.preventDefault();openCreate();}});
+document.addEventListener('keydown',event=>{if(event.key==='n'&&!event.ctrlKey&&!event.metaKey&&!event.altKey&&!document.activeElement?.isContentEditable&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)&&!document.querySelector('dialog[open]')){event.preventDefault();openCreate();}});
 const diffView=setupDiff({api,root:$('side-diff'),enhanceBlocks:display.enhance});
 sessionSecrets=setupSessionSecrets({$,api,el,getActive:()=>active});
 timeoutControls=setupTimeoutControls({$,api,getActive:()=>active,sections:[sessionSecrets]});
 parserScripts=setupParserScripts({$,api,el});
 secrets=setupSecrets({$,api,el,toast});
 $('settings-dialog').addEventListener('close',()=>secrets.close());
-workspace=createWorkspace({api,toast,labels,uuid,
+workspace=createWorkspace({api,toast,labels,uuid,imageViewer,
   viewChanged(view){
     if(view==='host-terminal'){
       terminalHost=hosts.find(host=>host.id===(terminalHost?.id||localStorage.getItem('agentworks-terminal-host')));
@@ -1397,10 +1989,14 @@ workspace=createWorkspace({api,toast,labels,uuid,
       $('header-title').textContent=terminalHost.name+' · Terminal';$('host-terminal-title').textContent=terminalHost.name+' · Terminal';
       hostTerminal.open();document.body.classList.remove('menu-open');enterChat();
     }else if(active)setTitle(active.title);else $('header-title').textContent='Overview';
+  },openGithubSession(row){
+    const pr=row.pr,repo=row.repository,request={...repo,repo:repo.name,number:pr.number,headSha:pr.headSha};delete request.name;
+    const branch=`pr-${pr.number}-${(pr.headBranch||'work').replace(/[^a-zA-Z0-9_/-]/g,'-').slice(0,150)}-${uuid().slice(0,6)}`;
+    openCreate({title:`PR #${pr.number}: ${pr.title}`.slice(0,80),workspaceMode:'newWorktree',githubPr:request,worktreePrefill:{branch,baseRef:pr.headSha,pullRequest:request}});
   },getConfig:()=>config,getActive:()=>active,selectSession,openCreate,refreshSessions,enhanceBlocks:display.enhance,openSettings,
   overview(){ $('conversation').hidden=true;$('welcome').hidden=false;localStorage.removeItem('agentworks-session'); },
   openPanel:tab=>sidePanel?.open(tab),
-  appendDraft(text){if(!active)return;const current=$('prompt').value;$('prompt').value=current?current+'\n\n'+text:text;drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));promptResize.size();},
+  appendDraft(text){if(!active)return;const current=$('prompt').value;$('prompt').value=current?current+'\n\n'+text:text;drafts[active.id]=$('prompt').value;sessionStorage.setItem('agentworks-drafts',JSON.stringify(drafts));promptResize.size();renderComposer();},
 });
 const sessionTerminal=setupTerminal({$,api,getActive:()=>active,socketUrl,onSelect:view=>{subagents.select(view);updateControls();scheduleDraw();}});
 const hostTerminal=setupTerminal({$:id=>$(id==='session-terminal'?'host-terminal-view':id.replace(/^terminal-/,'host-terminal-')),api,getActive:()=>terminalHost,socketUrl,tabs:false,endpoint:id=>`/api/hosts/${id}/terminal`});
@@ -1409,21 +2005,30 @@ $('host-terminal-back').onclick=()=>{workspace.showView('sessions');sidebar();if
 sidePanel=setupSidePanel({panel:$('side-panel'),tabs:{files:$('side-tab-files'),diff:$('side-tab-diff')},triggers:{files:$('session-files'),diff:$('session-diff')},close:$('side-close'),renderers:{files:workspace.sideFiles,diff:diffView},getActive:()=>active,phone});
 async function init(){
   config=await api('/api/status');
-  $('host-address').textContent=location.host+' · Linux prototype';
-  for(const p of config.providers){const option=el('option','',p.name+(p.authMode==='api_key'&&!p.keyPresent?' · API key needed':''));option.value=p.id;$('provider').append(option);}
+  $('host-address').textContent=location.host+' · '+(buildLabel(config.build)||'Linux prototype');
+  renderProviderPicker();
   applyRoots();
   await refreshSessions();
   const saved=sessions.find(s=>s.id===localStorage.getItem('agentworks-session'));if(saved)selectSession(saved);workspace.restoreView();
   // The dashboard's Settings link opens the dialog here; drop the flag so a reload doesn't reopen it.
-  const params=new URLSearchParams(location.search);if(params.has('settings')){params.delete('settings');history.replaceState(history.state,'',location.pathname+(params.size?'?'+params:'')+location.hash);openSettings();}
+  const params=new URLSearchParams(location.search);
+  if(params.has('notificationSession')||params.has('notificationAutomation')){
+    try{await openNotificationAlert({sessionId:params.get('notificationSession'),automationId:params.get('notificationAutomation'),seq:Number(params.get('notificationSeq')),event:params.get('notificationEvent')});}catch(error){toast('Could not open notification: '+error.message);}
+    for(const key of ['notificationSession','notificationSeq','notificationEvent','notificationAutomation'])params.delete(key);
+    history.replaceState(history.state,'',location.pathname+(params.size?'?'+params:'')+location.hash);
+  }
+  if(params.has('settings')){params.delete('settings');history.replaceState(history.state,'',location.pathname+(params.size?'?'+params:'')+location.hash);openSettings();}
   setInterval(()=>refreshSessions().catch(()=>{}),5000);
   notifications.start();
+  notificationTray=setupNotificationTray({openAlert:openNotificationAlert,onAlertsChange:updateNotificationIndicators});
+  window.addEventListener('focus',()=>{if(isAutoDismissEnabled()&&active?.id)notificationTray?.dismissSessionAlerts(active.id);});
 }
 init().catch(error=>toast('Cannot reach the local server: '+error.message));
 
-setupCommunication({api,getActive:()=>active,getSessions:()=>sessions,selectSession,toast,uuid});
+setupCommunication({api,getActive:()=>active,getSessions:()=>sessions,selectSession,toast});
 setupInboxDelivery({api,getActive:()=>active,toast,uuid});
 
+const github=setupGithub({api,getActive:()=>active});
 setupGitContext({api,getActive:()=>active});
 const worktreeOwnership=setupWorktreeOwnership({api,toast});
 setupControllers({api,toast,getProject:()=>editingProject});
@@ -1443,19 +2048,30 @@ setupPalettes({
   $,labels,selectSession,
   fallbackFocus:()=>active?$('prompt'):null,
   state:()=>({active,status,connected,sessions,projects,hosts,commands:availableCommands,
-    usageAvailable:!!active&&['claude','claude-rust','codex','codex-rust'].includes(active.provider)&&!!usageCommand(),
+    usageAvailable:!!active&&(active.provider==='antigravity'||['claude','claude-rust','codex','codex-rust'].includes(active.provider)&&!!usageCommand()),
     views:{files:()=>$('nav-files').click(),automations:()=>$('nav-automations').click()}}),
   handlers:{
     newSession:()=>openCreate(),
     importSession:()=>openImport(),
     newProject:()=>openProjectDialog(),
     settings:openSettings,
+    githubSettings:async()=>{await openSettings();$('settings-tab-github').click();},
     agents:()=>{if(active)$('session-agents').click();},
     workspaceInfo:()=>{if(active)$('session-workspace').click();},
     diff:()=>sidePanel.open('diff'),
     sessionFiles:()=>sidePanel.open('files'),
-    lifecycle:()=>{if(active){$('lifecycle-menu').open=true;$('lifecycle-menu').querySelector('button').focus();}},
+    lifecycle:()=>{if(active){$('lifecycle-menu').open=true;[...$('lifecycle-menu').querySelectorAll('.lifecycle-actions :is(button,select)')].find(c=>c.offsetParent)?.focus();}},
     forkSession:()=>{if(active)openFork();},
+    rename:()=>{if(active)openRename(active);},
+    sessionSettings:()=>{if(active)$('session-settings').click();},
+    archive:()=>{if(active)archiveSession(active);},
+    suspend:()=>{if(active&&!$('suspend-session').disabled)$('suspend-session').click();},
+    restart:()=>{if(active&&!$('restart-session').disabled)$('restart-session').click();},
+    changeDirectory:()=>{if(active&&!$('change-directory').disabled)$('change-directory').click();},
+    additionalDirectories:()=>{if(active&&!$('additional-directories').disabled)additionalDirectories.open();},
+    addDirectory:()=>{if(active&&!$('additional-directories').disabled)additionalDirectories.add();},
+    editProject:()=>{const project=projects.find(p=>p.id===active?.projectId);if(project)openProjectDialog(project);},
+    deleteEverywhere:()=>{if(active)deleteSession(active,true);},
     resume:()=>{if(active&&connected&&['suspended','error'].includes(status))resumeSession(active.id);},
     stop:()=>{if(active&&connected&&['running','waiting'].includes(status))$('stop').click();},
     usage:()=>{if(active&&connected&&status==='idle')$('show-usage').click();},
@@ -1513,26 +2129,90 @@ setInterval(()=>{if(active?.continuation?.dueAt)renderContinuation();},1000);
 
 $('session-filter').value=readStorage(localStorage,'agentworks-session-filter','active');
 $('session-filter').onchange=()=>{localStorage.setItem('agentworks-session-filter',JSON.stringify($('session-filter').value));sidebar();};
-$('rename-session').onclick=()=>{$('rename-title').value=active.title;$('rename-error').textContent='';$('rename-dialog').showModal();$('rename-title').focus();};
+// The rename dialog edits the session it was opened for; browser menus can
+// target sessions other than the active one.
+let renameTarget=null;
+function openRename(session){
+  renameTarget=session;
+  $('rename-title').value=session.title;$('rename-error').textContent='';
+  $('rename-dialog').showModal();$('rename-title').focus();
+}
+$('rename-session').onclick=()=>{if(active)openRename(active);};
+// Codex keeps its own rollout file per conversation and never shortens it; every
+// context compaction appends a checkpoint. Compacting keeps the latest one onward.
+const codexProviders=['codex','codex-rust'];
+const fileSize=b=>b<1048576?`${Math.max(1,Math.round(b/1024))} KB`:b<1073741824?`${(b/1048576).toFixed(b<10485760?1:0)} MB`:`${(b/1073741824).toFixed(1)} GB`;
+let codexTranscript=null;
+async function loadCodexTranscript(){
+  const button=$('codex-transcript'),session=active;
+  if(!session||!codexProviders.includes(session.provider)||session.hostId!=='local'){button.hidden=true;return null;}
+  try{
+    const info=await api(`/api/sessions/${encodeURIComponent(session.id)}/codex-transcript`);
+    if(active!==session)return null;
+    button.hidden=!info.available;if(info.available)button.textContent=`Codex transcript · ${fileSize(info.bytes)}…`;
+    codexTranscript={sessionId:session.id,...info};return codexTranscript;
+  }catch{button.hidden=true;return null;}
+}
+function renderCodexTranscript(info){
+  const n=info.checkpoints;
+  $('codex-transcript-size').textContent=`${fileSize(info.bytes)} on disk · ${n} compaction checkpoint${n===1?'':'s'}.`;
+  const worthwhile=info.compactedBytes!=null&&info.compactedBytes<info.bytes;
+  $('codex-transcript-plan').textContent=info.running?'Suspend the harness first: Codex writes to this file while it runs.'
+    :worthwhile?`Compacting keeps the latest checkpoint and what follows: about ${fileSize(info.compactedBytes)}.`
+    :info.compactedBytes==null?'Codex has not compacted this conversation yet, so there is nothing to remove.':'The file already starts at its latest checkpoint.';
+  $('codex-transcript-compact').disabled=info.running||!worthwhile;
+  const backups=info.backups||[],kept=backups.reduce((sum,b)=>sum+b.bytes,0);
+  $('codex-transcript-backup').hidden=$('codex-transcript-delete-backup').hidden=!backups.length;
+  $('codex-transcript-backup').textContent=backups.length?`The original is kept beside it as a backup (${fileSize(kept)}). Delete it once the session resumes normally.`:'';
+}
+$('lifecycle-menu').addEventListener('toggle',()=>{if($('lifecycle-menu').open)loadCodexTranscript();});
+$('codex-transcript').onclick=async()=>{
+  $('lifecycle-menu').open=false;sessionMenu.close();$('codex-transcript-error').textContent='';
+  const info=await loadCodexTranscript();if(!info)return;
+  renderCodexTranscript(info);$('codex-transcript-dialog').showModal();
+};
+$('codex-transcript-dismiss').onclick=()=>$('codex-transcript-dialog').close();
+async function codexTranscriptAction(path,method,busy){
+  const id=codexTranscript?.sessionId;if(!id)return;
+  for(const b of $('codex-transcript-dialog').querySelectorAll('button'))b.disabled=true;
+  $('codex-transcript-error').textContent='';$('codex-transcript-plan').textContent=busy;
+  try{
+    const info=await api(`/api/sessions/${encodeURIComponent(id)}/codex-transcript${path}`,{method,body:method==='POST'?'{}':undefined});
+    codexTranscript={sessionId:id,...info};
+    if(info.result)toast(`Codex transcript compacted: ${fileSize(info.result.before)} → ${fileSize(info.result.after)}`,'success');
+    if(active?.id===id)$('codex-transcript').textContent=`Codex transcript · ${fileSize(info.bytes)}…`;
+    renderCodexTranscript(info);
+  }catch(error){$('codex-transcript-error').textContent=error.message;if(codexTranscript)renderCodexTranscript(codexTranscript);}
+  finally{for(const b of $('codex-transcript-dialog').querySelectorAll('button:not(#codex-transcript-compact)'))b.disabled=false;}
+}
+$('codex-transcript-form').onsubmit=event=>{event.preventDefault();codexTranscriptAction('/compact','POST','Compacting…');};
+$('codex-transcript-delete-backup').onclick=()=>codexTranscriptAction('','DELETE','Deleting the backup…');
 $('rename-dismiss').onclick=()=>$('rename-dialog').close();
 $('rename-form').onsubmit=async event=>{
-  event.preventDefault();const id=active?.id;if(!id)return;
-  try{const updated=await api(`/api/sessions/${id}`,{method:'PATCH',body:JSON.stringify({title:$('rename-title').value})});if(active?.id===id){Object.assign(active,updated);setTitle(updated.title);}await refreshSessions();$('rename-dialog').close();}catch(e){$('rename-error').textContent=e.message;}
+  event.preventDefault();const id=renameTarget?.id;if(!id)return;
+  try{const updated=await api(`/api/sessions/${id}`,{method:'PATCH',body:JSON.stringify({title:$('rename-title').value})});if(active?.id===id){Object.assign(active,updated);setTitle(updated.title);}await refreshSessions();renameTarget=null;$('rename-dialog').close();}catch(e){$('rename-error').textContent=e.message;}
 };
 async function archiveSession(session){
   if(!session)return;
   const id=session.id;
   try{const updated=await worktreeOwnership.archive(session);if(!updated)return;if(active?.id===id)Object.assign(active,updated);await refreshSessions();updateControls();}catch(e){toast(e.message);}
 }
+async function removeRetainedWorktree(session){
+  try{if(await worktreeOwnership.removeRetained(session))await refreshSessions();}catch(e){toast(e.message);}
+}
 $('archive-session').onclick=()=>archiveSession(active);
 $('fork-session').onclick=()=>openFork();
 setupContextMenu({onError:message=>toast(message),resolve(target){
+  const githubContext=workspace?.githubContext(target);if(githubContext)return githubContext;
+  if(target.closest('a[href]'))return null;
   const row=target.closest('.session-item');
   if(row){
     const session=sessions.find(s=>s.id===row.dataset.sessionId);if(!session)return null;
-    return {origin:row,label:`Actions for ${session.title}`,actions:[
+    return {origin:row,focus:row.querySelector('.session-select')||row,label:`Actions for ${session.title}`,actions:[
       {label:'Fork session…',run:()=>openFork(session)},
+      {label:'Rename session…',run:()=>openRename(session)},
       {label:session.archived?'Unarchive session':'Archive session',run:()=>archiveSession(session)},
+      ...(session.archived&&session.worktree?.owned&&!session.worktree.removed?[{label:'Remove worktree…',danger:true,run:()=>removeRetainedWorktree(session)}]:[]),
       {label:'Delete history…',danger:true,run:()=>deleteSession(session)},
     ]};
   }
@@ -1541,6 +2221,7 @@ setupContextMenu({onError:message=>toast(message),resolve(target){
     const project=projects.find(p=>p.id===heading.dataset.projectId);if(!project)return null;
     return {origin:heading,label:`Actions for ${project.name}`,actions:[
       {label:'Edit project…',run:()=>openProjectDialog(project)},
+      ...(project.tasksEnabled?[{label:'Tasks…',run:()=>projectTasks.open(project.id)}]:[]),
       {label:project.archived?'Unarchive project':'Archive project…',run:()=>archiveProject(project)},
       {label:'Delete project…',danger:true,run:()=>openProjectRemove('delete',project)},
     ]};
@@ -1563,20 +2244,50 @@ $('suspend-session').onclick=async()=>{
   try{const updated=await api(`/api/sessions/${id}/suspend`,{method:'POST',body:'{}'});if(active?.id===id){Object.assign(active,updated);status=updated.status;updateControls();}await refreshSessions();}catch(e){toast(e.message);}
 };
 
+$('restart-session').onclick=async()=>{
+  const id=active?.id;if(!id)return;
+  try{await api(`/api/sessions/${id}/restart`,{method:'POST',body:'{}'});$('lifecycle-menu').open=false;toast('Restarting harness…','success');}catch(e){toast(e.message);}
+};
+$('additional-directories').onclick=()=>{$('lifecycle-menu').open=false;additionalDirectories.open();};
+// Unknown until the harness first initializes; the server checks again when it starts.
+function supportsAdditional(){const caps=active?.providerCapabilities;return !caps||typeof caps!=='object'||!!caps.additionalDirectories;}
+// The conversation stays; the harness reopens it in the chosen folder.
+$('change-directory').onclick=async()=>{
+  const session=active;if(!session)return;
+  $('lifecycle-menu').open=false;
+  const hostId=session.hostId||'local',host=hosts.find(h=>h.id===hostId);
+  const path=await directoryPicker.pick({hostId,hostName:host?.name||'Local',start:session.cwd});
+  if(!path||active?.id!==session.id)return;
+  try{
+    const result=await api(`/api/sessions/${session.id}/directory`,{method:'POST',body:JSON.stringify({cwd:path})});
+    toast(result.unchanged?'Already in that directory':result.restarted?'Moving the session and restarting its harness…':'Directory changed; it applies when the harness resumes','success');
+  }catch(e){toast(e.message);}
+};
+
 $('dismiss-lifecycle').onclick=()=>{$('lifecycle-menu').open=false;$('lifecycle-menu').querySelector('summary').focus();};
 $('lifecycle-menu').addEventListener('keydown',event=>{if(event.key==='Escape'){$('dismiss-lifecycle').click();event.stopPropagation();}});
+// Toolbar dropdowns close on an outside press; Session actions also closes once an action is chosen.
+document.addEventListener('pointerdown',event=>{for(const menu of [$('lifecycle-menu'),$('session-config-options')])if(menu.open&&!menu.contains(event.target))menu.open=false;});
+$('lifecycle-menu').querySelector('.lifecycle-actions').addEventListener('click',event=>{if(event.target.closest('button')&&event.target.id!=='dismiss-lifecycle')$('lifecycle-menu').open=false;});
 
 // Polling never submits or replays a restart request. Identity is server-owned and durable.
 const serviceSection=document.createElement('fieldset');serviceSection.id='service-controls';
 serviceSection.innerHTML=`<legend>Service · all projects</legend><p id="service-status" role="status" aria-live="polite">Loading service status…</p><label for="service-mode">Restart behavior</label><select id="service-mode"><option value="wait">Wait until all work is idle</option><option value="interrupt">Interrupt ALL active sessions</option></select><label for="service-expiry">Drain expiry (seconds, 5–900)</label><input id="service-expiry" type="number" min="5" max="900" value="300"><label for="service-release">Prepared release (blank keeps current executable)</label><input id="service-release" maxlength="128" placeholder="Immutable release basename"><button type="button" id="service-restart">Restart service</button><button type="button" id="service-cancel" hidden>Cancel pending restart</button><p id="service-error" class="error-text" role="alert"></p>`;
 $('settings-service-slot').replaceWith(serviceSection);
+api('/api/auth').then(auth=>{
+ if(!auth.user)return;
+ const row=document.createElement('p');row.id='auth-status';row.append(`Signed in as ${auth.user}. `);
+ const out=document.createElement('button');out.type='button';out.id='sign-out';out.textContent='Sign out';
+ out.onclick=async()=>{try{await api('/api/auth/logout',{method:'POST'});}finally{location.reload();}};
+ row.append(out);serviceSection.append(row);
+}).catch(()=>{});
 let servicePending=null,servicePolling=false;
 async function refreshService(){
  if(servicePolling||!$('settings-dialog').open)return;servicePolling=true;
  try{
   const s=await api('/api/service/restart');const a=s.activity;servicePending=s.requests.find(r=>['draining','dispatching'].includes(r.phase)||['pending','opening'].includes(r.handoffPhase));
   const latest=s.requests[0];const remaining=servicePending?Math.max(0,Math.ceil((servicePending.expiresAt-Date.now())/1000)):0;
-  $('service-status').textContent=`Instance ${s.instanceId.slice(0,8)} · ${s.restartSupported?'Supervised restart available':'Restart unavailable: external supervisor required'}. ${a.activeTurns} active turns, ${a.approvals} approvals, ${a.workspacePreparations} workspace preparations, ${a.startingHarnesses} harnesses starting.`+(latest?` Request ${latest.request.requestId}: ${latest.phase} · ${latest.detail}${latest.handoffPhase?' · handoff '+latest.handoffPhase:''}.`:'')+(servicePending?` Drain expires in ${remaining}s.`:'')+(s.managerError?' '+s.managerError:'')+(s.supervisorOutcome?.phase==='failed'?` Supervisor failed: ${s.supervisorOutcome.detail}`:'');
+  $('service-status').textContent=`Instance ${s.instanceId.slice(0,8)} · ${s.restartSupported?'Supervised restart available':'Restart unavailable: run as the systemd user service (agentworks service --install)'}. ${a.activeTurns} active turns, ${a.approvals} approvals, ${a.workspacePreparations} workspace preparations, ${a.startingHarnesses} harnesses starting.`+(latest?` Request ${latest.request.requestId}: ${latest.phase} · ${latest.detail}${latest.handoffPhase?' · handoff '+latest.handoffPhase:''}.`:'')+(servicePending?` Drain expires in ${remaining}s.`:'')+(s.managerError?' '+s.managerError:'');
   $('service-restart').disabled=!s.restartSupported||!!servicePending;$('service-cancel').hidden=!servicePending||servicePending.phase==='dispatching';
  }catch(e){$('service-status').textContent='Service disconnected. Waiting to reconnect and read the durable outcome…';}finally{servicePolling=false;}
 }

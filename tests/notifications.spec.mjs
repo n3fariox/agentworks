@@ -42,7 +42,7 @@ async function startServer(){
   const env={...process.env,
     AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:'4413',AGENTWORKS_ROOTS:fixture,
     AGENTWORKS_CATALOG_PATH:join(fixture,'catalog.json'),AGENTWORKS_DB_PATH:join(fixture,'sessions.sqlite3'),AGENTWORKS_DEMO_STATE_DIR:join(fixture,'demo')};
-  for(const key of ['AGENTWORKS_SUPERVISOR_DIR','AGENTWORKS_SUPERVISOR_TOKEN','AGENTWORKS_RELEASE_DIR','AGENTWORKS_RELEASE'])delete env[key];
+  for(const key of ['AGENTWORKS_SERVICE_DIR','NOTIFY_SOCKET','AGENTWORKS_RELEASE_DIR','INVOCATION_ID'])delete env[key];
   server=spawn(resolve('target/debug/agentworks'),[],{env,stdio:['ignore','pipe','pipe']});
   server.on('error',e=>{log+=e.message;exited=true;});server.on('exit',()=>exited=true);
   for(const stream of [server.stdout,server.stderr])stream.on('data',s=>{log+=String(s);});
@@ -93,6 +93,7 @@ test.afterAll(async()=>{
 });
 // Drive the background session until it is idle again.
 async function run(id,text='approval'){
+  await expect.poll(async()=> (await api(`/api/sessions/${id}`)).session.status).toBe('idle');
   await api(`/api/sessions/${id}/prompt`,{text,requestId:crypto.randomUUID()});
   for(let i=0;i<100;i++){
     const state=await api(`/api/sessions/${id}`);
@@ -226,6 +227,8 @@ test('clicking a notice opens the session that produced it',async({page})=>{
 test('the stream and its settings are unavailable cross-origin',async()=>{
   const post=await fetch(base+'/api/notifications',{method:'PUT',headers:{Origin:'http://evil.example','Content-Type':'application/json'},body:'{}'});
   expect(post.status).toBe(403);
+  const dismissal=await fetch(base+'/api/notifications/inbox/dismiss',{method:'POST',headers:{Origin:'http://evil.example','Content-Type':'application/json'},body:JSON.stringify({ids:[],dismissed:true})});
+  expect(dismissal.status).toBe(403);
   // A cross-origin WebSocket upgrade is refused by the same guard.
   const socket=new WebSocket(base.replace('http','ws')+'/api/notifications/events',{headers:{Origin:'http://evil.example'}});
   const outcome=await new Promise(resolve=>{
@@ -336,6 +339,7 @@ for(const mode of ['insecure','unsupported'])test(`${mode} origins/browsers expl
   const sockets=await harness(page,{[mode]:true,permission:'default'});
   await expect(page.locator('#controls')).toContainText(mode==='insecure'?'secure':'does not show notifications');
   await expect(page.locator('#notifications-enabled')).toHaveCount(0);
+  await expect(page.locator('#notifications-auto-dismiss')).toBeVisible();
   expect(sockets).toEqual([]);
   expect(await page.evaluate(()=>window.__permissionRequests)).toEqual([]);
 });
@@ -435,8 +439,10 @@ test('forwarded origin is derived from proxy headers and must match browser Orig
   for(const origin of ['https://unconfigured.example','http://localhost:4414']){
     const response=await fetch(base+'/api/notifications',{method:'PUT',headers:{Origin:origin,Host:'localhost:4414','X-Forwarded-Proto':'https','X-Forwarded-Host':'localhost:4414','Content-Type':'application/json'},body:'{}'});
     expect(response.status).toBe(403);
+    // Same headers fetch actually sends (it drops Host): a matching Host would be a
+    // genuine same-origin loopback request, which tunnels rely on.
     const outcome=await new Promise(resolve=>{
-      const ws=new WebSocket(base.replace('http','ws')+'/api/notifications/events',{headers:{Origin:origin,Host:'localhost:4414','X-Forwarded-Proto':'https'}});
+      const ws=new WebSocket(base.replace('http','ws')+'/api/notifications/events',{headers:{Origin:origin,'X-Forwarded-Proto':'https','X-Forwarded-Host':'localhost:4414'}});
       ws.on('open',()=>{ws.close();resolve('open');});ws.on('error',error=>resolve(error.message));
     });
     expect(outcome).toContain('403');
@@ -455,6 +461,7 @@ test('real insecure HTTP hostname is explained even when Notification exists',as
   });
   expect(await page.evaluate(()=>isSecureContext)).toBe(false);
   await expect(page.locator('#controls')).toContainText('HTTPS or localhost');
+  await expect(page.locator('#notifications-auto-dismiss')).toBeVisible();
   await expect(page.getByRole('button')).toHaveCount(0);
 });
 
@@ -466,4 +473,281 @@ test('unavailable shared storage suppresses events while test display stays usab
   await page.waitForFunction(()=>window.__storageAttempted);
   await page.getByRole('button',{name:'Send a test notification'}).click();
   expect((await shown(page)).map(n=>n.tag)).toEqual(['test']);
+});
+
+async function clearInbox(){
+  const {alerts}=await api('/api/notifications/inbox');
+  if(alerts.length)await api('/api/notifications/inbox/dismiss',{ids:alerts.map(a=>a.id),dismissed:true});
+}
+
+test('persistent tray works without browser permission; opening keeps alerts until dismissal and Undo restores them',async({page,context})=>{
+  await clearInbox();
+  await context.addInitScript(()=>localStorage.setItem('agentworks-notification-auto-dismiss','false'));
+  await captureNotifications(page,'denied');
+  await page.goto('/');
+  await run(background.id,'hello');
+  const bell=page.locator('#nav-notifications');
+  await expect(bell).toHaveAccessibleName('Notifications, 1 undismissed');
+  await bell.click();
+  const tray=page.locator('#notification-tray');
+  await expect(tray.getByText('Turn finished',{exact:true})).toBeVisible();
+  await tray.getByRole('link',{name:/Turn finished/}).click();
+  await expect(page.locator('#header-title')).toHaveText('Background session');
+  await expect(tray).not.toBeVisible();
+  await page.reload();
+  await expect(bell).toHaveAccessibleName('Notifications, 1 undismissed');
+  const second=await context.newPage();await second.goto('/dashboard');
+  await expect(second.locator('#nav-notifications')).toHaveAccessibleName('Notifications, 1 undismissed');
+  await bell.click();
+  await tray.getByRole('button',{name:'Dismiss Turn finished for Background session'}).click();
+  await expect(bell).toHaveAccessibleName('Notifications');
+  await expect(second.locator('#nav-notifications')).toHaveAccessibleName('Notifications');
+  await tray.getByRole('button',{name:'Undo',exact:true}).click();
+  await expect(bell).toHaveAccessibleName('Notifications, 1 undismissed');
+  await expect(second.locator('#nav-notifications')).toHaveAccessibleName('Notifications, 1 undismissed');
+  await tray.getByRole('button',{name:'Dismiss all',exact:true}).click();
+  await expect(tray.getByText(/caught up/)).toBeVisible();
+  await page.reload();await expect(bell).toHaveAccessibleName('Notifications');
+  expect(await shown(page)).toEqual([]);
+  await second.close();
+});
+
+test('tray groups approvals first and updates resolved requests without removing them',async({page})=>{
+  await clearInbox();
+  await page.addInitScript(()=>localStorage.setItem('agentworks-notification-auto-dismiss','false'));
+  await page.goto('/dashboard');
+  await api(`/api/sessions/${background.id}/prompt`,{text:'approval',requestId:crypto.randomUUID()});
+  await expect.poll(async()=> (await api(`/api/sessions/${background.id}`)).approvals.length).toBe(1);
+  await page.locator('#nav-notifications').click();
+  const tray=page.locator('#notification-tray');
+  await expect(tray.getByText('Needs attention',{exact:true})).toBeVisible();
+  await expect(tray.getByText('Approval needed',{exact:true})).toBeVisible();
+  const pending=(await api(`/api/sessions/${background.id}`)).approvals[0];
+  await api(`/api/sessions/${background.id}/approvals/${pending.id}`,{optionId:'allow'});
+  await expect(tray.getByText('Request resolved',{exact:true})).toBeVisible();
+  await expect(tray.getByText('Turn finished',{exact:true})).toBeVisible();
+  await page.screenshot({path:'.cache/notification-tray-desktop.png'});
+  const count=(await api('/api/notifications/inbox')).alerts.length;
+  expect(count).toBe(2);
+  await tray.getByRole('link',{name:/Turn finished/}).click();
+  await expect(page.locator('#header-title')).toHaveText('Background session');
+  await expect(page.locator('#session-state')).toHaveText('Ready');
+  await expect(page.locator('.notification-target')).toBeVisible();
+  expect((await api('/api/notifications/inbox')).alerts.length).toBe(count);
+});
+
+test('subsequent turn ended event dismisses previous ones for the same session',async({page})=>{
+  await clearInbox();
+  await run(background.id,'hello');
+  let {alerts}=await api('/api/notifications/inbox');
+  expect(alerts).toHaveLength(1);
+  const firstId=alerts[0].id;
+  expect(alerts[0].sessionId).toBe(background.id);
+  expect(alerts[0].event).toBe('turnEnd');
+
+  // Running another turn in background session should dismiss the previous turnEnd alert
+  await run(background.id,'hello again');
+  ({alerts}=await api('/api/notifications/inbox'));
+  expect(alerts).toHaveLength(1);
+  expect(alerts[0].id).not.toBe(firstId);
+  expect(alerts[0].sessionId).toBe(background.id);
+  expect(alerts[0].event).toBe('turnEnd');
+
+  // A turn in a different session does not dismiss background's turnEnd alert
+  await run(watched.id,'hello watched');
+  ({alerts}=await api('/api/notifications/inbox'));
+  expect(alerts).toHaveLength(2);
+  expect(alerts.some(a=>a.sessionId===background.id&&a.event==='turnEnd')).toBe(true);
+  expect(alerts.some(a=>a.sessionId===watched.id&&a.event==='turnEnd')).toBe(true);
+});
+
+test('tray inbox and dismissal survive a server restart',async({page})=>{
+  await clearInbox();await run(background.id,'hello');await run(watched.id,'hello');
+  const {alerts}=await api('/api/notifications/inbox');expect(alerts).toHaveLength(2);
+  await api('/api/notifications/inbox/dismiss',{ids:[alerts[0].id],dismissed:true});
+  await page.goto('/dashboard');await page.locator('#nav-notifications').click();
+  await expect(page.locator('.notification-card')).toHaveCount(1);
+  const stopped=new Promise(r=>server.once('exit',r));server.kill('SIGTERM');await stopped;await startServer();
+  expect((await api('/api/notifications/inbox')).alerts.map(a=>a.id)).toEqual([alerts[1].id]);
+  await expect(page.locator('.notification-status')).toHaveText('1 undismissed · Live');
+  await expect(page.locator('.notification-card')).toHaveCount(1);
+});
+
+test('tray reports load and dismissal failures and retains alerts',async({page})=>{
+  await clearInbox();await run(background.id,'hello');
+  await page.route('**/api/notifications/inbox',route=>route.fulfill({status:503,body:'Unavailable'}));
+  await page.goto('/');await page.locator('#nav-notifications').click();
+  await expect(page.locator('.notification-error')).toHaveText('Could not load notifications.');
+  await page.unroute('**/api/notifications/inbox');
+  await page.locator('#notification-tray').getByRole('button',{name:'Retry',exact:true}).click();
+  await expect(page.locator('.notification-card')).toHaveCount(1);
+  await page.route('**/api/notifications/inbox/dismiss',route=>route.fulfill({status:503,body:'Unavailable'}));
+  await page.locator('#notification-tray').getByRole('button',{name:'Dismiss all',exact:true}).click();
+  await expect(page.locator('.notification-error')).toHaveText('Could not save changes.');
+  await expect(page.locator('.notification-card')).toHaveCount(1);
+});
+
+test('tray fits mobile and Escape returns focus to its bell',async({page})=>{
+  await clearInbox();await run(background.id,'hello');await page.setViewportSize({width:390,height:844});
+  await page.goto('/');await expect(page.locator('#nav-notifications')).toBeVisible();
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await page.locator('#nav-notifications').click();
+  const tray=page.locator('#notification-tray');await expect(tray).toBeVisible();
+  await page.screenshot({path:'.cache/notification-tray-mobile.png'});
+  const bounds=await tray.boundingBox();expect(bounds.x).toBeGreaterThanOrEqual(0);expect(bounds.width).toBeLessThanOrEqual(390);
+  await page.keyboard.press('Escape');await expect(tray).not.toBeVisible();await expect(page.locator('#nav-notifications')).toBeFocused();
+});
+
+
+test('tray distinguishes explicit task reports from turn endings and escapes report content',async({page})=>{
+  await clearInbox();
+  await expect.poll(async()=> (await api(`/api/sessions/${background.id}`)).session.status).toBe('idle');
+  await api(`/api/sessions/${background.id}/agent-access`,{communicate:true},'PUT');
+  const payload={status:'completed',summary:'<b>Finished the assigned task</b>',requestId:crypto.randomUUID()};
+  await run(background.id,'mcp report_completion '+JSON.stringify(payload));
+  await page.goto('/dashboard');await page.locator('#nav-notifications').click();
+  const tray=page.locator('#notification-tray');
+  await expect(tray.getByText('Task completed',{exact:true})).toBeVisible();
+  await expect(tray.getByText('Turn finished',{exact:true})).toBeVisible();
+  await expect(tray.getByText(payload.summary,{exact:true})).toBeVisible();
+  await expect(tray.locator('.notification-body b')).toHaveCount(0);
+  await run(background.id,'mcp report_completion '+JSON.stringify({...payload,status:'blocked',summary:'Need your input',requestId:crypto.randomUUID()}));
+  await expect(tray.getByText('Task blocked',{exact:true})).toBeVisible();
+  await expect(tray.getByText('Needs attention',{exact:true})).toBeVisible();
+});
+
+test('full-screen mobile sessions keep the bell and live count accessible in Chat and Terminal',async({page})=>{
+  await clearInbox();await page.setViewportSize({width:390,height:844});
+  await page.addInitScript(id=>{localStorage.setItem('agentworks-session',id);localStorage.setItem('agentworks-composer-source','true');},watched.id);
+  await page.goto('/');await expect(page.locator('#session-state')).toHaveText('Ready');
+  await expect(page.locator('#workspace-nav')).not.toBeVisible();
+  const bell=page.locator('#session-notifications'),tray=page.locator('#notification-tray');
+  await expect(bell).toBeVisible();await expect(bell).toHaveAccessibleName('Notifications');
+  await run(background.id,'hello');await expect(bell).toHaveAccessibleName('Notifications, 1 undismissed');
+  await page.locator('#prompt').fill('Keep this draft');
+  await page.screenshot({path:'.cache/notification-tray-mobile-session.png'});
+  await bell.click();await expect(tray).toBeVisible();await expect(tray.locator('.notification-card')).toHaveCount(1);
+  await page.screenshot({path:'.cache/notification-tray-mobile-session-open.png'});
+  await tray.getByRole('button',{name:'Dismiss all',exact:true}).click();
+  await expect(bell).toHaveAccessibleName('Notifications');
+  await tray.getByRole('button',{name:'Close notifications',exact:true}).click();
+  await expect(bell).toBeFocused();await expect(page.locator('#prompt')).toHaveValue('Keep this draft');
+  await expect(page.locator('#workspace-nav')).not.toBeVisible();
+  await page.locator('#session-tab-terminal').click();
+  await expect(bell).toBeVisible();await bell.click();await expect(tray).toBeVisible();
+  await page.keyboard.press('Escape');await expect(bell).toBeFocused();
+  await expect(page.locator('#session-terminal')).toBeVisible();
+  await page.setViewportSize({width:320,height:700});await expect(bell).toBeInViewport();
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+  await page.setViewportSize({width:1280,height:800});
+  await expect(bell).not.toBeVisible();await expect(page.locator('#nav-notifications')).toBeVisible();
+});
+
+test('Alt+N triggers notification tray with keyboard navigation, session browser indicates undismissed alerts, and auto-dismiss clears them on view',async({page})=>{
+  await clearInbox();
+  await page.goto('/');
+
+  // Create alerts for background and watched sessions
+  await run(background.id,'hello background');
+  await run(watched.id,'hello watched');
+
+  // Both sessions should be indicated with .has-notifications in the session browser
+  const bgItem=page.locator(`#sessions .session-item[data-session-id="${background.id}"]`);
+  const watchedItem=page.locator(`#sessions .session-item[data-session-id="${watched.id}"]`);
+  await expect(bgItem).toHaveClass(/has-notifications/);
+  await expect(watchedItem).toHaveClass(/has-notifications/);
+
+  // Alt+N opens the tray and focuses the top notification link
+  await page.keyboard.press('Alt+n');
+  const tray=page.locator('#notification-tray');
+  await expect(tray).toBeVisible();
+  const links=tray.locator('.notification-link');
+  await expect(links).toHaveCount(2);
+  await expect(links.first()).toBeFocused();
+
+  // ArrowDown focuses the second link
+  await page.keyboard.press('ArrowDown');
+  await expect(links.nth(1)).toBeFocused();
+
+  // ArrowUp focuses the first link again
+  await page.keyboard.press('ArrowUp');
+  await expect(links.first()).toBeFocused();
+
+  // Hitting Enter follows the link to the session
+  const focusedSessionId=await links.first().getAttribute('data-session-id');
+  await page.keyboard.press('Enter');
+  await expect(tray).not.toBeVisible();
+
+  // By default, viewing a session auto-dismisses its notifications
+  const targetItem=page.locator(`#sessions .session-item[data-session-id="${focusedSessionId}"]`);
+  await expect(targetItem).not.toHaveClass(/has-notifications/);
+
+  // The other session still has notifications
+  const otherSessionId=focusedSessionId===background.id?watched.id:background.id;
+  const otherItem=page.locator(`#sessions .session-item[data-session-id="${otherSessionId}"]`);
+  await expect(otherItem).toHaveClass(/has-notifications/);
+
+  // Settings allows turning off auto-dismiss
+  await page.locator('#nav-settings').click();
+  await page.locator('#settings-tab-notifications').click();
+  const autoDismissCheckbox=page.locator('#notifications-auto-dismiss');
+  await expect(autoDismissCheckbox).toBeVisible();
+  await expect(autoDismissCheckbox).toBeChecked();
+  await autoDismissCheckbox.uncheck();
+  await page.locator('#dismiss-settings').click();
+
+  // Trigger another alert for the dismissed session
+  await run(focusedSessionId,'hello again');
+  await expect(targetItem).toHaveClass(/has-notifications/);
+
+  // Switching to the other session and then clicking targetItem with auto-dismiss off does not dismiss its notification
+  await otherItem.click();
+  await targetItem.click();
+  await expect(targetItem).toHaveClass(/has-notifications/);
+  const remainingAlerts=(await api('/api/notifications/inbox')).alerts.filter(a=>a.sessionId===focusedSessionId);
+  expect(remainingAlerts.length).toBeGreaterThan(0);
+});
+
+test('project heading in session browser is bold when any of its non-archived sub-sessions are bold, and un-bolds when dismissed',async({page})=>{
+  await clearInbox();
+  const project=await api('/api/projects',{name:'Alpha Project'});
+  const s1=await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Alpha Session 1',projectId:project.id});
+  const s2=await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Alpha Session 2',projectId:project.id});
+  const s3=await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Alpha Archived',projectId:project.id});
+
+  // Generate an alert on s3, then archive s3
+  await run(s3.id,'alert on s3');
+  await api(`/api/sessions/${s3.id}`,{archived:true},'PATCH');
+
+  await page.goto('/');
+  const projectHeading=page.locator(`#sessions .tree-heading[data-project-group="${project.id}"]`);
+  await expect(projectHeading).toBeVisible();
+  // Project heading should NOT be bold because s3 is archived
+  await expect(projectHeading).not.toHaveClass(/has-notifications/);
+
+  // Trigger an alert on non-archived s1: project heading should become bold
+  await run(s1.id,'alert on s1');
+  await expect(projectHeading).toHaveClass(/has-notifications/);
+  const s1Item=page.locator(`#sessions .session-item[data-session-id="${s1.id}"]`);
+  await expect(s1Item).toHaveClass(/has-notifications/);
+
+  // Trigger an alert on non-archived s2 as well
+  await run(s2.id,'alert on s2');
+  await expect(projectHeading).toHaveClass(/has-notifications/);
+
+  // View s1: s1 auto-dismisses, but s2 still has an active alert, so project heading remains bold
+  await s1Item.click();
+  await expect(s1Item).not.toHaveClass(/has-notifications/);
+  await expect(projectHeading).toHaveClass(/has-notifications/);
+
+  // View s2: s2 auto-dismisses, leaving no non-archived sessions with alerts
+  const s2Item=page.locator(`#sessions .session-item[data-session-id="${s2.id}"]`);
+  await s2Item.click();
+  await expect(s2Item).not.toHaveClass(/has-notifications/);
+
+  // Project heading should now un-bold
+  await expect(projectHeading).not.toHaveClass(/has-notifications/);
+
+  for(const id of [s1.id,s2.id,s3.id])await api(`/api/sessions/${id}`,undefined,'DELETE').catch(()=>{});
+  await api(`/api/projects/${project.id}`,undefined,'DELETE').catch(()=>{});
 });

@@ -26,6 +26,14 @@ type Reply = oneshot::Sender<Result<Value>>;
 fn failure(message: impl ToString) -> Error {
     Error::internal_error().data(message.to_string())
 }
+/// The message an error carries, whether as text or as a native error object.
+fn error_text(error: &Error) -> String {
+    match &error.data {
+        Some(Value::String(text)) => text.clone(),
+        Some(data) => data.to_string(),
+        None => error.message.clone(),
+    }
+}
 fn invalid(message: &str) -> Error {
     Error::invalid_params().data(message.to_owned())
 }
@@ -40,6 +48,19 @@ fn message(method: &str, params: Value) -> UntypedMessage {
         params,
     }
 }
+fn model_option(response: &Value, current: Value) -> Result<Value> {
+    let models = response["data"]
+        .as_array()
+        .ok_or_else(|| failure("Codex returned no model list"))?;
+    let options: Vec<_> = models
+        .iter()
+        .filter(|m| m["hidden"] != true)
+        .map(|m| json!({"value":m["model"],"name":m["displayName"]}))
+        .collect();
+    Ok(
+        json!({"id":"model","name":"Model","category":"model","type":"select","currentValue":current,"options":options}),
+    )
+}
 fn update(cx: &ConnectionTo<Client>, id: &str, update: Value) -> Result<()> {
     cx.send_notification(message(
         "session/update",
@@ -52,6 +73,7 @@ struct Session {
     settings: Value,
     host_policy: Value,
     roots: Vec<String>,
+    skills: Vec<Value>,
     configuring: bool,
     usage: Value,
     last_completed: Option<String>,
@@ -72,6 +94,8 @@ struct Bridge {
     questions: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     boolean_config: AtomicBool,
     subagents: AtomicBool,
+    /// The client shows ACP compaction updates.
+    compaction: AtomicBool,
     children: Mutex<HashMap<String, String>>,
     limits: Mutex<Map<String, Value>>,
     async_tasks: Mutex<async_tasks::Tasks>,
@@ -132,12 +156,17 @@ impl Bridge {
                     p["clientCapabilities"]["subagents"].is_object(),
                     Ordering::Relaxed,
                 );
+                self.compaction.store(
+                    p["clientCapabilities"]["session"]["compaction"].is_object(),
+                    Ordering::Relaxed,
+                );
                 self.rpc("initialize", json!({"clientInfo":{"name":"agentworks","title":"Agentworks","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}})).await?;
                 self.write(json!({"method":"initialized","params":{}}))
                     .await?;
                 let mut response = json!({"protocolVersion":1,"agentInfo":{"name":"agentworks-codex-acp","version":env!("CARGO_PKG_VERSION")},
                     "agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"embeddedContext":true},"mcpCapabilities":{"http":true},"sessionCapabilities":{"list":{},"close":{},"delete":{},"fork":{},"resume":{},"systemPrompt":{},"additionalDirectories":{},"subagents":{}}},
-                    "authMethods":[{"id":"api-key","name":"API key"}]});
+                    "authMethods":[{"id":"api-key","name":"API key"}],
+                    "_meta":{"agentworks":{"modelDiscovery":true,"permissionModeOnOpen":true}}});
                 self.negotiate_tasks(&p, &mut response);
                 Ok(response)
             }
@@ -159,6 +188,10 @@ impl Bridge {
                 self.rpc("account/login/start", json!({"type":"apiKey","apiKey":key}))
                     .await?;
                 Ok(json!({}))
+            }
+            "_agentworks/models/list" => {
+                let response = self.rpc("model/list", json!({})).await?;
+                Ok(json!({"configOptions":[model_option(&response, Value::Null)?]}))
             }
             "session/new" | "session/load" | "session/resume" | "session/fork" => {
                 let prompt = system_prompt(&p)?; // Validate before touching native state.
@@ -190,6 +223,23 @@ impl Bridge {
                 let config = session_config(&p)?;
                 let mut params =
                     json!({"cwd":field(&p,"cwd")?,"config":config,"runtimeWorkspaceRoots":roots});
+                // Apply the caller's selected policy before native thread initialization,
+                // which may itself need to run sandboxed filesystem helpers.
+                if let Some(mode) = p.pointer("/_meta/agentworks/permissionMode") {
+                    let mode = mode
+                        .as_str()
+                        .ok_or_else(|| invalid("Invalid permission mode"))?;
+                    if mode != "host" {
+                        let policy = mode_policy(mode, &roots)?;
+                        params["sandbox"] = json!(match mode {
+                            "agent-full-access" => "danger-full-access",
+                            "agent" => "workspace-write",
+                            _ => mode,
+                        });
+                        params["approvalPolicy"] = policy["approvalPolicy"].clone();
+                        params["approvalsReviewer"] = policy["approvalsReviewer"].clone();
+                    }
+                }
                 if let Some(prompt) = prompt {
                     // The native field replaces configured developer_instructions. Preserve
                     // the effective config (including project layers) before appending ours.
@@ -258,6 +308,11 @@ impl Bridge {
                             let id = field(&p, "sessionId")?;
                             self.open_tasks(id);
                             self.restore_tasks(cx, id).await;
+                            // Codex writes no rollout until a thread's first turn; report the
+                            // thread as missing so the client can start a new one instead.
+                            if error_text(&error).contains("no rollout found") {
+                                return Err(Error::resource_not_found(Some(id.to_owned())));
+                            }
                         }
                         return Err(error);
                     }
@@ -273,6 +328,7 @@ impl Bridge {
                         host_policy: policy(&settings),
                         settings,
                         roots,
+                        skills: Vec::new(),
                         configuring: false,
                         usage: Value::Null,
                         last_completed: None,
@@ -285,11 +341,15 @@ impl Bridge {
                     self.replay_tree(cx, &id).await?;
                 }
                 let options = self.config_options(&id).await?;
-                update(
-                    cx,
-                    &id,
-                    json!({"sessionUpdate":"available_commands_update","availableCommands":commands::available()}),
-                )?;
+                // Discovery must not prevent opening a conversation if skills are unavailable.
+                if let Err(error) = self.refresh_skills(&id, cx).await {
+                    eprintln!("Codex skill discovery failed: {error}");
+                    update(
+                        cx,
+                        &id,
+                        json!({"sessionUpdate":"available_commands_update","availableCommands":commands::available()}),
+                    )?;
+                }
                 self.restore_tasks(cx, &id).await;
                 Ok(json!({"sessionId":id,"configOptions":options}))
             }
@@ -435,7 +495,17 @@ impl Bridge {
             }
             "_session/async_task/stop" => self.stop_task(cx, &p).await,
             "session/prompt" => {
-                if let Some((name, args)) = commands::parse(&p["prompt"]) {
+                let id = field(&p, "sessionId")?;
+                let skill = commands::parse(&p["prompt"]).is_some_and(|(name, _)| {
+                    !commands::available().iter().any(|c| c["name"] == name)
+                        && self
+                            .sessions
+                            .lock()
+                            .unwrap()
+                            .get(id)
+                            .is_some_and(|s| s.skills.iter().any(|s| s["name"] == name))
+                });
+                if let Some((name, args)) = commands::parse(&p["prompt"]).filter(|_| !skill) {
                     if p["prompt"].as_array().is_some_and(|v| v.len() != 1) {
                         return Err(invalid(
                             "Send slash commands without attachments or extra context",
@@ -457,11 +527,6 @@ impl Bridge {
         let models = response["data"]
             .as_array()
             .ok_or_else(|| failure("Codex returned no model list"))?;
-        let options: Vec<_> = models
-            .iter()
-            .filter(|m| m["hidden"] != true)
-            .map(|m| json!({"value":m["model"],"name":m["displayName"]}))
-            .collect();
         let current = models.iter().find(|m| m["model"] == s.settings["model"]);
         let efforts: Vec<_> = current
             .into_iter()
@@ -473,9 +538,7 @@ impl Bridge {
             })
             .map(|e| json!({"value":e["reasoningEffort"],"name":e["reasoningEffort"]}))
             .collect();
-        let mut result = vec![
-            json!({"id":"model","name":"Model","category":"model","type":"select","currentValue":s.settings["model"],"options":options}),
-        ];
+        let mut result = vec![model_option(&response, s.settings["model"].clone())?];
         if !efforts.is_empty() {
             result.push(json!({"id":"reasoning_effort","name":"Reasoning effort","category":"thought_level","type":"select","currentValue":s.settings["effort"].as_str().or_else(||current.and_then(|m|m["defaultReasoningEffort"].as_str())),"options":efforts}));
         }
@@ -543,7 +606,12 @@ impl Bridge {
 
     async fn prompt(&self, p: Value) -> Result<Value> {
         let id = field(&p, "sessionId")?;
-        let input = prompt_input(&p["prompt"])?;
+        let mut input = prompt_input(&p["prompt"])?;
+        {
+            let sessions = self.sessions.lock().unwrap();
+            let session = sessions.get(id).ok_or_else(|| invalid("Unknown session"))?;
+            commands::skill_input(&mut input, &session.skills);
+        }
         self.run_turn(id, "turn/start", json!({"threadId":id,"input":input}))
             .await
     }
@@ -664,8 +732,9 @@ impl Bridge {
                     self.observe_tasks(&cx, method, p)?;
                     let id = p["threadId"].as_str().unwrap_or("");
                     if self.children.lock().unwrap().contains_key(id) {
-                        if let Some(event) = event_update(method, p)
-                            .filter(|_| self.subagents.load(Ordering::Relaxed))
+                        if let Some(event) =
+                            event_update(method, p, self.compaction.load(Ordering::Relaxed))
+                                .filter(|_| self.subagents.load(Ordering::Relaxed))
                         {
                             update(&cx, id, event)?;
                         }
@@ -735,7 +804,9 @@ impl Bridge {
                                 );
                             }
                         }
-                        if let Some(mut event) = event_update(method, p) {
+                        if let Some(mut event) =
+                            event_update(method, p, self.compaction.load(Ordering::Relaxed))
+                        {
                             if event["sessionUpdate"] == "usage_update" {
                                 if let Some(s) = self.sessions.lock().unwrap().get_mut(id) {
                                     s.usage = event.clone();
@@ -979,8 +1050,13 @@ fn prompt_input(blocks: &Value) -> Result<Vec<Value>> {
         Ok(json!({"type":"text","text":text,"text_elements":[]}))
     }).collect()
 }
-fn event_update(method: &str, p: &Value) -> Option<Value> {
+fn event_update(method: &str, p: &Value, compaction: bool) -> Option<Value> {
     match method {
+        "item/started" | "item/completed"
+            if compaction && p["item"]["type"] == "contextCompaction" =>
+        {
+            Some(compaction_update(&p["item"], method == "item/completed"))
+        }
         "item/completed" if p["item"]["type"] == "exitedReviewMode" => Some(
             json!({"sessionUpdate":"agent_message_chunk","messageId":p["item"]["id"],"content":{"type":"text","text":p["item"]["review"]}}),
         ),
@@ -1011,6 +1087,10 @@ fn event_update(method: &str, p: &Value) -> Option<Value> {
         _ => None,
     }
 }
+/// Status only: the item carries just its id, and Codex keeps the summary encrypted.
+fn compaction_update(item: &Value, done: bool) -> Value {
+    json!({"sessionUpdate":"compaction_update","compactionId":item["id"],"status":if done {"completed"} else {"in_progress"}})
+}
 fn tool_update(item: &Value, done: bool) -> Option<Value> {
     let kind = match item["type"].as_str()? {
         "commandExecution" => "execute",
@@ -1037,8 +1117,9 @@ fn tool_update(item: &Value, done: bool) -> Option<Value> {
     }
     Some(result)
 }
-fn replay_item(cx: &ConnectionTo<Client>, id: &str, item: &Value) -> Result<()> {
+fn replay_item(cx: &ConnectionTo<Client>, id: &str, item: &Value, compaction: bool) -> Result<()> {
     match item["type"].as_str() {
+        Some("contextCompaction") if compaction => update(cx, id, compaction_update(item, true)),
         Some("agentMessage" | "exitedReviewMode") => update(
             cx,
             id,
@@ -1127,6 +1208,7 @@ pub async fn run() -> Result<()> {
         questions: Mutex::default(),
         boolean_config: AtomicBool::new(false),
         subagents: AtomicBool::new(false),
+        compaction: AtomicBool::new(false),
         children: Mutex::default(),
         limits: Mutex::default(),
         async_tasks: Mutex::default(),

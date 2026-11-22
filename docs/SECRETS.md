@@ -109,7 +109,7 @@ At harness start, `environment` assignments are decrypted and added to the harne
 
 Changing a session's `environment` assignments restarts an idle harness automatically, as changing its Agentworks access already does; a busy one restarts when its turn ends. The UI also offers **Restart with secrets**. It stops the harness process and starts a new one with the current assignments, resuming the native conversation through the existing resume/load path in `session_runtime.rs`. Harnesses that support neither cannot use this; the UI offers a new session instead. Once passwords exist, the same action applies to sessions that started while secrets were locked.
 
-A restart before the session's first prompt starts a new harness session instead of resuming, because Codex keeps no thread until its first turn and resuming it fails. Codex passes the harness environment to its commands by default (checked with Codex 0.165 via `codex sandbox`). If a user's Codex configuration sets `shell_environment_policy.ignore_default_excludes = false`, Codex drops variables whose names contain `KEY`, `SECRET` or `TOKEN`, including assigned secrets; use `tool` delivery for those. Agentworks does not override the policy: `include_only` would remove every other variable, and `set` would put values on the command line.
+Codex writes no rollout until a thread's first turn, so resuming a session that was never prompted (for example after an environment change) fails with `no rollout found`. The Rust Codex adapter reports that as `ResourceNotFound`, and Agentworks then starts a new harness session, as it already did for Claude. Codex passes the harness environment to its commands by default (checked with Codex 0.165 via `codex sandbox`). If a user's Codex configuration sets `shell_environment_policy.ignore_default_excludes = false`, Codex drops variables whose names contain `KEY`, `SECRET` or `TOKEN`, including assigned secrets; use `tool` delivery for those. Agentworks does not override the policy: `include_only` would remove every other variable, and `set` would put values on the command line.
 
 ## Delivery 2: templated tool
 
@@ -135,7 +135,7 @@ run_with_secrets {
 
 ### Where the tool runs
 
-Every other Agentworks MCP tool executes on the server: the `agentworks mcp` facade runs next to the harness and translates each call into a bridge operation, relayed over the worker link for remote sessions (see [the relay contract](REMOTE-HOSTS.md#agentworks-mcp-messaging-relay)). `run_with_secrets` splits instead:
+Every other Agentworks MCP tool executes on the server: the `agentworks mcp` facade (`crates/agentworks-worker/src/mcp_proxy.rs`) runs next to the harness and translates each call into a bridge operation, relayed over the worker link for remote sessions (see [the relay contract](REMOTE-HOSTS.md#agentworks-mcp-messaging-relay)). `run_with_secrets` splits instead:
 
 1. The facade parses the call and extracts the referenced names. It sends one bridge operation, `resolve_secrets {names, argv, envKeys, fileKeys, cwd}`, containing the templated request but no values.
 2. The server authenticates the session credential, checks every name against the session's assignments and audits the release. If approval is needed it publishes the approval card and returns `{pending: id}` at once; the facade polls with `{approval: id}`. Every bridge request stays short because the bridge holds the communication lock and has a 15-second limit. Assignments are checked again when the human answers. Nothing runs on the server.

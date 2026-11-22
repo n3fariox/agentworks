@@ -193,9 +193,10 @@ pub fn seed(
             "Parent history could not be persisted",
         ));
     }
-    let boundary = selected.unwrap_or_else(|| boundary(&data.events));
+    let window = parent.window(&data);
+    let boundary = selected.unwrap_or_else(|| boundary(&window));
     if boundary == 0
-        || !data.events.iter().any(|e| {
+        || !window.iter().any(|e| {
             e["seq"] == boundary
                 && e["kind"] == "turn_end"
                 && e["data"]["stopReason"] != "cancelled"
@@ -207,8 +208,7 @@ pub fn seed(
             "No recorded completed turn at this boundary",
         ));
     }
-    let carried: Vec<Value> = data
-        .events
+    let carried: Vec<Value> = window
         .iter()
         .take_while(|e| e["seq"].as_u64().unwrap_or(u64::MAX) <= boundary)
         .filter(|e| carries(e["kind"].as_str().unwrap_or("")))
@@ -232,7 +232,7 @@ pub fn seed(
                 data.remove("initiatedBy");
                 data.remove("inboxDelivery");
                 data.remove("continuationState");
-                data.entry("forkSourceCwd").or_insert(json!(parent.cwd));
+                data.entry("forkSourceCwd").or_insert(json!(parent.cwd()));
             }
             event
         })
@@ -243,8 +243,7 @@ pub fn seed(
             "This session has no recorded conversation to fork yet. Send a message first.",
         ));
     }
-    let boundary_turn = data
-        .events
+    let boundary_turn = window
         .iter()
         .filter(|e| e["kind"] == "turn_end" && e["seq"].as_u64().unwrap_or(0) <= boundary)
         .count();
@@ -260,11 +259,10 @@ pub fn seed(
         parent_host_id: Some(parent.host_id.clone()),
         boundary_seq: boundary,
         boundary_turn,
-        parent_cwd: Some(parent.cwd.to_string_lossy().into_owned()),
+        parent_cwd: Some(parent.cwd().to_string_lossy().into_owned()),
         context: context.to_owned(),
         source_session_id: data.provider_session_id.clone(),
-        source_message_id: data
-            .events
+        source_message_id: window
             .iter()
             .filter(|e| e["seq"].as_u64().unwrap_or(u64::MAX) <= boundary)
             .rev()
@@ -278,10 +276,9 @@ pub fn seed(
             .map(str::to_owned),
         native_attempted: false,
         native_used: false,
-        truncated: data
-            .events
+        truncated: window
             .front()
-            .is_some_and(|e| e["seq"].as_u64().unwrap_or(0) > 1),
+            .is_some_and(|e| crate::event_compaction::first_seq(e) > 1),
         created: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -292,6 +289,7 @@ pub fn seed(
     } else {
         render(&carried, &parent.provider)
     };
+    drop(window);
     drop(data);
     Ok(Seed {
         lineage,
@@ -360,21 +358,17 @@ pub fn apply(s: &Session, seed: Seed, child_cwd: &Path) -> Result<(), Error> {
     next.lineage.truncated |= seed.body.len() > PRIMER_LIMIT;
     // These bridges implement Agentworks' exact message-boundary fork metadata.
     if s.provider != next.lineage.parent_provider.as_deref().unwrap_or("")
-        || !(agentworks_runtime::provider::cli_provider(&s.provider) == "codex"
-            || matches!(s.provider.as_str(), "claude-rust" | "goose"))
+        || !matches!(
+            agentworks_runtime::provider::cli_provider(&s.provider),
+            "codex" | "claude" | "goose"
+        )
     {
         next.lineage.source_message_id = None;
     }
     next.carried_context = Some(primer);
     next.bytes = data.bytes;
     for event in &events {
-        next.bytes += event.to_string().len();
-        next.events.push_back(event.clone());
-        while next.events.len() > crate::MAX_EVENTS || next.bytes > crate::MAX_EVENT_BYTES {
-            if let Some(old) = next.events.pop_front() {
-                next.bytes -= old.to_string().len();
-            }
-        }
+        crate::retain(&mut next, event);
     }
     *data = next;
     Ok(())

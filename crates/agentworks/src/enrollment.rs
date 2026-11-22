@@ -27,6 +27,11 @@ use tokio::{
 };
 use uuid::Uuid;
 
+mod update;
+mod windows;
+pub mod workers;
+pub use update::update;
+
 type Result<T> = std::result::Result<T, String>;
 type Output = mpsc::Sender<Message>;
 static SLOTS: OnceLock<Semaphore> = OnceLock::new();
@@ -35,6 +40,17 @@ static SLOTS: OnceLock<Semaphore> = OnceLock::new();
 struct Start {
     name: String,
     destination: String,
+    #[serde(default)]
+    os: Os,
+}
+/// Chosen in the dialog rather than detected: probing needs a shell, and the
+/// shell is exactly what differs.
+#[derive(Deserialize, Default, Clone, Copy, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum Os {
+    #[default]
+    Unix,
+    Windows,
 }
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -183,21 +199,61 @@ fn managed(host: &Host, command: &str) -> Command {
     .arg(command);
     cmd
 }
-fn platform_check() -> String {
-    let os = match std::env::consts::OS {
-        "macos" => "Darwin",
-        "linux" => "Linux",
-        other => other,
+/// The host's platform as workers name it, e.g. `linux-aarch64`.
+async fn platform(host: &Host, os: Os) -> Result<String> {
+    let (command, parse): (String, fn(&str) -> Option<String>) = match os {
+        Os::Unix => ("uname -sm".into(), workers::from_uname),
+        Os::Windows => (windows::architecture(), workers::from_windows),
     };
-    let arch = match std::env::consts::ARCH {
-        "aarch64" if os == "Darwin" => "arm64",
-        other => other,
+    let reply = managed(host, &command)
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|e| format!("Could not start ssh: {e}"))?;
+    let text = String::from_utf8_lossy(&reply.stdout);
+    match parse(&text) {
+        Some(platform) if reply.status.success() => Ok(platform),
+        _ => Err(format!(
+            "Could not detect the host's OS and CPU (ssh {}). {}",
+            reply.status,
+            String::from_utf8_lossy(&reply.stderr).trim()
+        )
+        .trim_end()
+        .to_owned()),
+    }
+}
+
+/// Picks the worker for the host's platform and installs it; returns the saved
+/// worker command.
+async fn install(host: &Host, os: Os, dir: &Path, id: &str, out: &Output) -> Result<String> {
+    let platform = platform(host, os).await?;
+    let worker = match tokio::task::spawn_blocking({
+        let platform = platform.clone();
+        move || workers::for_platform(&platform)
+    })
+    .await
+    .map_err(|e| e.to_string())??
+    {
+        workers::Worker::Built(path) => path,
+        workers::Worker::Server(path) => {
+            output(
+                out,
+                b"No current agentworks-worker beside this server; installing the full Agentworks binary.\r\n",
+            )
+            .await?;
+            path
+        }
     };
-    format!(
-        "test \"$(uname -s)\" = {} && test \"$(uname -m)\" = {} || {{ echo 'This server can only enroll a matching OS/CPU. Use manual setup for other platforms.' >&2; exit 1; }};",
-        quote(os),
-        quote(arch)
+    output(
+        out,
+        format!("Installing the {platform} worker.\r\n").as_bytes(),
     )
+    .await?;
+    match os {
+        Os::Unix => install_unix(host, dir, id, &worker, out).await,
+        Os::Windows => windows::install(host, dir, id, &worker, out).await,
+    }
 }
 async fn enroll(
     app: &App,
@@ -235,12 +291,17 @@ async fn enroll(
         .await
         .map_err(|e| e.to_string())?;
     let public = format!("restrict {}", public.trim());
-    let bootstrap = format!(
-        "set -eu; {} command -v tar >/dev/null; umask 077; mkdir -p \"$HOME/.ssh\"; chmod 700 \"$HOME/.ssh\"; touch \"$HOME/.ssh/authorized_keys\"; chmod 600 \"$HOME/.ssh/authorized_keys\"; grep -qxF {} \"$HOME/.ssh/authorized_keys\" || printf '\\n%s\\n' {} >> \"$HOME/.ssh/authorized_keys\"; printf '\\nDedicated key installed.\\n'",
-        platform_check(),
-        quote(&public),
-        quote(&public)
-    );
+    let bootstrap = match req.os {
+        Os::Unix => format!(
+            "sh -c {}",
+            quote(&format!(
+                "set -eu; command -v tar >/dev/null; umask 077; mkdir -p \"$HOME/.ssh\"; chmod 700 \"$HOME/.ssh\"; touch \"$HOME/.ssh/authorized_keys\"; chmod 600 \"$HOME/.ssh/authorized_keys\"; grep -qxF {} \"$HOME/.ssh/authorized_keys\" || printf '\\n%s\\n' {} >> \"$HOME/.ssh/authorized_keys\"; printf '\\nDedicated key installed.\\n'",
+                quote(&public),
+                quote(&public)
+            ))
+        ),
+        Os::Windows => windows::bootstrap(&public),
+    };
     stage(
         out,
         "Connect: confirm the host fingerprint and enter your SSH password if prompted.",
@@ -264,38 +325,16 @@ async fn enroll(
     .arg(hosts::known_hosts_option(&known))
     .arg("--")
     .arg(&host.destination)
-    .arg(format!("sh -c {}", quote(&bootstrap)));
+    .arg(bootstrap);
     interactive(&mut cmd, out, input).await?;
     host.identity_file = Some(key);
     host.known_hosts_file = Some(known);
     stage(out, "Verifying the new key…").await?;
-    run(&mut managed(&host, "true"), out).await?;
-    let release = format!(
-        ".local/share/agentworks/releases/{}",
-        dir.file_name().unwrap().to_string_lossy()
-    );
-    let remote = format!("\"$HOME/{release}\"");
+    // `exit 0` succeeds in sh, cmd.exe and PowerShell alike.
+    run(&mut managed(&host, "exit 0"), out).await?;
+    let id = dir.file_name().unwrap().to_string_lossy().into_owned();
     stage(out, "Preparing and copying the worker…").await?;
-    let bundle = bundle(&dir, out).await?;
-    let command = format!("umask 077; mkdir -p {remote} && cat > {remote}/bundle.tar.gz");
-    let mut upload = managed(&host, &command);
-    upload.stdin(Stdio::from(File::open(&bundle).map_err(|e| e.to_string())?));
-    run(&mut upload, out).await?;
-    // SHA-256 is checked before extraction; only our own source files are bundled.
-    let bytes = tokio::fs::read(&bundle).await.map_err(|e| e.to_string())?;
-    let checksum = tokio::task::spawn_blocking(move || crate::sha256::hex(&bytes))
-        .await
-        .map_err(|e| e.to_string())?;
-    stage(out, "Installing the worker…").await?;
-    let install = format!(
-        "set -eu; cd {remote}; if command -v sha256sum >/dev/null; then actual=$(sha256sum bundle.tar.gz); else actual=$(shasum -a 256 bundle.tar.gz); fi; test \"${{actual%% *}}\" = {checksum} || {{ echo 'Bundle checksum mismatch' >&2; exit 1; }}; tar -xzf bundle.tar.gz; rm bundle.tar.gz; sh install.sh"
-    );
-    run(
-        &mut managed(&host, &format!("sh -c {}", quote(&install))),
-        out,
-    )
-    .await?;
-    let command = format!("{remote}/launch");
+    let command = install(&host, req.os, &dir, &id, out).await?;
     stage(out, "Connecting the worker…").await?;
     let saved = app.catalog.lock().unwrap().add_managed_host(
         &host.name,
@@ -305,34 +344,88 @@ async fn enroll(
         host.known_hosts_file,
     )?;
     app.hosts.start(saved.clone());
-    // Report connection/provider availability from the actual worker handshake.
+    connected(app, &saved.id, "Host installed and saved").await?;
+    Ok(saved)
+}
+
+/// Reports connection/provider availability from the actual worker handshake.
+async fn connected(app: &App, id: &str, done: &str) -> Result<()> {
     for _ in 0..600 {
-        let link = app.hosts.link(&saved.id);
+        let link = app.hosts.link(id);
         if link.status == "connected" {
-            return Ok(saved);
+            return Ok(());
         }
         if link.status == "offline" {
             return Err(format!(
-                "Host installed and saved, but the worker could not connect: {}. Use Reconnect after fixing it.",
+                "{done}, but the worker could not connect: {}. Use Reconnect after fixing it.",
                 link.detail
             ));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    Err("Host installed and saved; worker connection is taking longer than expected. Check its status in Hosts.".into())
+    Err(format!(
+        "{done}; worker connection is taking longer than expected. Check its status in Hosts."
+    ))
 }
 
-async fn bundle(dir: &Path, out: &Output) -> Result<PathBuf> {
+const UNIX_RELEASES: &str = "\"$HOME/.local/share/agentworks/releases/";
+fn unix_release(id: &str) -> String {
+    format!("{UNIX_RELEASES}{id}\"")
+}
+/// The release a saved command launches, if this server installed it.
+fn unix_release_id(command: &str) -> Option<&str> {
+    let id = command
+        .strip_prefix(UNIX_RELEASES)?
+        .strip_suffix("\"/launch")?;
+    Uuid::parse_str(id).is_ok().then_some(id)
+}
+
+/// Uploads and installs the worker over POSIX sh; returns the saved worker command.
+async fn install_unix(
+    host: &Host,
+    dir: &Path,
+    id: &str,
+    worker: &Path,
+    out: &Output,
+) -> Result<String> {
+    let remote = unix_release(id);
+    let bundle = bundle(dir, worker, out).await?;
+    let command = format!("umask 077; mkdir -p {remote} && cat > {remote}/bundle.tar.gz");
+    let mut upload = managed(host, &command);
+    upload.stdin(Stdio::from(File::open(&bundle).map_err(|e| e.to_string())?));
+    run(&mut upload, out).await?;
+    // SHA-256 is checked before extraction; only our own source files are bundled.
+    let checksum = checksum(&bundle).await?;
+    stage(out, "Installing the worker…").await?;
+    let install = format!(
+        "set -eu; cd {remote}; if command -v sha256sum >/dev/null; then actual=$(sha256sum bundle.tar.gz); else actual=$(shasum -a 256 bundle.tar.gz); fi; test \"${{actual%% *}}\" = {checksum} || {{ echo 'Bundle checksum mismatch' >&2; exit 1; }}; tar -xzf bundle.tar.gz; rm bundle.tar.gz; sh install.sh {protocol}",
+        protocol = agentworks_runtime::remote::PROTOCOL,
+    );
+    run(
+        &mut managed(host, &format!("sh -c {}", quote(&install))),
+        out,
+    )
+    .await?;
+    Ok(format!("{remote}/launch"))
+}
+
+/// SHA-256 of a local bundle; checked remotely before extraction.
+async fn checksum(path: &Path) -> Result<String> {
+    let bytes = tokio::fs::read(path).await.map_err(|e| e.to_string())?;
+    tokio::task::spawn_blocking(move || crate::sha256::hex(&bytes))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn bundle(dir: &Path, worker: &Path, out: &Output) -> Result<PathBuf> {
     let staging = dir.join("runtime");
     tokio::fs::create_dir_all(&staging)
         .await
         .map_err(|e| e.to_string())?;
-    tokio::fs::copy(
-        std::env::current_exe().map_err(|e| e.to_string())?,
-        staging.join("agentworks"),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    // The payload is named `agentworks`, which `launch` and hosts expect.
+    tokio::fs::copy(worker, staging.join("agentworks"))
+        .await
+        .map_err(|e| e.to_string())?;
     for (file, bytes) in [
         (
             "launch",

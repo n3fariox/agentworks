@@ -106,13 +106,13 @@ fn hook_registrations_cannot_change_during_event_handling() {
 }
 
 #[test]
-fn registration_cannot_load_actions_and_still_checks_uncalled_functions() {
+fn constructors_are_data_and_uncalled_functions_are_still_checked() {
     let engine = Engine::new().unwrap();
     let source = format!("load(\"@agentworks//workflow.star\", \"start_session\")\n{FUNCTIONS}{REGISTRATIONS}");
-    assert_eq!(
-        engine.compile_registered("actions.star", &source).err().unwrap().kind,
-        DiagnosticKind::Capability
-    );
+    assert!(engine.compile_registered("actions.star", &source).is_ok());
+    // Loading constructors does not let a presentation hook return actions.
+    let invalid = "load(\"@agentworks//workflow.star\", \"Action\", \"skip\")\nload(\"@agentworks//github.star\", \"GithubContext\")\ndef hook(ctx: GithubContext, event: dict[str, typing.Any]) -> list[Action]:\n    return [skip(\"x\")]\nagent.register_github(hook)\n";
+    assert!(engine.compile_registered("wrong_capability.star", invalid).is_err());
     let source = format!("{FUNCTIONS}{REGISTRATIONS}\ndef unused() -> str:\n    return 123\n");
     assert_eq!(
         engine.compile_registered("typed.star", &source).err().unwrap().kind,

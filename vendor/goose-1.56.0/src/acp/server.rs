@@ -323,6 +323,8 @@ pub struct GooseAcpAgent {
     client_mcp_host_info: OnceCell<GooseMcpHostInfo>,
     client_supports_acp_elicitation: OnceCell<bool>,
     client_supports_goose_custom_notifications: OnceCell<bool>,
+    /// Agentworks patch: the client advertised ACP compaction updates.
+    client_supports_compaction: OnceCell<bool>,
     client_supports_recipe_param_requests: OnceCell<bool>,
     client_requests_tool_call_label_enrichment: OnceCell<bool>,
     client_cx: OnceCell<ConnectionTo<Client>>,
@@ -969,6 +971,7 @@ impl GooseAcpAgent {
             client_mcp_host_info: OnceCell::new(),
             client_supports_acp_elicitation: OnceCell::new(),
             client_supports_goose_custom_notifications: OnceCell::new(),
+            client_supports_compaction: OnceCell::new(),
             client_supports_recipe_param_requests: OnceCell::new(),
             client_requests_tool_call_label_enrichment: OnceCell::new(),
             client_cx: OnceCell::new(),
@@ -1453,6 +1456,14 @@ impl GooseAcpAgent {
                 cx.send_notification(SessionNotification::new(session_id.clone(), update))?;
             }
             MessageContent::SystemNotification(notification) => {
+                if let Some(update) = compaction_update_from_notification(notification)
+                    .filter(|_| self.client_supports_compaction.get() == Some(&true))
+                {
+                    cx.send_notification(agent_client_protocol::UntypedMessage::new(
+                        "session/update",
+                        serde_json::json!({"sessionId": session_id, "update": update}),
+                    )?)?;
+                }
                 send_status_message_update(
                     cx,
                     self.supports_goose_custom_notifications(),
@@ -1719,6 +1730,41 @@ fn send_status_message_update(
     Ok(())
 }
 
+/// Agentworks patch (vendor/GOOSE-SOURCES.md): compaction lifecycle data attached by
+/// the compaction operation, as an ACP compaction update.
+/// The ACP schema this server is built on has no compaction types, so the update is JSON.
+fn compaction_update_from_notification(
+    notification: &SystemNotificationContent,
+) -> Option<serde_json::Value> {
+    let data = notification.data.as_ref()?.get("compaction")?;
+    let status = data.get("status")?.as_str()?;
+    if !matches!(status, "in_progress" | "completed" | "failed") {
+        return None;
+    }
+    let mut update = serde_json::json!({"sessionUpdate": "compaction_update",
+        "compactionId": data.get("id")?.as_str()?, "status": status});
+    if let Some(summary) = data.get("summary").and_then(|s| s.as_str()) {
+        update["summary"] = serde_json::json!([{"type": "text", "text": summary}]);
+    }
+    if let Some(error) = data.get("error").and_then(|e| e.as_str()) {
+        update["error"] = serde_json::json!(error);
+    }
+    let details: serde_json::Map<String, serde_json::Value> =
+        ["trigger", "preTokens", "postTokens"]
+            .into_iter()
+            .filter_map(|key| {
+                Some((
+                    key.to_string(),
+                    data.get(key).filter(|v| !v.is_null())?.clone(),
+                ))
+            })
+            .collect();
+    if !details.is_empty() {
+        update["_meta"] = serde_json::json!({"_goose/compaction": details});
+    }
+    Some(update)
+}
+
 fn send_progress_message_update(
     cx: &ConnectionTo<Client>,
     supports_goose_custom_notifications: bool,
@@ -1790,6 +1836,12 @@ impl GooseAcpAgent {
             .client_fs_capabilities
             .set(args.client_capabilities.fs.clone());
         let _ = self.client_terminal.set(args.client_capabilities.terminal);
+        // This schema predates `session.compaction`; the Agentworks bridge mirrors it here.
+        let _ = self.client_supports_compaction.set(
+            args.client_capabilities.meta.as_ref().is_some_and(|meta| {
+                meta.get("agentworks/compaction") == Some(&serde_json::Value::Bool(true))
+            }),
+        );
         let goose_client_capabilities =
             extract_client_capabilities_meta(&args).and_then(|meta| meta.goose);
         let _ = self.client_mcp_host_info.set(extract_client_mcp_host_info(

@@ -29,12 +29,10 @@ Roles use the unstable ACP `sessionCapabilities.systemPrompt` capability (`unsta
 
 | Agent | Roles |
 | --- | --- |
-| Claude (`claude-agent-acp`) | Supported. Appended to the `claude_code` preset prompt. |
-| Claude · Rust ACP (`claude-rust`) | Supported. Passed to Claude Code as `--append-system-prompt`. |
+| Claude (`claude-rust`, and the former `claude` ID) | Supported. Passed to Claude Code as `--append-system-prompt`. |
 | Goose · embedded | Supported. Appended through a managed Goose system-prompt entry, replaced on new/load/fork. |
 | Demo agent | Supported. `role?` replies with the received system prompt. |
-| Codex · Rust ACP (`codex-rust`) | Supported. ACP append text is passed as Codex app-server `developerInstructions`, preserving its base instructions. |
-| Codex (`codex-acp`) | Not yet. The vendored Node adapter does not accept `systemPrompt`. |
+| Codex (`codex-rust`, and the former `codex` ID) | Supported. ACP append text is passed as Codex app-server `developerInstructions`, preserving its base instructions. |
 | OpenCode | Not yet. |
 
 `/api/status` reports `roles` per provider, and New session disables the picker for unsupported agents. If a harness with a stored role stops advertising the capability, opening the session fails with an error instead of continuing without the role. The transcript is kept.
@@ -74,6 +72,6 @@ of every installed Codex version. Run `python3 tests/codex-acp.test.py` and
 
 ## Not yet included
 
-Project and global default roles, a role editor in Settings, roles for MCP-started children, and Codex support through the vendored Node adapter patch.
+Project and global default roles, a role editor in Settings, roles for MCP-started children.
 
 Run `npm run test:roles` after `cargo build --locked`. It is also part of `npm run verify`.

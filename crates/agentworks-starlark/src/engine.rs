@@ -14,6 +14,7 @@
 mod registration;
 pub use registration::{HookInfo, RegisteredScript};
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
@@ -30,11 +31,31 @@ use starlark::values::FrozenHeapName;
 use starlark::values::OwnedFrozenValue;
 use starlark::values::none::NoneOr;
 
+// Host-bound session context. Scripts never receive a target-session argument.
+thread_local! { static BADGE_SESSION: RefCell<Option<String>> = const { RefCell::new(None) }; }
+pub struct BadgeScope(Option<String>, std::marker::PhantomData<std::rc::Rc<()>>);
+impl Drop for BadgeScope {
+    fn drop(&mut self) {
+        BADGE_SESSION.with(|value| *value.borrow_mut() = self.0.take());
+    }
+}
+pub type BadgeSink = Arc<dyn Fn(&str, &str, &str, &[Json]) + Send + Sync>;
+
 pub const HOST_API_VERSION: u32 = 1;
 const PROGRESS_PRELUDE: &str = "@agentworks//progress.star";
 const MESSAGE_PRELUDE: &str = "@agentworks//message.star";
 const WORKFLOW_PRELUDE: &str = "@agentworks//workflow.star";
 const TOOL_PRELUDE: &str = "@agentworks//tool.star";
+pub const GITHUB_EVENT_KINDS: [&str; 6] = [
+    "pr.tracked",
+    "pr.snapshot",
+    "pr.status_changed",
+    "pr.unavailable",
+    "pr.untracked",
+    "github.availability_changed",
+];
+const GITHUB_PRELUDE: &str = "@agentworks//github.star";
+const CHAT_PRELUDE: &str = "@agentworks//chat.star";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -47,6 +68,11 @@ pub enum Capability {
     MessageFormatter,
     /// Chooses the one-line header shown for a tool card. Display only.
     ToolHeader,
+    /// Rewrites one line of an agent (`chat.agent`) or user (`chat.user`)
+    /// chat message as Markdown. Display only.
+    ChatFormatter,
+    /// Observes GitHub PR state changes; badge setters only, no actions or I/O.
+    Github,
 }
 
 impl Capability {
@@ -56,6 +82,8 @@ impl Capability {
             Capability::MessageFormatter => (MESSAGE_PRELUDE, include_str!("../host/message.star")),
             Capability::Workflow => (WORKFLOW_PRELUDE, include_str!("../host/workflow.star")),
             Capability::ToolHeader => (TOOL_PRELUDE, include_str!("../host/tool.star")),
+            Capability::Github => (GITHUB_PRELUDE, include_str!("../host/github.star")),
+            Capability::ChatFormatter => (CHAT_PRELUDE, include_str!("../host/chat.star")),
         }
     }
     fn entry(self) -> &'static str {
@@ -64,6 +92,8 @@ impl Capability {
             Capability::Workflow => "on_event",
             Capability::MessageFormatter => "format_message",
             Capability::ToolHeader => "tool_header",
+            Capability::ChatFormatter => "format_line",
+            Capability::Github => "on_github",
         }
     }
     /// Host API v1 entry signature, as rendered by the starlark typechecker.
@@ -73,6 +103,8 @@ impl Capability {
             Capability::Workflow => "def(ctx: WorkflowContext, event: Event) -> list[Action]",
             Capability::MessageFormatter => "def(ctx: MessageContext, message: PeerMessage) -> str",
             Capability::ToolHeader => "def(ctx: ToolContext, tool: ToolCall) -> None | str",
+            Capability::ChatFormatter => "def(ctx: ChatContext, line: str) -> None | str",
+            Capability::Github => "def(ctx: GithubContext, event: dict[str, typing.Any]) -> None",
         }
     }
     /// Prelude record type for the hook's `ctx` argument.
@@ -82,6 +114,8 @@ impl Capability {
             Capability::Workflow => "WorkflowContext",
             Capability::MessageFormatter => "MessageContext",
             Capability::ToolHeader => "ToolContext",
+            Capability::ChatFormatter => "ChatContext",
+            Capability::Github => "GithubContext",
         }
     }
 }
@@ -129,7 +163,9 @@ impl Limits {
         match capability {
             Capability::Parser => Self::parser(),
             Capability::Workflow => Self::workflow(),
-            Capability::MessageFormatter | Capability::ToolHeader => Self::parser(),
+            Capability::MessageFormatter | Capability::ToolHeader | Capability::ChatFormatter | Capability::Github => {
+                Self::parser()
+            }
         }
     }
 }
@@ -228,6 +264,94 @@ fn parser_helpers(builder: &mut GlobalsBuilder) {
             ),
         })
     }
+
+    /// Replaces every match of `pattern` in `text`; `$1` or `${name}` in
+    /// `replacement` refer to capture groups, and `$$` is a literal `$`.
+    fn regex_replace(
+        #[starlark(require = pos)] pattern: &str,
+        #[starlark(require = pos)] text: &str,
+        #[starlark(require = pos)] replacement: &str,
+    ) -> anyhow::Result<String> {
+        Ok(cached_regex(pattern)?.replace_all(text, replacement).into_owned())
+    }
+
+    /// Applies `function` to the parts of one Markdown line outside inline code,
+    /// links, images, autolinks, bare URLs and HTML tags, which stay as they are.
+    fn map_prose<'v>(
+        #[starlark(require = pos)] line: &str,
+        #[starlark(require = pos)] function: starlark::values::Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<String> {
+        let mut out = String::with_capacity(line.len());
+        for (prose, part) in prose_segments(line) {
+            if !prose {
+                out.push_str(part);
+                continue;
+            }
+            let part = eval.heap().alloc(part);
+            let value = eval
+                .eval_function(function, &[part], &[])
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            out.push_str(
+                value
+                    .unpack_str()
+                    .ok_or_else(|| anyhow::anyhow!("map_prose function must return str"))?,
+            );
+        }
+        Ok(out)
+    }
+}
+
+/// Splits a Markdown line into `(is_prose, text)` runs. Code spans follow
+/// CommonMark: a backtick run closes only at a run of the same length.
+pub fn prose_segments(line: &str) -> Vec<(bool, &str)> {
+    static PROTECTED: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"!?\[[^\]]*\]\([^)]*\)|<[^\s<>]+>|https?://[^\s<>]+").unwrap());
+    let ticks = |from: usize| line[from..].bytes().take_while(|&b| b == b'`').count();
+    let mut segments = Vec::new();
+    let mut push = |from: usize, to: usize, prose: bool| {
+        if to > from {
+            segments.push((prose, &line[from..to]));
+        }
+    };
+    let (mut prose_start, mut at) = (0, 0);
+    while at < line.len() {
+        if line.as_bytes()[at] == b'`' {
+            let width = ticks(at);
+            let mut search = at + width;
+            let mut end = None;
+            while let Some(offset) = line[search..].find('`') {
+                let run = search + offset;
+                let length = ticks(run);
+                if length == width {
+                    end = Some(run + length);
+                    break;
+                }
+                search = run + length;
+            }
+            match end {
+                Some(end) => {
+                    push(prose_start, at, true);
+                    push(at, end, false);
+                    (prose_start, at) = (end, end);
+                }
+                None => at += width,
+            }
+            continue;
+        }
+        let next_tick = line[at..].find('`').map_or(line.len(), |i| at + i);
+        match PROTECTED.find(&line[at..next_tick]) {
+            Some(found) => {
+                let (start, end) = (at + found.start(), at + found.end());
+                push(prose_start, start, true);
+                push(start, end, false);
+                (prose_start, at) = (end, end);
+            }
+            None => at = next_tick,
+        }
+    }
+    push(prose_start, line.len(), true);
+    segments
 }
 
 /// Shared through `Arc`: cloning a `Regex` would give each call a cold match cache.
@@ -262,9 +386,11 @@ fn globals(capability: Capability) -> Globals {
             .with(parser_helpers)
             .with_namespace("agent", registration::registration_helpers)
             .build(),
-        Capability::MessageFormatter | Capability::ToolHeader => builder
-            .with_namespace("agent", registration::registration_helpers)
-            .build(),
+        Capability::MessageFormatter | Capability::ToolHeader | Capability::ChatFormatter | Capability::Github => {
+            builder
+                .with_namespace("agent", registration::registration_helpers)
+                .build()
+        }
         Capability::Workflow => builder.build(),
     }
 }
@@ -291,12 +417,23 @@ pub struct Compiled {
     pub display_name: String,
     /// Parser scripts: `COMMAND_PATTERN`. Rust routes only matching commands' output.
     pub command_pattern: Option<Arc<regex::Regex>>,
+    /// Formatters and tool headers: only matching text reaches the hook; None matches everything.
     pub text_pattern: Option<Arc<regex::Regex>>,
     pub message_type: Option<String>,
+    /// Exact event names routed before evaluation; None means all GitHub events.
+    pub github_events: Option<Vec<String>>,
+    pub automation_trigger: Option<Json>,
     pub compile_time: Duration,
 }
 
 impl Compiled {
+    pub fn accepts_github_event(&self, kind: &str) -> bool {
+        self.capability == Capability::Github
+            && self
+                .github_events
+                .as_ref()
+                .is_none_or(|events| events.iter().any(|event| event == kind))
+    }
     fn diagnostic(&self, kind: DiagnosticKind, message: impl std::fmt::Display) -> Diagnostic {
         Diagnostic {
             script: self.name.clone(),
@@ -315,6 +452,7 @@ pub struct CallStats {
 }
 
 pub struct Engine {
+    badge_sink: Mutex<Option<BadgeSink>>,
     parser_globals: Globals,
     workflow_globals: Globals,
     message_globals: Globals,
@@ -323,6 +461,9 @@ pub struct Engine {
     workflow_prelude: Prelude,
     message_prelude: Prelude,
     tool_prelude: Prelude,
+    chat_globals: Globals,
+    chat_prelude: Prelude,
+    github_prelude: Prelude,
     cache: Mutex<HashMap<String, Arc<Compiled>>>,
     hook_globals: Globals,
     hook_cache: Mutex<HashMap<(String, String), Arc<RegisteredScript>>>,
@@ -336,15 +477,22 @@ impl Engine {
         let message_prelude = prelude(Capability::MessageFormatter, &message_globals)?;
         let tool_globals = globals(Capability::ToolHeader);
         let tool_prelude = prelude(Capability::ToolHeader, &tool_globals)?;
+        let github_prelude = prelude(Capability::Github, &message_globals)?;
+        let chat_globals = globals(Capability::ChatFormatter);
+        let chat_prelude = prelude(Capability::ChatFormatter, &chat_globals)?;
         let parser_prelude = prelude(Capability::Parser, &parser_globals)?;
         let workflow_prelude = prelude(Capability::Workflow, &workflow_globals)?;
         Ok(Engine {
+            badge_sink: Mutex::new(None),
             parser_globals,
             workflow_globals,
             message_globals,
             message_prelude,
             tool_globals,
             tool_prelude,
+            chat_globals,
+            chat_prelude,
+            github_prelude,
             parser_prelude,
             workflow_prelude,
             cache: Mutex::default(),
@@ -353,12 +501,40 @@ impl Engine {
         })
     }
 
+    pub fn set_badge_sink(&self, sink: BadgeSink) {
+        *self.badge_sink.lock().unwrap() = Some(sink);
+    }
+    pub fn badge_scope(&self, session: Option<&str>) -> BadgeScope {
+        BadgeScope(
+            BADGE_SESSION.with(|value| value.replace(session.map(str::to_owned))),
+            std::marker::PhantomData,
+        )
+    }
+    /// Call only after the host has accepted the hook's return value.
+    pub fn publish_badge_effects(&self, script: &Compiled, effects: &[Json]) {
+        if effects.is_empty() {
+            return;
+        }
+        let target = BADGE_SESSION.with(|value| value.borrow().clone());
+        let sink = self.badge_sink.lock().unwrap().clone();
+        if let (Some(session), Some(sink)) = (target, sink) {
+            sink(&session, &script.name, &script.hash, effects);
+        }
+    }
+    pub fn publish_badges(&self, script: &Compiled, value: &Json) {
+        if let Some(effects) = value["badgeEffects"].as_array() {
+            self.publish_badge_effects(script, effects);
+        }
+    }
+
     fn parts(&self, capability: Capability) -> (&Globals, &Prelude) {
         match capability {
             Capability::Parser => (&self.parser_globals, &self.parser_prelude),
             Capability::Workflow => (&self.workflow_globals, &self.workflow_prelude),
             Capability::MessageFormatter => (&self.message_globals, &self.message_prelude),
             Capability::ToolHeader => (&self.tool_globals, &self.tool_prelude),
+            Capability::ChatFormatter => (&self.chat_globals, &self.chat_prelude),
+            Capability::Github => (&self.message_globals, &self.github_prelude),
         }
     }
 
@@ -492,9 +668,11 @@ impl Engine {
                     })?;
                 (display, Some(Arc::new(regex)))
             }
-            Capability::Workflow | Capability::MessageFormatter | Capability::ToolHeader => {
-                (install.name.clone(), None)
-            }
+            Capability::Workflow
+            | Capability::MessageFormatter
+            | Capability::ToolHeader
+            | Capability::ChatFormatter
+            | Capability::Github => (install.name.clone(), None),
         };
         let compiled = Arc::new(Compiled {
             name: install.name.clone(),
@@ -507,6 +685,8 @@ impl Engine {
             command_pattern,
             text_pattern: None,
             message_type: None,
+            github_events: None,
+            automation_trigger: None,
             compile_time: started.elapsed(),
         });
         self.cache
@@ -554,6 +734,12 @@ impl Engine {
         let started = Instant::now();
         let deadline = started + limits.max_wall;
         Module::with_temp_heap(|module| {
+            use starlark::values::{list::AllocList, tuple::AllocTuple};
+            let heap = module.heap();
+            module.set_extra_value(heap.alloc(AllocTuple([
+                heap.alloc("badge_effects"),
+                heap.alloc(AllocList(Vec::<starlark::values::Value>::new())),
+            ])));
             let mut eval = Evaluator::new(&module);
             let setup = |e: anyhow::Error| script.diagnostic(DiagnosticKind::Runtime, e);
             eval.set_max_tick_count(limits.max_ticks).map_err(setup)?;
@@ -640,7 +826,23 @@ impl Engine {
                 }
                 committed
             };
-            let json = serde_json::json!({"result": result, "state": committed});
+            let mut json = serde_json::json!({"result": result, "state": committed});
+            if first["provisional"] != true {
+                use starlark::values::tuple::TupleRef;
+                let extra = module
+                    .extra_value()
+                    .and_then(TupleRef::from_value)
+                    .expect("host effect buffer");
+                let effects = extra.content()[1]
+                    .to_json_value()
+                    .map_err(|error| script.diagnostic(DiagnosticKind::InvalidResult, error))?;
+                if effects.as_array().is_some_and(|values| !values.is_empty()) {
+                    if effects.to_string().len() + json["result"].to_string().len() > limits.max_output_bytes {
+                        return Err(script.diagnostic(DiagnosticKind::Limit, "badge effects exceed output limit"));
+                    }
+                    json["badgeEffects"] = effects;
+                }
+            }
             Ok((
                 json,
                 CallStats {
@@ -663,6 +865,8 @@ fn cap_name(c: Capability) -> &'static str {
         Capability::Workflow => "workflow",
         Capability::MessageFormatter => "message_formatter",
         Capability::ToolHeader => "tool_header",
+        Capability::ChatFormatter => "chat_formatter",
+        Capability::Github => "github",
     }
 }
 
@@ -685,7 +889,7 @@ fn prelude(capability: Capability, globals: &Globals) -> Result<Prelude, String>
     })?;
     let context = module.get(capability.context_type()).map_err(|e| e.to_string())?;
     let event = match capability {
-        Capability::Parser => None,
+        Capability::Parser | Capability::ChatFormatter | Capability::Github => None,
         Capability::MessageFormatter => Some(module.get("message_from_json").map_err(|e| e.to_string())?),
         Capability::ToolHeader => Some(module.get("tool_from_json").map_err(|e| e.to_string())?),
         Capability::Workflow => Some(module.get("event_from_json").map_err(|e| e.to_string())?),

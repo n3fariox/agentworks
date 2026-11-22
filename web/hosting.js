@@ -1,6 +1,13 @@
 // The public module URL retains a reverse proxy's stripped mount. Never use an
 // HTML <base> or origin-root URLs to infer the public application directory.
 export const appBase = new URL('./', import.meta.url);
+// A signed-out PAM session reloads into the sign-in page.
+const nativeFetch = globalThis.fetch.bind(globalThis);
+globalThis.fetch = async (...args) => {
+  const response = await nativeFetch(...args);
+  if (response.status === 401 && response.headers.get('x-agentworks-auth') === 'required') location.reload();
+  return response;
+};
 export function appUrl(path='') {
   const url = new URL(path.replace(/^\//, ''), appBase);
   if (url.origin !== appBase.origin || !url.pathname.startsWith(appBase.pathname)) {

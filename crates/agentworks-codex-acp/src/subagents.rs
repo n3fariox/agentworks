@@ -198,7 +198,7 @@ impl Bridge {
             let result = self
                 .history(&id, |_, item| {
                     self.collab_item(cx, &id, item, true, true)?;
-                    replay_item(cx, &id, item)
+                    replay_item(cx, &id, item, self.compaction.load(Ordering::Relaxed))
                 })
                 .await;
             // Deleted or ephemeral historical children must not prevent loading their parent.

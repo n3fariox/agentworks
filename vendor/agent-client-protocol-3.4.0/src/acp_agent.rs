@@ -4,7 +4,7 @@
 //! ACP agent subprocess from an [`AcpAgentConfig`], command string, or JSON
 //! configuration.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -50,6 +50,8 @@ pub struct AcpAgentConfig {
     args: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    env_remove: BTreeSet<String>,
 }
 
 impl AcpAgentConfig {
@@ -60,6 +62,7 @@ impl AcpAgentConfig {
             command: command.into(),
             args: Vec::new(),
             env: BTreeMap::new(),
+            env_remove: BTreeSet::new(),
         }
     }
 
@@ -103,6 +106,14 @@ impl AcpAgentConfig {
         self
     }
 
+    /// Do not pass this inherited variable to the child process. A variable
+    /// set explicitly with [`Self::env`] is still passed.
+    #[must_use]
+    pub fn env_remove(mut self, name: impl Into<String>) -> Self {
+        self.env_remove.insert(name.into());
+        self
+    }
+
     /// The executable path or command name.
     #[must_use]
     pub fn command(&self) -> &Path {
@@ -119,6 +130,12 @@ impl AcpAgentConfig {
     #[must_use]
     pub fn environment(&self) -> &BTreeMap<String, String> {
         &self.env
+    }
+
+    /// Inherited variables withheld from the child process.
+    #[must_use]
+    pub fn removed_environment(&self) -> &BTreeSet<String> {
+        &self.env_remove
     }
 }
 
@@ -258,6 +275,9 @@ impl AcpAgent {
     > {
         let mut std_cmd = std::process::Command::new(&self.config.command);
         std_cmd.args(&self.config.args);
+        for name in &self.config.env_remove {
+            std_cmd.env_remove(name);
+        }
         std_cmd.envs(&self.config.env);
         #[cfg(unix)]
         {

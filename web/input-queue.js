@@ -2,6 +2,7 @@
 // this module only renders it and sends deliberate enqueue/edit/remove/resume actions.
 const STATE_LABELS={queued:'Queued',sending:'Sending',sent:'Sent',paused:'Paused',error:'Needs inspection'};
 export const BUSY=['running','waiting','cancelling'];
+export const STARTING=['starting','resuming'];
 
 // Pure activity label for tests: status plus whether a tool call is in progress.
 export function activityLabel(status,toolActive){

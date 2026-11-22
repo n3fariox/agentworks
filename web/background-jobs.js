@@ -5,6 +5,17 @@ const terminal=state=>['completed','failed','stopped','cancelled'].includes(stat
 const activeJob=job=>!terminal(job.state)&&!Number.isSafeInteger(job.resultSeq);
 const key=job=>JSON.stringify([job.acpSessionId,job.asyncTaskId]);
 const label=state=>({running:'Running',pending:'Pending',paused:'Paused',stopping:'Stopping',completed:'Completed',failed:'Failed',stopped:'Stopped',cancelled:'Cancelled',unknown:'Status unknown'}[state]||'Status unknown');
+function progressText(progress){
+  if(typeof progress==='string')return progress.trim();
+  if(!progress||typeof progress!=='object')return '';
+  const parts=[progress.phase,progress.label].filter(value=>typeof value==='string'&&value.trim());
+  for(const count of Array.isArray(progress.counts)?progress.counts:[]){
+    if(count&&Number.isSafeInteger(count.done)&&Number.isSafeInteger(count.total)&&count.done>=0&&count.total>=count.done){
+      parts.push(`${count.done.toLocaleString('en-US')}/${count.total.toLocaleString('en-US')}${typeof count.unit==='string'&&count.unit?` ${count.unit}`:''}`);
+    }
+  }
+  return parts.join(' · ');
+}
 // Only what the adapter reported: Claude gives a summary, usage and an output file path;
 // Codex gives the state, and the command output stays on the launching tool call.
 export function jobResultLines(job){
@@ -18,13 +29,15 @@ export function jobResultLines(job){
     const parts=[Number.isFinite(u.totalTokens)?`${u.totalTokens.toLocaleString('en-US')} tokens`:'',Number.isFinite(u.toolUses)?`${u.toolUses} tool use${u.toolUses===1?'':'s'}`:'',Number.isFinite(u.durationMs)?`${Math.round(u.durationMs/1000)}s`:''].filter(Boolean);
     if(parts.length)lines.push(parts.join(' · '));
   }
-  if(job.progress)lines.push(typeof job.progress==='string'?job.progress:JSON.stringify(job.progress));
+  if(job.progress)lines.push(progressText(job.progress)||JSON.stringify(job.progress));
   return lines;
 }
 export function createBackgroundJobs({root,api,getActive,isConnected,onChange=()=>{}}){
   let jobs=new Map(),supported=false,revision=0;
   const pending=new Set(),errors=new Map(),rows=new Map();
   const summary=document.createElement('summary'),list=document.createElement('div');
+  const heading=document.createElement('span'),preview=document.createElement('span');
+  preview.className='background-job-preview';summary.append(heading,preview);
   list.className='background-job-list';list.setAttribute('aria-label','Background jobs');root.append(summary,list);
   const text=(tag,className)=>{const node=document.createElement(tag);node.className=className;return node;};
   function reset(){revision++;jobs.clear();supported=false;pending.clear();errors.clear();rows.clear();list.replaceChildren();root.open=false;render();}
@@ -54,7 +67,13 @@ export function createBackgroundJobs({root,api,getActive,isConnected,onChange=()
   function render(){
     const live=[...jobs].filter(([,job])=>activeJob(job)),unknown=live.filter(([,j])=>j.state==='unknown').length;
     root.hidden=!live.length;
-    summary.textContent='Background jobs · '+[live.length>unknown?`${live.length-unknown} active`:'',unknown?`${unknown} unknown`:''].filter(Boolean).join(' · ');
+    heading.textContent='Background jobs · '+[live.length>unknown?`${live.length-unknown} active`:'',unknown?`${unknown} unknown`:''].filter(Boolean).join(' · ');
+    const progress=live.filter(([,job])=>job.state!=='unknown').map(([,job])=>({job,text:progressText(job.progress)})).filter(item=>item.text);
+    preview.replaceChildren();preview.hidden=!progress.length;
+    for(const {job,text} of progress.slice(0,2)){
+      const line=document.createElement('span');line.textContent=`${job.name||'Background job'}: ${text}`;line.title=line.textContent;preview.append(line);
+    }
+    if(progress.length>2){const more=document.createElement('span');more.textContent=`+${progress.length-2} more`;preview.append(more);}
     const current=new Set();
     for(const [id,job]of live.reverse()){
       current.add(id);let row=rows.get(id);
@@ -64,7 +83,7 @@ export function createBackgroundJobs({root,api,getActive,isConnected,onChange=()
       }
       list.append(row.node);row.name.textContent=job.name||'Background job';row.state.textContent=label(job.state);
       row.description.textContent=job.summary||job.description||'';row.description.hidden=!row.description.textContent;
-      row.detail.textContent=[job.parentSessionId?'Subagent job':'',job.outputFilePath?`Output: ${job.outputFilePath}`:'',job.progress?typeof job.progress==='string'?job.progress:JSON.stringify(job.progress):''].filter(Boolean).join(' · ');row.detail.hidden=!row.detail.textContent;
+      row.detail.textContent=[job.parentSessionId?'Subagent job':'',job.outputFilePath?`Output: ${job.outputFilePath}`:'',job.progress?progressText(job.progress)||JSON.stringify(job.progress):''].filter(Boolean).join(' · ');row.detail.hidden=!row.detail.textContent;
       row.button.hidden=!job.canStop||terminal(job.state);row.button.disabled=!supported||!isConnected()||job.state!=='running'||pending.has(id);
       row.button.textContent=pending.has(id)?'Stopping…':'Stop';row.button.setAttribute('aria-label',`Stop ${job.name||'background job'}`);row.error.textContent=errors.get(id)||'';
       row.button.onclick=async()=>{

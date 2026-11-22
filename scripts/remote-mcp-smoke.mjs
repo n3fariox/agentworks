@@ -45,7 +45,7 @@ try {
  const off=await create({agentAccess:{}});
  assert.deepEqual((await call(off.id,'tools/list')).tools,[]);denied(await call(off.id,'read_inbox'));
  const names=(await call(a.id,'tools/list')).tools.map(t=>t.name).sort();
- assert.deepEqual(names,['acknowledge_message','list_sessions','read_inbox','send_message']);
+ assert.deepEqual(names,['acknowledge_message','list_sessions','read_inbox','read_message','send_message']);
  const peers=value(await call(a.id,'list_sessions'));
  assert(peers.sessions.some(p=>p.id===b.id));assert(peers.sessions.some(p=>p.id===c.id));
  assert(!peers.sessions.some(p=>p.id===outsider.id||p.id===off.id));

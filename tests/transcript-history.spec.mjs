@@ -54,6 +54,9 @@ test.beforeAll(async()=>{
     d.exec('BEGIN');
     for(let i=1;i<=TURNS;i++)for(const e of turn(i)){seq++;insert.run(session.id,seq,JSON.stringify({seq,...e}));}
     d.prepare("UPDATE sessions SET state=json_set(state,'$.seq',CAST(? AS INTEGER)) WHERE id=?").run(seq,session.id);
+    // Mark the seeded rows as already compacted so the paging contract is tested on
+    // contiguous sequences; live turns after them are still compacted when they end.
+    d.prepare('INSERT INTO event_compaction(session_id,through) VALUES (?,?) ON CONFLICT(session_id) DO UPDATE SET through=excluded.through').run(session.id,seq);
     d.exec('COMMIT');seeded=seq;
   }finally{d.close();}
   await start();
@@ -116,11 +119,14 @@ async function open(page){
 }
 // Transcript facts read in one pass: user prompts in order, reply texts, tool outputs.
 const facts=page=>page.evaluate(()=>({
-  prompts:[...document.querySelectorAll('#messages .message.user .message-body')].map(n=>n.textContent),
+  prompts:[...document.querySelectorAll('#messages .message.user .message-body')].map(n=>n.textContent.trim()),
   replies:[...document.querySelectorAll('#messages .message.assistant .message-body')].map(n=>n.textContent.trim()),
   tools:[...document.querySelectorAll('#messages .tool-card')].map(n=>({title:n.querySelector('.tool-title')?.textContent,text:n.querySelector('pre').textContent,load:n.querySelector('.tool-output-load')!==null})),
   first:document.querySelector('#messages').firstElementChild?.className,
 }));
+// Replies that are not seeded. A seeded reply streams as "Reply N " then "done", so when a page
+// boundary splits one, the loaded transcript legitimately opens with the "done" fragment.
+const unseeded=replies=>replies.filter((r,i)=>!/^Reply \d+/.test(r)&&!(i===0&&r==='done'));
 function checkSeeded(f){
   const seededPrompts=f.prompts.filter(p=>/^Prompt \d+$/.test(p)).map(p=>+p.slice(7));
   // Unique and consecutive up to the last seeded turn: no duplicates, no gaps.
@@ -142,7 +148,8 @@ test('browser loads multiple older pages, keeps the reading position and ends at
   await messages.evaluate(n=>n.scrollTo({top:0,behavior:'instant'}));
   // Anchor on a fully rendered prompt near the top and remember where the reader sees it.
   const anchorText=`Prompt ${initial.prompts[1]}`;
-  const anchor=page.locator('#messages .message.user .message-body',{hasText:new RegExp(`^${anchorText}$`)});
+  // Formatted user Markdown renders as a paragraph, so its text ends with a newline.
+  const anchor=page.locator('#messages .message.user .message-body',{hasText:new RegExp(`^${anchorText}\\s*$`)});
   const offset=async()=>{const [a,m]=await Promise.all([anchor.boundingBox(),messages.boundingBox()]);return a.y-m.y;};
   const seen=await offset();
   await page.locator('.history-more').click();
@@ -157,7 +164,9 @@ test('browser loads multiple older pages, keeps the reading position and ends at
     await expect(page.locator('.history-more').or(page.locator('.history-start'))).toBeVisible();
     await expect(page.locator('.history-more:disabled')).toHaveCount(0);
   }
-  expect(clicks).toBe(3);
+  // The browser opens on its recent turns only, so more pages precede them than the
+  // 3000-event window would leave.
+  expect(clicks).toBeGreaterThanOrEqual(3);
   await expect(page.locator('.history-start')).toHaveText('Beginning of conversation');
   const done=await facts(page);expect(done.first).toBe('history-boundary');
   const full=checkSeeded(done);
@@ -179,12 +188,15 @@ test('browser merges older pages with live events and keeps them across a reconn
   // A live turn completes while the older page request is in flight.
   await page.locator('.history-more').click();
   await expect(page.locator('.history-more')).toBeDisabled();
-  const otherReplies=async()=>(await facts(page)).replies.filter(r=>!/^Reply \d+/.test(r)).length;
+  const otherReplies=async()=>unseeded((await facts(page)).replies).length;
   const repliesBefore=await otherReplies();
-  await page.fill('#prompt','hello');await page.click('#send');
+  await page.fill('#prompt-editor .cm-content','hello');await page.click('#send');
   await expect(page.locator('#messages .message.user .message-body').last()).toHaveText('hello');
   await expect.poll(otherReplies).toBeGreaterThan(repliesBefore);
   await idle();await expect(page.locator('#session-state')).toHaveText('Ready');
+  // Session status can reach the browser just before the final assistant chunk. Capture the
+  // pre-reconnect transcript only after the live reply has reached its persisted final text.
+  await expect.poll(async()=>unseeded((await facts(page)).replies).at(-1)).toContain('hello');
   const liveReplies=await otherReplies();
   release();
   await expect.poll(async()=>checkSeeded(await facts(page)).prompts[0]).toBeLessThan(initial.prompts[0]);
@@ -193,7 +205,7 @@ test('browser merges older pages with live events and keeps them across a reconn
   expect(seededMerged.prompts[0]).toBeLessThan(initial.prompts[0]);
   expect(merged.prompts.at(-1)).toBe('hello');
   expect(merged.prompts.filter(p=>p==='hello').length).toBe(2);// one from the API test, one live
-  expect(merged.replies.filter(r=>!/^Reply \d+/.test(r)).length).toBe(liveReplies);
+  expect(unseeded(merged.replies).length).toBe(liveReplies);
   // Drop the socket: the reconnect snapshot overlaps what is loaded and must not duplicate or lose it.
   await page.unroute(/\/history\?/);
   expect(sockets.length).toBe(1);
@@ -209,4 +221,12 @@ test('browser merges older pages with live events and keeps them across a reconn
   await expect.poll(async()=>checkSeeded(await facts(page)).prompts[0]).toBeLessThan(seededMerged.prompts[0]);
   const more=checkSeeded(await facts(page));
   expect(more.prompts[0]).toBeLessThan(seededMerged.prompts[0]);
+});
+
+
+test('notification deep links load older pages and focus the result of the source turn',async({page})=>{
+  const seq=seeded-(TURNS-1)*PER_TURN;
+  await page.goto(base+'/?'+new URLSearchParams({notificationSession:session.id,notificationSeq:String(seq),notificationEvent:'turnEnd'}));
+  await expect(page.locator('.notification-target')).toContainText('Reply 1 done');
+  await expect(page.locator('.notification-target')).toBeInViewport();
 });

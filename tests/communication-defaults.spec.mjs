@@ -28,7 +28,7 @@ async function stop(){if(server&&!exited){const stopped=new Promise(r=>server.on
 async function setGlobal(role){const current=await api('/api/settings');return api('/api/settings',{...current,defaultCommunicationRole:role},'PUT');}
 async function create(project,agentAccess){return api('/api/sessions',{provider:'demo',cwd:fixture,projectId:project?.id,...(agentAccess===undefined?{}:{agentAccess})});}
 async function access(s){return api(`/api/sessions/${s.id}/agent-access`);}
-const off={communicate:false,startSessions:false,promptSessions:false,cancelSessions:false,runAutomations:false,restartService:false,manageReviewQueue:false,archiveSessions:false};
+const off={communicate:false,startSessions:false,promptSessions:false,cancelSessions:false,runAutomations:false,restartService:false,archiveSessions:false,manageAutomations:false};
 const participant={...off,communicate:true};
 const coordinator={...participant,startSessions:true,promptSessions:true,cancelSessions:true,runAutomations:true,archiveSessions:true};
 test.beforeAll(async()=>{await mkdir('.cache',{recursive:true});fixture=await mkdtemp(resolve('.cache/communication-defaults-'));await start();});
@@ -108,6 +108,7 @@ for(const mobile of [false,true])test(`role defaults and scoped settings ${mobil
   await page.locator('#create-submit').click();await expect(page.locator('#session-state')).toHaveText('Ready');
   const created=(await api('/api/sessions'))[0];expect(await access(created)).toEqual(coordinator);
   if(await page.locator('#session-more').isVisible())await page.locator('#session-more').click();
+  await page.locator('#lifecycle-menu > summary').click();
   await page.locator('#session-settings').click();
   await expect(page.locator('#session-settings-dialog')).toBeVisible();
   await expect(page.locator('#session-settings-scope')).toContainText('Role UI session');

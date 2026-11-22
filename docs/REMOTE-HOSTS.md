@@ -334,9 +334,10 @@ validated; the frame limit does not imply a total memory bound.
 ## Compatibility and upgrade contract
 
 The wire protocol number is an exact compatibility epoch, independent of the
-application `version` reported in `hello`. Both ends require `protocol == 3`;
+application `version` and `build` (both `<major>.<minor>.<commit count>`) reported in `hello`. Both ends require `protocol == 3`;
 the server sends an update diagnostic on a mismatch. The application version is
-informational and does not select a protocol. Native ACP initialization has its
+informational and does not select a protocol; a differing `build` only marks the
+host `outdated` in the host view (`null` when either side is a `-dev` version). Native ACP initialization has its
 own protocol/capability exchange inside each relayed channel.
 
 Extra JSON fields are generally ignored. Unknown text message types and malformed
@@ -353,7 +354,10 @@ support the full lifecycle. `directories: true` gates `browseDirectories` and
 
 Protocol 2 is intentionally rejected because it does not establish the protocol-3
 ownership-ready contract. Upgrade both binaries within a coordinated maintenance
-window, reconnect, and deliberately resume interrupted sessions. This protocol
+window, reconnect, and deliberately resume interrupted sessions. For hosts this
+server installed, `POST /api/hosts/{id}/update-worker` (**⋯ → Update worker**) does
+the worker half: it installs the server's current worker into a new release, then
+switches the saved launch command, reconnects, and removes the old release. This protocol
 does not promise mixed-version rolling upgrades or cross-link command replay.
 
 Future evolution should preserve existing field meanings within an epoch, use

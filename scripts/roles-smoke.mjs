@@ -52,7 +52,7 @@ try{
 
   // Role validation happens before anything is created.
   assert.match(await api('/api/sessions','POST',{provider:'demo',cwd:root,role:'missing'},400),/Role not found/);
-  assert.match(await api('/api/sessions','POST',{provider:'codex',cwd:root,role:'reviewer'},400),/does not accept role instructions/);
+  assert.match(await api('/api/sessions','POST',{provider:'opencode',cwd:root,role:'reviewer'},400),/does not accept role instructions/);
 
   // Editing the library leaves the running session's snapshot alone, across resume and restart.
   await api(`/api/roles/${custom.id}`,'PUT',{name:'Release captain',instructions:'Never tag anything.'});
@@ -76,7 +76,7 @@ try{
 
   // Forks cannot silently drop the parent's role on unsupported providers.
   const count=(await api('/api/sessions')).length;
-  assert.match(await api(`/api/sessions/${s.id}/fork`,'POST',{requestId:randomUUID(),provider:'codex'},400),/Forks must keep their parent's role/);
+  assert.match(await api(`/api/sessions/${s.id}/fork`,'POST',{requestId:randomUUID(),provider:'opencode'},400),/Forks must keep their parent's role/);
   assert.equal((await api('/api/sessions')).length,count);
 
   // A role never grants Agentworks access.

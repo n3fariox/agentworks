@@ -1,7 +1,6 @@
 import {localState as localStorage} from './hosting.js';
-// Right-hand panel beside the chat with Files and Diff tabs. Desktop shows it
-// as a third, resizable column; narrow layouts show it full screen in place of
-// the chat, and on phones it is a history entry so Back returns to the chat.
+// Files and Diff fill the conversation area while keeping the chat mounted.
+// On phones the panel is a history entry so Back returns to the chat.
 // Each tab is a {show(session),hide()} renderer; the panel only follows the
 // active session and decides which tab is visible.
 const KEY='agentworks-side-panel';
@@ -14,6 +13,7 @@ export function setupSidePanel({panel,tabs,triggers={},close,renderers,getActive
   const save=()=>localStorage.setItem(KEY,JSON.stringify({open:state.open&&!phone(),tab:state.tab}));
   function render(){
     panel.hidden=!state.open;
+    panel.dataset.tab=state.tab;
     for(const [name,button] of Object.entries(tabs)){
       const selected=state.open&&name===state.tab;
       button.setAttribute('aria-selected',String(selected));button.tabIndex=selected?0:-1;

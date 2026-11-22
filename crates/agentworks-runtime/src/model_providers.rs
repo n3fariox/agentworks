@@ -83,6 +83,22 @@ pub fn connection(id: &str, host: &str) -> Result<Connection> {
     })
 }
 
+/// Reads a saved provider connection for server-side requests (e.g. session routing)
+/// regardless of which execution hosts it is enabled on.
+pub fn server_connection(id: &str) -> Result<Connection> {
+    let _lock = storage_lock()?;
+    let p = profile(id)?;
+    Ok(Connection {
+        profile: p,
+        api_key: secrets()?.remove(id),
+    })
+}
+
+pub fn list_profiles() -> Result<Vec<Profile>> {
+    let _lock = storage_lock()?;
+    profiles()
+}
+
 pub fn draft_connection(request: &Value, host: &str) -> Result<Connection> {
     let _lock = storage_lock()?;
     let mut draft = request["profile"].clone();

@@ -37,17 +37,60 @@ def tool_header(ctx: ToolContext, tool: ToolCall) -> str | None:
 
 agent.register_tool_header(tool_header, title_pattern = ".*")
 `;
-const TEMPLATES={progress:TEMPLATE,formatter:FORMATTER_TEMPLATE,header:HEADER_TEMPLATE,both:TEMPLATE+'\n'+FORMATTER_TEMPLATE};
+export const CHAT_TEMPLATE=String.raw`load("@agentworks//chat.star", "ChatContext")
+
+# Rewrites one Markdown line of an agent message for display; None keeps it.
+# The result may span lines; ctx.state carries from line to line in a message.
+# Fenced code never arrives, and map_prose skips inline code and existing links.
+def format_line(ctx: ChatContext, line: str) -> str | None:
+    return map_prose(line, lambda text: regex_replace("\\b([A-Z][A-Z0-9]+-[0-9]+)\\b", text, "[$1](https://jira.example.com/browse/$1)"))
+
+# Only lines matching text_pattern reach format_line.
+agent.register_formatter(format_line, message_type = "chat.agent", text_pattern = "\\b[A-Z][A-Z0-9]+-[0-9]+\\b")
+`;
+export const BADGES_TEMPLATE=String.raw`load("@agentworks//progress.star", "LineContext", "Progress")
+
+# Existing hooks can update their session's stored badges. Changes persist
+# until this script updates or clears the same id. Provisional lines don't commit.
+def on_line(ctx: LineContext, line: str) -> Progress | None:
+    if "FAILED" in line:
+        agent.set_badge("build", "Build failed", tone = "danger", tooltip = "Build reported a failure")
+    elif "SUCCESS" in line:
+        agent.clear_badge("build")
+    return None
+
+agent.register_progress(on_line, command_pattern = "^make\\b")
+`;
+// Formats your own prompts; lines it doesn't rewrite stay exactly as typed.
+export const GITHUB_TEMPLATE=String.raw`load("@agentworks//github.star", "GithubContext")
+
+def on_github(ctx: GithubContext, event: dict[str, typing.Any]) -> None:
+    # Initial snapshots and later changes are distinguished by event["initial"].
+    # No filesystem, networking or action constructors are available here.
+    pr = event.get("after") or event.get("before")
+    if pr == None:
+        return None
+    badge_id = "review." + str(pr["number"])
+    if event.get("after") != None and pr["review"] == "CHANGES_REQUESTED":
+        agent.set_badge(badge_id, "Changes requested", tone = "warning", url = pr["url"])
+    else:
+        agent.clear_badge(badge_id)
+    return None
+
+agent.register_github(on_github, events = ["pr.tracked", "pr.snapshot", "pr.status_changed", "pr.untracked", "pr.unavailable"])
+`;
+export const CHAT_USER_TEMPLATE=CHAT_TEMPLATE.replace('message_type = "chat.agent"','message_type = "chat.user"').replace('of an agent message','of your message');
+const TEMPLATES={progress:TEMPLATE,formatter:FORMATTER_TEMPLATE,chat:CHAT_TEMPLATE,'chat-user':CHAT_USER_TEMPLATE,header:HEADER_TEMPLATE,github:GITHUB_TEMPLATE,badges:BADGES_TEMPLATE,both:TEMPLATE+'\n'+FORMATTER_TEMPLATE};
 
 export function setupParserScripts({$,api,el}){
   const root=$('parser-script-controls');
-  root.innerHTML=`<legend>Starlark scripts</legend>
-    <p class="field-note">Scripts register tool-progress, tool-header and message-formatting hooks. Enabled handlers run by priority (higher first, default 0), then filename, then registration order; the first matching handler for each hook wins. The list is shown in that order. Each script can register several kinds. Changes apply to future output and inbox deliveries; tool headers are recomputed for open sessions.</p>
+  root.innerHTML=`<legend>Starlark hooks</legend>
+    <p class="field-note">Automation files are managed in the Automations tab. Hook scripts register tool-progress, tool-header, inbox, chat-line and GitHub PR observation hooks. These hooks can call agent.set_badge / agent.clear_badge to update stored session badges. Enabled handlers run by priority (higher first, default 0), then filename, then registration order; the first matching handler for each hook wins, except chat line formatters and GitHub hooks, which all apply in that order. The list is shown in that order. Each script can register several kinds. Changes apply to future output and inbox deliveries; tool headers are recomputed for open sessions and visible session badges refresh.</p>
     <div class="parser-script-list" role="list" data-list></div>
     <button type="button" class="text-button parser-script-new" data-new>＋ New script</button>
     <div class="field-note" role="status" data-note></div>
     <div class="parser-script-editor" data-editor hidden>
-      <label data-starter-label>Starter<select data-starter><option value="progress">Tool progress</option><option value="formatter">Inbox formatter</option><option value="header">Tool header</option><option value="both">Progress and inbox formatter</option></select></label>
+      <label data-starter-label>Starter<select data-starter><option value="progress">Tool progress</option><option value="formatter">Inbox formatter</option><option value="chat">Chat line formatter · agent</option><option value="chat-user">Chat line formatter · user</option><option value="header">Tool header</option><option value="badges">Session badges</option><option value="github">GitHub PR events</option><option value="both">Progress and inbox formatter</option></select></label>
       <label>Name<input data-name spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="make_progress.star"></label>
       <div class="field-note" data-editor-note></div>
       <label>Source<textarea data-source spellcheck="false" autocomplete="off" autocapitalize="off" rows="16"></textarea></label>
@@ -90,7 +133,13 @@ export function setupParserScripts({$,api,el}){
       if(script.hooks?.length){
         const hooks=el('ul','parser-script-hooks');
         for(const hook of script.hooks){
-          const item=el('li');item.append(document.createTextNode(hook.hook==='progress'?'Tool progress · command: ':hook.hook==='tool_header'?'Tool header · title: ':'Formatter · '+hook.message_type+' · text: '),el('code','',hook.pattern));hooks.append(item);
+          const item=el('li');
+          // A formatter without text_pattern runs no regex and sees everything.
+          if(hook.hook==='github_trigger')item.textContent='Automation trigger · '+hook.trigger.name+' · '+hook.trigger.events.join(', ');
+          else if(hook.hook==='github')item.textContent=hook.events?'GitHub · '+hook.events.join(', '):'GitHub · all observations';
+          else if(hook.pattern==null)item.textContent='Formatter · '+hook.message_type+' · '+(hook.message_type.startsWith('chat.')?'every line':'every message');
+          else item.append(document.createTextNode(hook.hook==='progress'?'Tool progress · command: ':hook.hook==='tool_header'?'Tool header · title: ':'Formatter · '+hook.message_type+' · text: '),el('code','',hook.pattern));
+          hooks.append(item);
         }
         wrap.append(hooks);
       }
@@ -105,7 +154,7 @@ export function setupParserScripts({$,api,el}){
   }
   async function setEnabled(script,enabled,box){
     box.disabled=true;
-    try{render((await api(path(script.name)+'/enabled',{method:'PUT',body:JSON.stringify({enabled})})).scripts);note.textContent=`${script.name} ${enabled?'enabled':'disabled'}. Applies to future output and inbox deliveries.`;}
+    try{render((await api(path(script.name)+'/enabled',{method:'PUT',body:JSON.stringify({enabled})})).scripts);document.dispatchEvent(new Event('session-badges-changed'));note.textContent=`${script.name} ${enabled?'enabled':'disabled'}. Applies to future output, inbox deliveries and session badges.`;}
     catch(e){box.checked=!enabled;box.disabled=false;note.textContent='Not changed: '+e.message;}
   }
   async function setPriority(script){
@@ -113,19 +162,19 @@ export function setupParserScripts({$,api,el}){
     if(value===null)return;
     const priority=Number(value.trim());
     if(!Number.isInteger(priority)||priority<-1000||priority>1000){note.textContent='Not changed: priority must be an integer from -1000 to 1000.';return;}
-    try{render((await api(path(script.name)+'/priority',{method:'PUT',body:JSON.stringify({priority})})).scripts);note.textContent=`${script.name} priority set to ${priority}. Applies to future output and inbox deliveries.`;}
+    try{render((await api(path(script.name)+'/priority',{method:'PUT',body:JSON.stringify({priority})})).scripts);document.dispatchEvent(new Event('session-badges-changed'));note.textContent=`${script.name} priority set to ${priority}. Applies to future output, inbox deliveries and session badges.`;}
     catch(e){note.textContent='Not changed: '+e.message;}
   }
   async function remove(script,kind){
     if(kind==='delete'&&!confirm(`Delete ${script.name}? Its registered hooks stop running.`))return;
-    try{render((await api(path(script.name),{method:'DELETE'})).scripts);note.textContent=kind==='restore'?`${script.name} restored to the shipped version.`:`${script.name} deleted.`;if(editing===script.name)close();}
+    try{render((await api(path(script.name),{method:'DELETE'})).scripts);document.dispatchEvent(new Event('session-badges-changed'));note.textContent=kind==='restore'?`${script.name} restored to the shipped version.`:`${script.name} deleted.`;if(editing===script.name)close();}
     catch(e){note.textContent=(kind==='restore'?'Not restored: ':'Not deleted: ')+e.message;}
   }
   function open(script){
     editing=script?.name??null;editor.hidden=false;error.hidden=true;error.textContent='';
     q('[data-starter-label]').hidden=!!script;q('[data-starter]').value='progress';
     name.value=script?.name??'';name.readOnly=!!script;source.value=script?.source??TEMPLATE;
-    q('[data-editor-note]').textContent=script?.builtin?'Saving makes this your version; it stops following Agentworks updates until you restore it.':script?'':'Names use lowercase letters, digits, - or _ and end in .star. Register one or more handlers with agent.register_progress or agent.register_formatter. New scripts are enabled when saved.';
+    q('[data-editor-note]').textContent=script?.builtin?'Saving makes this your version; it stops following Agentworks updates until you restore it.':script?'':'Names use lowercase letters, digits, - or _ and end in .star. Register a progress or formatter hook. Inside a hook, use agent.set_badge / agent.clear_badge to update session badges. New scripts are enabled when saved.';
     (script?source:name).focus();
   }
   function close(){editing=null;editor.hidden=true;error.hidden=true;}
@@ -134,7 +183,7 @@ export function setupParserScripts({$,api,el}){
     if(!n){error.textContent='Enter a name ending in .star.';error.hidden=false;name.focus();return;}
     if(!editing&&scripts.some(s=>s.name===n)){error.textContent=`${n} already exists; edit it instead.`;error.hidden=false;return;}
     button.disabled=true;
-    try{render((await api(path(n),{method:'PUT',body:JSON.stringify({source:source.value})})).scripts);note.textContent=`${n} saved and checked.`;close();}
+    try{render((await api(path(n),{method:'PUT',body:JSON.stringify({source:source.value})})).scripts);document.dispatchEvent(new Event('session-badges-changed'));note.textContent=`${n} saved and checked.`;close();}
     catch(e){error.textContent=e.message;error.hidden=false;}
     finally{button.disabled=false;}
   }

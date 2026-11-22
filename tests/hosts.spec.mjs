@@ -1,8 +1,10 @@
 import {test,expect} from '@playwright/test';
+import {openCreateSections,choosePlace} from './support/create-sections.mjs';
 import {createServer} from 'node:http';
 import {readFile} from 'node:fs/promises';
 import {resolve,extname} from 'node:path';
 
+openCreateSections(test);
 // Static UI only: all API traffic is intercepted, no provider or live data access.
 const base='http://127.0.0.1:4363';let server;
 test.beforeAll(async()=>{
@@ -17,13 +19,14 @@ test.beforeAll(async()=>{
 test.afterAll(async()=>{await new Promise(ok=>server.close(ok));});
 
 const remote=(id,name,status,extra={})=>({id,name,status,kind:'remote',destination:`dev@${name}`,command:'agentworks',detail:'',since:Date.now(),worker:status==='connected'?{hostname:name,platform:'linux-x86_64',providers:['demo','claude'],tools:{codex:'/remote/bin/codex',claude:'/remote/bin/claude'},workspace:true,version:'0.1.0'}:null,...extra});
-async function fixture(page){
-  const state={hosts:[{id:'local',name:'Local',status:'connected',kind:'local'},remote('r1','build-box','connected'),remote('r2','old-box','offline',{detail:'ssh exited (exit status: 255). ssh: Permission denied (publickey). Retrying in 8s.'})],requests:[]};
+async function fixture(page,{build,r1={}}={}){
+  const state={directories:[],hosts:[{id:'local',name:'Local',status:'connected',kind:'local'},remote('r1','build-box','connected',r1),remote('r2','old-box','offline',{detail:'ssh exited (exit status: 255). ssh: Permission denied (publickey). Retrying in 8s.'})],requests:[]};
   await page.routeWebSocket('**/api/sessions/*/events',()=>{});
   await page.route('**/api/**',async route=>{
     const request=route.request(),path=new URL(request.url()).pathname,method=request.method();
     const json=data=>route.fulfill({json:data});
-    if(path==='/api/status')return json({roots:['/repo'],defaultModels:{},providers:[{id:'demo',name:'Demo agent',installed:true}]});
+    if(path==='/api/status')return json({roots:['/repo'],defaultModels:{},build,providers:[{id:'demo',name:'Demo agent',installed:true}]});
+    if(path==='/api/directories'){const q=Object.fromEntries(new URL(request.url()).searchParams);state.directories.push(q);return json({root:'/home/dev',path:q.path||'/home/dev',parent:null,entries:[{name:'src',path:'/home/dev/src'}]});}
     if(path==='/api/catalog')return json({projects:[{id:'a',name:'Alpha',locationIds:[]}],hosts:state.hosts,locations:[]});
     if(path==='/api/sessions'&&method==='GET')return json([]);
     if(path==='/api/automations')return json([]);
@@ -40,6 +43,7 @@ async function fixture(page){
     if(path==='/api/sessions'&&method==='POST'){state.created=request.postDataJSON();return route.fulfill({status:409,body:'stop here'});}
     const host=path.match(/^\/api\/hosts\/([^/]+)$/);
     if(host&&method==='DELETE'){state.hosts=state.hosts.filter(h=>h.id!==host[1]);return json({ok:true});}
+    if(host&&method==='PATCH'){const h=state.hosts.find(h=>h.id===host[1]);Object.assign(h,request.postDataJSON());return json(h);}
     return json({});
   });
   await page.goto(base);await expect(page.locator('#provider option')).toHaveCount(1);
@@ -98,13 +102,29 @@ test('host working directories enable remote sessions in the new-session dialog'
   const errors=[];page.on('pageerror',e=>errors.push(e.message));const s=await fixture(page);
   await page.locator('#view-hosts').click();
   const box=page.locator('[data-group="host:r1"]');
-  await box.getByRole('button',{name:'Working directories on build-box'}).click();
+  await box.getByRole('button',{name:'Settings for build-box'}).click();
+  const dialog=page.locator('#host-settings-dialog');
+  await expect(page.locator('#host-settings-title')).toHaveText('build-box');
+  await expect(dialog.getByRole('tab',{name:'General'})).toHaveAttribute('aria-selected','true');
+  await expect(page.locator('#host-edit-name')).toHaveValue('build-box');
+  await dialog.getByRole('tab',{name:'Harness tools'}).click();
   await expect(page.locator('#host-tools')).toContainText('/remote/bin/codex');
   await expect(page.locator('#host-tools')).toContainText('codex');
   await expect(page.locator('#host-tools')).toContainText('dev@build-box');
-  await page.locator('#host-roots').fill('~/projects\n\n/srv/app');
-  await page.locator('#save-host-roots').click();
-  await expect(page.locator('#host-roots-dialog')).toBeHidden();
+  await dialog.getByRole('tab',{name:'Connection'}).click();
+  await expect(page.locator('#host-connection')).toContainText('Connected');
+  await expect(page.locator('#host-connection').getByRole('button',{name:'Reconnect'})).toBeVisible();
+  // Edits survive switching categories, as in Settings.
+  await dialog.getByRole('tab',{name:'Directories'}).click();
+  await page.locator('#host-roots input').first().fill('~/projects');
+  await page.locator('#add-host-root').click();
+  await page.locator('#add-host-root').click();
+  await page.locator('#host-roots input').last().fill('/srv/app');
+  await dialog.getByRole('tab',{name:'Connection'}).click();await dialog.getByRole('tab',{name:'Directories'}).click();
+  await expect(page.locator('#host-roots input').last()).toHaveValue('/srv/app');
+  expect(await dialog.evaluate(e=>e.scrollWidth<=e.clientWidth)).toBe(true);
+  await page.locator('#save-host-settings').click();
+  await expect(dialog).toBeHidden();
   expect(s.requests.at(-1)).toEqual({path:'/api/hosts/r1/roots',method:'PUT',body:{roots:['~/projects','/srv/app']}});
   await expect(box).toContainText('No sessions yet');
   // Offline hosts cannot take new sessions; connected ones with directories can.
@@ -119,12 +139,60 @@ test('host working directories enable remote sessions in the new-session dialog'
   await expect(page.locator('#create-error')).toContainText('stop here');
   expect(s.created).toMatchObject({hostId:'r1',cwd:'~/projects',workspace:{mode:'directory'}});
   // Switching back to Local restores local roots and model discovery.
-  await page.locator('#create-host').selectOption('local');
+  await choosePlace(page,{host:'local'});
   await expect(page.locator('#load-models')).toBeEnabled();
   await expect(page.locator('#roots-note')).toContainText('Allowed roots: /repo');
   expect(errors).toEqual([]);
 });
 
+
+test('host settings rename, repoint, browse for roots, flag outdated workers and remove',async({page})=>{
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  const s=await fixture(page,{build:'0.1.376',r1:{outdated:true,worker:{...remote('r1','build-box','connected').worker,directories:true,build:'0.1.370'}}});
+  page.on('dialog',d=>d.accept());
+  await page.locator('#view-hosts').click();
+  const box=page.locator('[data-group="host:r1"]');
+  // Out-of-date workers are flagged in the sidebar and on the Connection tab.
+  await expect(box.locator('.connection-dot.host-update')).toHaveAttribute('aria-label',/worker update available/);
+  await expect(box.locator('.tree-label').first()).toBeVisible();
+  expect(await box.locator('.tree-label').first().evaluate(e=>e.getBoundingClientRect().width)).toBeGreaterThan(20);
+  await expect(page.locator('[data-group="host:r2"] .host-update')).toHaveCount(0);
+  await expect(page.locator('#host-address')).toContainText('v0.1.376');
+  await box.getByRole('button',{name:'Settings for build-box'}).click();
+  const dialog=page.locator('#host-settings-dialog');
+  await dialog.getByRole('tab',{name:'Connection'}).click();
+  await expect(page.locator('#host-connection')).toContainText('v0.1.370');
+  await expect(page.locator('#host-connection .update-badge')).toHaveText('Update available');
+  await expect(page.locator('#host-connection')).toContainText('v0.1.376');
+  // Browse… starts in the host's home directory, not inside the current roots.
+  await dialog.getByRole('tab',{name:'Directories'}).click();
+  await page.locator('#host-roots').getByRole('button',{name:'Browse for working directory'}).click();
+  await expect(page.locator('#directory-picker-host')).toContainText('inside its home directory');
+  await page.locator('#directory-picker-list').getByRole('button',{name:'src'}).click();
+  await page.locator('#directory-picker-select').click();
+  await expect(page.locator('#host-roots input').first()).toHaveValue('/home/dev/src');
+  expect(s.directories.every(q=>q.scope==='home'&&q.hostId==='r1')).toBe(true);
+  // General: rename and repoint; a changed destination asks before reconnecting.
+  await dialog.getByRole('tab',{name:'General'}).click();
+  await expect(page.locator('#host-edit-command')).toHaveValue('agentworks');
+  await page.locator('#host-edit-name').fill('builder');
+  await page.locator('#host-edit-destination').fill('dev@builder.lan');
+  await page.locator('#save-host-settings').click();
+  await expect(dialog).toBeHidden();
+  expect(s.requests.slice(-2)).toEqual([
+    {path:'/api/hosts/r1',method:'PATCH',body:{name:'builder',destination:'dev@builder.lan',command:'agentworks'}},
+    {path:'/api/hosts/r1/roots',method:'PUT',body:{roots:['/home/dev/src']}},
+  ]);
+  await expect(page.locator('[data-group="host:r1"]')).toContainText('builder');
+  // Remove lives in General; a host without sessions can be removed there.
+  await page.locator('[data-group="host:r2"]').getByRole('button',{name:'Settings for old-box'}).click();
+  await expect(page.locator('#host-remove-note')).toContainText('Nothing on the host is deleted');
+  await page.locator('#remove-host').click();
+  await expect(dialog).toBeHidden();
+  expect(s.requests.at(-1)).toEqual({path:'/api/hosts/r2',method:'DELETE',body:null});
+  await expect(page.locator('[data-group="host:r2"]')).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
 
 test('remote availability and directories are independent of local provider configuration',async({page})=>{
   const s=await fixture(page);
@@ -136,7 +204,7 @@ test('remote availability and directories are independent of local provider conf
   await expect(page.locator('#create-submit')).toBeEnabled();
   await expect(page.locator('#workspace-mode')).toBeEnabled();
   await expect(page.locator('#create-resume-policy')).toBeEnabled();
-  await page.locator('#create-host').selectOption('local');
+  await choosePlace(page,{host:'local'});
   await expect(page.locator('#directory')).toHaveValue('/repo');
   await expect(page.locator('#create-submit')).toBeDisabled();
   await expect(page.locator('#workspace-mode')).toBeEnabled();
@@ -148,11 +216,11 @@ test('remote selection respects required worktrees and restores local policy on 
   await page.route('**/api/projects/a/workspace-policy',route=>route.fulfill({json:{defaultMode:'newWorktree',requireWorktree:true}}));
   await page.locator('#view-hosts').click();
   await page.locator('[data-group="host:r1"]').getByRole('button',{name:'New session in build-box'}).click();
-  await page.locator('#create-project').selectOption('a');
+  await choosePlace(page,{project:'a'});
   await expect(page.locator('#workspace-policy-note')).toContainText('Isolated worktree required');
   await expect(page.locator('#workspace-mode')).toHaveValue('newWorktree');
   await expect(page.locator('#create-submit')).toBeEnabled();
-  await page.locator('#create-host').selectOption('local');
+  await choosePlace(page,{host:'local'});
   await expect(page.locator('#workspace-mode')).toHaveValue('newWorktree');
   await expect(page.locator('#workspace-policy-note')).toContainText('Isolated worktree required');
   await expect(page.locator('#create-submit')).toBeEnabled();
@@ -163,7 +231,7 @@ for(const mobile of [false,true])test(`guided enrollment terminal ${mobile?'mobi
   const state=await fixture(page);let typed='';
   await page.routeWebSocket('**/api/hosts/enroll/events',ws=>{ws.onMessage(data=>{
     const value=JSON.parse(data);
-    if(value.destination){expect(value).toEqual({name:'New box',destination:'dev@box'});ws.send(JSON.stringify({type:'stage',message:'Enter your SSH password in the terminal'}));ws.send(new TextEncoder().encode('Password: '));}
+    if(value.destination){expect(value).toEqual({name:'New box',destination:'dev@box',os:'unix'});ws.send(JSON.stringify({type:'stage',message:'Enter your SSH password in the terminal'}));ws.send(new TextEncoder().encode('Password: '));}
     if(value.type==='input')typed+=value.data;
     if(typed==='test-password'){
       const host=remote('enrolled','New box','connected',{managed:true});state.hosts.push(host);
@@ -181,8 +249,9 @@ for(const mobile of [false,true])test(`guided enrollment terminal ${mobile?'mobi
   await expect(page.locator('#host-stage')).toContainText('Connected');
   await expect(page.locator('#host-terminal')).not.toContainText('test-password');
   expect(await page.locator('#host-dialog').evaluate(e=>e.scrollWidth<=e.clientWidth)).toBe(true);
-  await page.locator('#host-done').click();await expect(page.locator('#host-roots-dialog')).toBeVisible();
-  await expect(page.locator('#host-roots-title')).toHaveText('Settings for New box');
+  await page.locator('#host-done').click();await expect(page.locator('#host-settings-dialog')).toBeVisible();
+  await expect(page.locator('#host-settings-title')).toHaveText('New box');
+  await expect(page.locator('#host-settings-panel-directories')).toBeVisible();
 });
 
 test('enrollment error allows retry and close cancels the terminal',async({page})=>{
@@ -204,7 +273,7 @@ test('enrollment error allows retry and close cancels the terminal',async({page}
   await page.locator('[data-group="host:r1"]').getByRole('button',{name:'New session in build-box'}).click();
   await page.locator('#load-models').click();
   await expect(page.locator('#create-model option[value="remote/model"]')).toHaveCount(1);
-  expect(modelRequest).toEqual({provider:'demo',cwd:'/remote/project',hostId:'r1'});
+  expect(modelRequest).toEqual({provider:'demo',cwd:'/remote/project',hostId:'r1',modelProvider:null});
   await page.locator('#workspace-mode').selectOption('existingWorktree');
   await page.locator('#discover-worktrees').click();
   await expect(page.locator('#existing-worktree option')).toHaveCount(2);

@@ -31,7 +31,85 @@ pub(super) fn parse(prompt: &Value) -> Option<(&str, &str)> {
         .then_some((name, args.trim()))
 }
 
+// Keep the text for model context and attach native skill inputs so Codex loads
+// the selected SKILL.md even when another skill has the same display name.
+pub(super) fn skill_input(input: &mut Vec<Value>, skills: &[Value]) {
+    if let Some(text) = input
+        .first()
+        .filter(|b| b["type"] == "text")
+        .and_then(|b| b["text"].as_str().map(str::to_owned))
+    {
+        let trimmed = text.trim_start();
+        if let Some(rest) = trimmed.strip_prefix('/') {
+            let name = rest.split_whitespace().next().unwrap_or("");
+            if !available().iter().any(|c| c["name"] == name)
+                && skills.iter().any(|s| s["name"] == name)
+            {
+                input[0]["text"] = json!(format!("{}${rest}", &text[..text.len() - trimmed.len()]));
+            }
+        }
+    }
+    let mut selected = std::collections::HashSet::new();
+    let mut extra = Vec::new();
+    for block in input.iter().filter(|b| b["type"] == "text") {
+        let text = block["text"].as_str().unwrap_or("");
+        for (at, _) in text.match_indices('$') {
+            if at > 0 && !text[..at].ends_with(char::is_whitespace) {
+                continue;
+            }
+            let rest = &text[at + 1..];
+            let end = rest
+                .find(|ch: char| !ch.is_alphanumeric() && !matches!(ch, '-' | '_' | '.' | ':'))
+                .unwrap_or(rest.len());
+            let name = &rest[..end];
+            if let Some(skill) = skills.iter().find(|s| s["name"] == name) {
+                if selected.insert(name.to_owned()) {
+                    extra.push(json!({"type":"skill","name":name,"path":skill["path"]}));
+                }
+            }
+        }
+    }
+    input.extend(extra);
+}
+
 impl Bridge {
+    pub(super) async fn refresh_skills(
+        &self,
+        id: &str,
+        cx: &ConnectionTo<Client>,
+    ) -> Result<Vec<Value>> {
+        let roots = self.sessions.lock().unwrap()[id].roots.clone();
+        let response = self.rpc("skills/list", json!({"cwds":roots})).await?;
+        let mut seen = std::collections::HashSet::new();
+        let skills: Vec<Value> = response["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|entry| entry["skills"].as_array().into_iter().flatten())
+            .filter(|s| {
+                s["enabled"] != false
+                    && s["name"].as_str().is_some_and(|n| !n.is_empty())
+                    && s["path"].is_string()
+            })
+            .filter(|s| seen.insert(s["name"].as_str().unwrap().to_owned()))
+            .cloned()
+            .collect();
+        let mut commands = available();
+        commands.extend(skills.iter().map(|s| json!({"name":format!("${}",s["name"].as_str().unwrap()),"description":s["description"],"input":{"hint":"optional instructions"}})));
+        self.sessions
+            .lock()
+            .unwrap()
+            .get_mut(id)
+            .ok_or_else(|| invalid("Unknown session"))?
+            .skills = skills.clone();
+        update(
+            cx,
+            id,
+            json!({"sessionUpdate":"available_commands_update","availableCommands":commands}),
+        )?;
+        Ok(skills)
+    }
+
     pub(super) async fn command(
         self: &Arc<Self>,
         id: &str,
@@ -206,13 +284,9 @@ impl Bridge {
                 text(cx, id, &lines.join("\n"))?;
             }
             "skills" => {
-                let roots = self.sessions.lock().unwrap()[id].roots.clone();
-                let response = self.rpc("skills/list", json!({"cwds":roots})).await?;
-                let lines = response["data"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .flat_map(|entry| entry["skills"].as_array().into_iter().flatten())
+                let skills = self.refresh_skills(id, cx).await?;
+                let lines = skills
+                    .iter()
                     .map(|skill| {
                         format!(
                             "- `${}` — {}",

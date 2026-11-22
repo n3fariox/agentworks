@@ -4,7 +4,7 @@ use crate::{
     lifecycle::Metadata,
     lineage::Lineage,
     origins::{AutomationOrigin, ControlOrigin, InboxTurn},
-    permissions::{ClaudeDefault, CodexDefault},
+    permissions::{AntigravityDefault, ClaudeDefault, CodexDefault},
     queue, timeouts,
 };
 use agentworks_workspace::cleanup::Owned;
@@ -13,6 +13,11 @@ use serde_json::Value;
 use std::collections::{HashSet, VecDeque};
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SessionData {
+    /// Script-owned badge state: source -> {hash, badges}. Not transcript events.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub script_badges: std::collections::HashMap<String, Value>,
+    #[serde(default)]
+    pub badge_revision: u64,
     pub status: String,
     #[serde(default)]
     pub inbox_turn: Option<InboxTurn>,
@@ -23,6 +28,9 @@ pub struct SessionData {
     pub events: VecDeque<Value>,
     #[serde(skip)]
     pub bytes: usize,
+    /// No harness is attached, so `events` stays empty and reads go to the store.
+    #[serde(skip)]
+    pub parked: bool,
     pub requests: HashSet<String>,
     /// Most recent submitted prompt survives the bounded in-memory event window.
     #[serde(default)]
@@ -48,6 +56,8 @@ pub struct SessionData {
     pub initial_claude_permission_mode: Option<ClaudeDefault>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_codex_permission_mode: Option<CodexDefault>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_antigravity_permission_mode: Option<AntigravityDefault>,
     pub available_commands: Value,
     pub turn_active: bool,
     pub project_id: Option<String>,
@@ -80,6 +90,9 @@ pub struct SessionData {
     /// L-08 fork context held until the first prompt hands it to the harness.
     #[serde(default)]
     pub carried_context: Option<String>,
+    /// ACP `additionalDirectories`: extra workspace roots, re-sent on every open request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_directories: Vec<std::path::PathBuf>,
     /// ACP `promptCapabilities` advertised at the last initialization.
     #[serde(default)]
     pub prompt_capabilities: Value,
@@ -90,6 +103,32 @@ pub struct SessionData {
     /// on every new/load/resume/fork, because harnesses do not persist it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<RoleSnapshot>,
+    /// Session router decision recorded at creation, if the session was routed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<RoutingDecision>,
+    /// The running turn is a native `/rename`; its reported title is adopted.
+    #[serde(skip)]
+    pub native_rename: bool,
+    /// The startup step in progress, shown until the session is ready.
+    #[serde(skip)]
+    pub startup: Option<String>,
+}
+
+/// Recorded decision from the session router at creation time.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutingDecision {
+    pub mode: String,
+    pub approach: String,
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider: Option<String>,
+    #[serde(default)]
+    pub fallback: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// The resolved text of a role at the time a session was created. Later edits
@@ -101,73 +140,4 @@ pub struct RoleSnapshot {
     pub name: String,
     pub hash: String,
     pub instructions: String,
-}
-
-impl SessionData {
-    /// True when no prompt was ever sent and nothing else gave the harness history for this
-    /// session (import, fork, or message and tool events). Some harnesses keep no record of
-    /// such a session, so it is started fresh rather than resumed.
-    pub fn never_prompted(&self) -> bool {
-        never_prompted(
-            &self.requests,
-            &self.events,
-            self.import_pending,
-            &self.lineage,
-        )
-    }
-}
-fn never_prompted(
-    requests: &HashSet<String>,
-    events: &VecDeque<Value>,
-    import_pending: bool,
-    lineage: &crate::lineage::Lineage,
-) -> bool {
-    requests.is_empty()
-        && !import_pending
-        && lineage.parent_id.is_none()
-        && !lineage.native_used
-        && !events.iter().any(|e| {
-            e["kind"] == "acp"
-                && matches!(
-                    e["data"]["sessionUpdate"].as_str(),
-                    Some("user_message_chunk" | "agent_message_chunk" | "tool_call")
-                )
-        })
-}
-
-#[cfg(test)]
-mod never_prompted_tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn only_sessions_without_any_conversation_count_as_never_prompted() {
-        let lineage = crate::lineage::Lineage::default();
-        let status = VecDeque::from([
-            json!({"kind":"status","data":{"status":"idle"}}),
-            json!({"kind":"acp","data":{"sessionUpdate":"available_commands_update"}}),
-        ]);
-        assert!(never_prompted(&HashSet::new(), &status, false, &lineage));
-        assert!(!never_prompted(
-            &HashSet::from(["r1".into()]),
-            &status,
-            false,
-            &lineage
-        ));
-        assert!(
-            !never_prompted(&HashSet::new(), &status, true, &lineage),
-            "import pending"
-        );
-        let imported =
-            VecDeque::from([json!({"kind":"acp","data":{"sessionUpdate":"agent_message_chunk"}})]);
-        assert!(
-            !never_prompted(&HashSet::new(), &imported, false, &lineage),
-            "imported history"
-        );
-        let fork = crate::lineage::Lineage {
-            parent_id: Some("parent".into()),
-            ..Default::default()
-        };
-        assert!(!never_prompted(&HashSet::new(), &status, false, &fork));
-    }
 }

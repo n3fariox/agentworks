@@ -81,8 +81,8 @@ impl Bridge {
         jobs.enabled = enabled;
         jobs.list_supported = true;
         if enabled {
-            response["_meta"] =
-                json!({"jetbrains":{"air":{"version":1,"capabilities":["asyncTasks"]}}});
+            response["_meta"]["jetbrains"] =
+                json!({"air":{"version":1,"capabilities":["asyncTasks"]}});
         }
     }
     pub(super) fn open_tasks(&self, root: &str) {

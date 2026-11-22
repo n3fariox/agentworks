@@ -1,13 +1,26 @@
 {
   "type": "module",
   "dependencies": {
+    "@codemirror/commands": "6.11.1",
+    "@codemirror/lang-markdown": "6.5.2",
+    "@codemirror/language": "6.13.1",
+    "@codemirror/state": "6.7.6",
+    "@codemirror/view": "6.43.15",
     "dompurify": "3.4.17",
     "mermaid": "12.2.0"
   },
   "devDependencies": {
-    "esbuild": "0.28.2"
+    "draco3d": "1.5.7",
+    "esbuild": "0.28.2",
+    "occt-import-js": "0.0.22",
+    "online-3d-viewer": "0.18.0",
+    "rhino3dm": "8.17.0",
+    "three": "0.176.0",
+    "web-ifc": "0.0.68"
   },
   "scripts": {
-    "build:mermaid": "cd .. && node scripts/build-mermaid.mjs"
+    "build:mermaid": "cd .. && node scripts/build-mermaid.mjs",
+    "build:model-viewer": "cd .. && node scripts/build-model-viewer.mjs",
+    "build:markdown-composer": "cd .. && node scripts/build-markdown-composer.mjs"
   }
 }

@@ -1,0 +1,12 @@
+[package]
+name = "agentworks-presentation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Safe browser presentation of transcripts, chat and tool cards."
+
+[dependencies]
+serde_json.workspace = true
+pulldown-cmark = "0.13"
+ammonia = "4"

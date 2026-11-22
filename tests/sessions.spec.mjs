@@ -1,5 +1,7 @@
 import {test,expect} from '@playwright/test';
+import {openCreateSections,choosePlace} from './support/create-sections.mjs';
 
+openCreateSections(test);
 async function create(page,name,directory){
   await page.locator('#new-session').click();
   await page.locator('#session-title').fill(name);
@@ -10,7 +12,7 @@ async function create(page,name,directory){
   await expect(page.locator('#session-state')).toHaveText('Ready');
 }
 async function send(page,text){
-  await page.locator('#prompt').fill(text);await page.locator('#send').click();
+  await page.locator('#prompt-editor .cm-content').fill(text);await page.locator('#send').click();
 }
 // Track this test's creations, including automation runs whose title differs
 // from the launch title. Never sweep another run's "Browser test" resources.
@@ -95,17 +97,17 @@ test('mobile: drawer, composer, image output, approval denial',async({page})=>{
   await page.locator('#session-home').click();
   await expect(page.locator('#new-session')).toBeInViewport();
   await page.getByRole('button',{name:/Browser test mobile/}).click();
-  await expect(page.locator('#prompt')).toBeInViewport();
+  await expect(page.locator('#prompt-editor .cm-content')).toBeInViewport();
   // The system Back button returns from a chat to the session browser, and
   // reopening a session makes Back work again.
   await page.goBack();
   await expect(page.locator('#new-session')).toBeInViewport();
   await page.getByRole('button',{name:/Browser test mobile/}).click();
-  await expect(page.locator('#prompt')).toBeInViewport();
+  await expect(page.locator('#prompt-editor .cm-content')).toBeInViewport();
   await page.goBack();
   await expect(page.locator('#new-session')).toBeInViewport();
   await page.goForward();
-  await expect(page.locator('#prompt')).toBeInViewport();
+  await expect(page.locator('#prompt-editor .cm-content')).toBeInViewport();
   // A quota chip and the stop control can coexist with both composer buttons.
   // Keep the essential stop action reachable even when its label is long.
   await page.evaluate(()=>{
@@ -148,7 +150,7 @@ test('OpenCode: native session and advertised free model picker', async ({page})
 test('Claude and Codex use existing sign-in without an API-key gate', async ({page}) => {
   await page.goto('/');
   await page.locator('#new-session').click();
-  for (const provider of ['claude','codex']) {
+  for (const provider of ['claude-rust','codex-rust']) {
     await page.locator('#provider').selectOption(provider);
     await expect(page.locator('#provider-note')).toContainText('existing agent sign-in');
     await expect(page.locator('#create-submit')).toBeEnabled();
@@ -165,13 +167,13 @@ test('project hierarchies preserve draft, stream, selection and independent expa
   await page.locator('#save-project').click();
   await expect(page.locator('#project-dialog')).not.toBeVisible();
   await page.locator('#new-session').click();
-  await page.locator('#create-project').selectOption({label:'Browser test Alpha'});
+  await choosePlace(page,{project:{label:'Browser test Alpha'}});
   await page.locator('#session-title').fill('Browser test grouped');
   await page.locator('#create-submit').click();
   await expect(page.locator('#session-state')).toHaveText('Ready');
   await send(page,'hello');
   await expect(page.locator('#session-state')).toHaveText('Ready');
-  await page.locator('#prompt').fill('A draft stays here');
+  await page.locator('#prompt-editor .cm-content').fill('A draft stays here');
   const currentSockets=sockets;
   await page.locator('#view-hosts').click();
   await expect(page.locator('#view-hosts')).toHaveAttribute('aria-selected','true');
@@ -189,7 +191,7 @@ test('project hierarchies preserve draft, stream, selection and independent expa
   await project.locator(':scope > summary .tree-label').click();
   await page.locator('#new-project').click();await page.locator('#project-name').fill('Browser test Beta');await page.locator('#save-project').click();
   await expect(page.locator('#project-dialog')).not.toBeVisible();
-  await page.locator('#session-project').selectOption({label:'Browser test Beta'});
+  await page.locator('#lifecycle-menu > summary').click();await page.locator('#session-project').selectOption({label:'Browser test Beta'});
   await expect(page.locator('#session-project')).toHaveValue(await page.locator('#create-project option',{hasText:'Browser test Beta'}).getAttribute('value'));
   await expect(page.locator('#prompt')).toHaveValue('A draft stays here');
   expect(sockets).toBe(currentSockets);
@@ -250,11 +252,11 @@ test('models at creation, command and skill discovery, host settings',async({pag
     await page.getByRole('button',{name:'Remove root directory'}).last().click();
     await expect(page.locator('#settings-roots input')).toHaveCount(original.roots.length);
     await page.locator('#settings-tab-models').click();
-    await page.locator('#default-model-codex').fill('test-default-model');
+    await page.locator('#default-model-codex-rust').fill('test-default-model');
     await page.locator('#save-settings').click();
     await expect(page.locator('#settings-dialog')).not.toBeVisible();
     await page.locator('#new-session').click();
-    await page.locator('#provider').selectOption('codex');
+    await page.locator('#provider').selectOption('codex-rust');
     await expect(page.locator('#create-model')).toHaveValue('test-default-model');
     await page.locator('#dismiss-create').click();
     await page.evaluate(settings=>fetch('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(settings)}),original);
@@ -276,7 +278,7 @@ test('models at creation, command and skill discovery, host settings',async({pag
     await page.locator('#send').click();
     await expect(page.locator('#session-state')).toHaveText('Ready');
     await page.reload();
-    await page.locator('#prompt').fill('$demo');
+    await page.locator('#prompt-editor .cm-content').fill('$demo');
     await expect(page.locator('#command-list')).toContainText('$demo-skill');
     await page.locator('#command-list button').click();
     await expect(page.locator('#prompt')).toHaveValue('$demo-skill ');
@@ -302,7 +304,7 @@ test('resume picker loads on open and agent changes, clears old filters, and ign
   let delayCodex=false;
   await page.route('**/api/external-sessions',async route=>{
     const {provider,hostProfile}=route.request().postDataJSON();
-    if(provider==='codex'&&delayCodex){startedSlow();await slowRelease;}
+    if(provider==='codex-rust'&&delayCodex){startedSlow();await slowRelease;}
     const title=provider==='opencode'?`opencode ${hostProfile?'host':'agentworks'}`:provider;
     await route.fulfill({json:{sessions:[{sessionId:title,cwd:'/project',title}],nextCursor:null}});
   });
@@ -310,15 +312,15 @@ test('resume picker loads on open and agent changes, clears old filters, and ign
     await page.goto('/');await page.locator('#new-session').click();await page.locator('#create-import').click();
     await expect(page.locator('.external-session')).toContainText('claude');
     await page.locator('#import-search').fill('claude');
-    await page.locator('#import-provider').selectOption('codex');
+    await page.locator('#import-provider').selectOption('codex-rust');
     await expect(page.locator('#import-search')).toHaveValue('');
     await expect(page.locator('.external-session')).toContainText('codex');
-    await page.locator('#import-provider').selectOption('claude');
+    await page.locator('#import-provider').selectOption('claude-rust');
     await expect(page.locator('.external-session')).toContainText('claude');
-    delayCodex=true;await page.locator('#import-provider').selectOption('codex');await slowStarted;
-    await page.locator('#import-provider').selectOption('claude');
+    delayCodex=true;await page.locator('#import-provider').selectOption('codex-rust');await slowStarted;
+    await page.locator('#import-provider').selectOption('claude-rust');
     await expect(page.locator('#external-sessions')).toContainText('Loading sessions');
-    const stale=page.waitForResponse(response=>response.url().endsWith('/api/external-sessions')&&response.request().postDataJSON().provider==='codex');
+    const stale=page.waitForResponse(response=>response.url().endsWith('/api/external-sessions')&&response.request().postDataJSON().provider==='codex-rust');
     releaseSlow();await stale;
     await expect(page.locator('.external-session')).toContainText('claude');
     await page.locator('#import-provider').selectOption('opencode');
@@ -370,7 +372,7 @@ test('resume picker imports external history, paginates, and opens existing entr
   }
 });
 
-test('side panel: files and diff beside the chat, resizable on desktop, full screen with Back on phones',async({page})=>{
+test('side panel: files and diff fill the conversation area, with Back on phones',async({page})=>{
   const {mkdir,writeFile,rm}=await import('node:fs/promises'),{resolve,join}=await import('node:path'),{randomUUID}=await import('node:crypto');
   const cwd=resolve('.cache/browser-side-panel-'+randomUUID());await mkdir(join(cwd,'src'),{recursive:true});
   try{
@@ -379,11 +381,13 @@ test('side panel: files and diff beside the chat, resizable on desktop, full scr
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.setViewportSize({width:1400,height:900});
   await page.goto('/');await page.evaluate(()=>{localStorage.removeItem('agentworks-side-panel');localStorage.removeItem('agentworks-side-panel-width');});
-  await create(page,'Browser test side panel',cwd);await page.locator('#prompt').fill('Keep the side panel draft');
+  await create(page,'Browser test side panel',cwd);await page.locator('#prompt-editor .cm-content').fill('Keep the side panel draft');
   const panel=page.locator('#side-panel');await expect(panel).toBeHidden();
-  // Files from the session bar opens a third column; the chat stays visible beside it.
+  // Files fills the conversation area and keeps the chat mounted.
   await page.locator('#session-files').click();await expect(panel).toBeVisible();await expect(page.locator('#session-files')).toHaveAttribute('aria-expanded','true');
-  await expect(page.locator('#conversation')).toBeVisible();
+  await expect(page.locator('#workspace-chat-column')).toBeHidden();
+  expect(await panel.evaluate(n=>n.clientWidth/n.parentElement.clientWidth)).toBeGreaterThan(.95);
+  await expect(page.locator('#side-panel-resize')).toBeHidden();
   // Hidden files stay invisible until the side panel's own toggle reveals them; both toggles share the flag.
   await expect(page.locator('#side-file-entries')).not.toContainText('.hidden-note.md');
   await page.locator('#side-files-hidden').check();await expect(page.locator('#side-file-entries')).toContainText('.hidden-note.md');await expect(page.locator('#files-hidden')).toBeChecked();
@@ -396,8 +400,8 @@ test('side panel: files and diff beside the chat, resizable on desktop, full scr
   await page.locator('#side-tab-files').click();await expect(page.locator('#workspace-preview')).toContainText('answer');
   // Chat links open image files in Files; inline images use the image viewer.
   await page.locator('#side-close').click();
-  await page.locator('#prompt').fill('See [the picture](pic.png) and ![inline picture](pic.png)');await page.locator('#send').click();
-  await expect(page.locator('#session-state')).toHaveText('Ready');await expect(page.locator('#prompt')).toHaveValue('');await page.locator('#prompt').fill('Keep the side panel draft');
+  await page.locator('#prompt-editor .cm-content').fill('See [the picture](pic.png) and ![inline picture](pic.png)');await page.locator('#send').click();
+  await expect(page.locator('#session-state')).toHaveText('Ready');await expect(page.locator('#prompt')).toHaveValue('');await page.locator('#prompt-editor .cm-content').fill('Keep the side panel draft');
   await page.locator('.message.assistant').getByRole('link',{name:'the picture'}).click();
   await expect(panel).toBeVisible();await expect(page.locator('#side-tab-files')).toHaveAttribute('aria-selected','true');
   await expect(page.locator('#workspace-preview .workspace-preview-header strong')).toHaveText('pic.png');await expect(page.locator('#workspace-preview img.file-image')).toBeVisible();
@@ -406,14 +410,11 @@ test('side panel: files and diff beside the chat, resizable on desktop, full scr
   await expect(viewer).toBeVisible();await expect(panel).toBeHidden();
   await page.keyboard.press('Escape');await expect(viewer).toBeHidden();
   await page.locator('#session-files').click();await expect(panel).toBeVisible();
-  // Dragging the left edge widens the panel; the width and open state persist across reload.
-  const before=(await panel.boundingBox()).width,edge=await page.locator('#side-panel-resize').boundingBox();
-  await page.mouse.move(edge.x+edge.width/2,edge.y+300);await page.mouse.down();await page.mouse.move(edge.x+edge.width/2-160,edge.y+300,{steps:5});await page.mouse.up();
-  const wider=(await panel.boundingBox()).width;expect(wider).toBeGreaterThan(before+140);
+  // The full-size panel and its open state survive reload.
   await page.reload();await expect(page.locator('#session-state')).toHaveText('Ready');await expect(panel).toBeVisible();
-  expect(Math.abs((await panel.boundingBox()).width-wider)).toBeLessThan(2);
-  // Clicking the active trigger again closes the panel.
-  await page.locator('#session-files').click();await expect(panel).toBeHidden();
+  expect(await panel.evaluate(n=>n.clientWidth/n.parentElement.clientWidth)).toBeGreaterThan(.95);
+  // Closing the panel restores the chat.
+  await page.locator('#side-close').click();await expect(panel).toBeHidden();
   await expect(page.locator('#prompt')).toHaveValue('Keep the side panel draft');
   // Phone: the panel replaces the chat, and Back returns to the chat.
   await page.setViewportSize({width:390,height:844});
@@ -434,13 +435,16 @@ test('workspace: file browsing, side preview, drafts, and manual automation runs
   await writeFile(join(cwd,'README.md'),'# Workspace files\n\nOpen [the notes](docs/note.md).');await writeFile(join(cwd,'docs/note.md'),'# A project note\n\nThis file belongs to the selected directory.');
   let defId;const errors=[];page.on('pageerror',e=>errors.push(e.message));
   try{
-    await page.goto('/');await create(page,'Browser test workspace',cwd);await page.locator('#prompt').fill('Keep my existing draft.');
+    await page.goto('/');await create(page,'Browser test workspace',cwd);await page.locator('#prompt-editor .cm-content').fill('Keep my existing draft.');
     const original=await page.evaluate(()=>localStorage.getItem('agentworks-session'));
     await page.locator('#nav-files').click();await page.locator('.file-entry').filter({hasText:'README.md'}).click();
     await expect(page.locator('#workspace-file-detail h1')).toHaveText('Workspace files');
     await page.locator('#workspace-file-detail a').filter({hasText:'the notes'}).click();await expect(page.locator('#workspace-file-detail h1')).toHaveText('A project note');
     await page.locator('#workspace-file-detail button').filter({hasText:'Source',exact:true}).click();await expect(page.locator('.workspace-source')).toContainText('# A project note');
-    await page.getByRole('button',{name:'Open beside chat',exact:true}).click();await expect(page.locator('#conversation')).toBeVisible();await expect(page.locator('#workspace-preview')).toContainText('A project note');
+    await page.locator('#workspace-file-detail').getByRole('navigation',{name:'File path'}).getByRole('button',{name:'docs',exact:true}).click();
+    await expect(page.locator('#file-breadcrumbs')).toContainText('docs');await page.locator('#file-entries .file-entry').filter({hasText:'note.md'}).click();
+    await expect(page.locator('#workspace-file-detail h1')).toHaveText('A project note');
+    await page.getByRole('button',{name:'Open beside chat',exact:true}).click();await expect(page.locator('#workspace-chat-column')).toBeHidden();await expect(page.locator('#workspace-preview')).toContainText('A project note');
     await expect(page.locator('#prompt')).toHaveValue('Keep my existing draft.');
     await page.locator('#workspace-preview').getByRole('button',{name:'Ask about this file'}).click();
     expect(await page.locator('#prompt').inputValue()).toContain('docs/note.md');expect(await page.locator('#prompt').inputValue()).toContain('Keep my existing draft.');
@@ -475,7 +479,7 @@ test('workspace mobile: browse without an agent, ask in a new session, preserve 
     await page.goto('/');await page.locator('#nav-files').click();await page.locator('#add-location').click();await page.locator('#location-path').fill(cwd);await page.locator('#save-location').click();
     await page.locator('.file-entry').filter({hasText:'README.md'}).click();await expect(page.locator('#workspace-file-detail h1')).toHaveText('Mobile files');
     await page.getByRole('button',{name:'Ask about this file'}).click();await expect(page.locator('#directory')).toHaveValue(cwd);await page.locator('#provider').selectOption('demo');await page.locator('#session-title').fill('Browser test mobile files');await page.locator('#create-submit').click();
-    await expect(page.locator('#session-state')).toHaveText('Ready');await expect(page.locator('#prompt')).toBeVisible();expect(await page.locator('#prompt').inputValue()).toContain('README.md');
+    await expect(page.locator('#session-state')).toHaveText('Ready');await expect(page.locator('#prompt-editor .cm-content')).toBeVisible();expect(await page.locator('#prompt').inputValue()).toContain('README.md');
     const id=await page.evaluate(()=>localStorage.getItem('agentworks-session'));const count=await page.evaluate(id=>fetch('/api/sessions/'+id).then(r=>r.json()).then(s=>s.events.filter(e=>e.kind==='user').length),id);expect(count).toBe(0);
     await page.locator('#session-home').click();await page.locator('#nav-files').click();await page.locator('.file-entry').filter({hasText:'README.md'}).click();await page.reload();await expect(page.locator('#workspace-files')).toBeVisible();await expect(page.locator('#workspace-file-detail h1')).toHaveText('Mobile files');await expect(page.locator('#workspace-location')).toHaveValue(await page.evaluate(()=>JSON.parse(localStorage.getItem('agentworks-workspace')).locationKey));
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
@@ -499,8 +503,8 @@ test('agent access and inbox: grants, safe drafts, activity, mobile layout',asyn
   });
   await page.reload();await page.getByRole('button',{name:/Browser test inbox/}).click();
   await expect(page.locator('#session-state')).toHaveText('Ready');
-  await page.locator('#prompt').fill('Existing draft');
-  await page.locator('#session-agents').click();
+  await page.locator('#prompt-editor .cm-content').fill('Existing draft');
+  await page.locator('#lifecycle-menu > summary').click();await page.locator('#session-agents').click();
   await expect(page.locator('#agent-preset')).toHaveValue('participant');
   await expect(page.locator('#agent-inbox')).toContainText('Review this peer message <script>unsafe()</script>');
   await expect(page.locator('#agent-inbox script')).toHaveCount(0);
@@ -511,10 +515,10 @@ test('agent access and inbox: grants, safe drafts, activity, mobile layout',asyn
   await expect(page.locator('#prompt')).toHaveValue(/Existing draft/);
   await expect(page.locator('#prompt')).toHaveValue(/peer-provided context/);
   await expect(page.locator('#messages')).not.toContainText('Local session, turn');
-  await page.locator('#session-agents').click();await page.locator('#agent-preset').selectOption('coordinator');
+  await page.locator('#lifecycle-menu > summary').click();await page.locator('#session-agents').click();await page.locator('#agent-preset').selectOption('coordinator');
   await page.locator('#save-agent-access').click();await expect(page.locator('#save-agent-access')).toBeEnabled();
   await page.locator('#dismiss-agents').click();await expect(page.locator('#session-state')).toHaveText('Ready');
-  await page.locator('#session-agents').click();await expect(page.locator('#agent-preset')).toHaveValue('coordinator');
+  await page.locator('#lifecycle-menu > summary').click();await page.locator('#session-agents').click();await expect(page.locator('#agent-preset')).toHaveValue('coordinator');
   await page.setViewportSize({width:390,height:844});
   const overflow=await page.locator('#agents-dialog').evaluate(n=>n.scrollWidth>n.clientWidth+2);expect(overflow).toBeFalsy();
   await page.screenshot({path:'.cache/prototype-agent-inbox-mobile.png'});

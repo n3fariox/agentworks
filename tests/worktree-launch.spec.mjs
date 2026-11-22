@@ -1,8 +1,10 @@
 import {test,expect} from '@playwright/test';
+import {openCreateSections,choosePlace} from './support/create-sections.mjs';
 import {createServer} from 'node:http';
 import {readFile} from 'node:fs/promises';
 import {resolve,extname} from 'node:path';
 
+openCreateSections(test);
 // Static UI only: all API traffic is intercepted, no provider or live data access.
 const port=Number(process.env.AGENTWORKS_WORKTREE_UI_PORT||4362),base=`http://127.0.0.1:${port}`;let server;
 test.beforeAll(async()=>{
@@ -71,7 +73,7 @@ for(const mobile of [false,true]){
     const errors=[];page.on('pageerror',e=>errors.push(e.message));const s=await fixture(page);
     await expect(page.locator('#workspace-mode')).toHaveValue('directory');
     await expect(page.locator('#workspace-new-fields')).toBeHidden();
-    await page.locator('#create-project').selectOption('b');
+    await choosePlace(page,{project:'b'});
     await expect(page.locator('#workspace-mode')).toHaveValue('newWorktree');
     await expect(page.locator('#workspace-mode option[value=directory]')).toBeDisabled();
     await expect(page.locator('#workspace-policy-note')).toContainText('Isolated worktree required');
@@ -90,7 +92,7 @@ for(const mobile of [false,true]){
     await page.locator('#create-submit').click();
     expect(s.creates[1]).toMatchObject({cwd:'/repo/.worktrees/linked',workspace:{mode:'existingWorktree'}});
     await page.locator('#directory').fill('/other');await expect(page.locator('#create-submit')).toBeDisabled();
-    await page.locator('#create-project').selectOption('a');
+    await choosePlace(page,{project:'a'});
     await expect(page.locator('#workspace-mode')).toHaveValue('directory');
     await expect(page.locator('#worktree-branch')).toHaveValue('');await expect(page.locator('#worktree-base')).toHaveValue('');
     expect(await page.locator('#create-dialog').evaluate(n=>{const r=n.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.height<=innerHeight;})).toBe(true);
@@ -99,7 +101,7 @@ for(const mobile of [false,true]){
 }
 test('identical retry keeps request ID, edited payload gets a new ID; harness and model preserved',async({page})=>{
   const s=await fixture(page);await page.locator('#load-models').click();await page.locator('#create-model').selectOption('chosen-model');
-  await page.locator('#create-project').selectOption('b');await expect(page.locator('#workspace-mode')).toHaveValue('newWorktree');
+  await choosePlace(page,{project:'b'});await expect(page.locator('#workspace-mode')).toHaveValue('newWorktree');
   await expect(page.locator('#create-model')).toHaveValue('chosen-model');
   await page.locator('#session-title').fill('Retry');await page.locator('#create-submit').click();await expect(page.locator('#create-error')).toContainText('retry');
   await page.locator('#create-submit').click();await expect.poll(()=>s.creates.length).toBe(2);
@@ -112,23 +114,23 @@ test('ordinary directory creation stays compatible',async({page})=>{
   const s=await fixture(page,{success:true});await page.locator('#directory').fill('/repo/subdir');await page.locator('#create-submit').click();
   await expect(page.locator('#create-dialog')).toBeHidden();await expect(page.locator('#project-path')).toHaveText('/repo/subdir');
   expect(s.creates[0]).toMatchObject({cwd:'/repo/subdir',projectId:null,workspace:{mode:'directory'}});
-  await page.locator('#prompt').fill('Keep my draft');await page.locator('#new-session').click();await page.locator('#workspace-mode').selectOption('newWorktree');await page.locator('#dismiss-create').click();
+  await page.locator('#prompt-editor .cm-content').fill('Keep my draft');await page.locator('#new-session').click();await page.locator('#workspace-mode').selectOption('newWorktree');await page.locator('#dismiss-create').click();
   await expect(page.locator('#prompt')).toHaveValue('Keep my draft');
   let wording='';page.on('dialog',async d=>{wording=d.message();await d.dismiss();});await page.locator('#lifecycle-menu > summary').click();await page.locator('#close-session').click();expect(wording).toContain('Worktree files and branches remain');
 });
 test('slow policy response cannot overwrite the next project, and errors block launch',async({page})=>{
   let release,started;const waiting=new Promise(r=>release=r),seen=new Promise(r=>started=r);
   await fixture(page,{policy:async({id,json,route})=>{if(id==='a'){started();await waiting;return json(isolated);}return route.fulfill({status:503,body:'Unavailable'});}});
-  await page.locator('#create-project').selectOption('a');await seen;await expect(page.locator('#create-submit')).toBeDisabled();
-  await page.locator('#create-project').selectOption('b');await expect(page.locator('#workspace-policy-note')).toContainText('Cannot load');release();
+  await choosePlace(page,{project:'a'});await seen;await expect(page.locator('#create-submit')).toBeDisabled();
+  await choosePlace(page,{project:'b'});await expect(page.locator('#workspace-policy-note')).toContainText('Cannot load');release();
   await expect(page.locator('#workspace-mode')).toHaveValue('directory');await expect(page.locator('#create-submit')).toBeDisabled();
-  await page.locator('#create-project').selectOption('');await expect(page.locator('#create-submit')).toBeEnabled();
+  await choosePlace(page,{project:''});await expect(page.locator('#create-submit')).toBeEnabled();
 });
 test('stale discovery cannot repopulate after source/project switch',async({page})=>{
   let release,started;const waiting=new Promise(r=>release=r),seen=new Promise(r=>started=r);
   const s=await fixture(page,{list:async({json})=>{started();await waiting;return json({worktrees:[{path:'/stale',branch:'stale'}]});}});
   await page.locator('#workspace-mode').selectOption('existingWorktree');await page.locator('#discover-worktrees').click();await seen;
-  await page.locator('#create-project').selectOption('b');release();await expect(page.locator('#workspace-mode')).toHaveValue('newWorktree');
+  await choosePlace(page,{project:'b'});release();await expect(page.locator('#workspace-mode')).toHaveValue('newWorktree');
   await expect(page.locator('#existing-worktree option')).toHaveCount(1);expect(s.creates).toHaveLength(0);
 });
 test('project creation policy defaults, enforcement and partial save retry',async({page})=>{

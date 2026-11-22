@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `AcpAgentConfig::env_remove` withholds inherited variables from the agent process.
+
 ## [3.4.0](https://github.com/agentclientprotocol/rust-sdk/compare/v3.3.0...v3.4.0) - 2026-10-16
 
 ### Added

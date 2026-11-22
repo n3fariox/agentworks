@@ -1,4 +1,6 @@
 use crate::{Approval, Session, use_api_key};
+#[cfg(test)]
+use agent_client_protocol::schema::v1::SessionNotification;
 use agent_client_protocol::schema::v1::{
     CancelNotification, ContentBlock, CreateElicitationRequest, CreateElicitationResponse,
     ElicitationAction, EmbeddedResource, EmbeddedResourceResource, ForkSessionRequest,
@@ -7,15 +9,14 @@ use agent_client_protocol::schema::v1::{
     SelectedPermissionOutcome, SessionConfigOptionValue, SetSessionConfigOptionRequest,
     SystemPrompt, TextContent, TextResourceContents,
 };
-use agent_client_protocol::{AcpAgent, Agent, Client, ConnectionTo, DynConnectTo};
-#[cfg(test)]
-use agent_client_protocol::{AcpAgentConfig, schema::v1::SessionNotification};
+use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo, DynConnectTo};
 use agentworks_runtime::acp::initialize_on;
 #[cfg(test)]
 use agentworks_runtime::acp::initialize_request;
+use agentworks_runtime::log::ms;
 use agentworks_runtime::provider::parse_model_config;
 use agentworks_runtime::provider::{
-    agent_config, cli_provider, is_free_model, prepare, safe_error,
+    agent_config, cli_provider, is_free_model, prepare, safe_error, session_environment,
 };
 use agentworks_runtime::subagents::{Notification, Sessions};
 use serde_json::{Value, json};
@@ -25,7 +26,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
@@ -76,15 +77,27 @@ fn profile_agent(
     provider: &str,
     host_profile: bool,
     profile: Option<&str>,
+    session: Option<&str>,
+    login: std::collections::BTreeMap<String, String>,
+    secrets: &[(String, zeroize::Zeroizing<String>)],
 ) -> Result<AcpAgent, String> {
-    profile_config(provider, host_profile, profile).map(AcpAgent::new)
-}
-fn profile_config(
-    provider: &str,
-    host_profile: bool,
-    profile: Option<&str>,
-) -> Result<agent_client_protocol::AcpAgentConfig, String> {
-    let config = agent_config(provider, use_api_key(), host_profile);
+    let base = agent_config(provider, use_api_key(), host_profile);
+    // The login environment is the base layer: harness settings always win,
+    // and it cannot reintroduce service-only variables.
+    let removed = base.removed_environment();
+    let login = login
+        .into_iter()
+        .filter(|(name, _)| !removed.contains(name));
+    let config = removed.iter().fold(
+        AcpAgentConfig::new(base.command()).args(base.arguments().iter().cloned()),
+        |config, name| config.env_remove(name),
+    );
+    let config = config
+        .envs(login)
+        .envs(session.map(session_environment).into_iter().flatten())
+        // Session secrets sit above the login environment and below harness settings.
+        .envs(secrets.iter().map(|(name, value)| (name.clone(), value.to_string())))
+        .envs(base.environment().clone());
     let config = if let Some(id) = profile {
         if provider != "goose" {
             return Err("Model profiles require Goose".into());
@@ -93,7 +106,7 @@ fn profile_config(
     } else {
         config
     };
-    Ok(config)
+    Ok(AcpAgent::new(config))
 }
 
 /// The session's role as an ACP system prompt. Do not rely on harness persistence:
@@ -104,7 +117,10 @@ fn role_prompt(
     init: &Value,
 ) -> Result<Option<SystemPrompt>, agent_client_protocol::Error> {
     let role = s.data.lock().unwrap().role.clone();
-    if !init["agentCapabilities"]["sessionCapabilities"]["systemPrompt"].is_object() {
+    if !init["agentCapabilities"]["sessionCapabilities"]["systemPrompt"].is_object()
+        && !(s.provider == "antigravity"
+            && agentworks_runtime::antigravity::supports_system_prompt(init))
+    {
         if let Some(role) = role {
             return Err(agent_client_protocol::Error::internal_error().data(format!(
                 "This agent does not accept role instructions, so the “{}” role cannot be applied. The transcript is preserved.",
@@ -136,12 +152,37 @@ async fn open_session(
             "Provider-history deletion was requested; inspect or retry deletion before continuing",
         ));
     }
+    s.startup("Initializing the agent");
+    let started = Instant::now();
     let init = initialize_on(
         connection,
         &s.provider,
         s.host_id == "local" && use_api_key(),
     )
     .await?;
+    tracing::info!(elapsed_ms = ms(started), "Initialized the agent");
+    s.startup(if s.data.lock().unwrap().provider_session_id.is_some() {
+        "Resuming the agent session"
+    } else {
+        "Opening the agent session"
+    });
+    let started = Instant::now();
+    let opened = open_initialized(connection, s, init).await;
+    tracing::info!(
+        elapsed_ms = ms(started),
+        ok = opened.is_ok(),
+        "Opened the provider session"
+    );
+    opened
+}
+
+/// Creates, forks, loads or resumes the provider session once `initialize` has
+/// answered with the agent's capabilities.
+async fn open_initialized(
+    connection: &ConnectionTo<Agent>,
+    s: &Session,
+    init: Value,
+) -> Result<Value, agent_client_protocol::Error> {
     s.data.lock().unwrap().agent_capabilities = init["agentCapabilities"].clone();
     s.emit(
         "async_task_connection",
@@ -154,15 +195,27 @@ async fn open_session(
     let caps = init["agentCapabilities"]["promptCapabilities"].clone();
     s.data.lock().unwrap().prompt_capabilities = if caps.is_object() { caps } else { json!({}) };
     s.emit("attachment_policy", crate::attachments::session_policy(s));
-    let system_prompt = role_prompt(s, &init)?;
-    let saved = {
-        let data = s.data.lock().unwrap();
-        // Codex keeps no thread until its first turn, so a restart before any prompt
-        // (after an access or secrets change) has nothing to resume.
-        data.provider_session_id
-            .clone()
-            .filter(|_| !data.never_prompted())
-    };
+    let mut system_prompt = role_prompt(s, &init)?;
+    let mut open_meta = opening_metadata(&s.provider, &s.data.lock().unwrap(), &init);
+    if s.provider == "antigravity" && agentworks_runtime::antigravity::supports_system_prompt(&init)
+    {
+        if let Some(prompt) = system_prompt.take() {
+            let text = prompt
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            open_meta.insert(
+                "antigravity".into(),
+                json!({"systemPrompt":{"append":text}}),
+            );
+        }
+    }
+    let saved = s.data.lock().unwrap().provider_session_id.clone();
     let Some(id) = saved else {
         let lineage = s.data.lock().unwrap().lineage.clone();
         if lineage.native_attempted {
@@ -190,11 +243,14 @@ async fn open_session(
                             .data("Could not persist native fork intent")
                     })?;
             }
-            let meta = json!({"jetbrains":{"air":{"fork":{"version":1,"messageId":lineage.source_message_id}}}});
+            let mut meta = json!(open_meta);
+            meta["jetbrains"] =
+                json!({"air":{"fork":{"version":1,"messageId":lineage.source_message_id}}});
             let response = connection
                 .send_request(
-                    ForkSessionRequest::new(lineage.source_session_id.unwrap(), s.cwd.clone())
+                    ForkSessionRequest::new(lineage.source_session_id.unwrap(), s.cwd())
                         .mcp_servers(crate::mcp::configuration(s))
+                        .additional_directories(crate::relocation::additional(s, &init))
                         .system_prompt(system_prompt.clone())
                         .meta(meta.as_object().unwrap().clone()),
                 )
@@ -214,7 +270,7 @@ async fn open_session(
                     "Native fork at recorded parent boundary {}. Original transcript directory: {}. Current directory: {}. Relative references in inherited history mean the original directory; verify files before retargeting them.",
                     lineage.boundary_seq,
                     lineage.parent_cwd.unwrap_or_default(),
-                    s.cwd.display()
+                    s.cwd().display()
                 ));
                 s.store
                     .lock()
@@ -241,9 +297,11 @@ async fn open_session(
         return Ok(serde_json::to_value(
             connection
                 .send_request(
-                    NewSessionRequest::new(s.cwd.clone())
+                    NewSessionRequest::new(s.cwd())
                         .mcp_servers(crate::mcp::configuration(s))
-                        .system_prompt(system_prompt.clone()),
+                        .additional_directories(crate::relocation::additional(s, &init))
+                        .system_prompt(system_prompt.clone())
+                        .meta(open_meta.clone()),
                 )
                 .block_task()
                 .await?,
@@ -258,9 +316,11 @@ async fn open_session(
         }
         connection
             .send_request(
-                LoadSessionRequest::new(id.clone(), s.cwd.clone())
+                LoadSessionRequest::new(id.clone(), s.cwd())
                     .mcp_servers(crate::mcp::configuration(s))
-                    .system_prompt(system_prompt.clone()),
+                    .additional_directories(crate::relocation::additional(s, &init))
+                    .system_prompt(system_prompt.clone())
+                    .meta(open_meta.clone()),
             )
             .block_task()
             .await
@@ -268,9 +328,11 @@ async fn open_session(
     } else if init["agentCapabilities"]["sessionCapabilities"]["resume"].is_object() {
         connection
             .send_request(
-                ResumeSessionRequest::new(id.clone(), s.cwd.clone())
+                ResumeSessionRequest::new(id.clone(), s.cwd())
                     .mcp_servers(crate::mcp::configuration(s))
-                    .system_prompt(system_prompt.clone()),
+                    .additional_directories(crate::relocation::additional(s, &init))
+                    .system_prompt(system_prompt.clone())
+                    .meta(open_meta.clone()),
             )
             .block_task()
             .await
@@ -278,9 +340,11 @@ async fn open_session(
     } else if init["agentCapabilities"]["loadSession"] == true {
         connection
             .send_request(
-                LoadSessionRequest::new(id.clone(), s.cwd.clone())
+                LoadSessionRequest::new(id.clone(), s.cwd())
                     .mcp_servers(crate::mcp::configuration(s))
-                    .system_prompt(system_prompt.clone()),
+                    .additional_directories(crate::relocation::additional(s, &init))
+                    .system_prompt(system_prompt.clone())
+                    .meta(open_meta.clone()),
             )
             .block_task()
             .await
@@ -297,13 +361,15 @@ async fn open_session(
                     !data.external && data.requests.is_empty()
                 } =>
         {
-            // Claude does not write a provider transcript until its first prompt. Nothing to lose here.
+            // Claude and Codex write no provider transcript until the first prompt. Nothing to lose here.
             return Ok(serde_json::to_value(
                 connection
                     .send_request(
-                        NewSessionRequest::new(s.cwd.clone())
+                        NewSessionRequest::new(s.cwd())
                             .mcp_servers(crate::mcp::configuration(s))
-                            .system_prompt(system_prompt.clone()),
+                            .additional_directories(crate::relocation::additional(s, &init))
+                            .system_prompt(system_prompt.clone())
+                            .meta(open_meta.clone()),
                     )
                     .block_task()
                     .await?,
@@ -315,7 +381,30 @@ async fn open_session(
     config["sessionId"] = json!(id);
     Ok(config)
 }
-/// Starts a temporary ACP session to ask the harness for its actual model list. No prompt/inference.
+// Send only an explicitly selected policy, and only to adapters that support it.
+// Saved modes take precedence; imports/old rows never inherit today's default.
+fn opening_metadata(
+    provider: &str,
+    data: &crate::SessionData,
+    init: &Value,
+) -> serde_json::Map<String, Value> {
+    let mut meta = serde_json::Map::new();
+    if cli_provider(provider) == "codex"
+        && init["_meta"]["agentworks"]["permissionModeOnOpen"] == true
+    {
+        let mode = data.permission_modes["currentValue"].as_str().or_else(|| {
+            (data.provider_session_id.is_none() && !data.external)
+                .then(|| data.initial_codex_permission_mode.map(|m| m.id()))
+                .flatten()
+        });
+        if let Some(mode) = mode {
+            meta.insert("agentworks".into(), json!({"permissionMode":mode}));
+        }
+    }
+    meta
+}
+
+/// Ask the harness for models without inference; adapters may require a temporary session.
 pub async fn discover_on(
     provider: &str,
     cwd: PathBuf,
@@ -328,13 +417,25 @@ pub async fn discover_on(
         let connection = profile
             .map(|id| agentworks_runtime::model_providers::connection(id, host_id))
             .transpose()?;
-        let (lines, guard) =
-            host.spawn_profile(provider, &cwd.to_string_lossy(), false, connection.as_ref())?;
+        let (lines, guard) = host.spawn_profile(
+            provider,
+            &cwd.to_string_lossy(),
+            false,
+            connection.as_ref(),
+            None,
+        )?;
         (DynConnectTo::new(lines), Some(guard))
     } else {
         prepare(provider)?;
         (
-            DynConnectTo::new(profile_agent(provider, false, profile)?),
+            DynConnectTo::new(profile_agent(
+                provider,
+                false,
+                profile,
+                None,
+                Default::default(),
+                &[],
+            )?),
             None,
         )
     };
@@ -363,6 +464,8 @@ pub async fn run(
     s: Arc<Session>,
     mut commands: mpsc::Receiver<Command>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let started = Instant::now();
+    s.unpark()?;
     if s.host_id == "local" {
         prepare(&s.provider)?;
     }
@@ -395,6 +498,9 @@ pub async fn run(
             data.initial_claude_permission_mode.map(|mode| mode.id())
         } else if cli_provider(&s.provider) == "codex" && data.provider_session_id.is_none() {
             data.initial_codex_permission_mode.map(|mode| mode.id())
+        } else if s.provider == "antigravity" && data.provider_session_id.is_none() {
+            data.initial_antigravity_permission_mode
+                .map(|mode| mode.id())
         } else {
             None
         }
@@ -414,15 +520,31 @@ pub async fn run(
         );
     }
     let (transport, _spawn_guard): (DynConnectTo<Client>, _) = if s.host_id == "local" {
-        let mut config = profile_config(
+        let login = if s.provider == "demo" {
+            Default::default()
+        } else {
+            let fresh = s.fresh_environment.swap(false, Ordering::SeqCst);
+            s.startup("Reading the login environment");
+            let step = Instant::now();
+            let login = crate::login_env::changes(&s.cwd(), fresh).await;
+            tracing::info!(elapsed_ms = ms(step), "Read the login environment");
+            login
+        };
+        s.startup("Starting the agent");
+        let agent = profile_agent(
             &s.provider,
             host_profile,
             s.data.lock().unwrap().model_provider.as_deref(),
-        )?;
-        for (name, value) in &secrets.vars {
-            config = config.env(name.as_str(), value.as_str());
-        }
-        (DynConnectTo::new(AcpAgent::new(config)), None)
+            Some(&s.id),
+            login,
+            &secrets.vars,
+        )?
+        .with_debug(|line, direction| {
+            if matches!(direction, agent_client_protocol::LineDirection::Stderr) {
+                tracing::debug!("agent stderr: {line}");
+            }
+        });
+        (DynConnectTo::new(agent), None)
     } else {
         let live = crate::hosts::registry()
             .and_then(|hosts| hosts.live(&s.host_id))
@@ -437,14 +559,17 @@ pub async fn run(
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect();
+        s.startup("Starting the agent on the host");
         let (lines, guard) = live.spawn_session(
             &s.provider,
-            &s.cwd.to_string_lossy(),
+            &s.cwd().to_string_lossy(),
             host_profile,
             connection.as_ref(),
+            Some(&s.id),
             &environment,
         )?;
         guard.bind_mcp(s.mcp_endpoint, s.mcp_token.lock().unwrap().clone());
+        tracing::info!(total_ms = ms(started), "Asked the host to start the agent");
         // Keep the worker process alive until this runtime returns or is cancelled.
         (DynConnectTo::new(lines), Some(guard))
     };
@@ -463,7 +588,7 @@ pub async fn run(
                 if staged.1>32*1024*1024 || staged.0.len()>=50000 {staged.2=true;}else{staged.0.push(update.clone());}
             }
             if !notify_replaying.load(Ordering::SeqCst) || (!import_pending && update["sessionUpdate"].as_str().is_some_and(|kind| kind.starts_with("async_task_"))) || (!is_child && matches!(update["sessionUpdate"].as_str(),Some("available_commands_update"|"config_option_update"|"current_mode_update"))) {
-                if !is_child {crate::limit_resume::observe(&notify_s, &update);}
+                if !is_child {crate::limit_resume::observe(&notify_s, &update);crate::native_rename::observe(&notify_s, &update);}
                 crate::timeouts::observe(&notify_s.id,&update,crate::timeouts::now_ms());
                 notify_s.emit("acp",update);
             }
@@ -595,7 +720,7 @@ pub async fn run(
                     return Err(agent_client_protocol::Error::internal_error().data("Saved permission mode is no longer advertised; inspect session configuration"));
                 }
             } else if let Some(mode)=initial_mode {
-                mode_config=crate::permission_modes::apply_initial(mode_config,if cli_provider(&s.provider)=="codex" {"Codex"} else {"Claude"},mode,|config_id,mode| {
+                mode_config=crate::permission_modes::apply_initial(mode_config,if cli_provider(&s.provider)=="codex" {"Codex"} else if s.provider=="antigravity" {"Antigravity"} else {"Claude"},mode,|config_id,mode| {
                     let connection=&connection;let provider_id=&provider_id;let s=&s;
                     async move {
                     let config=s.data.lock().unwrap().session_config.clone();
@@ -611,6 +736,8 @@ pub async fn run(
             let restored=crate::session_config::restore(&connection,&provider_id,config.clone(),&saved_config).await?;
             if restored!=config {crate::session_config::publish(&s,&restored);}
             crate::limit_resume::ready(&s);
+            tracing::info!(total_ms = ms(started), "The session is ready");
+            crate::account_quota::refresh_session(&s);
             s.emit("ready",json!({"providerSessionId":provider_id,"configuration":serde_json::to_value(&created).unwrap_or(Value::Null)}));
             if !s.start_queued_prompt().map_err(|e|agent_client_protocol::Error::internal_error().data(e))? {s.status("idle");}
             while let Some(command)=commands.recv().await {
@@ -703,6 +830,8 @@ pub async fn run(
                                         (Ok(result),None)=>{crate::limit_resume::finish(&s, Some(&serde_json::to_value(&result.stop_reason).unwrap_or(Value::Null)), None);s.emit("turn_end",json!({"stopReason":result.stop_reason}));},
                                         (Err(error),None)=>{let raw=serde_json::to_value(&error).unwrap_or(Value::Null);crate::limit_resume::enrich_codex(&s,&raw).await;crate::limit_resume::finish(&s,None,Some(&raw));s.emit("error",json!({"message":safe_error(&error.to_string())}));},
                                     }
+                                    crate::account_quota::refresh_session(&s);
+                                    crate::event_compaction::schedule(&s);
                                     crate::inbox_delivery::finished(&s,inbox_owner.as_ref());
                                     crate::input_queue::record_outcome(&s,outcome);
                                     s.status("idle");
@@ -776,6 +905,37 @@ fn attachment_block(attachment: crate::attachments::Payload) -> ContentBlock {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn opening_policy_requires_capability_and_preserves_saved_or_host_permissions() {
+        let mut data: crate::SessionData = serde_json::from_value(serde_json::json!({
+            "status":"starting","seq":0,"requests":[],"models":null,
+            "available_commands":[],"turn_active":false
+        }))
+        .unwrap();
+        let init = serde_json::json!({"_meta":{"agentworks":{"permissionModeOnOpen":true}}});
+        let metadata =
+            |data: &crate::SessionData| super::opening_metadata("codex-rust", data, &init);
+        // Old saved rows and imports have no captured default to infer.
+        assert!(metadata(&data).is_empty());
+        data.initial_codex_permission_mode =
+            Some(crate::permission_modes::CodexDefault::FullAccess);
+        assert_eq!(
+            metadata(&data)["agentworks"]["permissionMode"],
+            "agent-full-access"
+        );
+        assert!(super::opening_metadata("codex-rust", &data, &serde_json::json!({})).is_empty());
+        assert!(super::opening_metadata("claude-rust", &data, &init).is_empty());
+        data.external = true;
+        assert!(metadata(&data).is_empty());
+        data.external = false;
+        data.provider_session_id = Some("saved-thread".into());
+        assert!(metadata(&data).is_empty());
+        data.permission_modes = serde_json::json!({"currentValue":"read-only"});
+        assert_eq!(metadata(&data)["agentworks"]["permissionMode"], "read-only");
+        data.permission_modes = serde_json::json!({"currentValue":"host"});
+        assert_eq!(metadata(&data)["agentworks"]["permissionMode"], "host");
+    }
+
     #[test]
     fn attachment_blocks_use_acp_embedded_content() {
         use crate::attachments::Payload;
@@ -875,12 +1035,11 @@ mod fork_tests {
             let session = Arc::new(Session {
                 id: Uuid::new_v4().to_string(),
                 provider: "codex".into(),
-                cwd: dir.clone(),
                 title: "Child".into(),
                 initial_model: None,
                 created: 1,
                 host_id: host_id.into(),
-                location_id: "local".into(),
+                place: crate::Place::at(dir.clone(), "local".into()),
                 data: Mutex::new(data),
                 tx,
                 commands: Mutex::new(None),
@@ -890,8 +1049,10 @@ mod fork_tests {
                 mcp_endpoint: "127.0.0.1:1".parse().unwrap(),
                 mcp_token: Mutex::new("child-token".into()),
                 mcp_refresh_pending: AtomicBool::new(false),
+                fresh_environment: Default::default(),
                 notifications: crate::notifications::Hub::new(catalog),
-                progress: crate::tool_progress::Hub::empty(),
+                scripts: agentworks_scripting::Hub::empty(),
+                account_quota: Default::default(),
             });
             store
                 .lock()
@@ -979,8 +1140,14 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
-    async fn role_is_sent_on_every_open_and_never_dropped_silently() {
-        for supports in [true, false] {
+    async fn antigravity_extension_and_standard_roles_survive_every_open() {
+        for (provider, mode) in [
+            ("claude", "yes"),
+            ("claude", "no"),
+            ("antigravity", "extension"),
+            ("antigravity", "no"),
+        ] {
+            let supports = mode != "no";
             let dir = std::env::temp_dir().join(format!("agentworks-role-{}", Uuid::new_v4()));
             std::fs::create_dir_all(&dir).unwrap();
             let store = Arc::new(Mutex::new(
@@ -1002,13 +1169,12 @@ for line in sys.stdin:
             let (tx, _) = tokio::sync::broadcast::channel(16);
             let session = Arc::new(Session {
                 id: Uuid::new_v4().to_string(),
-                provider: "claude".into(),
-                cwd: dir.clone(),
+                provider: provider.into(),
                 title: "Role".into(),
                 initial_model: None,
                 created: 1,
                 host_id: "local".into(),
-                location_id: "local".into(),
+                place: crate::Place::at(dir.clone(), "local".into()),
                 data: Mutex::new(data),
                 tx,
                 commands: Mutex::new(None),
@@ -1018,8 +1184,10 @@ for line in sys.stdin:
                 mcp_endpoint: "127.0.0.1:1".parse().unwrap(),
                 mcp_token: Mutex::new("token".into()),
                 mcp_refresh_pending: AtomicBool::new(false),
+                fresh_environment: Default::default(),
                 notifications: crate::notifications::Hub::new(catalog),
-                progress: crate::tool_progress::Hub::empty(),
+                scripts: agentworks_scripting::Hub::empty(),
+                account_quota: Default::default(),
             });
             let script = r#"
 import sys,json
@@ -1027,11 +1195,19 @@ caps={'resume':{}}
 if sys.argv[1]=='yes': caps['systemPrompt']={}
 for line in sys.stdin:
  r=json.loads(line); m=r.get('method'); p=r.get('params',{})
- if m=='initialize': out={'protocolVersion':1,'agentCapabilities':{'sessionCapabilities':caps},'authMethods':[]}
- elif m in ('session/new','session/resume'):
-  assert sys.argv[1]=='yes', 'role must not open a session without the capability'
-  sp=p['systemPrompt']; assert sp['mode']=='append'
-  text=sp['content'][0]['text']; assert 'Agentworks role: Reviewer' in text and 'Review only.' in text
+ if m=='initialize':
+  capabilities={'loadSession':True,'sessionCapabilities':caps}
+  if sys.argv[1]=='extension': capabilities['_meta']={'antigravity':{'systemPrompt':{'append':True}}}
+  out={'protocolVersion':1,'agentCapabilities':capabilities,'authMethods':[]}
+ elif m in ('session/new','session/resume','session/load'):
+  assert sys.argv[1]!='no', 'role must not open a session without the capability'
+  if sys.argv[1]=='extension':
+   assert 'systemPrompt' not in p
+   text=p['_meta']['antigravity']['systemPrompt']['append']
+  else:
+   sp=p['systemPrompt']; assert sp['mode']=='append'
+   text=sp['content'][0]['text']
+  assert 'Agentworks role: Reviewer' in text and 'Review only.' in text
   out={'sessionId':'native'} if m=='session/new' else {}
  else: raise Exception('Unexpected method '+str(m))
  print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':out}),flush=True)
@@ -1040,7 +1216,7 @@ for line in sys.stdin:
                 AcpAgentConfig::new("python3")
                     .arg("-c")
                     .arg(script)
-                    .arg(if supports { "yes" } else { "no" }),
+                    .arg(mode),
             );
             let s = session.clone();
             Client
@@ -1051,6 +1227,8 @@ for line in sys.stdin:
                         assert_eq!(first.unwrap()["sessionId"], "native");
                         // A reconnect resumes and must carry the role again.
                         s.data.lock().unwrap().provider_session_id = Some("native".into());
+                        open_session(&connection, &s).await.unwrap();
+                        s.data.lock().unwrap().import_pending = true;
                         open_session(&connection, &s).await.unwrap();
                     } else {
                         assert!(first.unwrap_err().to_string().contains("Reviewer"));
@@ -1101,6 +1279,9 @@ pub async fn delete_provider_history(
                 &s.provider,
                 host_profile,
                 s.data.lock().unwrap().model_provider.as_deref(),
+                Some(&s.id),
+                Default::default(),
+                &[],
             )?),
             None,
         )
@@ -1115,9 +1296,10 @@ pub async fn delete_provider_history(
             .transpose()?;
         let (lines, guard) = host.spawn_profile(
             &s.provider,
-            &s.cwd.to_string_lossy(),
+            &s.cwd().to_string_lossy(),
             host_profile,
             connection.as_ref(),
+            Some(&s.id),
         )?;
         (DynConnectTo::new(lines), Some(guard))
     };

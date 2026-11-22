@@ -1,8 +1,10 @@
 import {test,expect} from '@playwright/test';
+import {openCreateSections,choosePlace} from './support/create-sections.mjs';
 import {createServer} from 'node:http';
 import {readFile} from 'node:fs/promises';
 import {resolve,extname} from 'node:path';
 
+openCreateSections(test);
 // Static UI only: all API traffic is intercepted, no provider or live data access.
 const port=Number(process.env.AGENTWORKS_FORK_UI_PORT||4363),base=`http://127.0.0.1:${port}`;let server;
 test.beforeAll(async()=>{
@@ -108,7 +110,7 @@ test('a fork can reuse the same directory instead of a new worktree',async({page
 });
 test('a project that requires isolation cannot be forked down to a plain directory',async({page})=>{
   await fixture(page);await openFork(page);
-  await page.locator('#create-project').selectOption('b');
+  await choosePlace(page,{project:'b'});
   await expect(page.locator('#workspace-mode')).toHaveValue('newWorktree');
   await expect(page.locator('#workspace-mode option[value=directory]')).toBeDisabled();
 });
@@ -171,7 +173,7 @@ test('carried Markdown references retain their original directory',async({page})
   await fixture(page);
   const s=snapshot();s.events=[{seq:1,kind:'acp',data:{sessionUpdate:'agent_message_chunk',forkSourceCwd:'/repo/original',content:{type:'text',text:'[Inspect file](src/config.rs)'}}}];
   await page.routeWebSocket('**/api/sessions/*/events',socket=>socket.send(JSON.stringify(s)));
-  await page.route('**/api/markdown',route=>route.fulfill({json:{html:'<p><a href="src/config.rs">Inspect file</a></p>'}}));
+  await page.route('**/api/markdown/batch',route=>route.fulfill({json:{results:route.request().postDataJSON().items.map(()=>({html:'<p><a href="src/config.rs">Inspect file</a></p>'}))}}));
   let filePath;
   await page.route('**/api/sessions/*/file?*',route=>{filePath=new URL(route.request().url()).searchParams.get('path');return route.fulfill({body:'source file',contentType:'text/plain'});});
   await page.reload();await page.locator('#messages a').filter({hasText:'Inspect file'}).click();
@@ -189,7 +191,7 @@ test('carried Markdown references retain their original directory',async({page})
 
  test('a fork can switch hosts and sends the chosen host and directory',async({page})=>{
   const s=await fixture(page,{success:false});await openFork(page);
-  await page.locator('#create-host').selectOption('r1');
+  await choosePlace(page,{host:'r1'});
   await page.locator('#workspace-mode').selectOption('directory');await page.locator('#directory').fill('/repo/remote');
   await page.locator('#create-submit').click();await expect(page.locator('#create-error')).toContainText('Previous creation');
   expect(s.forks[0].body).toMatchObject({hostId:'r1',cwd:'/repo/remote',workspace:{mode:'directory'}});

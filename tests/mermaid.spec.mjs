@@ -14,7 +14,7 @@ async function api(path,body,method){
 async function openChat(page){
  await page.addInitScript(id=>{if(window===window.top)localStorage.setItem('agentworks-session',id);},session.id);
  await page.goto('/');await expect(page.locator('#session-state')).toHaveText('Ready');
- await page.locator('#prompt').fill(message);await page.locator('#send').click();
+ await page.locator('#prompt-editor .cm-content').fill(message);await page.locator('#send').click();
  await expect(page.locator('.message.assistant .mermaid-block')).toHaveCount(3);
 }
 async function checkPreview(container){

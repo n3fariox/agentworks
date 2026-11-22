@@ -17,8 +17,15 @@ try{
   const explicit=await api('/api/sessions','POST',{provider:'demo',cwd,model:''});ids.push(explicit.id);assert.equal((await wait(explicit.id)).models.currentValue,'demo/steady');
   const stale=await api('/api/sessions','POST',{provider:'demo',cwd,model:'removed-model'});ids.push(stale.id);assert.equal((await wait(stale.id)).session.status,'error');
   const invalid=await fetch(base+'/api/settings',{method:'PUT',headers,body:JSON.stringify({roots:['/does-not-exist-agentworks'],defaultModels:{}})});assert.equal(invalid.status,400);
+  // Active-session capacity: default, range validation, enforcement, and kept when a form omits it.
+  assert.equal(original.maxActiveSessions,32);
+  for(const bad of [0,257]){const r=await fetch(base+'/api/settings',{method:'PUT',headers,body:JSON.stringify({roots:[cwd],defaultModels:{},maxActiveSessions:bad})});assert.equal(r.status,400);}
+  const active=(await api('/api/sessions')).filter(x=>!['suspended','error','closed'].includes(x.status)).length;
+  assert.equal((await api('/api/settings','PUT',{roots:[cwd],defaultModels:{demo:'demo/quick'},maxActiveSessions:active})).maxActiveSessions,active);
+  assert.equal((await api('/api/settings','PUT',{roots:[cwd],defaultModels:{demo:'demo/quick'}})).maxActiveSessions,active);
+  const full=await fetch(base+'/api/sessions',{method:'POST',headers,body:JSON.stringify({provider:'demo',cwd})});assert.equal(full.status,409);assert.match(await full.text(),new RegExp(`Limit: ${active} active`));
   assert.deepEqual((await api('/api/settings')).roots,[cwd]);
   await api('/api/settings','PUT',original);
   assert.equal((await api('/api/sessions/'+s.id)).models.currentValue,'demo/quick');
-  console.log('PASS: model discovery, saved defaults, explicit overrides, stale-model failure, commands snapshot, root validation and enforcement');
+  console.log('PASS: model discovery, saved defaults, explicit overrides, stale-model failure, commands snapshot, root validation and enforcement, active-session capacity');
 }finally{for(const id of ids)await api('/api/sessions/'+id,'DELETE');await api('/api/settings','PUT',original);}

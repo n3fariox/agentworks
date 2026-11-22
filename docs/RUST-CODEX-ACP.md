@@ -1,11 +1,8 @@
-# Experimental Rust Codex ACP bridge
+# Rust Codex ACP bridge
 
-Select **Codex · Rust ACP** in the harness picker (`provider: "codex-rust"` in the
-API). It is a separate harness alongside **Codex**, which continues to use the
-JavaScript adapter. The former `AGENTWORKS_CODEX_ADAPTER` switch has been removed.
-Each saved session retains its adapter identity across restart/resume. Both harnesses
-share Codex authentication, API-key storage, and account quota reporting, while model
-defaults are independent. Import registration treats native thread IDs as belonging
+Select **Codex** in the harness picker (`provider: "codex-rust"` in the API). It
+replaced the JavaScript `codex-acp` adapter; sessions saved under that adapter's ID,
+`codex`, now run on this bridge too, resuming the same native threads. Import registration treats native thread IDs as belonging
 to the same Codex provider to avoid opening duplicate writers through both adapters.
 
 The same Agentworks executable runs `agentworks codex-acp`, which starts the native
@@ -48,9 +45,26 @@ cancelled before either operation. These methods match the ACP State client's
 new lifecycle interfaces without requiring its changes to be copied into this
 branch.
 
-The host's sandbox and approval settings remain in effect until a mode is explicitly
-selected. The host preset restores the policy captured when this adapter opened
-the session. Subscription-window push notifications use the same timestamped
+Agentworks passes a captured default or saved permission mode in
+`_meta.agentworks.permissionMode` when opening a session, after negotiating
+`_meta.agentworks.permissionModeOnOpen` in the initialize response. The bridge
+sets native sandbox and approval overrides on `thread/start`, `thread/resume`,
+and `thread/fork`, before native initialization can invoke filesystem helpers.
+The usual settings update still confirms the mode before readiness or a prompt.
+Saved modes take precedence over defaults; imports and old saved rows without a
+captured mode retain the native policy. With no explicit mode (or `host`), the
+host's sandbox and approval settings remain in effect. The host preset restores
+the policy captured at thread opening.
+
+Model discovery negotiates `_meta.agentworks.modelDiscovery`, then calls
+`_agentworks/models/list`, which maps directly to native `model/list`. It never
+creates a native thread, starts MCP servers, or executes a model turn. Clients
+using older adapters without this capability retain temporary-session discovery;
+errors from the advertised extension propagate without retrying through a thread.
+The same ACP negotiation and metadata work through remote worker transports;
+update the worker executable to use these capabilities on another host.
+
+Subscription-window push notifications use the same timestamped
 `_codex/subscriptionLimits` metadata contract as the vendored adapter: sparse
 updates retain older field times and attach only to genuine session usage events.
 No account polling or quota-only events are added.
@@ -67,7 +81,7 @@ reconnect and authentication commands are not implemented. `/rename` changes the
 native conversation name; the Agentworks display title is managed separately.
 Unknown slash commands and unsupported arguments fail instead of becoming model
 instructions. Send slash commands separately from attachments or carried context.
-Native `$skill` invocations remain normal prompts and run in the Codex harness.
+Configured, enabled skills are discovered through `skills/list` and advertised as `$name` entries. Both `/` and `$` find them in the composer. `$name` invocations (including within a message) attach native skill inputs with their `SKILL.md` paths; a leading `/name` also invokes a discovered skill unless that name belongs to a built-in command. `/skills` refreshes the advertised list.
 Review reports also arrive through native review-mode items. The adapter preserves
 the review API's owning turn ID when Codex emits an internal turn-start ID, and
 waits for the owning turn's completion before accepting the next prompt.
@@ -115,8 +129,6 @@ newer history. Fingerprint-only boundary recovery is not implemented.
 
 Workers advertise `codex-rust` independently when native Codex is available, even
 without Node. Older workers that do not advertise it cannot start this harness.
-Remote enrollment still installs the existing npm dependencies; this experiment
-does not yet make enrollment or Claude execution independent of Node.
 
 Validation (no Node or inference needed):
 

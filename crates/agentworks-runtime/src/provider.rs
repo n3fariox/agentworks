@@ -11,6 +11,11 @@ pub fn cli_provider(provider: &str) -> &str {
         _ => provider,
     }
 }
+/// `claude` and `codex` once named the npm adapters. Sessions saved with them keep
+/// their ID but now run the Rust bridge, which shares the same native history.
+pub fn is_legacy(provider: &str) -> bool {
+    matches!(provider, "claude" | "codex")
+}
 
 pub fn key_present(provider: &str) -> bool {
     let keys: &[&str] = match cli_provider(provider) {
@@ -29,14 +34,9 @@ pub fn runtime_root() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")))
 }
-pub fn adapter_path(provider: &str) -> PathBuf {
-    runtime_root()
-        .join("node_modules/.bin")
-        .join(if provider == "claude" {
-            "claude-agent-acp"
-        } else {
-            "codex-acp"
-        })
+/// Test hook: an ACP agent executable that stands in for the Claude/Codex bridges.
+fn acp_override() -> Option<PathBuf> {
+    std::env::var_os("AGENTWORKS_ACP_COMMAND").map(PathBuf::from)
 }
 pub fn opencode_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("AGENTWORKS_OPENCODE_PATH") {
@@ -48,9 +48,22 @@ pub fn opencode_path() -> Option<PathBuf> {
             .find(|p| p.is_file())
     })
 }
+pub fn antigravity_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("AGENTWORKS_ANTIGRAVITY_PATH") {
+        return Some(PathBuf::from(path)).filter(|p| p.is_file());
+    }
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|p| p.join("agy"))
+            .find(|p| p.is_file())
+    })
+}
 pub fn installed(provider: &str) -> bool {
-    if matches!(provider, "codex-rust" | "claude-rust") {
-        let (var, name) = if provider == "claude-rust" {
+    if matches!(cli_provider(provider), "codex" | "claude") {
+        if acp_override().is_some() {
+            return true;
+        }
+        let (var, name) = if cli_provider(provider) == "claude" {
             ("CLAUDE_CODE_EXECUTABLE", "claude")
         } else {
             ("CODEX_PATH", "codex")
@@ -62,10 +75,68 @@ pub fn installed(provider: &str) -> bool {
             });
     }
     match provider {
-        "demo" | "goose" => true,
+        "demo" => true,
+        "goose" => cfg!(feature = "goose"),
         "opencode" => opencode_path().is_some(),
-        _ => adapter_path(provider).exists(),
+        "antigravity" => antigravity_path().is_some(),
+        _ => false,
     }
+}
+
+/// The service's own configuration and process-manager state. A harness never
+/// needs these, and inheriting them would let a server started by an agent open
+/// the live store, or let a child impersonate the service to systemd.
+pub const SERVICE_ENVIRONMENT: &[&str] = &[
+    "AGENTWORKS_BIND",
+    "AGENTWORKS_PORT",
+    "AGENTWORKS_ROOTS",
+    "AGENTWORKS_CATALOG_PATH",
+    "AGENTWORKS_DB_PATH",
+    "AGENTWORKS_AUTH_MODE",
+    "AGENTWORKS_PWA",
+    "AGENTWORKS_TLS_CERT",
+    "AGENTWORKS_TLS_KEY",
+    "AGENTWORKS_TLS_CLIENT_CA",
+    "AGENTWORKS_PAM_SERVICE",
+    "AGENTWORKS_PAM_USERS",
+    "AGENTWORKS_PAM_CONFDIR",
+    "AGENTWORKS_TRUSTED_PROXIES",
+    "AGENTWORKS_MODEL_PROVIDERS_DIR",
+    "AGENTWORKS_SUPERVISOR_DIR",
+    "AGENTWORKS_SUPERVISOR_TOKEN",
+    "AGENTWORKS_RELEASE_DIR",
+    "AGENTWORKS_RESTART_REQUEST",
+    "AGENTWORKS_OPENCODE_PATH",
+    "AGENTWORKS_ANTIGRAVITY_PATH",
+    "AGENTWORKS_MCP_ENDPOINT",
+    "AGENTWORKS_MCP_ENDPOINT_FILE",
+    "AGENTWORKS_MCP_TOKEN",
+    "AGENTWORKS_MCP_TOKEN_FILE",
+    "AGENTWORKS_LOGIN_ENV",
+    "NOTIFY_SOCKET",
+    "LISTEN_PID",
+    "LISTEN_FDS",
+    "LISTEN_FDNAMES",
+    "WATCHDOG_PID",
+    "WATCHDOG_USEC",
+    "INVOCATION_ID",
+    "JOURNAL_STREAM",
+    "SYSTEMD_EXEC_PID",
+    "MANAGERPID",
+    "MANAGERPIDFDID",
+    "MEMORY_PRESSURE_WATCH",
+    "MEMORY_PRESSURE_WRITE",
+];
+
+/// Tells a harness, and everything it runs, which Agentworks session it serves.
+pub fn session_environment(id: &str) -> [(&'static str, String); 2] {
+    [
+        ("AGENTWORKS_SESSION_ID", id.to_owned()),
+        (
+            "AGENTWORKS_SESSION_URI",
+            format!("agentworks://sessions/{id}"),
+        ),
+    ]
 }
 
 pub fn agent_config(provider: &str, api_key_mode: bool, host_profile: bool) -> AcpAgentConfig {
@@ -88,6 +159,11 @@ pub fn agent_config(provider: &str, api_key_mode: bool, host_profile: bool) -> A
             config = config.env("GOOSE_PATH_ROOT", root.to_string_lossy());
         }
         config
+    } else if provider == "antigravity" {
+        AcpAgentConfig::new(antigravity_path().unwrap_or_else(|| "agy".into()))
+            .arg("acp")
+            .env("GEMINI_API_KEY", "")
+            .env("GOOGLE_API_KEY", "")
     } else if provider == "opencode" {
         let home = runtime_root().join(".agentworks/opencode");
         let mut config =
@@ -108,14 +184,15 @@ pub fn agent_config(provider: &str, api_key_mode: bool, host_profile: bool) -> A
             .env("CODEX_API_KEY", "")
             .env("ANTHROPIC_API_KEY", "")
     } else {
-        let mut config = if provider == "codex-rust" {
-            AcpAgentConfig::new(std::env::current_exe().expect("executable path")).arg("codex-acp")
-        } else if provider == "claude-rust" {
-            AcpAgentConfig::new(std::env::current_exe().expect("executable path")).arg("claude-acp")
-        } else if let Some(node) = std::env::var_os("AGENTWORKS_NODE") {
-            AcpAgentConfig::new(node).arg(adapter_path(provider).to_string_lossy())
+        let mut config = if let Some(command) = acp_override() {
+            AcpAgentConfig::new(command)
         } else {
-            AcpAgentConfig::new(adapter_path(provider))
+            let bridge = if cli_provider(provider) == "codex" {
+                "codex-acp"
+            } else {
+                "claude-acp"
+            };
+            AcpAgentConfig::new(std::env::current_exe().expect("executable path")).arg(bridge)
         }
         .env("NO_BROWSER", "1");
         if api_key_mode {
@@ -143,7 +220,9 @@ pub fn agent_config(provider: &str, api_key_mode: bool, host_profile: bool) -> A
         }
         config
     };
-    config
+    SERVICE_ENVIRONMENT
+        .iter()
+        .fold(config, |config, name| config.env_remove(*name))
 }
 
 pub fn prepare(provider: &str) -> std::io::Result<()> {
@@ -151,7 +230,9 @@ pub fn prepare(provider: &str) -> std::io::Result<()> {
         for dir in ["data", "cache", "state", "config"] {
             std::fs::create_dir_all(runtime_root().join(".agentworks/opencode").join(dir))?;
         }
-    } else if !matches!(provider, "demo" | "goose") && use_api_key() {
+    } else if provider == "antigravity" {
+        crate::antigravity::allow_agentworks_mcp();
+    } else if !matches!(provider, "demo" | "goose" | "antigravity") && use_api_key() {
         std::fs::create_dir_all(
             runtime_root()
                 .join(".agentworks")
@@ -197,7 +278,13 @@ pub fn parse_model_config(config: &Value, free_only: bool) -> Option<Value> {
 // Never surface configured credentials through an adapter diagnostic.
 pub fn safe_error(message: &str) -> String {
     let mut safe = message.to_string();
-    for key in ["OPENAI_API_KEY", "CODEX_API_KEY", "ANTHROPIC_API_KEY"] {
+    for key in [
+        "OPENAI_API_KEY",
+        "CODEX_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+    ] {
         if let Ok(value) = std::env::var(key) {
             if !value.is_empty() {
                 safe = safe.replace(&value, "[redacted]");
@@ -210,6 +297,65 @@ pub fn safe_error(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn antigravity_uses_native_acp_and_cached_sign_in() {
+        for api_key_mode in [false, true] {
+            let config = agent_config("antigravity", api_key_mode, false);
+            assert_eq!(config.arguments(), &["acp"]);
+            assert_eq!(
+                config
+                    .environment()
+                    .get("GEMINI_API_KEY")
+                    .map(String::as_str),
+                Some("")
+            );
+            assert_eq!(
+                config
+                    .environment()
+                    .get("GOOGLE_API_KEY")
+                    .map(String::as_str),
+                Some("")
+            );
+            assert!(!config.environment().contains_key("HOME"));
+            assert!(!config.environment().contains_key("NO_BROWSER"));
+            assert!(
+                config
+                    .removed_environment()
+                    .contains("AGENTWORKS_ANTIGRAVITY_PATH")
+            );
+        }
+    }
+    #[test]
+    fn every_harness_withholds_service_configuration() {
+        for provider in [
+            "demo",
+            "goose",
+            "opencode",
+            "antigravity",
+            "claude",
+            "codex-rust",
+        ] {
+            let config = agent_config(provider, false, false);
+            for name in [
+                "AGENTWORKS_DB_PATH",
+                "AGENTWORKS_SUPERVISOR_TOKEN",
+                "AGENTWORKS_MCP_TOKEN",
+                "AGENTWORKS_MCP_TOKEN_FILE",
+                "AGENTWORKS_MCP_ENDPOINT",
+                "AGENTWORKS_MCP_ENDPOINT_FILE",
+                "NOTIFY_SOCKET",
+            ] {
+                assert!(
+                    config.removed_environment().contains(name),
+                    "{provider} {name}"
+                );
+                assert!(
+                    !config.environment().contains_key(name),
+                    "{provider} {name}"
+                );
+            }
+        }
+    }
     #[test]
     fn existing_signin_inherits_credential_locations_and_does_not_force_api_keys() {
         for provider in ["claude", "claude-rust", "codex", "codex-rust"] {
@@ -285,7 +431,7 @@ mod tests {
                 );
             }
         }
-        assert!(installed("goose"));
+        assert_eq!(installed("goose"), cfg!(feature = "goose"));
         assert!(
             !agent_config("goose", false, true)
                 .environment()
@@ -305,10 +451,20 @@ mod tests {
                 .get("CODEX_HOME")
         );
         assert!(!native.environment().contains_key("CLAUDE_CONFIG_DIR"));
-        assert_ne!(
-            native.command(),
-            agent_config("codex", true, false).command()
-        );
+    }
+
+    #[test]
+    fn legacy_ids_run_the_rust_bridges() {
+        assert!(is_legacy("claude") && is_legacy("codex") && !is_legacy("claude-rust"));
+        for (legacy, native) in [("claude", "claude-rust"), ("codex", "codex-rust")] {
+            let (old, new) = (
+                agent_config(legacy, false, false),
+                agent_config(native, false, false),
+            );
+            assert_eq!(old.command(), new.command());
+            assert_eq!(old.arguments(), new.arguments());
+            assert_eq!(installed(legacy), installed(native));
+        }
     }
 
     #[test]

@@ -156,8 +156,8 @@ test('UI: attach, preview, send and render; unsupported files and busy turns are
   await expect(chips).toHaveCount(1);
   await input.setInputFiles({name:'notes.txt',mimeType:'text/plain',buffer:Buffer.from('remember the milk')});
   await expect(page.locator('#attachment-list .attachment-chip.ready')).toHaveCount(2);
-  await page.locator('#prompt').fill('what is attached?');
-  await page.locator('#prompt').press('Enter');
+  await page.locator('#prompt-editor .cm-content').fill('what is attached?');
+  await page.locator('#prompt-editor .cm-content').press('Enter');
   await expect(page.locator('#attachment-list')).toBeHidden();
   const sent=page.locator('.message.user .message-attachments');
   await expect(sent.locator('img.attachment-sent-image')).toHaveAttribute('alt','pixel.png');
@@ -170,11 +170,11 @@ test('UI: attach, preview, send and render; unsupported files and busy turns are
   await page.reload();
   await expect(page.locator('.message.user .message-attachments img')).toHaveCount(1);
   // While busy, attachments are not queued; the draft and chips stay.
-  await page.locator('#prompt').fill('slow turn');await page.locator('#prompt').press('Enter');
+  await page.locator('#prompt-editor .cm-content').fill('slow turn');await page.locator('#prompt-editor .cm-content').press('Enter');
   await expect(page.locator('#stop')).toBeVisible();
   await input.setInputFiles({name:'later.txt',mimeType:'text/plain',buffer:Buffer.from('later')});
   await expect(page.locator('#attachment-list .attachment-chip.ready')).toHaveCount(1);
-  await page.locator('#prompt').fill('follow up with file');await page.locator('#prompt').press('Enter');
+  await page.locator('#prompt-editor .cm-content').fill('follow up with file');await page.locator('#prompt-editor .cm-content').press('Enter');
   await expect(page.locator('#toast')).toContainText('Attachments can’t be queued');
   await expect(page.locator('#prompt')).toHaveValue('follow up with file');
   await expect(page.locator('#attachment-list .attachment-chip')).toHaveCount(1);

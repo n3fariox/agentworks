@@ -3,7 +3,7 @@ export function setupInboxDelivery({api,getActive,toast,uuid}) {
   const dialog=document.getElementById('agents-dialog');
   const panel=document.createElement('section');panel.className='settings-section';panel.id='inbox-delivery-controls';
   const heading=document.createElement('h3');heading.textContent='Automatic inbox turns';
-  const help=document.createElement('p');help.textContent='Off by default. Authorize new peer messages to start turns in this saved context. The authorization stands until you disable it — it has no automatic expiry, and it survives a normal service restart while this session, its saved context, project, directory and grants stay the same. A turn interrupted by a restart is never repeated: it stays paused in the ledger for you to inspect. Stop, Suspend, archive, a completion report, a grant or project change, or a replaced native context ends it and asks you to authorize again. Peer text is untrusted context and cannot extend any of this.';
+  const help=document.createElement('p');help.textContent='On by default: new peer messages start turns in this session, with no total-turn cap. Set limits below, or disable it. It stays on until you disable it or a stop time or turn limit you chose runs out; it survives service restarts and follows the session to a new project, directory or native context. When the session cannot take a turn (suspended, archived, disconnected, grant off, needing attention), wakes are held and delivered once it can; Stop and archive drop the queued batch. Mail from a sender that can no longer message here is dropped. A turn interrupted by a restart is never repeated: it stays paused in the ledger for you to inspect. Peer text is untrusted context and cannot extend any of this.';
   help.className='field-note';
   const form=document.createElement('form');form.id='inbox-delivery-form';
   const controls=document.createElement('fieldset');controls.disabled=true;form.append(controls);
@@ -27,9 +27,8 @@ export function setupInboxDelivery({api,getActive,toast,uuid}) {
   let timer,busy=false,pendingRequest=null,dirty=false,loaded=false,epoch=0;
   const current=(id,version)=>dialog.open&&getActive()?.id===id&&epoch===version;
   function fill(p){
-    // Unconfigured policies have zero bounds. Show safe defaults until first authorization.
     fields.maxTurns.value=p.maxTurns??1;
-    unlimitedBox.checked=p.maxTurns==null&&p.generation>0;
+    unlimitedBox.checked=p.maxTurns==null;
     fields.maxTurns.disabled=unlimitedBox.checked;
     fields.cooldownSeconds.value=p.cooldownSeconds||30;
     fields.maxBatch.value=p.maxBatch||5;
@@ -39,7 +38,7 @@ export function setupInboxDelivery({api,getActive,toast,uuid}) {
   function render(data){
     const p=data.policy;
     const turns=p.maxTurns==null?`${p.attempts} turns, no total-turn cap`:`${p.attempts}/${p.maxTurns} turns`;
-    const until=p.enabled?(p.deadline?` · stops ${new Date(p.deadline).toLocaleString()}`:' · standing'):'';
+    const until=p.enabled?(p.deadline?` · stops ${new Date(p.deadline).toLocaleString()}`:' · standing')+(data.held?` · held: ${data.held}`:''):'';
     status.textContent=`${p.enabled?'Enabled':'Off'} · ${turns}${until} · ${data.pending} pending${p.reason?' · '+p.reason:''}`;
     const paused=data.deliveries.filter(d=>d.state==='paused').length;
     if(paused)status.textContent+=` · ${paused} paused for inspection`;

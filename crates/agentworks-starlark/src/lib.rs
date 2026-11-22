@@ -13,3 +13,6 @@ pub const INBOX_MESSAGE_SCRIPT: &str = include_str!("../scripts/inbox_message.st
 
 /// Source of the bundled tool card header script.
 pub const TOOL_HEADER_SCRIPT: &str = include_str!("../scripts/tool_header.star");
+
+/// Editable automation recipe, using only public Starlark primitives.
+pub const GITHUB_REVIEW_SCRIPT: &str = include_str!("../scripts/github_review.star");

@@ -7,6 +7,7 @@
 .recipe-step{display:grid;grid-template-columns:22px minmax(0,1fr) auto;gap:8px;align-items:start}
 .recipe-step-number{font-size:11px;color:var(--muted);text-align:right;padding-top:9px}
 .recipe-step textarea{width:100%;resize:vertical;min-height:64px;background:#15171c;border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px;font:12px/1.6 inherit}
+#automation-source-code{display:block;width:100%;min-height:280px;resize:vertical;background:#15171c;border:1px solid var(--border);color:var(--text);border-radius:8px;padding:10px;font:12px/1.6 ui-monospace,SFMono-Regular,monospace}
 .recipe-step-tools{display:flex;flex-direction:column;gap:2px}
 .recipe-step-tools .icon-button{width:28px;height:24px;font-size:13px}
 .recipe-step-tools .icon-button:disabled{opacity:.35;cursor:default}
@@ -15,7 +16,7 @@
 .automation-recipe-view .recipe-steps li{counter-increment:step;margin:0}
 .automation-recipe-view .recipe-steps li::before{content:"Step " counter(step);display:block;font-size:10px;color:var(--muted);margin-bottom:6px}#automation-dialog .workspace-check{margin:16px 0 0;font-size:12px}#automation-dialog .workspace-check input{margin:0;width:auto}#automation-dialog input,#location-dialog input{min-width:0}#automation-dialog .model-field input{min-width:0}
 @media(max-width:1100px){.workspace-preview-body{padding:22px 18px}.session-bar{padding:15px 20px}#messages{padding:22px 20px}.composer-wrap{padding:12px 18px}.session-bar select{max-width:100%}}
-@media(max-width:800px){.layout,body[data-workspace-view=files] .layout,body[data-workspace-view=automations] .layout{display:flex;flex-direction:column;height:100dvh;min-height:0}.layout>main{flex:1;min-height:0}#sidebar{top:59px;height:calc(100dvh - 59px);padding-top:21px}main>header{padding:0 12px;gap:6px;height:auto;min-height:61px;flex-wrap:wrap;align-content:center;row-gap:5px}#menu{padding:7px 4px;flex:none}.workspace-context{gap:5px}.workspace-context select{padding:8px 5px;font-size:12px}.workspace-context #workspace-project{max-width:115px;flex:1}.workspace-context #workspace-location{max-width:none;flex:1.25}.workspace-context #add-location{padding:5px;font-size:14px}.header-right{display:none}#workspace-files,#workspace-automations{grid-template-columns:210px minmax(0,1fr)}body[data-workspace-view=files] #menu,body[data-workspace-view=automations] #menu{display:none}.workspace-preview-body{padding:22px 18px}#automation-detail{padding:23px 18px}.automation-detail-header{gap:12px}}
+@media(max-width:800px){.layout,body[data-workspace-view=files] .layout,body[data-workspace-view=automations] .layout{display:flex;flex-direction:column;height:100dvh;min-height:0}.layout>main{flex:1;min-height:0}#sidebar{top:59px;height:calc(100dvh - 59px);padding-top:21px}main>header{padding:0 12px;gap:6px;height:auto;min-height:61px;flex-wrap:wrap;align-content:center;row-gap:5px}#menu{padding:7px 4px;flex:none}.workspace-context{gap:5px}.workspace-context select{padding:8px 5px;font-size:12px}.workspace-context #workspace-project{max-width:115px;flex:1}.workspace-context #workspace-location{max-width:none;flex:1.25}.workspace-context #add-location{padding:5px;font-size:14px}.header-right{display:none}#workspace-files,#workspace-automations{grid-template-columns:210px minmax(0,1fr)}body[data-workspace-view=files] #menu,body[data-workspace-view=automations] #menu,body[data-workspace-view=github] #menu{display:none}.workspace-preview-body{padding:22px 18px}#automation-detail{padding:23px 18px}.automation-detail-header{gap:12px}}
 @media(max-width:560px){#workspace-files,#workspace-automations{display:flex;flex-direction:column;overflow:auto}.workspace-file-list,.workspace-automation-list{flex:none;max-height:32dvh;border-right:0;border-bottom:1px solid var(--border);padding:14px 12px}.workspace-file-list .workspace-section-heading,.workspace-automation-list .workspace-section-heading{margin-bottom:8px}#file-entries{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:3px}.file-entry{padding:9px 5px;font-size:11px}.workspace-check{margin:8px 4px;font-size:11px}#workspace-file-detail{flex:none;min-height:320px;overflow:visible}#automation-detail{flex:none;overflow:visible;min-height:320px}.workspace-preview-header{padding:14px 16px;gap:8px}.workspace-preview-body{padding:20px 16px}.workspace-preview-footer{padding:14px 16px}.automation-run{gap:8px}.automation-instructions{max-height:none}.session-bar{padding:13px 16px;gap:9px}#messages{padding:22px 16px}.composer-wrap{padding:11px 14px}#automation-dialog textarea,#location-dialog input{font-size:16px}.automation-item{max-width:100%}}
 @media(pointer:coarse){.workspace-nav-item,.workspace-context select,.file-entry,.workspace-preview-footer button,.workspace-preview-tabs button,.automation-run{min-height:44px}}
 
@@ -54,8 +55,6 @@
 .markdown img.opens-preview{cursor:zoom-in}
 @media(max-width:800px){#side-panel{position:relative;inset:auto;transform:none;transition:none;z-index:auto;width:auto;min-width:0;max-width:none;border-left:0;flex:1}#workspace-session-area:has(#side-panel:not([hidden])) #workspace-chat-column{display:none}.side-panel-head{padding:6px 8px 6px 12px;min-height:52px}.side-tabs button{padding:8px 18px;font-size:13px}#side-close{min-width:44px;min-height:44px}#side-diff{padding:4px 12px 12px}}
 
-#review-queue form{display:grid;gap:12px;margin:16px 0}#review-queue label{display:grid;gap:5px}#review-queue input,#review-queue select,#review-queue textarea{box-sizing:border-box;width:100%;min-width:0}#review-queue pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}#review-queue article{margin:10px 0}
-#review-queue [hidden]{display:none}
 .worktree-paths{max-height:160px;overflow:auto;font:11px ui-monospace,monospace;color:#c8ccd3;padding-left:18px;overflow-wrap:anywhere}.danger-button{background:#34272b;color:#efb4ba;border:1px solid #6b3f46;border-radius:7px;padding:12px 15px;font-size:12px;font-weight:600}.danger-button:hover{background:#432d33}#worktree-archive-dialog .dialog-footer{flex-wrap:wrap;justify-content:flex-end}#worktree-archive-cancel{margin-right:auto}
 .controller-item{display:flex;gap:10px;align-items:flex-start;justify-content:space-between;border-bottom:1px solid var(--border);padding:10px 0}.controller-item strong{display:block;font-size:13px;font-weight:550}.controller-item small{display:block;color:var(--muted);font-size:11px;margin:4px 0}.controller-item code{font-size:10px;color:#9a93ab;overflow-wrap:anywhere}#controller-config{width:100%;font:11px ui-monospace,monospace;background:#111417;color:var(--text);border-radius:7px;padding:10px}#controllers-dialog{max-height:94dvh;overflow:auto}
 /* Main session views share the same header and optional Files/Diff column. */
@@ -96,3 +95,68 @@ body[data-workspace-view=host-terminal] .workspace-context{display:none}
 .automation-days input{width:auto;margin:0;accent-color:var(--accent)}
 .run-status.missed,.run-status.skipped{background:#2b2c31;color:#b9bcc6}
 @media (max-width:650px){.automation-schedule{padding-left:0}}
+
+/* Files and Diff use the whole session canvas.
+   Keep the chat mounted so closing the view restores draft and scroll state. */
+#workspace-session-area:has(#side-panel:not([hidden])) #workspace-chat-column{display:none}
+#side-panel{width:100%;min-width:0;max-width:none;flex:1;border-left:0}
+#side-panel-resize{display:none}
+.workspace-preview-path{display:flex;flex-wrap:wrap;align-items:center;gap:5px;min-width:0;overflow-wrap:anywhere;font-size:12px}
+.workspace-preview-path .text-button{font-size:12px;overflow-wrap:anywhere;text-align:left}
+
+/* Session toolbar, wider than phones: agent controls share one chip style,
+   views are matching toggles, and less-used session actions sit behind ⋯ at
+   the far right. Phones keep the session ⋯ popover from style.css. */
+.overflow-label{display:none}
+.lifecycle-label{display:block;font-size:11px;color:var(--muted);margin:2px 0 4px}
+.lifecycle-actions #session-project{width:100%;max-width:none;margin-bottom:6px}
+.lifecycle-actions hr{border:0;border-top:1px solid var(--border);margin:8px 0}
+@media(min-width:651px){
+  .toolbar-group{display:flex;align-items:center;gap:6px}
+  .toolbar-group:not(:has(>:not([hidden]))){display:none}
+  .session-bar :is(#model-picker,#permission-mode-picker){margin:0;height:30px;padding:0 8px;font-size:12px;border:1px solid var(--border);border-radius:7px;background:#1b1d22;color:var(--text)}
+  .session-config-options>summary{list-style:none;display:flex;align-items:center;height:30px;padding:0 10px;font-size:12px;border:1px solid var(--border);border-radius:7px;background:#1b1d22}
+  .session-config-options>summary::-webkit-details-marker{display:none}
+  .session-config-options>summary::after{content:'▾';margin-left:6px;color:var(--muted)}
+  .session-config-options[open]>summary{border-color:#5b5370}
+  .view-toggles{gap:2px;padding-left:10px;border-left:1px solid var(--border)}
+  .session-bar .view-toggles .text-button{font-size:12px;padding:6px 10px;border-radius:7px;color:#b9bec8}
+  .session-bar .view-toggles .text-button:hover{background:#202226;color:var(--text)}
+  .session-bar .view-toggles .text-button[aria-expanded=true]{background:#25212e;color:var(--accent)}
+  #lifecycle-menu{margin-left:auto}
+  #lifecycle-menu>summary{list-style:none;display:flex;align-items:center;justify-content:center;width:32px;min-height:0;height:30px;padding:0;font-size:16px}
+  #lifecycle-menu>summary::-webkit-details-marker{display:none}
+  #lifecycle-menu[open]>summary{border-color:#5b5370;background:#25212e}
+  #dismiss-lifecycle{display:none}
+  .lifecycle-actions{top:calc(100% + 6px)}
+  .lifecycle-actions .text-button{min-height:36px}
+}
+@media(max-width:650px){
+  .overflow-dots{display:none}
+  .overflow-label{display:inline}
+}
+
+/* Lines a chat.user formatter rewrote render as Markdown among the literal ones. */
+.message-body .user-formatted{white-space:normal}
+.message-body div.user-formatted>:first-child{margin-top:0}
+.message-body div.user-formatted>:last-child{margin-bottom:0}
+
+.model-viewer{display:block;width:100%;height:clamp(320px,65vh,760px);border:0;border-radius:8px;background:#171a1e}
+.background-job-preview:not([hidden]){display:block;margin-top:5px;color:var(--muted);font-size:11px;line-height:1.5;min-width:0}.background-job-preview>span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.background-jobs[open]>summary .background-job-preview{display:none}
+
+/* The visual viewport excludes the on-screen keyboard on iOS and Android. */
+@media(max-width:800px){
+  html[data-composer-viewport] body .layout{position:fixed;top:var(--composer-viewport-top);left:0;right:0;height:var(--composer-viewport-height);min-height:0}
+  html[data-composer-viewport] .layout>main{height:100%;min-height:0}
+  html[data-composer-viewport] #sidebar{height:calc(var(--composer-viewport-height) - 59px)}
+  html[data-composer-viewport] :is(#prompt,#prompt-editor,#prompt-editor .cm-scroller){max-height:min(320px,calc(var(--composer-viewport-height) * .35))}
+  html[data-composer-viewport] .composer-wrap{flex-shrink:0}
+}
+
+/* Session navigation lives in the sidebar; keep host/directory controls for Files only. */
+main>header :is(#palette-search,label[for=workspace-project],#workspace-project){display:none}
+body:not([data-workspace-view=files]) .workspace-context{display:none}
+body.menu-open main>header,body:is([data-workspace-view=sessions],[data-workspace-view=automations],[data-workspace-view=github]) main>header{display:none}
+@media(min-width:651px){body:not([data-workspace-view=files]):not([data-workspace-view=host-terminal]) main>header{display:none}}
+.session-location{width:100%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:#777f8c}
+#session-location-title{font-weight:550;color:var(--text)}

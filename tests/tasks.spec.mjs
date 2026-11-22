@@ -1,0 +1,71 @@
+import {test,expect} from '@playwright/test';
+import {spawn} from 'node:child_process';
+import {mkdtemp} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {resolve,join} from 'node:path';
+import {randomUUID} from 'node:crypto';
+import {serverReady,stopChild,removeFixture} from './support/cleanup.mjs';
+const port=process.env.AGENTWORKS_TASKS_BROWSER_PORT||'4592',base=`http://127.0.0.1:${port}`;
+test.use({baseURL:base});let fixture,server;
+async function api(path,body,method=body===undefined?'GET':'POST'){const r=await fetch(base+path,{method,headers:{Origin:base,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});const text=await r.text();expect(r.status,text).toBe(200);return JSON.parse(text);}
+test.beforeAll(async()=>{fixture=await mkdtemp(join(tmpdir(),'agentworks-tasks-browser-'));server=spawn(resolve(process.env.AGENTWORKS_BINARY||'target/debug/agentworks'),[],{env:{...process.env,AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:port,AGENTWORKS_ROOTS:fixture,AGENTWORKS_CATALOG_PATH:join(fixture,'catalog.json'),AGENTWORKS_DB_PATH:join(fixture,'sessions.sqlite3'),AGENTWORKS_DEMO_STATE_DIR:join(fixture,'demo'),AGENTWORKS_SUPERVISOR_DIR:'',AGENTWORKS_SUPERVISOR_TOKEN:'',AGENTWORKS_RESTART_REQUEST:''},stdio:'ignore'});for(let i=0;i<200;i++){if(await serverReady(server,base))return;await new Promise(r=>setTimeout(r,100));}throw Error('Task browser server startup timed out');});
+test.afterAll(async()=>{await stopChild(server);await removeFixture(fixture);});
+
+test('task CRUD, sanitized Markdown, # picker, durable URI links and rename',async({page})=>{
+ const errors=[];page.on('pageerror',e=>errors.push(e.message));page.on('dialog',d=>d.accept());
+ const project=await api('/api/projects',{name:'Browser tickets',slug:'BROW',tasksEnabled:true}),other=await api('/api/projects',{name:'Other browser tickets',tasksEnabled:true});
+ await api(`/api/projects/${other.id}/tasks`,{title:'Hidden outsider',requestId:randomUUID()});
+ const session=await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Ticket browser',projectId:project.id});
+ await expect.poll(async()=>(await api(`/api/sessions/${session.id}`)).session.status).toBe('idle');
+ await page.addInitScript(id=>{localStorage.setItem('agentworks-session',id);localStorage.setItem('agentworks-composer-source','true');},session.id);
+ await page.goto('/');await expect(page.locator('#session-state')).toHaveText('Ready');
+ if(await page.locator('#session-more').isVisible())await page.click('#session-more');await page.locator('#lifecycle-menu > summary').click();await page.click('#session-tasks');await expect(page.locator('#tasks-dialog')).toBeVisible();
+ const malicious='<img src=x onerror=alert(1)>';
+ await page.fill('#task-title',malicious);await page.fill('#task-body','# Heading\n\n**Bold**\n\n'+malicious+'\n\n[bad](javascript:alert(1))');
+ await page.locator('#task-preview').locator('..').locator('summary').click();
+ await expect(page.locator('#task-preview h1')).toHaveText('Heading');await expect(page.locator('#task-preview strong')).toHaveText('Bold');
+ await expect(page.locator('#task-preview [onerror], #task-preview a[href^="javascript:"]')).toHaveCount(0);
+ await page.click('#task-save');await expect(page.locator('#task-heading')).toHaveText('BROW-1');
+ await expect(page.locator('#tasks-list')).toContainText(malicious);await expect(page.locator('#tasks-list img')).toHaveCount(0);
+ await page.fill('#task-title','Picker ticket');await page.selectOption('#task-status','done');await page.click('#task-save');await expect(page.locator('#task-meta')).toContainText('Revision 2');
+ await expect(page.locator('#tasks-list')).toContainText('No open tickets.');
+ await page.check('#tasks-show-done');await expect(page.locator('#tasks-list')).toContainText('BROW-1');
+ await page.locator('#tasks-list button').first().click();await page.selectOption('#task-status','open');await page.click('#task-save');await expect(page.locator('#task-meta')).toContainText('Revision 3');
+ await page.click('#dismiss-tasks');
+ await api(`/api/projects/${project.id}/tasks`,{title:'Completed ticket excluded from picker',status:'done',requestId:randomUUID()});
+ const prompt=page.locator('#prompt'),list=page.locator('#mention-list');await page.reload();await expect(page.locator('#session-state')).toHaveText('Ready');await prompt.pressSequentially('Review #');
+ await expect(list.getByRole('option')).toHaveCount(1);await expect(list).not.toContainText('Hidden outsider');await expect(list).toContainText('#BROW-1');
+ await prompt.press('Enter');await expect(prompt).toHaveValue('Review #BROW-1 ');await expect(list).toBeHidden();await prompt.press('Enter');
+ const uri=`agentworks://projects/${project.id}/tasks/1`,message=page.locator('.message.user .message-body').last();
+ await expect(message.getByRole('link',{name:'#BROW-1'})).toHaveAttribute('href',uri);
+ await page.reload();await expect(page.locator('.message.user .message-body').last().getByRole('link',{name:'#BROW-1'})).toHaveAttribute('href',uri);
+ await api(`/api/projects/${project.id}`,{name:'Renamed browser tickets',slug:'REN'},'PATCH');
+ await page.locator('.message.user .message-body').last().getByRole('link',{name:'#BROW-1'}).click();await expect(page.locator('#task-heading')).toHaveText('REN-1');await expect(page.locator('#task-title')).toHaveValue('Picker ticket');
+ await page.setViewportSize({width:390,height:844});expect(await page.locator('#tasks-dialog').evaluate(n=>n.scrollWidth<=n.clientWidth)).toBe(true);
+ // A competing edit is never silently overwritten by the stale browser revision.
+ await api(`/api/projects/${project.id}/tasks/1`,{revision:3,title:'Concurrent edit',requestId:randomUUID()},'PUT');
+ await page.fill('#task-title','Stale browser edit');await page.click('#task-save');await expect(page.locator('#task-error')).toContainText('Conflict');
+ await page.click('#tasks-refresh');await expect(page.locator('#task-title')).toHaveValue('Concurrent edit');await page.click('#task-delete');await expect(page.locator('#tasks-list')).toContainText('No open tickets.');
+ await page.click('#task-new');await page.fill('#task-title','Read only later');await page.click('#task-save');await expect(page.locator('#task-heading')).toHaveText('REN-3');
+ await api(`/api/projects/${project.id}/archive`,{archived:true,sessions:'ungroup'});await page.click('#tasks-refresh');await expect(page.locator('#task-title')).toBeDisabled();await expect(page.locator('#task-delete')).toBeDisabled();await expect(page.locator('#tasks-note')).toContainText('read-only');
+ expect(errors).toEqual([]);
+});
+
+test('project opt-in hides tickets and preserves direct links across disable and re-enable',async({page})=>{
+ const project=await api('/api/projects',{name:'Opt in UI',slug:'OPT'});
+ const session=await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Opt in session',projectId:project.id});
+ await expect.poll(async()=>(await api(`/api/sessions/${session.id}`)).session.status).toBe('idle');
+ await page.addInitScript(id=>{localStorage.setItem('agentworks-session',id);localStorage.setItem('agentworks-composer-source','true');},session.id);
+ await page.goto('/');await expect(page.locator('#session-state')).toHaveText('Ready');
+ await expect(page.locator('#session-tasks')).toBeHidden();
+ const settings=async()=>{await page.getByRole('button',{name:'Edit project Opt in UI',exact:true}).click();await expect(page.locator('#project-dialog')).toBeVisible();};
+ await settings();await expect(page.locator('#project-tasks-enabled')).not.toBeChecked();await expect(page.locator('#project-tasks')).toBeHidden();await expect(page.locator('#project-slug')).toBeDisabled();
+ await page.check('#project-tasks-enabled');await page.click('#save-project');await expect(page.locator('#project-dialog')).not.toBeVisible();
+ const task=(await api(`/api/projects/${project.id}/tasks`,{title:'Keep this ticket',requestId:randomUUID()})).task;
+ await settings();await expect(page.locator('#project-tasks')).toBeVisible();await page.uncheck('#project-tasks-enabled');await page.click('#save-project');await expect(page.locator('#project-dialog')).not.toBeVisible();
+ await expect(page.locator('#session-tasks')).toBeHidden();
+ await page.locator('#prompt').fill(`[#OPT-1](${task.uri})`);await page.locator('#send').click();
+ await page.locator('.message.user a').last().click();await expect(page.locator('#task-error')).toContainText('Tickets are disabled');await expect(page.locator('#task-save')).toBeDisabled();await page.click('#dismiss-tasks');
+ await settings();await page.check('#project-tasks-enabled');await page.click('#save-project');await expect(page.locator('#project-dialog')).not.toBeVisible();
+ await page.locator('.message.user a').last().click();await expect(page.locator('#task-title')).toHaveValue('Keep this ticket');
+});

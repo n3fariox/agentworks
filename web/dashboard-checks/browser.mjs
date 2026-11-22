@@ -14,7 +14,7 @@ const fixture = await mkdtemp(join(tmpdir(), 'agentworks-u10-'));
 const env = {...process.env, AGENTWORKS_BIND:'127.0.0.1', AGENTWORKS_PORT:'4531',
   AGENTWORKS_ROOTS:fixture, AGENTWORKS_CATALOG_PATH:join(fixture,'catalog.json'),
   AGENTWORKS_DB_PATH:join(fixture,'sessions.sqlite3'), AGENTWORKS_DEMO_STATE_DIR:join(fixture,'demo')};
-for (const key of Object.keys(env)) if (/^AGENTWORKS_(SUPERVISOR|RELEASE)/.test(key)) delete env[key];
+for (const key of Object.keys(env)) if (/^AGENTWORKS_(SUPERVISOR|SERVICE_DIR|RELEASE)/.test(key)) delete env[key];
 const server = spawn(resolve(process.env.AGENTWORKS_DASHBOARD_TEST_BINARY || '.cache/b009-u10-target/debug/agentworks'), [], {env, stdio:['ignore','pipe','pipe']});
 let log = '', proxy, browser;
 for (const stream of [server.stdout,server.stderr]) stream.on('data', chunk => log += chunk);

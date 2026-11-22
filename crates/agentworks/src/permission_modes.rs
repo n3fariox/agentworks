@@ -8,7 +8,15 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-pub use agentworks_session::permissions::{ClaudeDefault, CodexDefault};
+pub use agentworks_session::permissions::{AntigravityDefault, ClaudeDefault, CodexDefault};
+
+pub fn initial_antigravity_default(
+    provider: &str,
+    external: bool,
+    setting: Option<AntigravityDefault>,
+) -> Option<AntigravityDefault> {
+    (provider == "antigravity" && !external).then(|| setting.unwrap_or_default())
+}
 pub fn initial_codex_default(
     provider: &str,
     external: bool,
@@ -229,6 +237,40 @@ mod tests {
                     .unwrap()
                     .contains("Codex default 'agent-full-access' is not advertised")
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn antigravity_defaults_to_auto_for_new_native_sessions() {
+        assert_eq!(
+            initial_antigravity_default("antigravity", false, None),
+            Some(AntigravityDefault::Auto)
+        );
+        assert_eq!(
+            initial_antigravity_default("antigravity", false, Some(AntigravityDefault::Plan)),
+            Some(AntigravityDefault::Plan)
+        );
+        assert_eq!(initial_antigravity_default("antigravity", true, None), None);
+        for provider in ["claude", "codex", "opencode", "demo"] {
+            assert_eq!(initial_antigravity_default(provider, false, None), None);
+        }
+        // Mode IDs as advertised by `agy acp` session/new.
+        let advertised = |current: &str| json!({"modes":{"currentModeId":current,"availableModes":[{"id":"default"},{"id":"accept-edits"},{"id":"auto"},{"id":"plan"}]}});
+        for mode in [
+            AntigravityDefault::Auto,
+            AntigravityDefault::Default,
+            AntigravityDefault::AcceptEdits,
+            AntigravityDefault::Plan,
+        ] {
+            let result = apply_initial(
+                parse(&advertised("default")).unwrap(),
+                "Antigravity",
+                mode.id(),
+                |_, requested| async move { Ok(advertised(&requested)) },
+            )
+            .await
+            .unwrap();
+            assert_eq!(result["currentValue"], mode.id());
         }
     }
 

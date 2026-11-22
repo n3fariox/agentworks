@@ -65,7 +65,7 @@ async fn native_bridge_works_with_typed_acp_client() {
                     let id = session.session_id.clone();
                     let configured = cx.send_request(SetSessionConfigOptionRequest::new(id.clone(), "mode", SessionConfigOptionValue::value_id("plan"))).block_task().await?;
                     assert!(serde_json::to_value(configured)?["configOptions"].as_array().unwrap().iter().any(|o| o["id"] == "mode" && o["currentValue"] == "plan"));
-                    for text in ["hello", "bash", "question", "plan", "tasks", "unfinished", "agent", "/usage"] {
+                    for text in ["hello", "bash", "question", "plan", "tasks", "unfinished", "agent", "/usage", "/rename Parser work"] {
                         let response = cx.send_request(PromptRequest::new(id.clone(), vec![ContentBlock::from(text)])).block_task().await?;
                         assert_eq!(response.stop_reason, StopReason::EndTurn, "{text}");
                     }
@@ -105,11 +105,19 @@ async fn native_bridge_works_with_typed_acp_client() {
         "config_option_update",
         "user_message_chunk",
         "subagent_update",
+        "session_info_update",
     ] {
         assert!(
             kinds.iter().any(|k| k == kind),
             "{kind} did not parse as a typed update"
         );
     }
+    assert!(
+        updates
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|u| u["sessionUpdate"] == "session_info_update" && u["title"] == "Parser work")
+    );
     let _ = std::fs::remove_dir_all(config_dir);
 }

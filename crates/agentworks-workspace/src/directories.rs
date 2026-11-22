@@ -3,7 +3,10 @@
 //! Shared by the server (local host) and the remote worker. Callers pass the
 //! configured roots; every path is canonicalized here and must stay inside a
 //! canonical root, so browser-supplied strings are never trusted.
-use crate::{Error, fail};
+use crate::{
+    Error, fail,
+    paths::{canonicalize, display},
+};
 use http::StatusCode;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -15,7 +18,7 @@ const SCAN_LIMIT: usize = 5000;
 pub fn canonical_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     for root in roots {
-        if let Ok(root) = std::fs::canonicalize(root)
+        if let Ok(root) = canonicalize(root)
             && root.is_dir()
             && !out.contains(&root)
         {
@@ -52,7 +55,7 @@ pub fn resolve(roots: &[PathBuf], path: &str) -> Result<(PathBuf, PathBuf), Erro
             "No such directory inside the allowed roots",
         )
     };
-    let path = std::fs::canonicalize(requested).map_err(|_| hidden())?;
+    let path = canonicalize(requested).map_err(|_| hidden())?;
     let root = containing(&roots, &path).ok_or_else(hidden)?;
     if !path.is_dir() {
         return Err(hidden());
@@ -67,7 +70,7 @@ pub fn browse(roots: &[PathBuf], path: Option<&str>, hidden: bool) -> Result<Val
         let roots = canonical_roots(roots);
         let entries: Vec<Value> = roots
             .iter()
-            .map(|r| json!({"name":r.to_string_lossy(),"path":r}))
+            .map(|r| json!({"name":display(r),"path":display(r)}))
             .collect();
         return Ok(
             json!({"path":null,"root":null,"parent":null,"entries":entries,"truncated":false}),
@@ -88,20 +91,22 @@ pub fn browse(roots: &[PathBuf], path: Option<&str>, hidden: bool) -> Result<Val
         if !hidden && name.starts_with('.') {
             continue;
         }
-        let Ok(target) = std::fs::canonicalize(entry.path()) else {
+        let Ok(target) = canonicalize(entry.path()) else {
             continue;
         };
         if !target.starts_with(&root) || !target.is_dir() {
             continue;
         }
-        entries.push(json!({"name":name,"path":target}));
+        entries.push(json!({"name":name,"path":display(&target)}));
     }
     entries.sort_by_key(|e| e["name"].as_str().unwrap_or_default().to_lowercase());
     let parent = path
         .parent()
         .filter(|p| path != root && p.starts_with(&root))
-        .map(Path::to_path_buf);
-    Ok(json!({"path":path,"root":root,"parent":parent,"entries":entries,"truncated":truncated}))
+        .map(display);
+    Ok(
+        json!({"path":display(&path),"root":display(&root),"parent":parent,"entries":entries,"truncated":truncated}),
+    )
 }
 
 /// A single new path component.
@@ -132,7 +137,7 @@ pub fn create(roots: &[PathBuf], parent: &str, name: &str) -> Result<PathBuf, Er
     let (parent, root) = resolve(roots, parent)?;
     let created = make(&parent, &root, name)?;
     // Defense in depth: the result must still resolve to parent/name inside the root.
-    match std::fs::canonicalize(&created) {
+    match canonicalize(&created) {
         Ok(path) if path == created && path.starts_with(&root) && path.is_dir() => Ok(path),
         _ => Err(fail(
             StatusCode::CONFLICT,
@@ -222,7 +227,7 @@ mod tests {
     fn temp() -> Temp {
         let dir = std::env::temp_dir().join(format!("agentworks-dirs-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        Temp(std::fs::canonicalize(dir).unwrap())
+        Temp(canonicalize(dir).unwrap())
     }
     fn s(p: &Path) -> String {
         p.to_string_lossy().into_owned()

@@ -20,6 +20,7 @@ use tokio::{
     process::Command,
 };
 use tokio_tungstenite::tungstenite::{Message, protocol::WebSocketConfig};
+use tracing::Instrument;
 
 /// A remote execution host. The server reaches it over SSH and starts the
 /// Agentworks worker there; all session state stays on this server. The
@@ -47,18 +48,35 @@ pub struct Host {
 }
 pub const DEFAULT_REMOTE_COMMAND: &str = "agentworks";
 pub const PROTOCOL: u64 = 3;
+/// This build's version, `<major>.<minor>.<commit count>` (e.g. `0.1.376`), or
+/// `<major>.<minor>.0-dev` when the count is unknown; see build.rs. Unlike the
+/// protocol, a different version still connects, but is shown as out of date.
+pub const BUILD: &str = env!("AGENTWORKS_BUILD");
+
+/// Whether a worker reporting `build` is out of date with this server. A `-dev`
+/// version on either side cannot be compared; a worker too old to report a
+/// build is out of date.
+pub fn outdated(worker_build: Option<&str>) -> Option<bool> {
+    let known = |b: &str| !b.is_empty() && !b.ends_with("-dev");
+    match worker_build.filter(|b| !b.is_empty()) {
+        None => Some(true),
+        Some(b) if known(b) && known(BUILD) => Some(b != BUILD),
+        Some(_) => None,
+    }
+}
 const MAX_FRAME: usize = 64 * 1024 * 1024;
 /// The worker prints this line on stdout before the WebSocket starts. Anything
 /// earlier, such as output from the remote shell's startup files, is skipped.
 pub const READY: &str = "agentworks worker ready";
 const MAX_PREAMBLE: usize = 64 * 1024;
-pub const PROVIDERS: [&str; 7] = [
+pub const PROVIDERS: [&str; 8] = [
     "demo",
     "claude",
     "claude-rust",
     "codex",
     "codex-rust",
     "opencode",
+    "antigravity",
     "goose",
 ];
 const PING_EVERY: Duration = Duration::from_secs(15);
@@ -118,7 +136,12 @@ impl Hosts {
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         let mut tasks = self.tasks.lock().unwrap();
         self.write_link(&host.id, "connecting", String::new(), None);
-        let task = tokio::spawn(self.clone().supervise(host.clone(), generation));
+        let span = tracing::info_span!("host", host = %host.name);
+        let task = tokio::spawn(
+            self.clone()
+                .supervise(host.clone(), generation)
+                .instrument(span),
+        );
         tasks.insert(host.id, (generation, task.abort_handle()));
     }
     /// Aborting the supervisor drops its ssh child, which is killed on drop.
@@ -204,6 +227,7 @@ impl Hosts {
             );
             let started = Instant::now();
             let reason = self.connect_once(&host, generation).await;
+            tracing::warn!("Offline: {reason}");
             // A link that stayed up for a while was healthy; retry promptly.
             if started.elapsed() > MAX_BACKOFF {
                 backoff = MIN_BACKOFF;
@@ -223,6 +247,7 @@ impl Hosts {
 
     /// Runs one ssh session for its whole life and returns why it ended.
     async fn connect_once(&self, host: &Host, generation: u64) -> String {
+        let started = Instant::now();
         let mut child = match Command::new(&self.ssh)
             .args(ssh_args(host))
             .stdin(Stdio::piped())
@@ -240,6 +265,7 @@ impl Hosts {
             return "Could not attach to ssh's input and output.".into();
         };
         let log: Arc<Mutex<VecDeque<String>>> = Default::default();
+        // The worker logs to stderr, so its lines join the server's log here.
         collect(child.stderr.take(), log.clone());
         let tail = |log: &Arc<Mutex<VecDeque<String>>>| {
             let lines = log.lock().unwrap();
@@ -317,7 +343,7 @@ impl Hosts {
         };
         if ws
             .send(Message::text(
-                json!({"type":"welcome","protocol":PROTOCOL,"hostId":host.id}).to_string(),
+                json!({"type":"welcome","protocol":PROTOCOL,"hostId":host.id,"log":crate::log::configured()}).to_string(),
             ))
             .await
             .is_err()
@@ -345,6 +371,7 @@ impl Hosts {
             }
             let _ = sink.close().await;
         });
+        tracing::info!(elapsed_ms = crate::log::ms(started), "Connected");
         let live = Arc::new(Live::new(out.clone(), worker.clone()));
         let _connection = ConnectionGuard {
             live: live.clone(),
@@ -665,7 +692,7 @@ impl Live {
     pub fn home_terminal(self: &Arc<Self>) -> Result<crate::terminal::Handle, String> {
         let home = self.worker["home"]
             .as_str()
-            .filter(|home| home.starts_with('/'))
+            .filter(|home| agentworks_workspace::paths::normalize(home).is_some())
             .ok_or_else(|| "Update the remote worker to enable host terminals.".to_string())?;
         self.terminal(home)
     }
@@ -767,6 +794,13 @@ impl Live {
         let result = self.request(request).await?;
         serde_json::from_str(&result).map_err(|_| "Invalid workspace reply".into())
     }
+    pub async fn antigravity_quota(&self) -> Result<Value, String> {
+        if self.worker["antigravityQuota"] != true {
+            return Err("Update this host's worker to retrieve Antigravity quota".into());
+        }
+        let result = self.request(json!({"type":"antigravityQuota"})).await?;
+        serde_json::from_str(&result).map_err(|_| "Invalid Antigravity quota reply".into())
+    }
     pub async fn model_providers(&self, mut request: Value) -> Result<Value, String> {
         if self.worker["modelProviders"] != true {
             return Err("Update this host's worker to configure model providers".into());
@@ -778,7 +812,14 @@ impl Live {
     async fn request(&self, mut request: Value) -> Result<String, String> {
         // Lifecycle operations perform several bounded Git checks plus adapter
         // shutdown. Directory validation retains its shorter deadline.
-        let timeout = if request["type"] == "workspace" {
+        let timeout = if request["type"] == "antigravityQuota" {
+            Duration::from_secs(40)
+        } else if request["type"] == "workspace" && request["operation"] == "runWorktreeHooks" {
+            Duration::from_secs(360)
+        } else if request["type"] == "workspace" && request["operation"] == "populateWorktree" {
+            // A checkout of a large repository; Git's own deadline is shorter.
+            Duration::from_secs(660)
+        } else if request["type"] == "workspace" {
             Duration::from_secs(120)
         } else {
             Duration::from_secs(15)
@@ -793,19 +834,32 @@ impl Live {
             requests.insert(id, tx);
         }
         let _pending = DirectoryRequest { live: self, id };
+        let kind = request["operation"]
+            .as_str()
+            .or(request["type"].as_str())
+            .unwrap_or("")
+            .to_owned();
         request["request"] = json!(id);
         let request = request.to_string();
+        let started = Instant::now();
         if self.out.send(Message::text(request)).await.is_err() {
             self.requests.lock().unwrap().remove(&id);
             return Err("The host disconnected.".into());
         }
-        match tokio::time::timeout(timeout, rx).await {
+        let result = match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(result)) => result,
             _ => {
                 self.requests.lock().unwrap().remove(&id);
                 Err("The host did not answer.".into())
             }
-        }
+        };
+        tracing::debug!(
+            request = kind,
+            elapsed_ms = crate::log::ms(started),
+            ok = result.is_ok(),
+            "Host request finished"
+        );
+        result
     }
     /// Starts an agent adapter on the worker. The returned transport carries
     /// its ACP lines; dropping the guard stops the remote process.
@@ -815,20 +869,24 @@ impl Live {
         cwd: &str,
         host_profile: bool,
     ) -> Result<(RemoteLines, Spawned), String> {
-        self.spawn_profile(provider, cwd, host_profile, None)
+        self.spawn_profile(provider, cwd, host_profile, None, None)
     }
+    /// `session` names the Agentworks session in the harness environment.
+    /// Older workers ignore it.
     pub fn spawn_profile(
         self: &Arc<Self>,
         provider: &str,
         cwd: &str,
         host_profile: bool,
         model_provider: Option<&crate::model_providers::Connection>,
+        session: Option<&str>,
     ) -> Result<(RemoteLines, Spawned), String> {
         self.spawn_session(
             provider,
             cwd,
             host_profile,
             model_provider,
+            session,
             &Default::default(),
         )
     }
@@ -840,6 +898,7 @@ impl Live {
         cwd: &str,
         host_profile: bool,
         model_provider: Option<&crate::model_providers::Connection>,
+        session: Option<&str>,
         environment: &std::collections::BTreeMap<&str, &str>,
     ) -> Result<(RemoteLines, Spawned), String> {
         if !environment.is_empty() && self.worker["secretEnvironment"] != true {
@@ -862,7 +921,7 @@ impl Live {
             }
             channels.insert(channel, incoming_tx);
         }
-        let mut spawn = json!({"type":"spawn","channel":channel,"provider":provider,"cwd":cwd,"hostProfile":host_profile,"modelConnection":model_provider});
+        let mut spawn = json!({"type":"spawn","channel":channel,"provider":provider,"cwd":cwd,"hostProfile":host_profile,"modelConnection":model_provider,"session":session});
         if !environment.is_empty() {
             spawn["environment"] = json!(environment);
         }
@@ -1053,13 +1112,17 @@ fn check_hello(hello: &Value) -> Result<Value, String> {
         .collect();
     Ok(json!({
         "version": text("version", 40),
+        "build": text("build", 80),
         "platform": text("platform", 40),
         "hostname": text("hostname", 80),
         "providers": providers,
         "tools": hello["tools"],
         "mcpRelay": hello["mcpRelay"],
         "workspace": hello["workspace"] == true,
+        "gitSettings": hello["gitSettings"] == true,
+        "deferredWorktree": hello["deferredWorktree"] == true,
         "modelProviders": hello["modelProviders"] == true,
+        "antigravityQuota": hello["antigravityQuota"] == true,
         "sharedModelProviders": hello["sharedModelProviders"] == true,
         "worktreeCleanup": hello["worktreeCleanup"] == true,
         "directories": hello["directories"] == true,
@@ -1088,12 +1151,16 @@ fn collect(
     log: Arc<Mutex<VecDeque<String>>>,
 ) {
     let Some(output) = output else { return };
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(output).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            push_line(&log, &line);
+    tokio::spawn(
+        async move {
+            let mut lines = BufReader::new(output).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::info!(target: "agentworks::worker", "{line}");
+                push_line(&log, &line);
+            }
         }
-    });
+        .in_current_span(),
+    );
 }
 
 /// Reads ssh's stdout up to the worker's ready line, keeping what came before
@@ -1128,6 +1195,29 @@ async fn skip_preamble(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builds_compare_only_when_both_are_known() {
+        let prefix = concat!(
+            env!("CARGO_PKG_VERSION_MAJOR"),
+            ".",
+            env!("CARGO_PKG_VERSION_MINOR"),
+            "."
+        );
+        let patch = BUILD.strip_prefix(prefix).unwrap();
+        assert!(patch == "0-dev" || patch.parse::<u64>().is_ok(), "{BUILD}");
+        assert_eq!(outdated(None), Some(true));
+        assert_eq!(outdated(Some("")), Some(true));
+        assert_eq!(outdated(Some("0.1.0-dev")), None);
+        if BUILD.ends_with("-dev") {
+            assert_eq!(outdated(Some("0.1.12")), None);
+        } else {
+            assert_eq!(outdated(Some(BUILD)), Some(false));
+            assert_eq!(outdated(Some("0.0.1")), Some(true));
+            // Workers from before commit-count versions report a commit hash.
+            assert_eq!(outdated(Some("0.1.0+0123456789ab")), Some(true));
+        }
+    }
 
     #[tokio::test]
     async fn mcp_credentials_are_scoped_to_live_channels_and_links() {
@@ -1165,7 +1255,7 @@ mod tests {
         let (out, mut frames) = mpsc::channel(16);
         let old = Arc::new(Live::new(out, json!({"providers":["demo"]})));
         let error = old
-            .spawn_session("demo", "/remote", false, None, &environment)
+            .spawn_session("demo", "/remote", false, None, None, &environment)
             .err()
             .unwrap();
         assert!(error.contains("Update this host's worker"));
@@ -1184,7 +1274,7 @@ mod tests {
             json!({"providers":["demo"],"secretEnvironment":true}),
         ));
         let (_lines, _guard) = live
-            .spawn_session("demo", "/remote", false, None, &environment)
+            .spawn_session("demo", "/remote", false, None, None, &environment)
             .unwrap();
         let frame: Value =
             serde_json::from_str(frames.recv().await.unwrap().to_text().unwrap()).unwrap();

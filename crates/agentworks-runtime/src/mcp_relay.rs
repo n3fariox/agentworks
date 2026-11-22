@@ -22,6 +22,7 @@ pub fn allowed(operation: &str) -> bool {
         "tools/list"
             | "list_sessions"
             | "read_inbox"
+            | "read_message"
             | "send_message"
             | "acknowledge_message"
             | "list_session_secrets"

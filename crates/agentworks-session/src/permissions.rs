@@ -20,6 +20,30 @@ impl ClaudeDefault {
     }
 }
 
+/// ACP mode IDs advertised by `agy acp`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum AntigravityDefault {
+    #[default]
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "default")]
+    Default,
+    #[serde(rename = "accept-edits")]
+    AcceptEdits,
+    #[serde(rename = "plan")]
+    Plan,
+}
+impl AntigravityDefault {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Default => "default",
+            Self::AcceptEdits => "accept-edits",
+            Self::Plan => "plan",
+        }
+    }
+}
+
 /// ACP mode IDs from the pinned Codex adapter (not raw sandbox policy names).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum CodexDefault {

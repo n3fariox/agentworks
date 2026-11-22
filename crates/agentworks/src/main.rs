@@ -1,9 +1,11 @@
+mod account_quota;
 mod async_tasks;
 mod attachments;
 mod automations;
 mod browser_origin;
 mod catalog;
 mod codex_oauth;
+mod codex_transcript;
 mod communication;
 mod completion;
 mod controllers;
@@ -11,41 +13,53 @@ mod diff;
 mod directories;
 mod elicitation;
 mod enrollment;
+mod event_compaction;
 mod fork;
 mod git_context;
-mod goose_acp;
+mod git_settings;
+mod github;
+mod github_tracking;
 mod host_usage;
 mod hosting;
 mod hosts;
+mod idle_sleep;
 mod inbox_delivery;
 mod input_queue;
 mod lifecycle;
 mod limit_resume;
+mod login_env;
 mod mcp;
 mod model_providers;
+#[cfg(feature = "model-viewer")]
+mod model_viewer;
+mod native_rename;
 mod notifications;
+mod pam;
 mod permission_modes;
 mod recovery;
-mod review_queue;
+mod relocation;
 mod roles;
-mod secret_exec;
+mod routing;
+mod scripting;
 mod secrets;
 mod service_restart;
+mod service_unit;
+mod session_badges;
 mod session_config;
 mod session_runtime;
 mod store;
+mod tasks;
 mod terminal;
+mod tls;
 mod tool_bodies;
-mod tool_headers;
-mod tool_progress;
 mod transcript_history;
+mod web_auth;
 mod workspace;
 mod worktree_cleanup;
 mod worktrees;
-use agentworks_runtime::{
-    provider::{cli_provider, installed, key_present, use_api_key},
-    worker as agent,
-};
+use agentworks_presentation::chat;
+use agentworks_presentation::markdown::{inline_html, render_markdown_with_marker};
+use agentworks_runtime::provider::{cli_provider, installed, key_present, use_api_key};
 use agentworks_session::{SessionData, timeouts};
 use agentworks_workspace::sha256;
 use catalog::{Catalog, Settings};
@@ -65,18 +79,70 @@ use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    borrow::Cow,
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    env,
     net::IpAddr,
-    path::PathBuf,
+    path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tracing::Instrument;
 use uuid::Uuid;
 
 const MAX_EVENTS: usize = 3000;
 const MAX_EVENT_BYTES: usize = 4 * 1024 * 1024;
 type ApiResult = Result<Json<Value>, (StatusCode, String)>;
+
+fn add_mise_shims_to_path() {
+    let Some(home) = env::var_os("HOME").map(PathBuf::from) else {
+        return;
+    };
+    let mise = home.join(".local/bin/mise");
+    if !is_executable(&mise) {
+        return;
+    }
+
+    let data_dir = env::var_os("MISE_DATA_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(".local/share/mise"));
+    let shims = data_dir.join("shims");
+    if !shims.is_dir() {
+        return;
+    }
+
+    let current = env::var_os("PATH").unwrap_or_default();
+    if env::split_paths(&current).any(|path| path == shims) {
+        return;
+    }
+    let Ok(path) = env::join_paths(std::iter::once(shims).chain(env::split_paths(&current))) else {
+        return;
+    };
+
+    // This runs in the synchronous entry point before constructing Tokio or
+    // spawning any application threads; children inherit the augmented PATH.
+    unsafe { env::set_var("PATH", path) };
+}
+
+fn is_executable(path: &FsPath) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
 
 #[derive(Clone)]
 struct App {
@@ -97,20 +163,24 @@ struct App {
     notifications: notifications::Hub,
     hosts: Arc<hosts::Hosts>,
     host_usage: Arc<host_usage::Hub>,
+    account_quota: Arc<account_quota::Hub>,
+    router: Arc<routing::RouterState>,
+    github: Arc<github::Hub>,
+    web_auth: Arc<web_auth::WebAuth>,
 
-    /// U-05 progress parser thread and installed scripts.
-    progress: tool_progress::Hub,
+    /// Installed hook execution shared by presentation and automation adapters.
+    scripts: agentworks_scripting::Hub,
 }
 
 struct Session {
     id: String,
     provider: String,
-    cwd: PathBuf,
+    /// Working directory and its catalog location; `relocate` changes both together.
+    place: std::sync::RwLock<Place>,
     title: String,
     initial_model: Option<String>,
     created: u64,
     host_id: String,
-    location_id: String,
     data: Mutex<SessionData>,
     tx: broadcast::Sender<Value>,
     commands: Mutex<Option<mpsc::Sender<session_runtime::Command>>>,
@@ -120,10 +190,25 @@ struct Session {
     mcp_endpoint: std::net::SocketAddr,
     mcp_token: Mutex<String>,
     mcp_refresh_pending: std::sync::atomic::AtomicBool,
+    /// Restart harness: the next local start re-reads the login environment.
+    fresh_environment: std::sync::atomic::AtomicBool,
     /// U-02; cloned from the app hub so `emit` needs no global state.
     notifications: notifications::Hub,
-    /// U-05; derived tool progress, fed from `emit`.
-    progress: tool_progress::Hub,
+    /// Script host; derives tool views from events emitted by this session.
+    scripts: agentworks_scripting::Hub,
+    /// Account quota shared with every session on the same host and family.
+    account_quota: Arc<account_quota::Hub>,
+}
+
+#[derive(Clone)]
+struct Place {
+    cwd: PathBuf,
+    location_id: String,
+}
+impl Place {
+    fn at(cwd: PathBuf, location_id: String) -> std::sync::RwLock<Self> {
+        std::sync::RwLock::new(Self { cwd, location_id })
+    }
 }
 
 struct Approval {
@@ -167,6 +252,7 @@ impl Session {
             // the lock. Publish the actual state rather than an obsolete transition.
             data["status"] = json!(state.status);
             data["explicitlySuspended"] = json!(state.lifecycle.suspended);
+            data["asleep"] = json!(state.lifecycle.asleep);
         }
         if let Some(origin) = state.automation.as_mut().filter(|a| a.outcome.is_none()) {
             origin.outcome = match kind {
@@ -220,8 +306,19 @@ impl Session {
         if kind == "user" {
             state.last_prompt = Some(event.clone());
         }
+        if kind == "antigravity_quota" && self.provider == "antigravity" {
+            self.account_quota
+                .observe_antigravity(&self.host_id, &self.id, &event["data"]);
+        }
+        if kind == "acp" {
+            let family = account_quota::family(&self.provider, state.model_provider.as_deref());
+            self.account_quota
+                .observe(&self.host_id, &family, &self.id, time, &event["data"]);
+        }
         // U-02: fan out noteworthy events to connected browsers.
-        if let Some(category) = notifications::classify(kind, &event["data"]) {
+        if notifications::classify(kind, &event["data"]).is_some()
+            || matches!(kind, "approval_resolved" | "completion_reported")
+        {
             let (title, project_id) = (
                 state
                     .lifecycle
@@ -230,7 +327,7 @@ impl Session {
                     .unwrap_or_else(|| self.title.clone()),
                 state.project_id.clone(),
             );
-            self.notifications.publish(
+            self.notifications.observe(
                 &notifications::Context {
                     session_id: &self.id,
                     title: &title,
@@ -238,22 +335,17 @@ impl Session {
                     project_id: project_id.as_deref(),
                 },
                 state.seq,
-                category,
+                time,
+                kind,
                 &event["data"],
             );
         }
-        state.bytes += event.to_string().len();
-        state.events.push_back(event.clone());
-        while state.events.len() > MAX_EVENTS || state.bytes > MAX_EVENT_BYTES {
-            if let Some(old) = state.events.pop_front() {
-                state.bytes -= old.to_string().len();
-            }
-        }
+        retain(&mut state, &event);
         if let Err(error) = self.store.lock().unwrap().event(&self.id, &state, &event) {
             if state.storage_error.is_none() {
-                eprintln!(
-                    "Could not persist session {}: {}",
-                    self.id,
+                tracing::error!(
+                    session = %self.id,
+                    "Could not persist the session: {}",
                     agentworks_runtime::provider::safe_error(&error.to_string())
                 );
             }
@@ -266,9 +358,9 @@ impl Session {
         // Publish the tool before any derived header/progress for it.
         let _ = self.tx.send(event.clone());
         if kind == "acp" {
-            self.progress.update(
+            self.scripts.update(
                 &self.id,
-                (&self.provider, &self.cwd),
+                (&self.provider, &self.cwd()),
                 &self.tx,
                 state.seq,
                 &event["data"],
@@ -284,7 +376,14 @@ impl Session {
             self.emit("async_task_finished", result);
         }
     }
+    /// Shows what startup is doing until the session is ready. Not part of the
+    /// transcript: a browser that connects later reads it from the snapshot.
+    fn startup(&self, step: &str) {
+        self.data.lock().unwrap().startup = Some(step.into());
+        let _ = self.tx.send(json!({"kind":"startup","data":{"step":step}}));
+    }
     fn status(&self, status: &str) {
+        let mut startup_failed = false;
         {
             let mut data = self.data.lock().unwrap();
             data.status = if data.storage_error.is_some() {
@@ -292,12 +391,35 @@ impl Session {
             } else {
                 status.into()
             };
+            if !matches!(status, "starting" | "resuming") {
+                data.startup = None;
+            }
             if matches!(status, "idle" | "error" | "closed" | "suspended") {
                 data.turn_active = false;
                 data.inbox_turn = None;
+                data.native_rename = false;
+            }
+            // Under this lock, so input queued during startup always sees the outcome.
+            if data.input_queue.after_startup {
+                match data.status.as_str() {
+                    "idle" => {
+                        let limited =
+                            data.continuation.limited || data.continuation.due_at.is_some();
+                        data.input_queue.startup_finished(limited);
+                    }
+                    "error" | "closed" | "suspended" => {
+                        data.input_queue
+                            .block("The session did not start; inspect, then resume the queue.");
+                        startup_failed = true;
+                    }
+                    _ => {}
+                }
             }
         }
         self.emit("status", json!({"status":status}));
+        if startup_failed {
+            input_queue::broadcast(self);
+        }
     }
     fn meta(&self) -> Value {
         let data = self.data.lock().unwrap();
@@ -313,9 +435,9 @@ impl Session {
                 .unwrap_or(value)
                 .to_owned()
         });
-        json!({"id":self.id,"provider":self.provider,"cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"model":model,
-            "archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"created":self.created,"status":data.status,"turnRunning":data.turn_active,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"]),
-            "projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"modelProvider":data.model_provider,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"providerCapabilities":data.agent_capabilities["sessionCapabilities"],"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None}})
+        json!({"id":self.id,"provider":self.provider,"cwd":self.cwd(),"additionalDirectories":data.additional_directories,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"model":model,
+            "archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"asleep":data.lifecycle.asleep,"created":self.created,"status":data.status,"turnRunning":data.turn_active,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"]),
+            "projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id(),"modelProvider":data.model_provider,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"routing":data.routing,"providerCapabilities":data.agent_capabilities["sessionCapabilities"],"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None}})
     }
     /// Full snapshot for the HTTP API, with every retained event as stored.
     fn snapshot(&self) -> Value {
@@ -325,19 +447,33 @@ impl Session {
     /// `after`, a reconnecting browser receives only newer events, provided the
     /// retained window still continues from that sequence (`resumed`).
     fn browser_snapshot(&self, after: Option<u64>) -> Value {
-        let headers = self.progress.headers(&self.id);
+        let headers = self.scripts.headers(&self.id);
+        let mut opened_cut = false;
         let mut snapshot = self.snapshot_with(|events, seq| {
+            // A merged chunk run the browser saw only part of cannot be resumed past.
             let resumed = after.filter(|&after| {
                 after <= seq
                     && events.front().map_or(after == seq, |e| {
-                        e["seq"].as_u64().unwrap_or(0) <= after.saturating_add(1)
+                        event_compaction::first_seq(e) <= after.saturating_add(1)
                     })
+                    && !event_compaction::splits(events, after)
             });
-            (
-                json!(tool_bodies::compact(events, resumed.unwrap_or(0), &headers)),
-                resumed,
-            )
+            let compacted = agentworks_presentation::transcript::compact(
+                events,
+                resumed.unwrap_or(0),
+                &headers,
+            );
+            if resumed.is_some() {
+                return (json!(compacted), resumed);
+            }
+            let (opening, cut) =
+                transcript_history::opening(transcript_history::without_superseded(compacted));
+            opened_cut = cut;
+            (json!(opening), None)
         });
+        if opened_cut {
+            snapshot["truncated"] = json!(true);
+        }
         snapshot["toolHeaders"] = json!(headers);
         snapshot
     }
@@ -345,15 +481,65 @@ impl Session {
         &self,
         events: impl FnOnce(&std::collections::VecDeque<Value>, u64) -> (Value, Option<u64>),
     ) -> Value {
+        // Taken before session guards: never hold the store while waiting on them.
+        let unacknowledged = self
+            .store
+            .lock()
+            .unwrap()
+            .unacknowledged(&self.id)
+            .unwrap_or(0);
         let approvals = self.approvals.lock().unwrap();
         let data = self.data.lock().unwrap();
-        let (events, resumed) = events(&data.events, data.seq);
+        let window = self.window(&data);
+        let (events, resumed) = events(&window, data.seq);
         json!({"kind":"snapshot","seq":data.seq,"resumed":resumed,"session":{"id":self.id,"provider":self.provider,
-            "cwd":self.cwd,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id,"modelProvider":data.model_provider,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None},"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"])} ,"events":events,
-            "truncated":data.events.front().is_some_and(|e|e["seq"].as_u64().unwrap_or(0)>1),
+            "cwd":self.cwd(),"additionalDirectories":data.additional_directories,"title":data.lifecycle.title.as_deref().unwrap_or(&self.title),"archived":data.lifecycle.archived,"explicitlySuspended":data.lifecycle.suspended,"asleep":data.lifecycle.asleep,"status":data.status,"projectId":data.project_id,"hostId":self.host_id,"locationId":self.location_id(),"modelProvider":data.model_provider,"automation":data.automation,"initiatedBy":data.control_origin,"continuation":data.continuation,"fork":data.lineage,"worktree":worktree_summary(&data),"role":role_summary(&data),"routing":data.routing,"timeouts":data.timeouts,"effectiveTimeouts":timeouts::effective(data.timeouts.clone()),"providerHistoryDeletion":if data.provider_history_deleted {Some("deleted")} else if data.provider_history_delete_pending {Some("pending")} else {None},"inputQueue":data.input_queue,"lastUserSeq":data.last_prompt.as_ref().map(|e| &e["seq"]),"unacknowledged":unacknowledged,"startup":data.startup} ,"events":events,
+            "truncated":window.front().is_some_and(|e|event_compaction::first_seq(e)>1),
             "asyncTasks":data.async_tasks.snapshot(),"providerCapabilities":data.agent_capabilities["sessionCapabilities"],"sessionConfig":data.session_config,"permissionModes":data.permission_modes,"models":data.models,"attachments":attachments::policy(&self.provider,&data.prompt_capabilities),"commands":data.available_commands,"storageError":data.storage_error,
             "approvals":approvals.iter().map(|(id,a)|a.event(id)).collect::<Vec<_>>(),
-            "toolProgress":self.progress.views(&self.id)})
+            "toolProgress":self.scripts.views(&self.id)})
+    }
+    fn read_window(&self) -> Result<(VecDeque<Value>, usize), String> {
+        let recent = self.store.lock().unwrap().recent(&self.id);
+        store::window(recent.map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+    }
+    /// The retained event window, read from the store while the session is parked.
+    fn window<'a>(&self, data: &'a SessionData) -> Cow<'a, VecDeque<Value>> {
+        if !data.parked {
+            return Cow::Borrowed(&data.events);
+        }
+        Cow::Owned(self.read_window().map_or_else(
+            |error| {
+                tracing::error!(session = %self.id, "Could not read session history: {error}");
+                VecDeque::new()
+            },
+            |(events, _)| events,
+        ))
+    }
+    /// Drops the event window once no harness is attached. Stored events are the
+    /// source of truth, except while a failed write has left them behind.
+    fn park(&self) {
+        let mut data = self.data.lock().unwrap();
+        let released = self
+            .worker
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_none_or(|worker| worker.is_finished());
+        if released && !data.parked && data.storage_error.is_none() {
+            data.events = VecDeque::new();
+            data.bytes = 0;
+            data.parked = true;
+        }
+    }
+    /// Reloads the event window for a starting harness.
+    fn unpark(&self) -> Result<(), String> {
+        let mut data = self.data.lock().unwrap();
+        if data.parked {
+            (data.events, data.bytes) = self.read_window()?;
+            data.parked = false;
+        }
+        Ok(())
     }
     fn display_title(&self) -> String {
         self.data
@@ -364,16 +550,23 @@ impl Session {
             .clone()
             .unwrap_or_else(|| self.title.clone())
     }
+    fn cwd(&self) -> PathBuf {
+        self.place.read().unwrap().cwd.clone()
+    }
+    fn location_id(&self) -> String {
+        self.place.read().unwrap().location_id.clone()
+    }
     fn metadata(&self) -> store::Metadata {
+        let place = self.place.read().unwrap().clone();
         store::Metadata {
             id: self.id.clone(),
             provider: self.provider.clone(),
-            cwd: self.cwd.clone(),
+            cwd: place.cwd,
             title: self.title.clone(),
             initial_model: self.initial_model.clone(),
             created: self.created,
             host_id: self.host_id.clone(),
-            location_id: self.location_id.clone(),
+            location_id: place.location_id,
         }
     }
     fn send_command(&self, command: session_runtime::Command) -> Result<(), (StatusCode, String)> {
@@ -387,10 +580,13 @@ impl Session {
                 "Session could not be saved to disk",
             ));
         }
-        self.commands
-            .lock()
-            .unwrap()
-            .as_ref()
+        Self::handoff_command(self.commands.lock().unwrap().as_ref(), command)
+    }
+    fn handoff_command(
+        commands: Option<&mpsc::Sender<session_runtime::Command>>,
+        command: session_runtime::Command,
+    ) -> Result<(), (StatusCode, String)> {
+        commands
             .ok_or_else(|| fail(StatusCode::GONE, "Agent process unavailable"))?
             .try_send(command)
             .map_err(|_| {
@@ -399,6 +595,47 @@ impl Session {
                     "Agent is unavailable or a command is pending",
                 )
             })
+    }
+    fn send_prompt_command(
+        &self,
+        command: session_runtime::Command,
+        request_id: &str,
+    ) -> Result<(), (StatusCode, String)> {
+        // Release the commands lock before taking data. Keep data locked through
+        // handoff and persistence so a fast runtime outcome cannot overtake them.
+        let commands = self.commands.lock().unwrap().clone();
+        let mut data = self.data.lock().unwrap();
+        if data.storage_error.is_some() {
+            return Err(fail(
+                StatusCode::INSUFFICIENT_STORAGE,
+                "Session could not be saved to disk",
+            ));
+        }
+        Self::handoff_command(commands.as_ref(), command)?;
+        let before = data.input_queue.clone();
+        data.input_queue.command_handed_off(request_id);
+        if data.input_queue != before
+            && self
+                .store
+                .lock()
+                .unwrap()
+                .save_state(&self.id, &data)
+                .is_err()
+        {
+            // The command may already be executing. Preserve an inspectable
+            // state, never report delivery as durable or dispatch the next item.
+            data.input_queue = before;
+            data.input_queue
+                .finish_turn(&input_queue::Outcome::StorageFailure);
+            data.storage_error = Some(
+                "Could not save command handoff; inspect queued inputs before resuming".into(),
+            );
+            return Err(fail(
+                StatusCode::INSUFFICIENT_STORAGE,
+                "Command handoff could not be saved; delivery is uncertain",
+            ));
+        }
+        Ok(())
     }
     fn set_commands(&self, commands: Value) {
         self.data.lock().unwrap().available_commands = commands.clone();
@@ -422,7 +659,7 @@ impl Session {
                 .automation
                 .as_ref()
                 .map(|a| format!("automation:{}", a.run_id))
-                .ok_or("Missing automation metadata")?;
+                .unwrap_or_else(|| format!("create:{}", self.id));
             if let Some(origin) = data.automation.as_mut() {
                 origin.outcome = None;
             }
@@ -462,13 +699,7 @@ impl Session {
             json!({"seq":next.seq,"kind":"history_imported","data":{"updates":events.len()}}),
         );
         for event in &events {
-            next.bytes += event.to_string().len();
-            next.events.push_back(event.clone());
-            while next.events.len() > MAX_EVENTS || next.bytes > MAX_EVENT_BYTES {
-                if let Some(old) = next.events.pop_front() {
-                    next.bytes -= old.to_string().len();
-                }
-            }
+            retain(&mut next, event);
         }
         self.store
             .lock()
@@ -490,6 +721,20 @@ impl Session {
     }
 }
 
+/// Adds an event to the retained window. Parked sessions only keep it in the store.
+fn retain(state: &mut SessionData, event: &Value) {
+    if state.parked {
+        return;
+    }
+    state.bytes += event.to_string().len();
+    state.events.push_back(event.clone());
+    while state.events.len() > MAX_EVENTS || state.bytes > MAX_EVENT_BYTES {
+        if let Some(old) = state.events.pop_front() {
+            state.bytes -= old.to_string().len();
+        }
+    }
+}
+
 /// Name and version of the session's role; the instructions stay server-side.
 fn role_summary(data: &SessionData) -> Value {
     data.role.as_ref().map_or(
@@ -500,7 +745,7 @@ fn role_summary(data: &SessionData) -> Value {
 fn worktree_summary(data: &SessionData) -> Value {
     data.worktree.as_ref().map_or(
         Value::Null,
-        |o| json!({"owned":true,"path":o.path,"branch":o.branch,"removed":o.removed.is_some()}),
+        |o| json!({"owned":true,"path":o.path,"branch":o.branch,"mainTop":o.main_top,"removed":o.removed.is_some()}),
     )
 }
 fn fail(code: StatusCode, msg: impl Into<String>) -> (StatusCode, String) {
@@ -514,92 +759,31 @@ fn session(app: &App, id: &str) -> Result<Arc<Session>, (StatusCode, String)> {
         .cloned()
         .ok_or_else(|| fail(StatusCode::NOT_FOUND, "Session not found"))
 }
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    add_mise_shims_to_path();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).is_some_and(|arg| arg == "recovery") {
         return recovery::run(&args[2..]).map_err(|e| e.to_string().into());
     }
-    if args.get(1).is_some_and(|arg| arg == "goose-browser-url") {
-        // Browser launchers discard stdout; the sign-in PTY is our UI.
-        use std::io::Write;
-        let url = args.get(2).ok_or("Missing authorization URL")?;
-        let mut tty = std::fs::OpenOptions::new().write(true).open("/dev/tty")?;
-        writeln!(tty, "Open this URL in your browser:\n{url}")?;
-        return Ok(());
-    }
-    if args.get(1).is_some_and(|arg| arg == "goose-login") {
-        tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_target(false)
-            .init();
-        let result = goose_acp::login(args.get(2).map(String::as_str).unwrap_or("")).await;
-        match result {
-            Ok(()) => println!(
-                "Sign-in completed. You can close this terminal and start a Goose session."
-            ),
-            Err(error) => {
-                eprintln!("Sign-in failed: {error}");
-                std::process::exit(1);
-            }
-        }
-        return Ok(());
-    }
-    if args.get(1).is_some_and(|arg| arg == "goose-acp") {
-        let result = goose_acp::run().await;
-        if let Err(error) = &result {
-            eprintln!("agentworks goose-acp: {error}");
-        }
-        std::process::exit(i32::from(result.is_err()));
-    }
-    if let Some(bridge @ ("codex-acp" | "claude-acp")) = args.get(1).map(String::as_str) {
-        let result = if bridge == "codex-acp" {
-            agentworks_codex_acp::run().await
-        } else {
-            agentworks_claude_acp::run().await
-        };
-        if let Err(error) = &result {
-            eprintln!("agentworks {bridge}: {error}");
-        }
-        std::process::exit(i32::from(result.is_err()));
-    }
-    if args.get(1).is_some_and(|a| a == "demo-acp") {
-        let result = agentworks_demo_acp::run().await;
-        if let Err(error) = &result {
-            eprintln!("agentworks demo-acp: {error}");
-        }
-        std::process::exit(i32::from(result.is_err()));
+    if let Some(result) = agentworks_worker::dispatch(&args).await {
+        return result;
     }
     if args.get(1).is_some_and(|a| a == "--service-protocol") {
-        println!("{}", json!({"serviceProtocol":1}));
+        // 2: restarts are launched by systemd through the release directory's `current` link.
+        println!("{}", json!({"serviceProtocol":2}));
         return Ok(());
     }
-    if args.get(1).is_some_and(|a| a == "mcp") {
-        return mcp::stdio().await.map_err(|e| e.to_string().into());
+    if args.get(1).is_some_and(|a| a == "service") {
+        return service_unit::run(&args[2..]).map_err(|e| e.to_string().into());
     }
-    if args.get(1).is_some_and(|a| a == "agent") {
-        // Worker cleanup completes inside run(). Tokio stdin uses an uncancellable
-        // blocking reader, so runtime shutdown can hang while a dead peer still
-        // holds stdin open. Only this stateless CLI mode exits explicitly.
-        let code = match agent::run(&args[2..]).await {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("agentworks agent: {error}");
-                1
-            }
-        };
-        std::process::exit(code);
-    }
-    if args.get(1).is_some_and(|a| a == "--probe") {
-        let provider = args.get(2).map(String::as_str).unwrap_or("demo");
-        if !agentworks_runtime::remote::PROVIDERS.contains(&provider) {
-            return Err(
-                "Use --probe claude|claude-rust|codex|codex-rust|goose|opencode|demo".into(),
-            );
-        }
-        agentworks_runtime::acp::probe(provider).await?;
-        return Ok(());
-    }
+    agentworks_runtime::log::init();
     let auth_mode = std::env::var("AGENTWORKS_AUTH_MODE").unwrap_or_else(|_| "existing".into());
     if !["existing", "api_key"].contains(&auth_mode.as_str()) {
         return Err("AGENTWORKS_AUTH_MODE must be existing or api_key".into());
@@ -620,23 +804,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if roots.is_empty() || roots.iter().any(|p| !p.is_dir()) {
         return Err("AGENTWORKS_ROOTS must contain existing directories".into());
     }
+    let tls = tls::Config::from_env()?;
+    let acceptor = tls.as_ref().map(tls::Config::acceptor).transpose()?;
     let listener = tokio::net::TcpListener::bind((bind, port)).await?;
     let catalog_path = std::env::var_os("AGENTWORKS_CATALOG_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
-                .join(".agentworks/catalog.json")
+                // Never the live service's store: install requires explicit paths in service.env.
+                .join(".agentworks/dev/catalog.json")
         });
     let db_path = std::env::var_os("AGENTWORKS_DB_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|| catalog_path.with_extension("sessions.sqlite3"));
+    // The catalog is not tied to the database path, so it needs its own lock.
+    if let Some(parent) = catalog_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _catalog_lock = store::exclusive(
+        &catalog_path.with_extension("json.lock"),
+        "Another Agentworks process is already using this catalog",
+    )
+    .map_err(|e| e.to_string())?;
+    let web_auth = web_auth::WebAuth::configure(
+        tls.is_some(),
+        catalog_path.with_extension("web-sign-ins.json"),
+    )?;
     let mut store = store::Store::open(&db_path).map_err(|e| e.to_string())?;
     store
         .import_legacy(&db_path.with_file_name("legacy-sessions.json"))
         .map_err(|e| e.to_string())?;
     inbox_delivery::reconcile(&mut store).map_err(|(_, e)| e)?;
+    event_compaction::startup(&mut store);
     let restored = store.load().map_err(|e| e.to_string())?;
-    let progress = tool_progress::start(&store.connection)?;
+    let scripts = scripting::start(&store.connection)?;
     let attachment_root = db_path.with_extension("attachments");
     attachments::prune_orphans(
         &attachment_root,
@@ -670,9 +871,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         notifications: notifications::Hub::new(catalog),
         hosts: hosts::Hosts::new(),
         host_usage: Arc::new(host_usage::Hub::default()),
+        account_quota: Arc::default(),
+        router: Arc::default(),
+        github: Arc::new(github::Hub::default()),
+        web_auth: Arc::new(web_auth),
 
-        progress,
+        scripts,
     };
+    crate::scripting::bind_badge_sessions(&app.scripts, &app.sessions);
     if let Some(policy) = app
         .catalog
         .lock()
@@ -687,7 +893,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     for (metadata, mut data) in restored {
         inbox_delivery::restore(&mut data);
+        data.async_tasks.forget_finished_details();
         data.continuation.reconcile();
+        lifecycle::settle_archived(&mut data);
         data.input_queue.recover();
         let pending = data.queued_prompt.take().is_some();
         let interrupted = data.turn_active
@@ -702,23 +910,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         data.status = "suspended".into();
         data.turn_active = false;
         data.inbox_turn = None;
+        // One window at a time: all of them together would be the server's largest allocation.
+        let recent = app.store.lock().unwrap().recent(&metadata.id);
+        let (window, _) =
+            store::window(recent.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
         // U-05: rebuild derived progress from the retained event window.
-        let replay: Vec<(u64, Value)> = data
-            .events
+        let replay: Vec<(u64, Value)> = window
             .iter()
             .filter(|e| e["kind"] == "acp")
             .filter_map(|e| Some((e["seq"].as_u64()?, e["data"].clone())))
             .collect();
+        // Retained reports seed shared account quota with their original receipt times.
+        let family = account_quota::family(&metadata.provider, data.model_provider.as_deref());
+        for event in window
+            .iter()
+            .filter(|e| e["kind"] == "antigravity_quota" && metadata.provider == "antigravity")
+        {
+            app.account_quota
+                .observe_antigravity(&metadata.host_id, &metadata.id, &event["data"]);
+        }
+        for event in window.iter().filter(|e| e["kind"] == "acp") {
+            if let Some(time) = event["time"].as_u64() {
+                app.account_quota.observe(
+                    &metadata.host_id,
+                    &family,
+                    &metadata.id,
+                    time,
+                    &event["data"],
+                );
+            }
+        }
         let (tx, _) = broadcast::channel(128);
         let s = Arc::new(Session {
             id: metadata.id,
             provider: metadata.provider,
-            cwd: metadata.cwd,
             title: metadata.title,
             initial_model: metadata.initial_model,
             created: metadata.created,
             host_id: metadata.host_id,
-            location_id: metadata.location_id,
+            place: Place::at(metadata.cwd, metadata.location_id),
             data: Mutex::new(data),
             tx,
             commands: Mutex::new(None),
@@ -728,12 +958,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             mcp_endpoint: app.mcp_endpoint,
             mcp_token: Mutex::new(Uuid::new_v4().to_string()),
             mcp_refresh_pending: std::sync::atomic::AtomicBool::new(false),
+            fresh_environment: Default::default(),
             notifications: app.notifications.clone(),
-            progress: app.progress.clone(),
+            scripts: app.scripts.clone(),
+            account_quota: app.account_quota.clone(),
         });
         for (seq, data) in &replay {
-            app.progress
-                .update(&s.id, (&s.provider, &s.cwd), &s.tx, *seq, data);
+            app.scripts
+                .replay(&s.id, (&s.provider, &s.cwd()), &s.tx, *seq, data);
         }
         if interrupted {
             s.emit("interrupted",json!({"message":"The server stopped during this turn. It was not automatically retried. Check the last tool result before continuing."}));
@@ -752,6 +984,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let inbox_scheduler = tokio::spawn(inbox_delivery::scheduler(app.clone()));
     let input_scheduler = tokio::spawn(input_queue::scheduler(app.clone()));
     tokio::spawn(automations::scheduler(app.clone()));
+    tokio::spawn(github_tracking::scheduler(app.clone()));
+    tokio::spawn(idle_sleep::scheduler(app.clone()));
     tokio::spawn(mcp::serve_bridge(app.clone(), mcp_listener));
     let router = Router::new()
         .route(
@@ -760,6 +994,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/api/service/restart/cancel", post(service_restart::cancel))
         .route("/", get(hosting::index))
+        .route("/api/auth", get(web_auth::status))
+        .route("/api/auth/login", post(web_auth::login))
+        .route("/api/auth/logout", post(web_auth::logout))
+        .route(
+            "/login.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/login.js"),
+                )
+            }),
+        )
         .route(
             "/app.js",
             get(|| async {
@@ -860,6 +1106,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route(
+            "/notification-tray.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/notification-tray.js"),
+                )
+            }),
+        )
+        .route(
             "/notifications.js",
             get(|| async {
                 (
@@ -887,11 +1142,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route(
+            "/additional-directories.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/additional-directories.js"),
+                )
+            }),
+        )
+        .route(
             "/directory-picker.js",
             get(|| async {
                 (
                     [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
                     include_str!("../../../web/directory-picker.js"),
+                )
+            }),
+        )
+        .route(
+            "/create-place.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/create-place.js"),
+                )
+            }),
+        )
+        .route(
+            "/create-sections.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/create-sections.js"),
                 )
             }),
         )
@@ -950,6 +1232,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route(
+            "/tasks.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript")],
+                    include_str!("../../../web/tasks.js"),
+                )
+            }),
+        )
+        .route(
+            "/task-mentions.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript")],
+                    include_str!("../../../web/task-mentions.js"),
+                )
+            }),
+        )
+        .route(
             "/mentions.js",
             get(|| async {
                 (
@@ -991,6 +1291,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (
                     [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
                     include_str!("../../../web/diff.js"),
+                )
+            }),
+        )
+        .route(
+            "/session-badges.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/session-badges.js"),
+                )
+            }),
+        )
+        .route(
+            "/github-browser.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/github-browser.js"),
+                )
+            }),
+        )
+        .route(
+            "/github.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/github.js"),
                 )
             }),
         )
@@ -1067,11 +1394,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route(
+            "/markdown-composer.bundle.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/markdown-composer.bundle.js"),
+                )
+            }),
+        )
+        .route(
+            "/markdown-composer-LICENSES.txt",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                    include_str!("../../../web/markdown-composer-LICENSES.txt"),
+                )
+            }),
+        )
+        .route(
             "/display-preferences.js",
             get(|| async {
                 (
                     [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
                     include_str!("../../../web/display-preferences.js"),
+                )
+            }),
+        )
+        .route(
+            "/compaction.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/compaction.js"),
                 )
             }),
         )
@@ -1099,6 +1453,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/automations/{id}",
             axum::routing::put(automations::update).delete(automations::delete),
         )
+        .route(
+            "/api/automations/preview-script",
+            post(automations::preview_script),
+        )
+        .route("/api/automations/{id}/script", get(automations::get_script))
+        .route(
+            "/api/automations/inspect-script",
+            post(automations::inspect_script),
+        )
         .route("/api/automations/{id}/run", post(automations::run))
         .route("/api/automations/{id}/runs", get(automations::runs))
         .route("/api/status", get(status))
@@ -1109,18 +1472,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/roles/{id}",
             axum::routing::put(roles::update).delete(roles::delete),
         )
-        .route("/api/scripts", get(tool_progress::get_scripts))
+        .route("/api/scripts", get(scripting::get_scripts))
         .route(
             "/api/scripts/{name}",
-            axum::routing::put(tool_progress::put_script).delete(tool_progress::delete_script),
+            axum::routing::put(scripting::put_script).delete(scripting::delete_script),
         )
         .route(
             "/api/scripts/{name}/enabled",
-            axum::routing::put(tool_progress::put_enabled),
+            axum::routing::put(scripting::put_enabled),
         )
         .route(
             "/api/scripts/{name}/priority",
-            axum::routing::put(tool_progress::put_priority),
+            axum::routing::put(scripting::put_priority),
         )
         .route("/api/timeouts", get(get_timeouts).put(save_timeouts))
         .route("/api/secrets", get(secrets::list).post(secrets::create))
@@ -1133,6 +1496,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(get_notifications).put(save_notifications),
         )
         .route("/api/notifications/events", get(notification_events))
+        .route("/api/notifications/inbox", get(notification_inbox))
+        .route(
+            "/api/notifications/inbox/dismiss",
+            post(dismiss_notifications),
+        )
+        .route(
+            "/api/notifications/inbox/events",
+            get(notification_inbox_events),
+        )
         .route(
             "/api/sessions/{id}/timeouts",
             axum::routing::put(save_session_timeouts),
@@ -1145,6 +1517,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/external-sessions", post(list_external_sessions))
         .route("/api/sessions/import", post(import_session))
         .route("/api/dashboard/host-usage/events", get(host_usage::events))
+        .route("/api/account-quota/events", get(account_quota::events))
+        .route(
+            "/api/sessions/{id}/quota/refresh",
+            post(account_quota::refresh),
+        )
         .route("/api/catalog", get(get_catalog))
         .route("/api/hosts", post(hosts::add))
         .route("/api/hosts/enroll/events", get(enrollment::upgrade))
@@ -1167,6 +1544,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .route(
+            "/vendor/xterm-addon-web-links.mjs",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/vendor/xterm-addon-web-links.mjs"),
+                )
+            }),
+        )
+        .route(
             "/vendor/xterm.css",
             get(|| async {
                 (
@@ -1184,8 +1570,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
             }),
         )
-        .route("/api/hosts/{id}", axum::routing::delete(hosts::remove))
+        .route(
+            "/api/hosts/{id}",
+            axum::routing::delete(hosts::remove).patch(hosts::update),
+        )
         .route("/api/hosts/{id}/reconnect", post(hosts::reconnect))
+        .route("/api/hosts/{id}/update-worker", post(enrollment::update))
         .route(
             "/api/hosts/{id}/terminal",
             post(terminal::open_host).delete(terminal::stop_host),
@@ -1203,11 +1593,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/projects/{id}",
             axum::routing::patch(rename_project).delete(delete_project),
         )
-        .route("/api/projects/{id}/archive", post(archive_project))
         .route(
-            "/api/projects/{id}/review-queue",
-            get(review_queue::get).post(review_queue::post),
+            "/api/projects/{id}/tasks",
+            get(tasks::list).post(tasks::create),
         )
+        .route(
+            "/api/projects/{id}/tasks/{taskId}",
+            get(tasks::get).put(tasks::update).delete(tasks::delete),
+        )
+        .route("/api/projects/{id}/archive", post(archive_project))
         .route(
             "/api/projects/{id}/workspace-policy",
             get(worktrees::get_policy).put(worktrees::put_policy),
@@ -1253,6 +1647,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(communication::ack_message),
         )
         .route(
+            "/api/sessions/{id}/mailbox/ack-all",
+            post(communication::ack_all),
+        )
+        .route(
             "/api/sessions/{id}/agent-audit",
             get(communication::audit_log),
         )
@@ -1286,6 +1684,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/{id}/stop", post(cancel))
         .route("/api/sessions/{id}/suspend", post(lifecycle::suspend))
         .route("/api/sessions/{id}/resume", post(resume))
+        .route("/api/sessions/{id}/restart", post(restart))
+        .route(
+            "/api/sessions/{id}/codex-transcript",
+            get(codex_transcript::info).delete(codex_transcript::delete_backups),
+        )
+        .route(
+            "/api/sessions/{id}/codex-transcript/compact",
+            post(codex_transcript::compact_now),
+        )
+        .route("/api/sessions/{id}/directory", post(relocation::change))
+        .route(
+            "/api/sessions/{id}/additional-directories",
+            post(relocation::set_additional),
+        )
         .route("/api/sessions/{id}/model", post(set_model))
         .route(
             "/api/sessions/{id}/configuration",
@@ -1334,24 +1746,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/{id}/file", get(file))
         .route("/api/sessions/{id}/workspace", get(git_context::workspace))
         .route("/api/sessions/{id}/worktree", get(worktree_cleanup::status))
+        .route("/api/git/config", post(git_settings::repository))
+        .route(
+            "/api/github/connections",
+            get(github::connections).post(github::save_connection),
+        )
+        .route("/api/github/verify", post(github::verify))
+        .route("/api/github/pulls", get(github::pulls))
+        .route("/api/github/sessions", get(github::sessions))
+        .route(
+            "/api/github/polling",
+            axum::routing::put(github::save_polling),
+        )
+        .route(
+            "/api/sessions/{id}/github/events",
+            get(github_tracking::events),
+        )
+        .route("/api/sessions/{id}/badges", get(session_badges::list))
+        .route(
+            "/api/sessions/{id}/github",
+            get(session_badges::context).post(github::save_binding),
+        )
+        .route(
+            "/api/sessions/{id}/worktree/hooks/retry",
+            post(git_settings::retry),
+        )
         .route(
             "/api/sessions/{id}/worktree/remove",
             post(worktree_cleanup::remove),
         )
         .route("/api/sessions/{id}/diff", get(diff::view))
         .route("/api/markdown", post(markdown))
-        .route("/{name}", get(hosting::asset))
+        .route("/api/markdown/batch", post(markdown_batch))
+        .route("/api/sessions/{id}/user-format", post(format_user))
+        .route("/{name}", get(hosting::asset));
+    #[cfg(feature = "model-viewer")]
+    let router = router.route("/model-viewer-assets/{*name}", get(model_viewer::asset));
+    let router = router
         .layer(DefaultBodyLimit::max(128 * 1024))
+        // Transcript pages, tool bodies and web assets over slow links. WebSocket
+        // upgrades have no body and pass through; session events gzip themselves.
+        .layer(tower_http::compression::CompressionLayer::new())
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app.clone());
+    let scheme = if tls.is_some() { "https" } else { "http" };
     println!("Agentworks listening on {bind}:{port}");
-    println!("Local URL: http://127.0.0.1:{port}");
+    println!("Local URL: {scheme}://127.0.0.1:{port}");
+    if tls.as_ref().is_some_and(tls::Config::requires_client_cert) {
+        println!("TLS client certificates required.");
+    }
+    if let Some(sign_in) = app.web_auth.describe() {
+        println!("{sign_in}.");
+    }
     println!(
         "Persistent sessions: {}. Ctrl-C to stop.",
         db_path.display()
     );
-    axum::serve(listener, router)
-        .with_graceful_shutdown(async move {
+    // The listener is bound, so connections queue until serve() accepts them.
+    service_restart::ready(&app);
+    let listener = tls::Listener::new(listener, acceptor)?;
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<tls::ClientAddr>(),
+    )
+    .with_graceful_shutdown(async move {
             #[cfg(unix)]
             {
                 let mut terminate=tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("register SIGTERM handler");
@@ -1391,15 +1849,23 @@ async fn guard(
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let direct_host = allowed_host(host, app.bind, app.port);
-    let forwarded_origin = browser_origin::forwarded_origin(&headers);
+    let direct_host = allowed_host(host, app.bind, app.port, app.web_auth.secure);
+    let peer = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<tls::ClientAddr>>()
+        .map(|info| info.0.0.ip());
+    // Forwarded headers count only from a trusted proxy (any peer when none is configured).
+    let proxied = app.web_auth.proxies.trusts(peer);
+    let forwarded_origin = proxied
+        .then(|| browser_origin::forwarded_origin(&headers))
+        .flatten();
     let ws = req.uri().path().ends_with("/events");
     let origin = headers
         .get(header::ORIGIN)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if ws {
-        eprintln!(
+        tracing::debug!(
             "WebSocket request path={:?} host={:?} origin={:?} x_forwarded_proto={:?} x_forwarded_host={:?} direct_host={} forwarded_origin={:?}",
             req.uri().path(),
             log_header(&headers, header::HOST),
@@ -1412,17 +1878,18 @@ async fn guard(
     }
     if !direct_host && forwarded_origin.is_none() {
         if ws {
-            eprintln!("WebSocket rejected reason=unrecognized_host");
+            tracing::info!("WebSocket rejected reason=unrecognized_host");
         }
         return (StatusCode::FORBIDDEN, "Unrecognized host").into_response();
     }
     let write = !matches!(req.method().as_str(), "GET" | "HEAD");
     if write || ws {
-        if !(direct_host && origin == format!("http://{host}"))
-            && !browser_origin::origin_matches_forwarded(&headers, origin)
+        let scheme = if app.web_auth.secure { "https" } else { "http" };
+        if !(direct_host && origin == format!("{scheme}://{host}"))
+            && !(proxied && browser_origin::origin_matches_forwarded(&headers, origin))
         {
             if ws {
-                eprintln!(
+                tracing::info!(
                     "WebSocket rejected reason=origin_mismatch path={:?}",
                     req.uri().path()
                 );
@@ -1431,17 +1898,29 @@ async fn guard(
         }
     }
     if ws {
-        eprintln!("WebSocket guard passed path={:?}", req.uri().path());
+        tracing::debug!("WebSocket guard passed path={:?}", req.uri().path());
     }
     let mermaid_frame = req.uri().path() == "/mermaid-frame.html";
-    let mut response = next.run(req).await;
+    let model_frame =
+        cfg!(feature = "model-viewer") && req.uri().path() == "/model-viewer-frame.html";
+    let denied = app
+        .web_auth
+        .deny(req.method(), req.uri().path(), req.headers(), peer);
+    let mut response = match denied {
+        Some(denied) => denied,
+        None => next.run(req).await,
+    };
     let h = response.headers_mut();
     h.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
     h.insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
     h.insert(header::REFERRER_POLICY, "no-referrer".parse().unwrap());
     // xterm emits scoped style sheets and per-cell true-color style attributes.
     // Script execution remains restricted to bundled same-origin modules.
-    let csp = if mermaid_frame {
+    // CAD importers use Emscripten bindings that generate JavaScript functions.
+    // Allow evaluation only in the dedicated model frame, not in the app.
+    let csp = if model_frame {
+        "default-src 'none'; script-src 'self' 'unsafe-eval'; style-src 'unsafe-inline'; connect-src 'self' blob:; img-src 'self' blob: data:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'none'"
+    } else if mermaid_frame {
         "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; font-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'none'"
     } else {
         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
@@ -1458,7 +1937,7 @@ fn log_header(headers: &HeaderMap, name: impl axum::http::header::AsHeaderName) 
         .unwrap_or_else(|| "<missing>".into())
 }
 
-fn allowed_host(host: &str, bind: IpAddr, port: u16) -> bool {
+fn allowed_host(host: &str, bind: IpAddr, port: u16, secure: bool) -> bool {
     let Ok(authority) = host.parse::<axum::http::uri::Authority>() else {
         return false;
     };
@@ -1473,7 +1952,8 @@ fn allowed_host(host: &str, bind: IpAddr, port: u16) -> bool {
             .is_ok_and(|ip| ip.is_loopback());
     // An SSH tunnel's browser-facing port can differ from the listening port.
     // The write/WebSocket guard still enforces exact Origin/Host agreement.
-    if !loopback && authority.port_u16().unwrap_or(80) != port {
+    let default_port = if secure { 443 } else { 80 };
+    if !loopback && authority.port_u16().unwrap_or(default_port) != port {
         return false;
     }
     if !bind.is_loopback() {
@@ -1488,19 +1968,36 @@ fn allowed_host(host: &str, bind: IpAddr, port: u16) -> bool {
 }
 async fn status(State(app): State<App>) -> Json<Value> {
     let defaults = app.catalog.lock().unwrap().data.settings.clone();
-    let mut status = json!({"roots":effective_roots(&app),"defaultModels":defaults.default_models,"defaultCommunicationRole":defaults.default_communication_role.unwrap_or_default(),"providers":[
+    let auth = if use_api_key() { "api_key" } else { "existing" };
+    // Legacy `claude`/`codex` session IDs stay valid but are never offered for new sessions.
+    let mut status = json!({"roots":effective_roots(&app),"defaultModels":defaults.default_models,"defaultCommunicationRole":defaults.default_communication_role.unwrap_or_default(),"sessionRouting":defaults.session_routing.unwrap_or_default(),"providers":[
         {"id":"demo","name":"Demo agent","installed":true,"keyPresent":true},
-        {"id":"claude","name":"Claude","installed":installed("claude"),"keyPresent":key_present("claude"),"authMode":if use_api_key(){"api_key"}else{"existing"}},
-        {"id":"claude-rust","name":"Claude · Rust ACP","installed":installed("claude-rust"),"keyPresent":key_present("claude-rust"),"authMode":if use_api_key(){"api_key"}else{"existing"}},
-        {"id":"codex","name":"Codex","installed":installed("codex"),"keyPresent":key_present("codex"),"authMode":if use_api_key(){"api_key"}else{"existing"}},
-        {"id":"codex-rust","name":"Codex · Rust ACP","installed":installed("codex-rust"),"keyPresent":key_present("codex-rust"),"authMode":if use_api_key(){"api_key"}else{"existing"}},
+        {"id":"claude-rust","name":"Claude","installed":installed("claude-rust"),"keyPresent":key_present("claude-rust"),"authMode":auth},
+        {"id":"codex-rust","name":"Codex","installed":installed("codex-rust"),"keyPresent":key_present("codex-rust"),"authMode":auth},
         {"id":"goose","name":"Goose · embedded","installed":true,"keyPresent":true,"authMode":"configured"},
+        {"id":"antigravity","name":"Antigravity","installed":installed("antigravity"),"keyPresent":true,"authMode":"existing"},
         {"id":"opencode","name":"OpenCode · free models","installed":installed("opencode"),"keyPresent":true}
     ]});
+    status["features"] = json!({"modelViewer": cfg!(feature = "model-viewer")});
+    status["build"] = json!(agentworks_runtime::remote::BUILD);
+    let hidden = defaults.hidden_providers.unwrap_or_default();
     for p in status["providers"].as_array_mut().unwrap() {
-        p["roles"] = json!(roles::supported(p["id"].as_str().unwrap_or_default()));
+        let id = p["id"].as_str().unwrap_or_default().to_string();
+        p["roles"] = json!(roles::supported(&id));
+        p["hidden"] = json!(hidden.contains(&id));
     }
     Json(status)
+}
+/// Harnesses that may run at once; suspended, failed and closed sessions don't count.
+/// Read before taking the sessions lock, which is never held while locking the catalog.
+fn active_limit(app: &App) -> usize {
+    app.catalog
+        .lock()
+        .unwrap()
+        .data
+        .settings
+        .max_active_sessions
+        .unwrap_or(catalog::DEFAULT_ACTIVE_SESSIONS) as usize
 }
 fn effective_roots(app: &App) -> Vec<PathBuf> {
     app.catalog
@@ -1544,7 +2041,7 @@ async fn get_settings(State(app): State<App>) -> Json<Value> {
     let roots = effective_roots(&app);
     let settings = app.catalog.lock().unwrap().data.settings.clone();
     Json(
-        json!({"roots":roots,"defaultModels":settings.default_models,"claudeDefaultPermissionMode":settings.claude_default_permission_mode.unwrap_or_default(),"codexDefaultPermissionMode":settings.codex_default_permission_mode.unwrap_or_default(),"defaultCommunicationRole":settings.default_communication_role.unwrap_or_default()}),
+        json!({"git":settings.git.unwrap_or_default(),"roots":roots,"maxActiveSessions":settings.max_active_sessions.unwrap_or(catalog::DEFAULT_ACTIVE_SESSIONS),"idleSleepMinutes":settings.idle_sleep_minutes.unwrap_or(catalog::DEFAULT_IDLE_SLEEP_MINUTES),"defaultModels":settings.default_models,"claudeDefaultPermissionMode":settings.claude_default_permission_mode.unwrap_or_default(),"codexDefaultPermissionMode":settings.codex_default_permission_mode.unwrap_or_default(),"antigravityDefaultPermissionMode":settings.antigravity_default_permission_mode.unwrap_or_default(),"defaultCommunicationRole":settings.default_communication_role.unwrap_or_default(),"hiddenProviders":settings.hidden_providers.unwrap_or_default(),"sessionRouting":settings.session_routing.unwrap_or_default()}),
     )
 }
 
@@ -1556,6 +2053,38 @@ async fn get_notifications(State(app): State<App>) -> Json<Value> {
         "categories":notifications::Event::ALL.iter().map(|e|json!({"id":e,"label":e.label()})).collect::<Vec<_>>(),
         "projects":catalog.data.projects.iter().map(|p|json!({"id":p.id,"name":p.name})).collect::<Vec<_>>(),
     }))
+}
+async fn notification_inbox(State(app): State<App>) -> Json<Value> {
+    Json(json!({"alerts":app.notifications.list()}))
+}
+#[derive(Deserialize)]
+struct DismissNotifications {
+    ids: Vec<String>,
+    dismissed: bool,
+}
+async fn dismiss_notifications(
+    State(app): State<App>,
+    Json(request): Json<DismissNotifications>,
+) -> ApiResult {
+    if request.ids.len() > 10000 || request.ids.iter().any(|id| id.len() > 128) {
+        return Err(fail(
+            StatusCode::BAD_REQUEST,
+            "Too many notification identifiers",
+        ));
+    }
+    app.notifications
+        .dismiss(&request.ids, request.dismissed)
+        .map_err(|_| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not save notification dismissal",
+            )
+        })?;
+    Ok(Json(json!({"alerts":app.notifications.list()})))
+}
+async fn notification_inbox_events(State(app): State<App>, ws: WebSocketUpgrade) -> Response {
+    let receiver = app.notifications.subscribe_inbox();
+    ws.on_upgrade(move |socket| notification_socket(socket, receiver))
 }
 async fn save_notifications(
     State(app): State<App>,
@@ -1606,6 +2135,26 @@ async fn save_settings(State(app): State<App>, Json(mut settings): Json<Settings
             normalized.push(path);
         }
     }
+    if settings
+        .max_active_sessions
+        .is_some_and(|n| !(1..=catalog::MAX_ACTIVE_SESSIONS).contains(&n))
+    {
+        return Err(fail(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Allow between 1 and {} active sessions",
+                catalog::MAX_ACTIVE_SESSIONS
+            ),
+        ));
+    }
+    if settings.idle_sleep_minutes.is_some_and(|n| {
+        n != 0 && !(catalog::MIN_IDLE_SLEEP_MINUTES..=catalog::MAX_IDLE_SLEEP_MINUTES).contains(&n)
+    }) {
+        return Err(fail(
+            StatusCode::BAD_REQUEST,
+            "Sleep idle sessions after 1 hour to 7 days, or never",
+        ));
+    }
     for (provider, model) in &settings.default_models {
         if !agentworks_runtime::remote::PROVIDERS.contains(&provider.as_str())
             || model.is_empty()
@@ -1623,6 +2172,16 @@ async fn save_settings(State(app): State<App>, Json(mut settings): Json<Settings
             ));
         }
     }
+    if settings.hidden_providers.as_ref().is_some_and(|hidden| {
+        hidden
+            .iter()
+            .any(|p| !agentworks_runtime::remote::PROVIDERS.contains(&p.as_str()))
+    }) {
+        return Err(fail(StatusCode::BAD_REQUEST, "Unknown harness"));
+    }
+    if let Some(routing) = settings.session_routing.as_mut() {
+        routing::validate_settings(routing)?;
+    }
     settings.roots = Some(normalized);
     persist_settings(&app, |current| {
         // Older settings forms may omit these controls; keep their saved defaults.
@@ -1632,11 +2191,25 @@ async fn save_settings(State(app): State<App>, Json(mut settings): Json<Settings
         settings.codex_default_permission_mode = settings
             .codex_default_permission_mode
             .or(current.codex_default_permission_mode);
+        settings.antigravity_default_permission_mode = settings
+            .antigravity_default_permission_mode
+            .or(current.antigravity_default_permission_mode);
         settings.default_communication_role = settings
             .default_communication_role
             .or(current.default_communication_role);
         settings.timeouts = settings.timeouts.take().or(current.timeouts.clone());
+        settings.max_active_sessions = settings.max_active_sessions.or(current.max_active_sessions);
+        settings.idle_sleep_minutes = settings.idle_sleep_minutes.or(current.idle_sleep_minutes);
         settings.notifications = current.notifications.clone();
+        settings.git = settings.git.take().or(current.git.clone());
+        settings.hidden_providers = settings
+            .hidden_providers
+            .take()
+            .or(current.hidden_providers.clone());
+        settings.session_routing = settings
+            .session_routing
+            .take()
+            .or_else(|| current.session_routing.clone());
         settings
     })?;
     Ok(get_settings(State(app.clone())).await)
@@ -1703,6 +2276,10 @@ fn persist_settings(
     if let Some(policy) = &next.timeouts {
         policy
             .validate()
+            .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    }
+    if let Some(git) = &next.git {
+        git.validate()
             .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
     }
     let policy = next.timeouts.clone().unwrap_or_default();
@@ -1902,6 +2479,7 @@ async fn import_session(State(app): State<App>, Json(req): Json<ImportSession>) 
             queued_prompt: None,
             control_origin: None,
             fork: None,
+            ..Default::default()
         }),
     )
     .await
@@ -1923,76 +2501,87 @@ async fn get_catalog(State(app): State<App>) -> Json<Value> {
     }))
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProjectName {
     name: String,
+    slug: Option<String>,
+    #[serde(default, rename = "tasksEnabled")]
+    tasks_enabled: Option<bool>,
     #[serde(
         default,
         rename = "defaultCommunicationRole",
         deserialize_with = "communication::role_patch"
     )]
     default_communication_role: Option<Option<communication::Role>>,
-    /// Omitted keeps the current directory; `null` clears it.
     #[serde(
         default,
-        rename = "defaultLocation",
-        deserialize_with = "location_patch"
+        rename = "sessionRouting",
+        deserialize_with = "routing::project_patch"
     )]
-    default_location: Option<Option<ProjectLocation>>,
+    session_routing: Option<Option<routing::ProjectSettings>>,
+    /// Project directories by host id. A host left out keeps its directory;
+    /// `null` clears that host's directory.
+    #[serde(default, rename = "defaultLocations")]
+    default_locations: BTreeMap<String, Option<String>>,
 }
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProjectLocation {
-    #[serde(default)]
-    host_id: Option<String>,
-    path: String,
-}
-fn location_patch<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<Option<ProjectLocation>>, D::Error> {
-    Option::<ProjectLocation>::deserialize(deserializer).map(Some)
-}
-/// Validates a requested project directory on its host before anything is saved.
-async fn project_location(
+/// Validates each requested project directory on its host before anything is
+/// saved. `None` clears that host's directory.
+async fn project_locations(
     app: &App,
-    location: &Option<Option<ProjectLocation>>,
-) -> Result<Option<Option<(String, PathBuf)>>, (StatusCode, String)> {
-    let Some(location) = location else {
-        return Ok(None);
-    };
-    let Some(location) = location else {
-        return Ok(Some(None));
-    };
-    let host = location.host_id.as_deref().unwrap_or("local").to_string();
-    let path = if host == "local" {
-        checked_cwd(app, &location.path)?
-    } else {
-        tokio::time::timeout(
-            std::time::Duration::from_secs(12),
-            hosts::remote_directory(app, &host, &location.path),
-        )
-        .await
-        .map_err(|_| {
-            fail(
-                StatusCode::REQUEST_TIMEOUT,
-                "Remote directory validation timed out",
+    locations: &BTreeMap<String, Option<String>>,
+) -> Result<Vec<(String, Option<PathBuf>)>, (StatusCode, String)> {
+    let mut checked = Vec::with_capacity(locations.len());
+    for (host, path) in locations {
+        let Some(path) = path else {
+            checked.push((host.clone(), None));
+            continue;
+        };
+        let path = if host == "local" {
+            checked_cwd(app, path)?
+        } else {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(12),
+                hosts::remote_directory(app, host, path),
             )
-        })??
-    };
-    Ok(Some(Some((host, path))))
+            .await
+            .map_err(|_| {
+                fail(
+                    StatusCode::REQUEST_TIMEOUT,
+                    "Remote directory validation timed out",
+                )
+            })??
+        };
+        checked.push((host.clone(), Some(path)));
+    }
+    Ok(checked)
 }
 fn save_project(
     app: &App,
     id: Option<&str>,
-    req: ProjectName,
-    location: Option<Option<(String, PathBuf)>>,
+    mut req: ProjectName,
+    locations: Vec<(String, Option<PathBuf>)>,
 ) -> ApiResult {
+    if let Some(Some(sr)) = req.session_routing.as_mut() {
+        routing::validate_project_settings(sr)?;
+    }
     let mut catalog = app.catalog.lock().unwrap();
     let mut project = catalog
-        .project(id, &req.name, req.default_communication_role)
+        .project_with_options(
+            id,
+            &req.name,
+            req.default_communication_role,
+            req.slug.as_deref(),
+            req.tasks_enabled,
+        )
         .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
-    if let Some(location) = location {
-        let location = match location {
-            Some((host, path)) => Some(catalog.location_on(&host, &path).map_err(|_| {
+    if let Some(sr) = req.session_routing {
+        project = catalog
+            .set_project_session_routing(&project.id, sr)
+            .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
+    for (host, path) in locations {
+        let location = match path {
+            Some(path) => Some(catalog.location_on(&host, &path).map_err(|_| {
                 fail(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Could not save project directory",
@@ -2001,22 +2590,24 @@ fn save_project(
             None => None,
         };
         project = catalog
-            .set_default_location(&project.id, location.as_ref().map(|l| l.id.as_str()))
+            .set_default_location(&project.id, &host, location.as_ref().map(|l| l.id.as_str()))
             .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
     Ok(Json(json!(project)))
 }
 async fn create_project(State(app): State<App>, Json(req): Json<ProjectName>) -> ApiResult {
-    let location = project_location(&app, &req.default_location).await?;
-    save_project(&app, None, req, location)
+    let locations = project_locations(&app, &req.default_locations).await?;
+    let _gate = app.communication_lock.lock().await;
+    save_project(&app, None, req, locations)
 }
 async fn rename_project(
     State(app): State<App>,
     Path(id): Path<String>,
     Json(req): Json<ProjectName>,
 ) -> ApiResult {
-    let location = project_location(&app, &req.default_location).await?;
-    save_project(&app, Some(&id), req, location)
+    let locations = project_locations(&app, &req.default_locations).await?;
+    let _gate = app.communication_lock.lock().await;
+    save_project(&app, Some(&id), req, locations)
 }
 /// What happens to a project's sessions when the project is archived or deleted.
 /// The default applies the same operation; `ungroup` moves them to Ungrouped instead.
@@ -2049,7 +2640,7 @@ fn ungroup_sessions(
 ) -> Result<(), (StatusCode, String)> {
     for s in sessions {
         s.data.lock().unwrap().project_id = None;
-        inbox_delivery::revoke_related(app, s, reason)?;
+        inbox_delivery::drop_from_sender(app, s, reason)?;
         s.emit("session_updated", json!({"projectId":null}));
     }
     Ok(())
@@ -2065,7 +2656,6 @@ async fn delete_project(
     if !app.catalog.lock().unwrap().contains(&id) {
         return Err(fail(StatusCode::BAD_REQUEST, "Project not found"));
     }
-    review_queue::ensure_project_removable(&app.store.lock().unwrap().connection, &id)?;
     app.store
         .lock()
         .unwrap()
@@ -2080,6 +2670,9 @@ async fn delete_project(
     if req.sessions == ProjectSessions::Cascade {
         // Delete sessions before the project so a failure leaves a retryable project.
         for s in &affected {
+            inbox_delivery::drop_from_sender(&app, s, "Project deletion requested")?;
+            let _ = lifecycle::suspend_locked(s).await?;
+            git_settings::exit_locked(&app, s, "delete").await?;
             delete_session_locked(&app, s).await?;
         }
     }
@@ -2114,11 +2707,32 @@ async fn archive_project(
         return Err(fail(StatusCode::BAD_REQUEST, "Project not found"));
     }
     let affected = project_sessions(&app, &id);
+    // Refuse before the first session changes, so a project never ends up half archived.
+    if req.archived && req.sessions == ProjectSessions::Cascade {
+        for s in &affected {
+            if !s.data.lock().unwrap().lifecycle.archived {
+                lifecycle::between_turns(s)?;
+            }
+        }
+    }
     if req.archived && req.sessions == ProjectSessions::Ungroup {
         ungroup_sessions(&app, &affected, "Project archived")?;
     } else {
         for s in &affected {
-            let _ = lifecycle::apply(s, None, Some(req.archived)).await?;
+            let (was_archived, hooks) = {
+                let data = s.data.lock().unwrap();
+                (
+                    data.lifecycle.archived,
+                    data.worktree.as_ref().is_some_and(|o| o.hooks.is_some()),
+                )
+            };
+            if req.archived && !was_archived {
+                git_settings::exit(&app, s, "archive", &[]).await?;
+            }
+            if !req.archived && was_archived && hooks {
+                worktree_cleanup::restore(&app, s).await?;
+            }
+            let _ = lifecycle::apply(&app, s, None, Some(req.archived)).await?;
         }
     }
     let project = app
@@ -2152,7 +2766,7 @@ async fn assign_project(
     }
     if let Some(project) = req.project_id.as_deref() {
         catalog
-            .attach_location(project, &s.location_id)
+            .attach_location(project, &s.location_id())
             .map_err(|_| {
                 fail(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -2161,7 +2775,7 @@ async fn assign_project(
             })?;
     }
     drop(catalog);
-    inbox_delivery::revoke_related(&app, &s, "Project assignment changed")?;
+    inbox_delivery::drop_from_sender(&app, &s, "Sender moved to another project")?;
     s.data.lock().unwrap().project_id = req.project_id.clone();
     s.emit("session_updated", json!({"projectId":req.project_id}));
     Ok(Json(s.meta()))
@@ -2184,7 +2798,7 @@ async fn list_sessions(
 async fn activity(State(app): State<App>) -> Json<Value> {
     // The async preparation guard releases on success, failure and cancellation.
     // It also covers brief policy/root edits, conservatively reporting those as busy.
-    let workspace_preparing = app.workspace_lock.try_lock().is_err();
+    let workspace_preparing = app.workspace_lock.try_lock().is_err() || worktrees::populating();
     let sessions: Vec<_> = app
         .sessions
         .lock()
@@ -2330,25 +2944,7 @@ async fn fork_session(
         req.context.as_deref().unwrap_or("auto"),
         req.summary.as_deref(),
     )?;
-    let provider = req
-        .provider
-        .clone()
-        .unwrap_or_else(|| parent.provider.clone());
     let parent_profile = parent.data.lock().unwrap().model_provider.clone();
-    let model_provider = req.model_provider.clone().unwrap_or_else(|| {
-        if provider == parent.provider && target_host == parent.host_id {
-            parent_profile.clone()
-        } else {
-            None
-        }
-    });
-    let same_model_provider = model_provider == parent_profile;
-    // Native history belongs to one host/provider. Cross-host/provider forks
-    // retain the recorded transcript/summary and open a fresh native session.
-    if target_host != parent.host_id || provider != parent.provider || !same_model_provider {
-        seed.lineage.source_session_id = None;
-        seed.lineage.source_message_id = None;
-    }
     let (title, inherited_model, project_id, inherited_role) = {
         let data = parent.data.lock().unwrap();
         (
@@ -2356,21 +2952,77 @@ async fn fork_session(
                 .title
                 .clone()
                 .unwrap_or_else(|| parent.title.clone()),
-            // A model only carries over to the same harness; another agent advertises
-            // its own models and would reject a foreign ID.
-            (provider == parent.provider && same_model_provider)
-                .then(|| {
-                    data.models["currentValue"]
-                        .as_str()
-                        .map(str::to_owned)
-                        .or_else(|| parent.initial_model.clone())
-                })
-                .flatten(),
+            data.models["currentValue"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| parent.initial_model.clone()),
             req.project_id.clone().or_else(|| data.project_id.clone()),
             // Every fork keeps the parent's exact role snapshot.
             data.role.clone(),
         )
     };
+    let effective_cwd = req
+        .cwd
+        .unwrap_or_else(|| parent.cwd().to_string_lossy().into_owned());
+    let effective_title = req
+        .title
+        .unwrap_or_else(|| format!("{title} (fork)"))
+        .chars()
+        .take(80)
+        .collect::<String>();
+    let routing_mode = routing::effective_mode(&app, project_id.as_deref());
+    let requested_provider = req.provider.as_deref().unwrap_or("");
+    let (provider, model_provider, routed_model, already_routed) =
+        if routing::should_route(routing_mode, requested_provider, false) {
+            let decision = routing::route(
+                &app,
+                &routing::RouteInput {
+                    project_id: project_id.as_deref(),
+                    host_id: &target_host,
+                    title: Some(&effective_title),
+                    description: None,
+                    prompt: None,
+                    role_name: inherited_role.as_ref().map(|r| r.name.as_str()),
+                    role_description: None,
+                    requires_role_support: inherited_role.is_some(),
+                    cwd: &effective_cwd,
+                },
+            )
+            .await?;
+            (
+                decision.provider.clone(),
+                decision.model_provider.clone(),
+                decision.model.clone(),
+                Some(decision),
+            )
+        } else {
+            let provider = req
+                .provider
+                .clone()
+                .unwrap_or_else(|| parent.provider.clone());
+            let model_provider = req.model_provider.clone().unwrap_or_else(|| {
+                if provider == parent.provider && target_host == parent.host_id {
+                    parent_profile.clone()
+                } else {
+                    None
+                }
+            });
+            (provider, model_provider, req.model, None)
+        };
+    let same_model_provider = model_provider == parent_profile;
+    // Native history belongs to one host/provider. Cross-host/provider forks
+    // retain the recorded transcript/summary and open a fresh native session.
+    if target_host != parent.host_id || provider != parent.provider || !same_model_provider {
+        seed.lineage.source_session_id = None;
+        seed.lineage.source_message_id = None;
+    }
+    // A model only carries over to the same harness; another agent advertises
+    // its own models and would reject a foreign ID.
+    let final_model = routed_model.or_else(|| {
+        (already_routed.is_none() && provider == parent.provider && same_model_provider)
+            .then_some(inherited_model)
+            .flatten()
+    });
     let result = create_session_inner(
         &app,
         Create {
@@ -2382,26 +3034,21 @@ async fn fork_session(
             role: None,
             inherited_role,
             provider: provider.clone(),
-            cwd: req
-                .cwd
-                .unwrap_or_else(|| parent.cwd.to_string_lossy().into_owned()),
-            title: Some(
-                req.title
-                    .unwrap_or_else(|| format!("{title} (fork)"))
-                    .chars()
-                    .take(80)
-                    .collect(),
-            ),
-            model: req.model.or(inherited_model),
+            cwd: effective_cwd,
+            title: Some(effective_title),
+            model: final_model,
             model_provider,
             project_id,
             host_id: Some(target_host),
+            prompt: None,
+            description: None,
             external_id: None,
             external_host: false,
             automation: None,
             queued_prompt: None,
             control_origin: None,
             fork: Some(seed),
+            already_routed,
         },
         Some(&key),
     )
@@ -2429,6 +3076,7 @@ struct Create {
     /// A fork's copy of its parent's role; never set by a client.
     #[serde(skip)]
     inherited_role: Option<agentworks_session::model::RoleSnapshot>,
+    #[serde(default)]
     provider: String,
     cwd: String,
     title: Option<String>,
@@ -2439,6 +3087,12 @@ struct Create {
     project_id: Option<String>,
     #[serde(rename = "hostId")]
     host_id: Option<String>,
+    /// Optional initial prompt sent when the session starts (and scored by the router).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prompt: Option<String>,
+    /// Optional task description used by the router without sending a prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
     #[serde(skip)]
     external_id: Option<String>,
     #[serde(skip)]
@@ -2452,6 +3106,8 @@ struct Create {
     /// L-08 prepared carry-over; built by the fork endpoint, never by a client.
     #[serde(skip)]
     fork: Option<fork::Seed>,
+    #[serde(skip)]
+    already_routed: Option<agentworks_session::model::RoutingDecision>,
 }
 async fn create_session(State(app): State<App>, Json(req): Json<Create>) -> ApiResult {
     limit_resume::new_policy(req.resume_policy.clone())?;
@@ -2486,7 +3142,9 @@ fn initial_agent_access(
     explicit.or_else(|| (!automation).then(|| project_role.access()))
 }
 
+#[tracing::instrument(name = "create", skip_all, fields(host = %hosts::name(app, req.host_id.as_deref().unwrap_or("local")), provider = %req.provider))]
 async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&str>) -> ApiResult {
+    let started = std::time::Instant::now();
     // A request without a directory starts in the project's directory on that host.
     if req.cwd.trim().is_empty() {
         let host = req.host_id.as_deref().unwrap_or("local");
@@ -2494,8 +3152,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
             .catalog
             .lock()
             .unwrap()
-            .default_location(req.project_id.as_deref())
-            .filter(|l| l.host_id == host)
+            .default_location(req.project_id.as_deref(), host)
             .map(|l| l.path.to_string_lossy().into_owned())
             .ok_or_else(|| {
                 fail(
@@ -2507,6 +3164,61 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
     if req.model.as_ref().is_some_and(|m| m.len() > 256) {
         return Err(fail(StatusCode::BAD_REQUEST, "Model ID is too long"));
     }
+    if req.prompt.as_ref().is_some_and(|p| p.chars().count() > 100_000) {
+        return Err(fail(StatusCode::BAD_REQUEST, "Initial prompt is too long"));
+    }
+    if req.description.as_ref().is_some_and(|d| d.chars().count() > 8192) {
+        return Err(fail(StatusCode::BAD_REQUEST, "Description is too long"));
+    }
+    if req.queued_prompt.is_none()
+        && let Some(prompt) = req.prompt.as_ref().filter(|p| !p.trim().is_empty())
+    {
+        req.queued_prompt = Some(prompt.clone());
+    }
+    if req
+        .project_id
+        .as_deref()
+        .is_some_and(|id| !app.catalog.lock().unwrap().contains(id))
+    {
+        return Err(fail(StatusCode::BAD_REQUEST, "Project not found"));
+    }
+    let host_id = req.host_id.as_deref().unwrap_or("local");
+    let routing_mode = routing::effective_mode(app, req.project_id.as_deref());
+    let routing_decision = if let Some(decision) = req.already_routed.take() {
+        Some(decision)
+    } else if routing::should_route(routing_mode, &req.provider, req.external_id.is_some()) {
+        let requested_role = if let Some(role) = &req.inherited_role {
+            Some((role.name.clone(), None))
+        } else if let Some(role_id) = req.role.as_deref().filter(|r| !r.is_empty()) {
+            let role = roles::get(&app.store.lock().unwrap().connection, role_id)
+                .map_err(|_| fail(StatusCode::INTERNAL_SERVER_ERROR, "Could not read role"))?
+                .ok_or_else(|| fail(StatusCode::BAD_REQUEST, "Role not found"))?;
+            Some((role.name, Some(role.description)))
+        } else {
+            None
+        };
+        let decision = routing::route(
+            app,
+            &routing::RouteInput {
+                project_id: req.project_id.as_deref(),
+                host_id,
+                title: req.title.as_deref(),
+                description: req.description.as_deref(),
+                prompt: req.queued_prompt.as_deref().or(req.prompt.as_deref()),
+                role_name: requested_role.as_ref().map(|(n, _)| n.as_str()),
+                role_description: requested_role.as_ref().and_then(|(_, d)| d.as_deref()),
+                requires_role_support: requested_role.is_some(),
+                cwd: &req.cwd,
+            },
+        )
+        .await?;
+        req.provider = decision.provider.clone();
+        req.model = decision.model.clone();
+        req.model_provider = decision.model_provider.clone();
+        Some(decision)
+    } else {
+        None
+    };
     if !agentworks_runtime::remote::PROVIDERS.contains(&req.provider.as_str()) {
         return Err(fail(StatusCode::BAD_REQUEST, "Unknown provider"));
     }
@@ -2517,6 +3229,10 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
         req.model_provider.as_deref(),
     )
     .await?;
+    tracing::debug!(
+        elapsed_ms = agentworks_runtime::log::ms(started),
+        "Selected the model provider"
+    );
     // Checked before any workspace is prepared, so a bad role leaves nothing behind.
     let role = match req.inherited_role.clone() {
         Some(role) => Some(role),
@@ -2543,19 +3259,22 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
         return Err(fail(
             StatusCode::CONFLICT,
             match req.provider.as_str() {
+                "antigravity" => {
+                    "Antigravity CLI is not installed on PATH. Install agy or set AGENTWORKS_ANTIGRAVITY_PATH, then sign in with agy."
+                }
                 "opencode" => {
                     "OpenCode is not installed on PATH. Set AGENTWORKS_OPENCODE_PATH if needed."
                 }
-                "codex-rust" => {
+                "codex" | "codex-rust" => {
                     "Native Codex is not installed on PATH. Install Codex or set CODEX_PATH."
                 }
-                "claude-rust" => {
+                _ => {
                     "Native Claude Code is not installed on PATH. Install Claude Code or set CLAUDE_CODE_EXECUTABLE."
                 }
-                _ => "ACP adapter missing. Run npm ci --ignore-scripts.",
             },
         ));
     }
+    let step = std::time::Instant::now();
     let source = match &remote_host {
         Some(host) => tokio::time::timeout(
             std::time::Duration::from_secs(12),
@@ -2570,6 +3289,10 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
         })??,
         None => checked_cwd(app, &req.cwd)?,
     };
+    tracing::info!(
+        elapsed_ms = agentworks_runtime::log::ms(step),
+        "Checked the directory"
+    );
     // Registered imports/resume retain their original context, even after policy changes.
     if let Some(external) = &req.external_id {
         let existing = app
@@ -2586,7 +3309,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
             })
             .cloned();
         if let Some(existing) = existing {
-            if existing.cwd != source {
+            if existing.cwd() != source {
                 return Err(fail(
                     StatusCode::CONFLICT,
                     "This harness session is already registered with a different directory",
@@ -2596,6 +3319,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
         }
     }
     worktrees::verify_import(app, &req, &source).await?;
+    let limit = active_limit(app);
     if app
         .sessions
         .lock()
@@ -2608,19 +3332,20 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
             )
         })
         .count()
-        >= 12
+        >= limit
     {
         return Err(fail(
             StatusCode::CONFLICT,
-            "Limit: 12 active harnesses. Suspend idle sessions first.",
+            format!("Limit: {limit} active harnesses. Suspend idle sessions first."),
         ));
     }
     // Prepare workspaces on the machine that owns their files.
+    let step = std::time::Instant::now();
     let (cwd, owned_worktree) = if let Some(host) = remote_host.as_deref() {
         hosts::prepare_workspace(app, host, &req, source, creation_key).await?
     } else {
         tokio::time::timeout(
-            std::time::Duration::from_secs(12),
+            std::time::Duration::from_secs(120),
             worktrees::prepare(app, &req, source, creation_key),
         )
         .await
@@ -2631,6 +3356,11 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
             )
         })??
     };
+    tracing::info!(
+        elapsed_ms = agentworks_runtime::log::ms(step),
+        worktree = owned_worktree.is_some(),
+        "Prepared the workspace"
+    );
     let mut catalog = app.catalog.lock().unwrap();
     if req
         .project_id
@@ -2677,8 +3407,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
         id: Uuid::new_v4().to_string(),
         provider: req.provider.clone(),
         host_id: location.host_id,
-        location_id: location.id,
-        cwd,
+        place: Place::at(cwd, location.id),
         title,
         initial_model: if let Some(profile) = &model_profile {
             req.model
@@ -2701,6 +3430,8 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
             .unwrap()
             .as_millis() as u64,
         data: Mutex::new(SessionData {
+            script_badges: Default::default(),
+            badge_revision: 0,
             model_provider: req.model_provider,
             lifecycle: Default::default(),
             inbox_turn: None,
@@ -2708,6 +3439,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
             seq: 0,
             events: VecDeque::new(),
             bytes: 0,
+            parked: false,
             requests: HashSet::new(),
             last_prompt: None,
             models: Value::Null,
@@ -2727,6 +3459,11 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
                 req.external_id.is_some(),
                 catalog.data.settings.codex_default_permission_mode,
             ),
+            initial_antigravity_permission_mode: permission_modes::initial_antigravity_default(
+                &req.provider,
+                req.external_id.is_some(),
+                catalog.data.settings.antigravity_default_permission_mode,
+            ),
             available_commands: json!([]),
             turn_active: false,
             project_id: req.project_id,
@@ -2745,9 +3482,13 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
             timeouts: None,
             lineage: Default::default(),
             carried_context: None,
+            additional_directories: Vec::new(),
             prompt_capabilities: Value::Null,
             worktree: owned_worktree,
             role,
+            routing: routing_decision,
+            native_rename: false,
+            startup: None,
         }),
         tx,
         commands: Mutex::new(None),
@@ -2757,13 +3498,16 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
         mcp_endpoint: app.mcp_endpoint,
         mcp_token: Mutex::new(Uuid::new_v4().to_string()),
         mcp_refresh_pending: std::sync::atomic::AtomicBool::new(false),
+        fresh_environment: Default::default(),
         notifications: app.notifications.clone(),
-        progress: app.progress.clone(),
+        scripts: app.scripts.clone(),
+        account_quota: app.account_quota.clone(),
     });
     // Event publication takes session state before the catalog. Release the
     // catalog before reading other sessions, so turn completion can run while
     // another session is created.
     drop(catalog);
+    let limit = active_limit(app);
     {
         let mut sessions = app.sessions.lock().unwrap();
         if let Some(id) = &req.external_id {
@@ -2777,7 +3521,7 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
                 data.opencode_host == req.external_host
                     && data.provider_session_id.as_ref() == Some(id)
             }) {
-                if existing.cwd != s.cwd {
+                if existing.cwd() != s.cwd() {
                     return Err(fail(
                         StatusCode::CONFLICT,
                         "This harness session is already registered with a different directory",
@@ -2795,15 +3539,17 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
                 )
             })
             .count()
-            >= 12
+            >= limit
         {
             return Err(fail(
                 StatusCode::CONFLICT,
-                "Limit: 12 active harnesses. Restart the server to suspend idle sessions first.",
+                format!(
+                    "Limit: {limit} active harnesses. Restart the server to suspend idle sessions first."
+                ),
             ));
         }
         if let Some(seed) = fork {
-            fork::apply(&s, seed, &s.cwd)?;
+            fork::apply(&s, seed, &s.cwd())?;
         }
         worktrees::arm_creation(app, creation_key)?;
         app.store
@@ -2824,6 +3570,11 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
         sessions.insert(s.id.clone(), s.clone());
     }
     s.emit("status", json!({"status":"starting"}));
+    tracing::info!(
+        session = %s.id,
+        total_ms = agentworks_runtime::log::ms(started),
+        "Created the session"
+    );
     start_worker(app, &s);
     Ok(Json(s.meta()))
 }
@@ -2837,8 +3588,43 @@ fn start_worker(app: &App, s: &Arc<Session>) {
     *s.commands.lock().unwrap() = Some(commands);
     let worker_s = s.clone();
     let app_for_diagnostics = app.clone();
+    // A root span: a resume or restart has no create request to nest under.
+    let span = tracing::info_span!(parent: None, "session", id = %s.id, host = %hosts::name(app, &s.host_id), provider = %s.provider);
     let worker = tokio::spawn(async move {
+        if let Err(message) = worktrees::populate(&app_for_diagnostics, &worker_s).await {
+            tracing::warn!("Could not create the worktree: {message}");
+            worker_s.emit("error", json!({"message":message}));
+            worker_s.status("error");
+            return;
+        }
+        let entered = {
+            let started = std::time::Instant::now();
+            let _run = app_for_diagnostics.run_lock.lock().await;
+            let _workspace = app_for_diagnostics.workspace_lock.lock().await;
+            let locked = std::time::Instant::now();
+            if worker_s.data.lock().unwrap().worktree.as_ref().is_some_and(|o| {
+                o.hooks
+                    .as_ref()
+                    .is_some_and(|h| h.enter != agentworks_workspace::hooks::Status::Succeeded)
+            }) {
+                worker_s.startup("Running worktree enter hooks");
+            }
+            let entered = git_settings::run(&app_for_diagnostics, &worker_s, "enter", "create").await;
+            tracing::info!(
+                wait_ms = locked.duration_since(started).as_millis() as u64,
+                elapsed_ms = agentworks_runtime::log::ms(locked),
+                "Ran the enter hook"
+            );
+            entered
+        };
+        if let Err((_, message)) = entered {
+            tracing::warn!("The enter hook failed: {message}");
+            worker_s.emit("error", json!({"message":message}));
+            worker_s.status("error");
+            return;
+        }
         if let Err(error) = session_runtime::run(worker_s.clone(), rx).await {
+            tracing::warn!("The session stopped: {error}");
             worker_s.clear_approvals();
             // A dropped host link is handled like a server restart: the turn
             // is not retried and the session resumes once the host is back.
@@ -2852,10 +3638,17 @@ fn start_worker(app: &App, s: &Arc<Session>) {
                     .unwrap()
                     .input_queue
                     .block("Remote host disconnected; inspect, then resume the queue.");
-                let _ = inbox_delivery::cancel(
-                    &worker_s,
-                    "Remote host disconnected; inspect before reauthorizing inbox turns",
-                );
+                let _ = if was_active {
+                    inbox_delivery::cancel(
+                        &worker_s,
+                        "Remote host disconnected during a turn; inspect before resuming",
+                    )
+                } else {
+                    inbox_delivery::interrupt_inflight(
+                        &worker_s,
+                        "Remote host disconnected; queued wakes are held until it reconnects",
+                    )
+                };
                 worker_s.emit("interrupted",json!({"message":if was_active {"The connection to this session's host dropped during a turn. It was not retried. Resume once the host reconnects, and check the last tool result before continuing."} else {"The connection to this session's host dropped. Resume once the host reconnects."}}));
                 worker_s.status("suspended");
                 return;
@@ -2874,13 +3667,51 @@ fn start_worker(app: &App, s: &Arc<Session>) {
             );
             worker_s.status("error");
         }
-    });
+    }.instrument(span));
     *handle = Some(worker);
 }
 async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     let _run = app.run_lock.lock().await;
     service_restart::allow_start(&app)?;
     let s = session(&app, &id)?;
+    resume_locked(&app, &s).await
+}
+/// A fresh harness process for an idle session, which re-reads the login
+/// environment and harness configuration. Between turns only: a running turn
+/// would be cut short. A stopped session is simply resumed.
+async fn restart(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
+    let _run = app.run_lock.lock().await;
+    service_restart::allow_start(&app)?;
+    let s = session(&app, &id)?;
+    let running = {
+        let data = s.data.lock().unwrap();
+        match data.status.as_str() {
+            "idle" if !data.turn_active => true,
+            "suspended" | "error" => false,
+            _ => {
+                return Err(fail(
+                    StatusCode::CONFLICT,
+                    "Restart the harness between turns: wait for this turn to finish, or stop it",
+                ));
+            }
+        }
+    };
+    if running {
+        lifecycle::stop_worker(&s).await;
+        s.clear_approvals();
+        s.status("suspended");
+    }
+    s.fresh_environment
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    resume_locked(&app, &s).await
+}
+async fn resume_locked(app: &App, s: &Arc<Session>) -> ApiResult {
+    if s.data.lock().unwrap().lifecycle.archived {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "This session is archived; unarchive it before resuming",
+        ));
+    }
     if let Some(profile) = s.data.lock().unwrap().model_provider.as_deref() {
         agentworks_runtime::model_providers::authorize(profile, &s.host_id)
             .map_err(|e| fail(StatusCode::FORBIDDEN, e))?;
@@ -2908,7 +3739,7 @@ async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
         ));
     }
     if s.host_id == "local" {
-        if !installed(&s.provider) || !s.cwd.is_dir() {
+        if !installed(&s.provider) || !s.cwd().is_dir() {
             return Err(fail(
                 StatusCode::CONFLICT,
                 "Harness or working directory is unavailable on this host",
@@ -2925,6 +3756,7 @@ async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
             "This session's host is not connected, or no longer offers this harness",
         ));
     }
+    let limit = active_limit(app);
     {
         let sessions = app.sessions.lock().unwrap();
         let mut data = s.data.lock().unwrap();
@@ -2948,16 +3780,20 @@ async fn resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
                     )
             })
             .count()
-            >= 12
+            >= limit
         {
-            return Err(fail(StatusCode::CONFLICT, "Limit: 12 active harnesses"));
+            return Err(fail(
+                StatusCode::CONFLICT,
+                format!("Limit: {limit} active harnesses"),
+            ));
         }
         data.lifecycle.suspended = false;
+        data.lifecycle.asleep = false;
         data.status = "resuming".into();
     }
-    lifecycle::stop_worker(&s).await;
+    lifecycle::stop_worker(s).await;
     s.status("resuming");
-    start_worker(&app, &s);
+    start_worker(app, s);
     Ok(Json(json!({"accepted":true})))
 }
 #[derive(Deserialize)]
@@ -2979,9 +3815,6 @@ async fn prompt(
     Path(id): Path<String>,
     Json(req): Json<Prompt>,
 ) -> ApiResult {
-    let _run = app.run_lock.lock().await;
-    service_restart::allow_start(&app)?;
-    let s = session(&app, &id)?;
     if req.text.trim().is_empty()
         || req.text.len() > 32768
         || req.request_id.len() > 100
@@ -2992,6 +3825,21 @@ async fn prompt(
             "Enter a message of up to 32 KB and a request ID",
         ));
     }
+    let s = session(&app, &id)?;
+    let _run = loop {
+        // Opening a dormant session leaves it released; the first prompt resumes it.
+        if idle_sleep::dormant(&s) {
+            idle_sleep::wake_for_prompt(&app, &s).await?;
+        }
+        let run = app.run_lock.lock().await;
+        service_restart::allow_start(&app)?;
+        // The idle sweep may have won run_lock after the first check.
+        if idle_sleep::dormant(&s) {
+            drop(run);
+            continue;
+        }
+        break run;
+    };
     // L-05: a request ID bound into the explicit queue is never also sent directly.
     match input_queue::check_binding(&s, &req.request_id, &req.text)? {
         input_queue::Bound::Duplicate(_) => {
@@ -3026,6 +3874,7 @@ fn accept_prompt(
     initiator_title: Option<String>,
     attachments: Vec<(attachments::Meta, attachments::Payload)>,
 ) -> ApiResult {
+    let rename = native_rename::parse(&s.provider, &text);
     {
         let mut data = s.data.lock().unwrap();
         if data.requests.contains(&request_id) {
@@ -3052,7 +3901,12 @@ fn accept_prompt(
         data.input_queue.begin_turn(&text);
         data.status = "running".into();
         data.turn_active = true;
+        data.native_rename = rename.is_some();
         data.requests.insert(request_id.clone());
+    }
+    // Claude stores the named title as given; a bare `/rename` reports its choice later.
+    if let Some(Some(title)) = rename {
+        native_rename::adopt(s, title);
     }
     let mut user = json!({"text":text,"requestId":request_id,"initiatedBy":initiated_by,"initiatorTitle":initiator_title});
     let command = if attachments.is_empty() {
@@ -3066,7 +3920,7 @@ fn accept_prompt(
     };
     s.emit("user", user);
     s.emit("status", json!({"status":"running"}));
-    if let Err(error) = s.send_command(command) {
+    if let Err(error) = s.send_prompt_command(command, &request_id) {
         s.status("error");
         return Err(error);
     }
@@ -3088,10 +3942,11 @@ async fn cancel(
     // lock prevents another prompt being accepted while this cancellation queues.
     let stopped_prompt = {
         let data = s.data.lock().unwrap();
+        let window = s.window(&data);
         let user = data
             .last_prompt
             .as_ref()
-            .or_else(|| data.events.iter().rev().find(|e| e["kind"] == "user"));
+            .or_else(|| window.iter().rev().find(|e| e["kind"] == "user"));
         if target.user_seq.is_some() && user.and_then(|e| e["seq"].as_u64()) != target.user_seq {
             return Err(fail(
                 StatusCode::CONFLICT,
@@ -3101,7 +3956,7 @@ async fn cancel(
         user.cloned()
     };
     let restart_error = service_restart::stop_requester(&app, &id).err();
-    let inbox_error = inbox_delivery::cancel(&s, "Explicit Stop").err();
+    let inbox_error = inbox_delivery::stop(&s, "Explicit Stop").err();
     let status = {
         let mut data = s.data.lock().unwrap();
         data.continuation.stop("Explicit Stop");
@@ -3200,11 +4055,12 @@ async fn delete_session(
     let _gate = app.communication_lock.lock().await;
     let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
+    inbox_delivery::drop_from_sender(&app, &s, "Sender deleted")?;
+    let _ = lifecycle::suspend_locked(&s).await?;
+    git_settings::exit(&app, &s, "delete", &[]).await?;
     if options.provider_history {
         // Stop the active adapter before asking a separate connection to delete
         // its durable session, so it cannot rewrite history after deletion.
-        inbox_delivery::revoke_related(&app, &s, "Provider history deletion requested")?;
-        let _ = lifecycle::suspend_locked(&s).await?;
         if let Err(error) = session_runtime::delete_provider_history(&s).await {
             let message = agentworks_runtime::provider::safe_error(&error.to_string());
             s.emit("session_updated", s.meta());
@@ -3215,10 +4071,9 @@ async fn delete_session(
     delete_session_locked(&app, &s).await?;
     Ok(Json(json!({"ok":true})))
 }
-/// Callers hold the communication and run locks.
+/// Callers hold the communication and run locks, have stopped the harness, and completed exit hooks.
 async fn delete_session_locked(app: &App, s: &Session) -> Result<(), (StatusCode, String)> {
-    inbox_delivery::revoke_related(app, s, "Session deleted")?;
-    let _ = lifecycle::suspend_locked(s).await?;
+    inbox_delivery::drop_from_sender(app, s, "Sender deleted")?;
     app.store.lock().unwrap().delete(&s.id).map_err(|_| {
         fail(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -3229,7 +4084,7 @@ async fn delete_session_locked(app: &App, s: &Session) -> Result<(), (StatusCode
     attachments::delete_session(&s.id);
     secrets::forget(&s.id);
     app.sessions.lock().unwrap().remove(&s.id);
-    app.progress.forget(&s.id);
+    app.scripts.forget(&s.id);
     s.status("closed");
     Ok(())
 }
@@ -3344,6 +4199,8 @@ struct EventsQuery {
     /// Last event sequence the browser applied; resumes without a full replay.
     after: Option<u64>,
 }
+/// WebSocket subprotocol under which large session messages are gzip binary frames.
+const GZIP_SUBPROTOCOL: &str = "agentworks.gzip";
 async fn events(
     State(app): State<App>,
     Path(id): Path<String>,
@@ -3353,13 +4210,15 @@ async fn events(
     let s = match session(&app, &id) {
         Ok(session) => session,
         Err(error) => {
-            eprintln!("Session WebSocket route rejected reason=session_not_found");
+            tracing::info!(session = %id, "Session WebSocket route rejected reason=session_not_found");
             return Err(error);
         }
     };
+    let ws = ws.protocols([GZIP_SUBPROTOCOL]);
+    let gzip = ws.selected_protocol().is_some();
     Ok(ws.on_upgrade(move |socket| {
-        eprintln!("Session WebSocket upgraded");
-        event_socket(socket, s, query.after)
+        tracing::debug!(session = %s.id, "Session WebSocket upgraded");
+        event_socket(socket, s, query.after, gzip)
     }))
 }
 
@@ -3377,8 +4236,9 @@ async fn notification_socket(socket: WebSocket, mut rx: broadcast::Receiver<Valu
     loop {
         tokio::select! {
             next=rx.recv()=>{
-                // A lagging tab loses notices rather than blocking the session that
-                // produced them; it re-reads the sidebar on its next poll.
+                // Disconnect lagging consumers rather than blocking producers.
+                // Inbox clients reload durable state when they reconnect; optional
+                // browser popups deliberately have no historical backlog.
                 let Ok(event)=next else {break};
                 if sink.send(Message::Text(event.to_string().into())).await.is_err(){break;}
             }
@@ -3390,13 +4250,40 @@ async fn notification_socket(socket: WebSocket, mut rx: broadcast::Receiver<Valu
         }
     }
 }
-async fn event_socket(socket: WebSocket, s: Arc<Session>, after: Option<u64>) {
+/// Messages at least this large are gzipped for clients that ask for it.
+const SOCKET_COMPRESS_MIN: usize = 8 * 1024;
+/// A session event as a WebSocket message: text, or a gzip binary frame when large.
+/// permessage-deflate is not available in tungstenite, so compression is explicit.
+async fn socket_message(value: &Value, gzip: bool) -> Message {
+    let text = value.to_string();
+    if !gzip || text.len() < SOCKET_COMPRESS_MIN {
+        return Message::Text(text.into());
+    }
+    let compressed = tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(
+            Vec::with_capacity(text.len() / 6),
+            flate2::Compression::new(6),
+        );
+        encoder
+            .write_all(text.as_bytes())
+            .and_then(|()| encoder.finish())
+            .map_err(|_| text)
+    })
+    .await;
+    match compressed {
+        Ok(Ok(bytes)) => Message::Binary(bytes.into()),
+        Ok(Err(text)) => Message::Text(text.into()),
+        Err(_) => Message::Text(value.to_string().into()),
+    }
+}
+async fn event_socket(socket: WebSocket, s: Arc<Session>, after: Option<u64>, gzip: bool) {
     let mut rx = s.tx.subscribe();
     let (mut sink, mut stream) = socket.split();
     let snapshot = s.browser_snapshot(after);
     let mut seq = snapshot["seq"].as_u64().unwrap_or(0);
     if sink
-        .send(Message::Text(snapshot.to_string().into()))
+        .send(socket_message(&snapshot, gzip).await)
         .await
         .is_err()
     {
@@ -3409,9 +4296,9 @@ async fn event_socket(socket: WebSocket, s: Arc<Session>, after: Option<u64>) {
                 let n=event["seq"].as_u64().unwrap_or(0);
                 // L-05 hook: queue state is broadcast unsequenced (not stored in event history).
                 // U-05: derived tool progress and headers reuse their source event's seq and are never stored.
-                if !matches!(event["kind"].as_str(),Some("input_queue"|"tool_progress"|"tool_header")) {if n<=seq {continue;} seq=n;}
+                if !matches!(event["kind"].as_str(),Some("input_queue"|"tool_progress"|"tool_header"|"session_badges"|"github_event"|"github_context")) {if n<=seq {continue;} seq=n;}
                 let closed=event["kind"]=="status" && (event["data"]["status"]=="closed" || event["data"]["status"]=="suspended");
-                if sink.send(Message::Text(event.to_string().into())).await.is_err(){break;}
+                if sink.send(socket_message(&event,gzip).await).await.is_err(){break;}
                 if closed {let _=sink.send(Message::Close(None)).await;break;}
             }
             incoming=stream.next()=>match incoming {
@@ -3436,8 +4323,8 @@ async fn file(
     local_only(&s)?;
     // Canonicalize before checking roots: traversal and symlinks cannot escape
     // the workspace roots currently allowed for this session's host.
-    checked_cwd(&app, &s.cwd.to_string_lossy())?;
-    let path = tokio::fs::canonicalize(s.cwd.join(&req.path))
+    checked_cwd(&app, &s.cwd().to_string_lossy())?;
+    let path = tokio::fs::canonicalize(s.cwd().join(&req.path))
         .await
         .map_err(|_| fail(StatusCode::NOT_FOUND, "File or directory not found"))?;
     let roots = effective_roots(&app);
@@ -3463,91 +4350,132 @@ async fn file(
 #[derive(Deserialize)]
 struct Markdown {
     text: String,
+    #[serde(default)]
+    user: bool,
+    /// Agent messages name their session so its `chat.agent` formatters apply.
+    #[serde(default, rename = "sessionId")]
+    session_id: Option<String>,
 }
-async fn markdown(Json(req): Json<Markdown>) -> Json<Value> {
-    let marker = format!("awmermaid-{}", &Uuid::new_v4().simple().to_string()[..16]);
-    Json(
-        json!({"html":render_markdown_with_marker(&req.text, &marker), "mermaidClass":format!("language-{marker}")}),
-    )
-}
-#[cfg(test)]
-fn render_markdown(text: &str) -> String {
-    render_markdown_with_marker(text, "awmermaid-test")
-}
-fn render_markdown_with_marker(text: &str, marker: &str) -> String {
-    let parser = pulldown_cmark::Parser::new_ext(
-        text,
-        pulldown_cmark::Options::ENABLE_TABLES | pulldown_cmark::Options::ENABLE_STRIKETHROUGH,
-    );
-    let mut out = String::new();
-    let parser = parser.map(|event| match event {
-        pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(
-            pulldown_cmark::CodeBlockKind::Fenced(info),
-        )) if info.trim().eq_ignore_ascii_case("mermaid") => pulldown_cmark::Event::Start(
-            pulldown_cmark::Tag::CodeBlock(pulldown_cmark::CodeBlockKind::Fenced(marker.into())),
-        ),
-        pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link {
-            link_type,
-            dest_url,
-            title,
-            id,
-        }) => {
-            // A bare filename with a line suffix resembles a URL scheme to the
-            // sanitizer. Make its relative-path meaning explicit before cleaning.
-            let parts: Vec<_> = dest_url.split(':').collect();
-            let local_line = (parts.len() == 2 || parts.len() == 3)
-                && parts[0].contains('.')
-                && !parts[0].contains('/')
-                && parts[1..]
-                    .iter()
-                    .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
-            let dest_url = if local_line {
-                format!("./{dest_url}").into()
+/// Renders one message, applying its session's `chat.agent` (or user) formatters.
+/// Blocking: formatters run scripts. A formatter that panics leaves the text as written.
+fn render_message(app: &App, req: Markdown) -> Value {
+    let session = req
+        .session_id
+        .as_deref()
+        .and_then(|id| app.sessions.lock().unwrap().get(id).cloned());
+    let text = match session {
+        Some(s) => {
+            let apply = if req.user {
+                chat::apply_user_in_session
             } else {
-                dest_url
+                chat::apply_in_session
             };
-            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link {
-                link_type,
-                dest_url,
-                title,
-                id,
-            })
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                apply(
+                    &app.scripts,
+                    &s.id,
+                    &s.provider,
+                    &s.cwd().to_string_lossy(),
+                    &req.text,
+                )
+            }))
+            .unwrap_or_else(|_| req.text.clone())
         }
-        event => event,
-    });
-    pulldown_cmark::html::push_html(&mut out, parser);
-    ammonia::Builder::default()
-        .url_relative(ammonia::UrlRelative::PassThrough)
-        // Agents link host files as file:// URLs; the browser turns local ones
-        // into in-app previews instead of navigating.
-        .add_url_schemes(&["file", "agentworks"])
-        .add_tag_attributes("code", &["class"])
-        .attribute_filter(|element, attribute, value| {
-            if element != "code" || attribute != "class" {
-                return Some(value.into());
-            }
-            // Keep only fenced-code language hints for display preferences.
-            let languages = value
-                .split_whitespace()
-                .filter(|class| {
-                    class.strip_prefix("language-").is_some_and(|language| {
-                        (1..=32).contains(&language.len())
-                            && language
-                                .bytes()
-                                .all(|b| b.is_ascii_alphanumeric() || b"+#._-".contains(&b))
-                    })
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            (!languages.is_empty()).then(|| languages.into())
-        })
-        .clean(&out)
-        .to_string()
+        None => req.text,
+    };
+    let marker = format!("awmermaid-{}", &Uuid::new_v4().simple().to_string()[..16]);
+    json!({"html":render_markdown_with_marker(&text, &marker), "mermaidClass":format!("language-{marker}")})
 }
-
+async fn markdown(State(app): State<App>, Json(req): Json<Markdown>) -> ApiResult {
+    tokio::task::spawn_blocking(move || Json(render_message(&app, req)))
+        .await
+        .map_err(|_| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Markdown rendering failed",
+            )
+        })
+}
+#[derive(Deserialize)]
+struct MarkdownBatch {
+    items: Vec<Markdown>,
+}
+/// Most messages rendered in one batch request.
+const MARKDOWN_BATCH: usize = 200;
+/// Opening a transcript renders every message; one round trip serves them all.
+async fn markdown_batch(State(app): State<App>, Json(req): Json<MarkdownBatch>) -> ApiResult {
+    if req.items.len() > MARKDOWN_BATCH {
+        return Err(fail(
+            StatusCode::BAD_REQUEST,
+            format!("At most {MARKDOWN_BATCH} messages per batch"),
+        ));
+    }
+    tokio::task::spawn_blocking(move || {
+        let results: Vec<Value> = req
+            .items
+            .into_iter()
+            .map(|item| render_message(&app, item))
+            .collect();
+        Json(json!({ "results": results }))
+    })
+    .await
+    .map_err(|_| {
+        fail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Markdown rendering failed",
+        )
+    })
+}
+#[derive(Deserialize)]
+struct UserFormat {
+    text: String,
+}
+/// `chat.user` formatting of a user message. Each line a formatter rewrote is
+/// sanitized HTML; null lines are shown as typed. `lines` is null when no
+/// `chat.user` formatter is enabled.
+async fn format_user(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(req): Json<UserFormat>,
+) -> ApiResult {
+    let s = session(&app, &id)?;
+    let hub = app.scripts.clone();
+    let (provider, cwd) = (s.provider.clone(), s.cwd().to_string_lossy().into_owned());
+    let lines = tokio::task::spawn_blocking(move || {
+        chat::format_in_session(&hub, Some(&s.id), "chat.user", &provider, &cwd, &req.text)
+    })
+    .await
+    .unwrap_or(None)
+    .map(|lines| {
+        lines
+            .into_iter()
+            .map(|line| line.map(|markdown| inline_html(&markdown)))
+            .collect::<Vec<_>>()
+    });
+    Ok(Json(json!({ "lines": lines })))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn project_request_ticket_opt_in_is_optional_and_camel_case() {
+        for (value, expected) in [
+            (json!({"name":"Rename"}), None),
+            (json!({"name":"Enabled","tasksEnabled":true}), Some(true)),
+            (json!({"name":"Disabled","tasksEnabled":false}), Some(false)),
+        ] {
+            let request: ProjectName = serde_json::from_value(value).unwrap();
+            assert_eq!(request.tasks_enabled, expected);
+        }
+        assert!(
+            serde_json::from_value::<ProjectName>(json!({"name":"Bad","tasks_enabled":true}))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ProjectName>(json!({"name":"Bad","tasksEnabled":"true"}))
+                .is_err()
+        );
+    }
     #[test]
     fn agent_sessions_use_project_role_without_inheriting_controller_grants() {
         let participant = initial_agent_access(None, false, communication::Role::Participant)
@@ -3558,14 +4486,12 @@ mod tests {
         assert!(!participant.cancel_sessions);
         assert!(!participant.run_automations);
         assert!(!participant.restart_service);
-        assert!(!participant.manage_review_queue);
 
         let coordinator = initial_agent_access(None, false, communication::Role::Coordinator)
             .expect("explicit project coordinator role should be materialized");
         assert!(coordinator.start_sessions);
         assert!(coordinator.archive_sessions);
         assert!(!coordinator.restart_service);
-        assert!(!coordinator.manage_review_queue);
 
         assert!(initial_agent_access(None, true, communication::Role::Coordinator).is_none());
         let preserved = initial_agent_access(
@@ -3581,68 +4507,16 @@ mod tests {
     fn host_checks_follow_bind_address() {
         let local = "127.0.0.1".parse().unwrap();
         let network = "0.0.0.0".parse().unwrap();
-        assert!(allowed_host("127.0.0.1:4317", local, 4317));
-        assert!(!allowed_host("agentbox:4317", local, 4317));
-        assert!(allowed_host("localhost:5555", local, 4317));
-        assert!(allowed_host("127.0.0.1:5555", local, 4317));
-        assert!(!allowed_host("localhost.evil:5555", local, 4317));
-        assert!(allowed_host("agentbox:4317", network, 4317));
-        assert!(allowed_host("100.64.1.2:4317", network, 4317));
-        assert!(!allowed_host("agentbox:9999", network, 4317));
-        assert!(!allowed_host("", network, 4317));
-    }
-    #[test]
-    fn markdown_removes_active_content() {
-        let html = render_markdown(
-            "# Hello\n<script>alert(1)</script>\n[x](javascript:alert(1))\n<img src=x onerror=alert(1)>",
-        );
-        assert!(html.contains("<h1>Hello</h1>"));
-        assert!(!html.contains("<script"));
-        assert!(!html.contains("javascript:"));
-        assert!(!html.contains("onerror"));
-    }
-    #[test]
-    fn markdown_keeps_file_links() {
-        let html = render_markdown(
-            "[a](file:///home/x/a.png) [b](/home/x/b.png) [line](sample.rs:42) [bad](javascript:42)",
-        );
-        assert!(html.contains(r#"href="file:///home/x/a.png""#));
-        assert!(html.contains(r#"href="/home/x/b.png""#));
-        assert!(html.contains(r#"href="./sample.rs:42""#));
-        assert!(!html.contains("javascript:"));
-    }
-    #[test]
-    fn markdown_keeps_session_links_from_formatters() {
-        let html = render_markdown(
-            "[@ui-hover](agentworks://sessions/28d9887c-e7c3-4096-870c-8ccf6d4eb4ae)",
-        );
-        assert!(
-            html.contains(r#"href="agentworks://sessions/28d9887c-e7c3-4096-870c-8ccf6d4eb4ae""#)
-        );
-        assert!(html.contains(">@ui-hover</a>"));
-    }
-
-    #[test]
-    fn markdown_marks_only_mermaid_fences() {
-        let html = render_markdown_with_marker(
-            "```mermaid\nflowchart LR; A-->B\n```\n<pre><code class=\"language-mermaid\">flowchart LR; X-->Y</code></pre>\n\n```js\nconst x = 1;\n```",
-            "awmermaid-0123456789abcdef",
-        );
-        assert_eq!(
-            html.matches("language-awmermaid-0123456789abcdef").count(),
-            1
-        );
-        assert!(html.contains("language-mermaid"));
-        assert!(html.contains("language-js"));
-    }
-    #[test]
-    fn markdown_keeps_only_code_language_classes() {
-        let html = render_markdown(
-            "```rust\nfn main() {}\n```\n<code class=\"toast language-x\">a</code><p class=\"language-js\">b</p>",
-        );
-        assert!(html.contains("<code class=\"language-rust\">"));
-        assert!(html.contains("<code class=\"language-x\">"));
-        assert!(!html.contains("toast"));
-        assert!(!html.contains("<p class"));
+        assert!(allowed_host("127.0.0.1:4317", local, 4317, false));
+        assert!(!allowed_host("agentbox:4317", local, 4317, false));
+        assert!(allowed_host("localhost:5555", local, 4317, false));
+        assert!(allowed_host("127.0.0.1:5555", local, 4317, false));
+        assert!(!allowed_host("localhost.evil:5555", local, 4317, false));
+        assert!(allowed_host("agentbox:4317", network, 4317, false));
+        assert!(allowed_host("100.64.1.2:4317", network, 4317, false));
+        assert!(!allowed_host("agentbox:9999", network, 4317, false));
+        assert!(!allowed_host("", network, 4317, false));
+        assert!(allowed_host("agentbox", network, 443, true));
+        assert!(!allowed_host("agentbox", network, 443, false));
     }
 }

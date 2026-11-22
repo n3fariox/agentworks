@@ -12,7 +12,7 @@ use axum::{
 };
 use base64::{
     Engine,
-    engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE_NO_PAD},
+    engine::general_purpose::STANDARD,
 };
 use ring::{
     aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey},
@@ -616,102 +616,22 @@ pub fn environment(db: &rusqlite::Connection, session: &str) -> rusqlite::Result
     Ok(out)
 }
 /// Forms of each value delivered to a session, replaced in everything the session
-/// stores or publishes. Literal matching only: a deliberately transformed value is
-/// not caught.
-pub(crate) type Forms = Vec<(Zeroizing<String>, String)>;
-static SCRUBBERS: OnceLock<Mutex<HashMap<String, Forms>>> = OnceLock::new();
-fn scrubbers() -> std::sync::MutexGuard<'static, HashMap<String, Forms>> {
-    SCRUBBERS.get_or_init(Default::default).lock().unwrap()
-}
-/// Values this short are too likely to occur by chance to replace.
-const MIN_SCRUB_BYTES: usize = 4;
-fn forms(name: &str, value: &str) -> Forms {
-    if value.len() < MIN_SCRUB_BYTES {
-        return Vec::new();
-    }
-    let percent: String = value
-        .bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                (b as char).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect();
-    let json = serde_json::to_string(value).unwrap();
-    let mut out = vec![
-        value.to_owned(),
-        STANDARD_NO_PAD.encode(value),
-        URL_SAFE_NO_PAD.encode(value),
-        percent,
-        json[1..json.len() - 1].to_owned(),
-    ];
-    out.sort();
-    out.dedup();
-    let label = format!("[redacted:{name}]");
-    out.into_iter()
-        .map(|form| (Zeroizing::new(form), label.clone()))
-        .collect()
-}
-/// Adds values delivered to a session to its scrubber. Earlier values stay registered,
-/// since they may still appear in later output.
+/// stores or publishes.
+static SCRUBBERS: std::sync::LazyLock<agentworks_secrets::redact::Scrubbers> =
+    std::sync::LazyLock::new(Default::default);
 pub fn register(session: &str, vars: &[(String, Zeroizing<String>)]) {
-    if vars.is_empty() {
-        return;
-    }
-    let mut scrubbers = scrubbers();
-    let all = scrubbers.entry(session.to_owned()).or_default();
-    for form in vars.iter().flat_map(|(name, value)| forms(name, value)) {
-        if !all.iter().any(|(known, _)| **known == *form.0) {
-            all.push(form);
-        }
-    }
-    sort_forms(all);
-}
-fn sort_forms(forms: &mut Forms) {
-    // Longest first, so a value is never partly replaced by a shorter one it contains.
-    forms.sort_by_key(|(form, _)| std::cmp::Reverse(form.len()));
+    SCRUBBERS.register(session, vars);
 }
 pub fn forget(session: &str) {
-    scrubbers().remove(session);
+    SCRUBBERS.forget(session);
     delivered().remove(session);
     allowed_uses().remove(session);
 }
-/// Scrubber forms for one call's values, for the facade that runs the command.
-pub(crate) fn forms_for<'a>(vars: impl Iterator<Item = (&'a str, &'a str)>) -> Forms {
-    let mut all: Forms = vars.flat_map(|(name, value)| forms(name, value)).collect();
-    sort_forms(&mut all);
-    all
-}
 pub fn scrub_text(session: &str, text: &str) -> String {
-    let scrubbers = scrubbers();
-    let Some(forms) = scrubbers.get(session) else {
-        return text.to_owned();
-    };
-    replace(forms, text)
+    SCRUBBERS.text(session, text)
 }
-pub(crate) fn replace(forms: &Forms, text: &str) -> String {
-    let mut out = text.to_owned();
-    for (form, label) in forms {
-        if out.contains(form.as_str()) {
-            out = out.replace(form.as_str(), label);
-        }
-    }
-    out
-}
-/// Replaces delivered values in every string of `value`.
 pub fn scrub(session: &str, value: &mut Value) {
-    fn walk(forms: &Forms, value: &mut Value) {
-        match value {
-            Value::String(s) => *s = replace(forms, s),
-            Value::Array(a) => a.iter_mut().for_each(|v| walk(forms, v)),
-            Value::Object(o) => o.values_mut().for_each(|v| walk(forms, v)),
-            _ => {}
-        }
-    }
-    if let Some(forms) = scrubbers().get(session) {
-        walk(forms, value);
-    }
+    SCRUBBERS.json(session, value);
 }
 
 static DELIVERED: OnceLock<Mutex<HashMap<String, HashSet<String>>>> = OnceLock::new();
@@ -989,7 +909,7 @@ fn release(app: &App, s: &Session, names: &[String]) -> mail::Result<Value> {
         .iter()
         .map(|(name, value)| (name.clone(), json!(value.as_str())))
         .collect();
-    Ok(json!({"values":map,"cwd":s.cwd}))
+    Ok(json!({"values":map,"cwd":s.cwd()}))
 }
 
 fn describe(a: &Assignment) -> String {
@@ -1225,51 +1145,6 @@ mod tests {
                 .contains("password")
         );
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn delivered_values_and_their_encodings_are_scrubbed_per_session() {
-        let value = "tok/en+value=1&x";
-        register(
-            "scrub-a",
-            &[
-                ("TOKEN".into(), Zeroizing::new(value.into())),
-                ("SHORT".into(), Zeroizing::new("abc".into())),
-            ],
-        );
-        let label = "[redacted:TOKEN]";
-        let mut event = json!({"text": format!("a {value} b"), "nested": [{
-            "b64": STANDARD.encode(value), "url": URL_SAFE_NO_PAD.encode(value),
-            "pct": "tok%2Fen%2Bvalue%3D1%26x", "json": serde_json::to_string(&json!({"v": value})).unwrap()}],
-            "short": "abc", "n": 1});
-        scrub("scrub-a", &mut event);
-        assert_eq!(event["text"], format!("a {label} b"));
-        let nested = &event["nested"][0];
-        assert!(nested["b64"].as_str().unwrap().starts_with(label));
-        assert_eq!(nested["url"], label);
-        assert_eq!(nested["pct"], label);
-        assert!(nested["json"].as_str().unwrap().contains(label));
-        assert_eq!(event["short"], "abc", "short values are not replaced");
-        assert!(!event.to_string().contains(value));
-        assert_eq!(
-            scrub_text("scrub-b", value),
-            value,
-            "other sessions are untouched"
-        );
-        // A longer value containing a shorter one is replaced whole.
-        register(
-            "scrub-c",
-            &[
-                ("INNER".into(), Zeroizing::new("secret".into())),
-                ("OUTER".into(), Zeroizing::new("my-secret-value".into())),
-            ],
-        );
-        assert_eq!(
-            scrub_text("scrub-c", "my-secret-value secret"),
-            "[redacted:OUTER] [redacted:INNER]"
-        );
-        forget("scrub-a");
-        assert_eq!(scrub_text("scrub-a", value), value);
     }
 
     #[test]

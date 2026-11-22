@@ -2,7 +2,9 @@
   "name": "agentworks-adapters",
   "private": true,
   "scripts": {
-    "build": "scripts/mise-cargo.sh build --locked",
+    "build": "scripts/mise-cargo.sh build --locked -p agentworks -p agentworks-worker",
+    "build:windows-worker": "scripts/build-windows-worker.sh",
+    "build:bundle": "scripts/build-bundle.sh",
     "start": "scripts/mise-cargo.sh run --locked",
     "test:smoke": "node scripts/smoke.mjs",
     "test:browser": "playwright test",
@@ -28,8 +30,10 @@
     "test:remote-worktree-cleanup": "AGENTWORKS_CLEANUP_REMOTE=1 node scripts/worktree-cleanup-smoke.mjs",
     "test:controller-archive": "node scripts/controller-archive-smoke.mjs",
     "test:controllers": "node scripts/controller-smoke.mjs",
+    "test:automation-manager": "node scripts/automation-manager-smoke.mjs",
     "test:fork": "node scripts/fork-smoke.mjs",
     "test:roles": "node scripts/roles-smoke.mjs && playwright test tests/roles.spec.mjs",
+    "test:git-settings": "node scripts/git-settings-smoke.mjs && AGENTWORKS_GIT_REMOTE=1 node scripts/git-settings-smoke.mjs && playwright test tests/git-settings.spec.mjs",
     "test:worktree-ui": "playwright test tests/worktree-launch.spec.mjs",
     "test:limit-resume": "node scripts/limit-resume-smoke.mjs",
     "test:acp-lifecycle": "node scripts/acp-lifecycle-smoke.mjs",
@@ -46,29 +50,34 @@
     "test:service-restart": "node scripts/service-restart-smoke.mjs",
     "test:supervisor": "python3 scripts/service/supervisor-test.py",
     "prepare:coordinator": "node scripts/prepare-self-improvement.mjs",
-    "test:codex-quota": "node tests/codex-subscription.test.mjs",
-    "test:review-queue": "node scripts/review-queue-smoke.mjs",
+    "test:codex-quota": "playwright test tests/codex-subscription.spec.mjs",
+    "test:tasks": "node --test tests/task-mentions.test.mjs && node scripts/tasks-smoke.mjs && playwright test tests/tasks.spec.mjs",
     "test:questions": "node tests/questions.test.mjs && playwright test tests/questions.spec.mjs",
     "test:host-enrollment": "node scripts/host-enrollment-smoke.mjs",
-    "test:terminal": "playwright test tests/terminal.spec.mjs",
+    "test:antigravity": "node --test tests/antigravity-usage.test.mjs && playwright test tests/antigravity.spec.mjs",
+    "test:terminal": "playwright test tests/terminal.spec.mjs tests/terminal-links.spec.mjs",
     "test:transcript-history": "playwright test tests/transcript-history.spec.mjs",
+    "test:presentation": "scripts/mise-cargo.sh test --locked -p agentworks-presentation",
+    "test:scripting": "scripts/mise-cargo.sh test --locked -p agentworks-scripting",
     "test:starlark": "cargo test --locked -p agentworks-starlark",
     "test:progress": "node --test tests/bazel-progress.test.mjs && node scripts/progress-smoke.mjs",
     "test:tool-bodies": "node scripts/tool-bodies-smoke.mjs && playwright test tests/tool-bodies.spec.mjs",
-    "test:async-tasks": "node tests/async-tasks-adapters.test.mjs && playwright test tests/async-tasks.spec.mjs",
-    "test:subagents": "node tests/subagents.test.mjs && node tests/subagents-adapters.test.mjs && playwright test tests/subagents.spec.mjs",
+    "test:async-tasks": "playwright test tests/async-tasks.spec.mjs",
+    "test:subagents": "node tests/subagents.test.mjs && playwright test tests/subagents.spec.mjs",
     "readme:media": "node scripts/readme-media/capture.mjs",
-    "test:attachments": "node tests/attachments-adapters.test.mjs && playwright test tests/attachments.spec.mjs",
-    "test:codex-oauth": "playwright test tests/codex-oauth.spec.mjs"
+    "test:attachments": "playwright test tests/attachments.spec.mjs",
+    "test:codex-oauth": "playwright test tests/codex-oauth.spec.mjs",
+    "test:github": "node --test tests/session-badges.test.mjs && playwright test tests/github.spec.mjs",
+    "build:model-viewer": "node scripts/build-model-viewer.mjs",
+    "test:model-viewer": "node --test tests/model-files.test.mjs && playwright test tests/model-viewer.spec.mjs"
   },
   "dependencies": {
-    "@agentclientprotocol/claude-agent-acp": "0.93.0",
-    "@agentclientprotocol/codex-acp": "file:vendor/codex-acp",
     "@modelcontextprotocol/sdk": "1.32.1"
   },
   "devDependencies": {
     "@playwright/test": "1.64.1",
-    "ws": "8.22.0",
-    "@xterm/xterm": "6.0.0"
+    "@xterm/addon-web-links": "0.12.0",
+    "@xterm/xterm": "6.0.0",
+    "ws": "8.22.0"
   }
 }

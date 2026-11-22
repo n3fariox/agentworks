@@ -95,8 +95,8 @@ test('provider-history deletion is explicit, capability gated, and cancelable',a
   await expect(page.locator('#delete-provider-history')).toBeVisible();
   page.once('dialog',dialog=>{expect(dialog.message()).toContain('provider’s conversation history');dialog.dismiss();});
   await page.locator('#delete-provider-history').click();expect(f.deletes).toEqual([]);
-  // The mobile flyout closes on choosing an action; reopen only when needed.
-  if(await page.locator('#session-more').isVisible())await page.locator('#session-more').click();
+  // Session actions closes on choosing an action; reopen it.
+  await page.locator('#lifecycle-menu>summary').click();
   page.once('dialog',dialog=>dialog.accept());
   await page.locator('#delete-provider-history').click();
   await expect.poll(()=>f.deletes.length).toBe(1);expect(f.deletes).toEqual(['?providerHistory=true']);
@@ -107,7 +107,7 @@ test('ordinary delete preserves provider history and unsupported adapters hide d
   await page.locator('#session-config-options>summary').click();
   await page.locator('#lifecycle-menu>summary').click();
   await expect(page.locator('#delete-provider-history')).toBeHidden();
-  page.once('dialog',dialog=>{expect(dialog.message()).toContain('Provider conversation history, worktree files and branches remain');dialog.accept();});
+  page.once('dialog',dialog=>{expect(dialog.message()).toContain('Provider conversation history remains. Worktree files and branches remain');dialog.accept();});
   await page.locator('#close-session').click();
   await expect.poll(()=>f.deletes.length).toBe(1);expect(f.deletes).toEqual(['']);
 });

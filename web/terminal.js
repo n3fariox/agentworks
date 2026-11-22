@@ -1,4 +1,35 @@
 // The browser can disconnect freely; the service owns the shell and emulator.
+// Presentation frames repaint physical rows, so xterm cannot infer soft wraps.
+// Some sign-in CLIs also hard-wrap URLs with a one/two-cell inset. Only join
+// URL tokens at a filled right edge; never join arbitrary terminal paragraphs.
+function wrappedTerminalUrls(view,y){
+  const buffer=view.buffer.active,links=[];
+  for(let row=Math.max(0,y-64);row<y;row++){
+    const line=buffer.getLine(row)?.translateToString(true).trimEnd()||'';
+    for(const match of line.matchAll(/https?:\/\/[^\s<>"'`]+/g)){
+      let text=match[0],endRow=row,endColumn=match.index+text.length,edge=line;
+      if(endColumn!==line.length)continue;
+      while(endRow+1<buffer.length&&endRow-row<64&&edge.length>=view.cols-2){
+        const next=buffer.getLine(endRow+1)?.translateToString(true).trimEnd()||'';
+        const continuation=/^ {0,2}([A-Za-z0-9:/?#\[\]@!$&()*+,;=._~%+-]+)$/.exec(next);
+        if(!continuation||/^https?:\/\//.test(continuation[1]))break;
+        text+=continuation[1];endRow++;endColumn=next.length;edge=next;
+      }
+      if(endRow===row||y-1>endRow)continue;
+      try{new URL(text);}catch{continue;}
+      links.push({text,range:{start:{x:match.index+1,y:row+1},end:{x:endColumn,y:endRow+1}}});
+    }
+  }
+  return links;
+}
+
+function terminalCopyText(view){
+  const text=view.getSelection(),position=view.getSelectionPosition();
+  if(!position||position.start.y===position.end.y)return text;
+  const compact=text.replace(/[ \r\n]/g,'');
+  return wrappedTerminalUrls(view,position.start.y+1).find(link=>link.text===compact)?.text||text;
+}
+
 export function setupTerminal({$,api,getActive,socketUrl,tabs=true,onSelect=()=>{},endpoint=id=>`/api/sessions/${id}/terminal`,eventsEndpoint=id=>endpoint(id)+'/events',runningStatus='Shell running',exitStatus=frame=>frame.code==null?'Terminal stopped':`Shell exited (${frame.code})`}) {
   let current=null, terminal=null, socket=null, timer=null, observer=null, generation=0, ready=false, exited=false;
   const selected=new Map();
@@ -69,7 +100,7 @@ export function setupTerminal({$,api,getActive,socketUrl,tabs=true,onSelect=()=>
     dispose();current=getActive()?.id;if(!current)return;
     const gen=generation;status('Starting shell…');$('terminal-restart').hidden=true;
     try{
-      const {Terminal}=await import('./vendor/xterm.mjs');
+      const [{Terminal},{WebLinksAddon}]=await Promise.all([import('./vendor/xterm.mjs'),import('./vendor/xterm-addon-web-links.mjs')]);
       if(gen!==generation)return;
       const opened=await api(endpoint(current),{method:'POST',body:JSON.stringify({restart})});
       if(opened.available===false){status('No saved terminal for this archived session');return;}
@@ -77,6 +108,17 @@ export function setupTerminal({$,api,getActive,socketUrl,tabs=true,onSelect=()=>
       $('terminal-surface').replaceChildren();$('terminal-surface').classList.remove('terminal-readonly');
       terminal=new Terminal({fontFamily:'ui-monospace, SFMono-Regular, Menlo, monospace',fontSize:14,lineHeight:1.2,scrollback:10000,cursorBlink:true,theme:{background:'#101218',foreground:'#e2e8f0'}});
       terminal.open($('terminal-surface'));
+      const view=terminal;
+      const openUrl=(event,url)=>{if(!view.hasSelection())window.open(url,'_blank','noopener,noreferrer');};
+      terminal.registerLinkProvider({provideLinks(y,callback){callback(wrappedTerminalUrls(view,y).map(link=>({...link,activate:openUrl})));}});
+      terminal.loadAddon(new WebLinksAddon(openUrl));
+      view.element.addEventListener('copy',event=>{
+        if(!view.hasSelection()||!event.clipboardData)return;
+        const text=terminalCopyText(view);
+        if(text===view.getSelection())return;
+        event.clipboardData.setData('text/plain',text);
+        event.preventDefault();event.stopPropagation();
+      },true);
       terminal.onData(data=>{if(ready)send({type:'input',data});});
       terminal.onBinary(data=>{if(ready)send({type:'binary',data:Array.from(data,c=>c.charCodeAt(0)&255)});});
       observer=new ResizeObserver(fit);observer.observe($('terminal-surface'));fit();connect(gen);terminal.focus();

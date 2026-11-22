@@ -46,6 +46,7 @@ async function openGlobalTimeouts(page){
 }
 async function openSessionTimeouts(page){
   if(await page.locator('#session-more').isVisible())await page.locator('#session-more').click();
+  await page.locator('#lifecycle-menu > summary').click();
   await page.locator('#session-settings').click();
   await expect(page.locator('#session-settings-dialog')).toBeVisible();
 }
@@ -68,7 +69,7 @@ test('global defaults and session overrides are separate and apply to the next t
   await page.locator('#save-session-settings').click();
   await expect(page.locator('#session-settings-dialog')).toBeHidden();
   expect((await api('/api/sessions/'+session.id)).session.timeouts.totalSeconds).toBe(3600);
-  await page.locator('#prompt').fill('hello timeouts');await page.locator('#send').click();
+  await page.locator('#prompt-editor .cm-content').fill('hello timeouts');await page.locator('#send').click();
   await expect(page.locator('#session-state')).toHaveText('Ready');
   await expect(page.getByText('Turn limits: 3600s total (excludes approval waits) · warn after 120s quiet')).toBeVisible();
   await openGlobalTimeouts(page);

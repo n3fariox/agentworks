@@ -49,6 +49,26 @@ impl State {
         }) {
             task["resultSeq"] = json!(seq);
         }
+        self.forget_finished_details();
+    }
+    /// A finished job whose outcome is in the transcript keeps only what identifies
+    /// it: the `async_task_finished` event holds the rest, and no view shows it from
+    /// here. This state is saved with the session, so its details would otherwise
+    /// be rewritten with every change for up to 100 finished jobs.
+    pub fn forget_finished_details(&mut self) {
+        for task in &mut self.tasks {
+            if terminal(task["state"].as_str().unwrap_or(""))
+                && task["resultSeq"].is_u64()
+                && let Some(fields) = task.as_object_mut()
+            {
+                fields.retain(|k, _| {
+                    matches!(
+                        k.as_str(),
+                        "asyncTaskId" | "acpSessionId" | "parentSessionId" | "state" | "resultSeq"
+                    )
+                });
+            }
+        }
     }
     /// Returns the job's result when this update ended it.
     pub fn observe(&mut self, update: &Value) -> Option<Value> {
@@ -83,7 +103,7 @@ impl State {
         };
         let task = &mut self.tasks[index];
         let finished = terminal(task["state"].as_str().unwrap_or(""));
-        for key in [
+        const FIELDS: [&str; 12] = [
             "name",
             "taskType",
             "description",
@@ -96,9 +116,13 @@ impl State {
             "usage",
             "lastToolName",
             "parentSessionId",
-        ] {
-            if let Some(value) = update.get(key) {
-                task[key] = value.clone();
+        ];
+        // A finished job ignores later reports (see `forget_finished_details`).
+        if !finished {
+            for key in FIELDS {
+                if let Some(value) = update.get(key) {
+                    task[key] = value.clone();
+                }
             }
         }
         let mut ended = None;
@@ -228,6 +252,15 @@ mod tests {
             state.record(&result, 9);
             assert_eq!(state.tasks[0]["resultSeq"], 9);
             assert!(result.get("resultSeq").is_none());
+            // Once shown, only its identity stays; a late report does not refill it.
+            let mut fields: Vec<&String> = state.tasks[0].as_object().unwrap().keys().collect();
+            fields.sort();
+            assert_eq!(
+                fields,
+                ["acpSessionId", "asyncTaskId", "resultSeq", "state"]
+            );
+            assert!(state.observe(&ended).is_none());
+            assert!(state.tasks[0].get("summary").is_none());
         }
     }
     #[test]

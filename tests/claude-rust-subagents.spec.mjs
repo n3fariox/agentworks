@@ -120,10 +120,11 @@ test('claude-rust background commands become jobs that stop individually',async(
   await expect(page.locator('#messages')).toContainText('Background · Running');
   await api('/api/sessions/'+s.id+'/prompt',{text:'later',requestId:'claude-rust-later'});await state(s.id,'idle');
   // The fake CLI's level drops Sleep before its completion; Agentworks keeps the first terminal state.
-  await expect(sleep.locator('.background-job-state')).toHaveText('Stopped');
-  await expect(panel.locator('.background-job')).toHaveCount(3);
+  // Finished jobs leave the panel and their outcome moves to the work log.
+  await expect(sleep).toHaveCount(0);await expect(page.locator('#messages')).toContainText('Background job · Sleep · stopped');
+  await expect(panel.locator('.background-job')).toHaveCount(2);
   await build.getByRole('button',{name:'Stop Build'}).click();
-  await expect(build.locator('.background-job-state')).toHaveText('Stopped');
+  await expect(build).toHaveCount(0);await expect(page.locator('#messages')).toContainText('Background job · Build · stopped');
   await expect(panel.locator('.background-job').filter({hasText:'spec'}).locator('.background-job-state')).toHaveText('Running');
   expect((await api('/api/sessions/'+s.id)).session.status).toBe('idle');
   await page.reload();await expect(panel).toBeVisible();

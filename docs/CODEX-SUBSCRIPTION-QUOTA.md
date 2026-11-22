@@ -1,27 +1,10 @@
 # Codex subscription quota: implemented local contract
 
-This reference documents the pinned local Codex ACP extension and its metadata contract.
-
-## Reproducible adapter path
-
-`package.json` and package-lock.json select `file:vendor/codex-acp`, local version
-`2.2.2-agentworks.1`. The fork contains the existing upstream 2.2.2 packaged
-bundle, LICENSE, README and manifest, a small helper, the exact bundle patch and
-upstream SHA-256. There are no startup downloads, postinstall scripts or ignored
-node_modules-only changes. `npm ci --ignore-scripts` installs the local CLI through
-the existing adapter_path; offline install works with the existing npm cache.
-No runtime dependencies were upgraded.
-
-The bundled `CodexEventHandler` observes `account/rateLimits/updated` using
-`observeSubscriptionLimits` alongside its unchanged upstream cache. Because the
-upstream cache has no timestamps and does not retain omitted window fields, a
-parallel session-state cache retains each reported field with its observation.
-`createUsageUpdate` attaches that cache only to existing genuine parent context
-updates; used/size calculation, child handling and null-context suppression are
-unchanged. No quota-only context values are fabricated.
-
-This addresses the documented upstream gap:
-https://github.com/agentclientprotocol/codex-acp/issues/227
+This reference documents the Codex subscription metadata contract. The Rust Codex
+bridge (`agentworks-codex-acp`) observes `account/rateLimits/updated` and attaches the
+cached windows to genuine usage updates. It replaced the vendored npm `codex-acp`
+fork that first implemented this contract; `tests/fixtures/subscription-limits.mjs`
+keeps that fork's cache logic to drive the browser display test.
 
 ## Implemented metadata contract (version 1)
 
@@ -84,7 +67,6 @@ it; no alternate transport is needed. `_meta.quota` from upstream is prompt
 Run from the worktree:
 
 ```sh
-npm ci --offline --ignore-scripts --no-audit --no-fund
 npm run test:codex-quota
 node tests/usage-status.test.mjs
 node node_modules/@playwright/test/cli.js test tests/codex-subscription.spec.mjs

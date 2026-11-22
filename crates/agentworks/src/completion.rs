@@ -131,10 +131,8 @@ pub fn report(app: &App, s: &Session, req: Report) -> mail::Result<Value> {
     )
     .map_err(error)?;
     tx.execute("INSERT INTO agent_audit(actor,action,target,outcome,created) VALUES (?1,'completion_reported',?1,?2,?3)",params![s.id,format!("report:{id}"),created]).map_err(error)?;
-    crate::inbox_delivery::cancel_db(&tx, &s.id, "Explicit completion or blocked report")?;
     tx.commit().map_err(error)?;
     drop(store);
-    crate::inbox_delivery::interrupt_inflight(s, "Explicit completion or blocked report")?;
     {
         let mut data = s.data.lock().unwrap();
         data.continuation
@@ -142,7 +140,10 @@ pub fn report(app: &App, s: &Session, req: Report) -> mail::Result<Value> {
         data.input_queue
             .block("Completion reported; inspect, then resume.");
     }
-    s.emit("completion_reported", json!({"reportId":id}));
+    s.emit(
+        "completion_reported",
+        json!({"reportId":id,"status":report["status"],"summary":report["summary"]}),
+    );
     Ok(json!({"report":report,"duplicate":false}))
 }
 pub fn get(app: &App, a: &mail::Actor, req: Query) -> mail::Result<Value> {
