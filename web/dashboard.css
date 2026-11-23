@@ -86,7 +86,66 @@
 
 .operations-dashboard #refresh-status {
   font-size:13px;
+  margin:0;
+}
+
+/* Explanations live behind a "?" so the page itself stays terse. */
+.operations-dashboard .status-row,.operations-dashboard .heading-with-help {
+  position:relative;
+  display:flex;
+  align-items:center;
+  gap:8px;
+}
+
+.operations-dashboard .status-row {
   margin-top:24px;
+}
+
+.operations-dashboard .help-tip {
+  position:static;
+}
+
+.operations-dashboard .help-tip > summary {
+  list-style:none;
+  display:inline-grid;
+  place-items:center;
+  width:22px;
+  height:22px;
+  min-height:0;
+  padding:0;
+  border:1px solid var(--border);
+  border-radius:50%;
+  font-size:12px;
+  font-weight:600;
+  color:var(--muted);
+}
+
+.operations-dashboard .help-tip > summary::-webkit-details-marker {
+  display:none;
+}
+
+.operations-dashboard .help-tip[open] > summary,.operations-dashboard .help-tip > summary:hover {
+  color:var(--text);
+}
+
+.operations-dashboard .help-tip-body {
+  position:absolute;
+  z-index:5;
+  top:calc(100% + 6px);
+  left:0;
+  width:min(360px,calc(100vw - 32px));
+  padding:4px 14px;
+  background:var(--panel);
+  border:1px solid var(--border);
+  border-radius:8px;
+  box-shadow:0 8px 24px rgba(0,0,0,.35);
+  font-weight:400;
+}
+
+.operations-dashboard .help-tip-body p {
+  font-size:13px;
+  line-height:1.5;
+  margin:10px 0;
 }
 
 .operations-dashboard .note {

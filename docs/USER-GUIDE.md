@@ -101,6 +101,18 @@ AGENTWORKS_TEST_MCP_HARNESSES=claude,codex,opencode \
 AGENTWORKS_URL=http://127.0.0.1:4323 npm run test:mcp-harnesses
 ```
 
+## Operations dashboard and usage
+
+The UI keeps usage text short; the **?** buttons on the dashboard and in the composer's usage panel summarize what follows.
+
+**Dashboard refresh.** Hosts, projects and active-turn counts are a snapshot read when the page opens and when you press **Refresh dashboard**. Quota cards update live over a WebSocket as soon as any session reports quota. Host metrics (local and capable remote hosts) update every 5 seconds while the dashboard is visible; all viewers share one collector per host, and disk usage covers local storage mounts (see [dashboard host usage](dashboard-host-usage.md)). Session counts and lists include only sessions currently taking a turn.
+
+**Quota cards.** There is one card per host and provider family, because every session there shares one sign-in. Each card shows the latest report from any session on that host and account; reports are never added together. "Updated" is when the report was observed: when Agentworks received it for Claude and Antigravity, or the adapter's own observation time for each Codex field. Reports over 10 minutes old are marked **stale**; replayed values with no stored time show **Update time unknown**. Account identity and authentication are not verified. Missing quota never means an unlimited plan, and account spend or USD limits are not available.
+
+**Where quota comes from.** Agentworks never queries account services or sends prompts to read quota. Claude and Codex quota arrives with the agent's own ACP `usage_update` events (Claude's unified 5h/7d windows; Codex `_codex/subscriptionLimits`). Antigravity quota comes from its native `/usage` command, run when a session starts, after each completed turn, or when you press **Refresh quota**, at most once per 30 seconds; no model prompt is sent.
+
+**Composer usage.** The pill next to Send shows context used and the most relevant quota window, named only by its length (`5h`, `7d`) so it fits on phones; `⚠` marks values over 10 minutes old or of unknown age. Open the composer menu and tap the usage line for details: context tokens, reported model and cost, and each quota window with its reset countdown and update time. Context comes from the session's own `usage_update` events; usage attributed to subagents or parent tool calls is ignored so it cannot overwrite the session's values. A drop in context is reported without guessing its cause. Cost is whatever the provider reports for the session (Claude's SDK total), not verified account billing. Antigravity models are mapped to their quota buckets; for an unmapped model the panel points to the dashboard, which lists every bucket.
+
 ## Agent completion reports
 
 Participating agents can call **report_completion** to persist a completed/blocked claim with a summary, branch/commit, checks and a retry request ID. **get_completion** reads a permitted session's latest report. Reports appear in **Agents & inbox**, survive updates/restarts and retain authenticated author identity. They do not end turns, start work, approve changes or merge commits. Review and integration remain separate from an agent's claim. See [report schemas, permissions and checks](COMPLETION-REPORTS.md).

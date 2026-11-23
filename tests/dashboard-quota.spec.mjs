@@ -33,11 +33,25 @@ test('dashboard quota cards update live per host and account', async ({page}) =>
   await expect(cards).toHaveCount(3);
   const local = cards.filter({hasText:'Claude · Local'});
   await expect(local.getByRole('meter')).toHaveJSProperty('value', 25);
-  await expect(local).toContainText('Agentworks received');
+  await expect(local).toContainText('5h quota used: 25%');
+  await expect(local).toContainText(/Resets in (\d+h )?\d+m · Updated /);
+  await expect(local.locator('.usage-detail')).not.toContainText('stale');
   await expect(local).toContainText('Adapter: available');
   await expect(cards.filter({hasText:'Goose · Work ChatGPT · Rock'}).getByRole('meter')).toHaveJSProperty('value', 40);
   await expect(cards.filter({has:page.getByRole('heading',{name:'Codex',exact:true})}).locator('.quota-state')).toHaveText('No quota reported');
   // A report from any session reaches the open dashboard without a refresh.
   socket.send(JSON.stringify({kind:'quota', entry:claude(0.6, now + 1000)}));
   await expect(local.getByRole('meter')).toHaveJSProperty('value', 60);
+
+  // Help popovers stay inside narrow mobile viewports and dismiss on Escape or outside click.
+  await page.setViewportSize({width:320, height:800});
+  const quotaTip = page.locator('.heading-with-help .help-tip');
+  await quotaTip.locator('summary').click();
+  const body = quotaTip.locator('.help-tip-body');
+  await expect(body).toBeVisible();
+  const box = await body.boundingBox();
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(320);
+  await page.keyboard.press('Escape');
+  await expect(body).toBeHidden();
 });

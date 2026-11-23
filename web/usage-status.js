@@ -27,6 +27,11 @@ export function countdown(ms){
   const m=Math.ceil(ms/60000),d=Math.floor(m/1440),h=Math.floor(m%1440/60),r=m%60;
   return d?`${d}d ${h}h`:h?`${h}h ${r}m`:`${r}m`;
 }
+// Clock time for "updated …" text; earlier days also name the date.
+export function shortTime(at,now=Date.now()){
+  const d=new Date(at),time=d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
+  return d.toDateString()===new Date(now).toDateString()?time:`${d.toLocaleDateString(undefined,{month:'short',day:'numeric'})} ${time}`;
+}
 function resetText(at,now){
   if(at==null)return null;
   const left=countdown(at-now);
@@ -125,6 +130,12 @@ function antigravityQuota(raw){
     return {...w,remainingFraction:value!==undefined&&value>=0&&value<=1?value:null,resetsAt:Number.isFinite(reset)?reset:null};
   })};
 }
+// Window length in the same 5h/7d form as Claude, for the narrow composer pill.
+const WINDOW_LENGTHS={weekly:'7d',daily:'1d',hourly:'1h','5hr':'5h','7day':'7d'};
+function windowLength(w){
+  const raw=(w.window||/(?:^|-)(\d+(?:hr|[hdm])|weekly|daily|hourly)$/i.exec(w.id)?.[1]||'').toLowerCase();
+  return raw?WINDOW_LENGTHS[raw]||raw.replace(/hr$/,'h'):w.name||w.id;
+}
 export function antigravityWindows(state,now=Date.now()){
   const report=state.antigravityQuota;if(!report)return [];
   const fresh=freshness({at:report.observedAtMs,source:'server'},now);
@@ -132,8 +143,9 @@ export function antigravityWindows(state,now=Date.now()){
     const label=`${w.group} · ${w.window||w.name||w.id}`;
     const percent=w.remainingFraction===null?null:100*w.remainingFraction;
     const remaining=percent===null?'quota unknown':`${Math.round(percent)}% left`;
-    return {...w,label,percent,stale:fresh.stale,compact:`${label} ${remaining}${fresh.stale?' ⚠':''}`,
-      detail:`${label}: ${remaining} · ${w.resetsAt===null?'reset unknown':`${resetText(w.resetsAt,now)} (${new Date(w.resetsAt).toLocaleString()})`} · ${fresh.text}`};
+    const warn=fresh.stale?' ⚠':'';
+    return {...w,label,percent,stale:fresh.stale,observedAtMs:report.observedAtMs,compact:`${label} ${remaining}${warn}`,pill:`${windowLength(w)} ${remaining}${warn}`,
+      detail:`${label}: ${remaining} · ${w.resetsAt===null?'reset unknown':resetText(w.resetsAt,now)} · ${fresh.text}`};
   });
 }
 
@@ -181,11 +193,12 @@ export function withSharedQuota(state,shared){
   return {...state,quota,codexQuota,antigravityQuota};
 }
 
+// Replayed values without a source time have unknown age and count as stale.
+// Where each time comes from is documented in docs/USER-GUIDE.md.
 function freshness(v,now){
-  if(v.at==null&&v.source==='adapter')return {text:`freshness unknown (${v.replayed?'replayed, ':''}no source observation time)`,stale:true};
-  if(v.at==null)return {text:`freshness unknown (replayed${v.seq!=null?' event #'+v.seq:''}, no stored timestamp)`,stale:true};
+  if(v.at==null)return {text:'update time unknown',stale:true};
   const stale=now-v.at>STALE_MS;
-  return {text:`${v.source==='adapter'?'adapter':v.source==='server'?'Agentworks':'browser'}-observed ${new Date(v.at).toLocaleString()}${v.replayed?' (replayed)':''}${stale?' — stale':''}`,stale};
+  return {text:`updated ${shortTime(v.at,now)}${stale?' · stale':''}`,stale};
 }
 
 function codexWindows(state,now){
@@ -201,10 +214,9 @@ function codexWindows(state,now){
     const f=w.usedPercent?freshness(w.usedPercent,now):{text:'freshness unknown',stale:true};
     const remaining=used===undefined?'usage unknown':`${Math.round(100-used)}% left`;
     const reset=w.resetsAt?.value;
-    const rt=reset===undefined?'reset unknown':`${resetText(reset,now)} (${new Date(reset).toLocaleString()}) · ${freshness(w.resetsAt,now).text}`;
     return {window:w,label,brief,remaining,stale:f.stale,
       compact:`${brief} ${remaining}${f.stale?' ⚠':''}`,
-      detail:`${label}: ${used===undefined?'usage unknown':`${used}% used / ${100-used}% remaining`} · ${f.text} · ${rt}${w.windowDurationMins?` · duration ${freshness(w.windowDurationMins,now).text}`:''}`};
+      detail:`${label}: ${used===undefined?'usage unknown':`${+(100-used).toFixed(1)}% left`} · ${reset===undefined?'reset unknown':resetText(reset,now)} · ${f.text}`};
   });
 }
 
@@ -248,27 +260,32 @@ export function usageView(state,{now=Date.now(),provider,model}={}){
   // Quota is shown as what is left; the used share is its complement.
   const compactQuota=['5h','7d'].filter(k=>state.quota[k]).map(k=>{const w=state.quota[k],reset=resetText(w.resetsAt,now);return `${k} ${pct(100-w.usedPercent)}% left${freshness(w,now).stale?' ⚠':''}${reset?` (${reset})`:''}`;});
   const quota=['5h','7d'].map(k=>{const w=state.quota[k];if(!w)return `${k} quota: not reported`;
-    return `${k} quota (reported): ${pct(100-w.usedPercent)}% remaining${w.status?' · status '+w.status:''} · ${w.resetsAt?`${resetText(w.resetsAt,now)} (${new Date(w.resetsAt).toLocaleString()})`:'reset unknown'} · ${freshness(w,now).text}`;});
+    return `${k} quota: ${pct(100-w.usedPercent)}% left${w.status&&w.status!=='allowed'?' · '+w.status.replace(/_/g,' '):''} · ${w.resetsAt?resetText(w.resetsAt,now):'reset unknown'} · ${freshness(w,now).text}`;});
   const codex=codexWindows(state,now);
   const antigravity=activeAntigravityWindows(state,model,now);
   const tightest=leadAntigravityWindow(antigravity,model);
-  const quotaDetails=provider==='antigravity'?(antigravity.length?antigravity.map(w=>w.detail):[state.antigravityQuota?'Quota mapping unavailable for the active model. All account quotas remain on the dashboard.':'Antigravity quota: not reported yet']):codex.length?codex.map(w=>w.detail):['codex','codex-rust'].includes(provider)?['Subscription quota: not reported']:quota;
+  const quotaDetails=provider==='antigravity'?(antigravity.length?antigravity.map(w=>w.detail):[state.antigravityQuota?'Quota mapping unavailable for this model; see the dashboard.':'Antigravity quota: not reported yet']):codex.length?codex.map(w=>w.detail):['codex','codex-rust'].includes(provider)?['Subscription quota: not reported']:quota;
+  const tokens=n=>n!==undefined?n.toLocaleString():'?';
   const details=[
-    c?`Context occupancy (current window): ${c.used!==undefined?c.used.toLocaleString():'unknown'} of ${c.size!==undefined?c.size.toLocaleString():'unknown'} tokens${c.percent!==undefined?` (${c.percent.toFixed(1)}%)`:''} · ${cf.text}`:'Context occupancy: not reported yet',
-    c?.dropped?'Occupancy decreased since the previous report (cause not reported)':'',
-    c?.sizeChanged?'Reported context window size changed':'',
-    state.model?`Reported model: ${state.model.name} · ${freshness(state.model,now).text}`:'',
-    state.cost?`Provider-reported cost: ${state.cost.amount.toFixed(4)} ${state.cost.currency||'(currency unknown)'} · scope and account billing not verified · ${freshness(state.cost,now).text}`:'Cost: not reported',
+    c?`Context: ${tokens(c.used)} / ${tokens(c.size)} tokens${c.percent!==undefined?` (${c.percent.toFixed(1)}%)`:''} · ${cf.text}`:'Context: not reported yet',
+    c?.dropped?'Context shrank since the last report':'',
+    c?.sizeChanged?'Context window size changed':'',
+    state.model?`Model: ${state.model.name}`:'',
+    state.cost?`Cost: ${state.cost.amount.toFixed(4)} ${state.cost.currency||'(currency unknown)'}`:'',
     ...quotaDetails,
-    provider==='antigravity'?'Source: native Antigravity /usage command; refreshed on session start, completed turns, or Refresh quota, at most once per 30 seconds. No model prompt is sent.':'Quota appears only when a provider event reports it, from this or another session on the same host and account; Agentworks does not query usage or infer quota from token counts.',
-    provider==='antigravity'?'Context source: ACP usage_update':`Source: ACP usage_update${provider?' · '+provider:''} · ${state.events} event(s)${state.ignored?` · ${state.ignored} subagent/parent-attributed ignored`:''}`,
   ].filter(Boolean);
+  // How the numbers are gathered sits behind the panel's "?" (full notes in docs/USER-GUIDE.md).
+  const help=[provider==='antigravity'
+    ?'Quota comes from Antigravity’s /usage command, read when the session starts, after each turn, or on Refresh quota (at most every 30 seconds). No prompt is sent.'
+    :'Context, cost and quota come from the agent’s own usage reports. Quota is shared by every session on the same host and account; Agentworks never queries it.',
+    '⚠ marks values over 10 minutes old or of unknown age.'];
   const stale=c?cf.stale:antigravity.length?antigravity.every(w=>w.stale):true;
   // Glanceable form for the phone composer chip: context used and 5h quota left.
+  // Windows are named only by length so the pill fits narrow screens.
   const primary=codex.find(w=>w.window.role==='primary'&&w.window.limitId==='codex')||codex.find(w=>w.window.role==='primary')||codex[0];
-  const short=[c?.percent!==undefined?`ctx ${Math.round(Math.min(100,c.percent))}%`:'',state.quota['5h']?`5h ${pct(100-state.quota['5h'].usedPercent)}% left`:'',primary?primary.compact:'',tightest?.compact||''].filter(Boolean).join(' · ');
+  const short=[c?.percent!==undefined?`ctx ${Math.round(Math.min(100,c.percent))}%`:'',state.quota['5h']?`5h ${pct(100-state.quota['5h'].usedPercent)}% left`:'',primary?primary.compact:'',tightest?.pill||''].filter(Boolean).join(' · ');
   const allQuota=[...compactQuota,...codex.map(w=>w.compact),...(tightest?[tightest.compact]:[])];
-  return {label:(c&&stale?'⚠ ':'')+label+(allQuota.length?' · '+allQuota.join(' · '):''),short:short&&(c&&stale?'⚠ ':'')+short,stale,known:!!c||antigravity.length>0,details};
+  return {label:(c&&stale?'⚠ ':'')+label+(allQuota.length?' · '+allQuota.join(' · '):''),short:short&&(c&&stale?'⚠ ':'')+short,stale,known:!!c||antigravity.length>0,details,help};
 }
 
 // Keeps every host/family's shared quota current from the server push, and
@@ -307,7 +324,11 @@ export function setupUsageStatus({root,getProvider,getModel=()=>null,getShared=(
     button.textContent=v.label;button.classList.toggle('stale',v.stale);button.classList.toggle('unknown',!v.known);
     button.title='Context usage details';
     if(chip){chip.textContent=v.short;chip.hidden=!v.short;chip.classList.toggle('stale',v.stale);chip.setAttribute('aria-label',`Usage: ${v.label}. More options`);}
-    panel.replaceChildren(...v.details.map(t=>{const p=document.createElement('div');p.textContent=t;return p;}));
+    const help=document.createElement('details'),summary=document.createElement('summary');
+    help.className='usage-help';help.open=!!panel.querySelector('.usage-help')?.open;
+    summary.textContent='?';summary.title='How usage is reported';summary.setAttribute('aria-label','How usage is reported');
+    help.append(summary,...v.help.map(t=>{const p=document.createElement('p');p.textContent=t;return p;}));
+    panel.replaceChildren(...v.details.map(t=>{const p=document.createElement('div');p.textContent=t;return p;}),help);
   };
   render();
   return {

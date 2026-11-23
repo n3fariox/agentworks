@@ -110,6 +110,10 @@ body[data-code-wrap=scroll] .tool-card pre,body[data-code-wrap=scroll] .approval
 .usage-status-toggle{background:none;border:0;color:inherit;opacity:.75;cursor:pointer;font:inherit;padding:4px 6px;min-height:28px}
 .usage-status-toggle.stale,.usage-status-toggle.unknown{opacity:.55;font-style:italic}
 .usage-status-details{width:100%;max-width:640px;padding:8px 10px;border:1px solid rgba(127,127,127,.35);border-radius:8px;display:grid;gap:4px;overflow-wrap:anywhere}
+.usage-help>summary{list-style:none;display:inline-grid;place-items:center;width:20px;height:20px;border:1px solid rgba(127,127,127,.5);border-radius:50%;cursor:pointer;font-size:11px;font-weight:600;opacity:.75}
+.usage-help>summary::-webkit-details-marker{display:none}
+.usage-help[open]>summary,.usage-help>summary:hover{opacity:1}
+.usage-help p{margin:4px 0 0;opacity:.8}
 @media (max-width:640px){.usage-status{align-items:stretch}.usage-status-toggle{text-align:left;min-height:36px}}
 /* L-05 activity indicator and queued inputs */
 .activity-indicator{display:flex;align-items:center;gap:.5rem;font-size:.85rem;padding:.35rem .25rem;color:var(--muted,#aaa)}
