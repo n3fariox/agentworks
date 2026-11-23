@@ -2346,6 +2346,17 @@ async fn discover_models(State(app): State<App>, Json(req): Json<ModelDiscovery>
         req.model_provider.as_deref(),
     )
     .await?;
+    if let Some(id) = req
+        .model_provider
+        .as_deref()
+        .filter(|id| model_providers::is_endpoint_profile(id))
+    {
+        let models =
+            model_providers::endpoint_models(id, remote.unwrap_or("local"), link.as_deref())
+                .await
+                .map_err(|error| fail(StatusCode::BAD_GATEWAY, error))?;
+        return Ok(Json(models));
+    }
     let models = session_runtime::discover_on(
         &req.provider,
         cwd,

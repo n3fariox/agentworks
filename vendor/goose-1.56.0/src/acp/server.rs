@@ -219,6 +219,14 @@ pub(super) const DEFAULT_PROVIDER_ID: &str = "goose";
 pub(super) const DEFAULT_PROVIDER_LABEL: &str = "Goose (Default)";
 const PROVIDER_CONFIG_STATUS_CHECK_CONCURRENCY: usize = 16;
 
+/// Agentworks patch: how long session setup waits for the model inventory refresh.
+const SESSION_INVENTORY_REFRESH_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Agentworks patch: set for profiles whose endpoint defines the model list.
+fn session_start_inventory_refresh() -> bool {
+    std::env::var_os("AGENTWORKS_GOOSE_SESSION_INVENTORY").is_some_and(|value| value == "1")
+}
+
 /// In-memory state for an active ACP session.
 ///
 /// ## Terminology (temporary, until all clients migrate to ACP)
@@ -1003,21 +1011,34 @@ impl GooseAcpAgent {
     /// `session/new` critical path avoids stalling session creation on slow or
     /// blocking work such as a synchronous keychain read while resolving the
     /// provider's inventory identity.
-    fn spawn_provider_inventory_refresh(&self, goose_session: &Session, agent: &Arc<Agent>) {
-        let Some(provider_name) = goose_session.provider_name.clone() else {
-            return;
-        };
+    ///
+    /// Agentworks patch: with `AGENTWORKS_GOOSE_SESSION_INVENTORY=1` the cache
+    /// is refreshed at every session start, and the caller waits briefly for it
+    /// (see `prepare_acp_session_agent`) so the session's model options match
+    /// the endpoint. The task keeps running if that wait times out.
+    fn spawn_provider_inventory_refresh(
+        &self,
+        goose_session: &Session,
+        agent: &Arc<Agent>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let provider_name = goose_session.provider_name.clone()?;
         let inventory_service = self.provider_inventory.clone();
         let agent = agent.clone();
         let session_id = goose_session.id.clone();
-        tokio::spawn(async move {
+        let every_session = session_start_inventory_refresh();
+        Some(tokio::spawn(async move {
             let Some(mut inventory) = inventory_service
                 .find_entry_for_provider(&provider_name)
                 .await
             else {
                 return;
             };
-            if !should_refresh_inventory_for_session_init(&inventory) {
+            let refresh = if every_session {
+                inventory.configured && inventory.supports_refresh
+            } else {
+                should_refresh_inventory_for_session_init(&inventory)
+            };
+            if !refresh {
                 return;
             }
             let provider = match agent.provider(&session_id).await {
@@ -1035,7 +1056,7 @@ impl GooseAcpAgent {
             inventory_service
                 .refresh_with_provider(&provider_name, &provider, &mut inventory, "session init")
                 .await;
-        });
+        }))
     }
 
     async fn get_or_create_session_agent(
@@ -1139,7 +1160,19 @@ impl GooseAcpAgent {
             .internal_err()?
             .start()
             .await;
-        self.spawn_provider_inventory_refresh(session, &agent);
+        let refresh = self.spawn_provider_inventory_refresh(session, &agent);
+        if let Some(refresh) = refresh.filter(|_| session_start_inventory_refresh()) {
+            // Dropping the handle on timeout detaches the task; it still stores its result.
+            if tokio::time::timeout(SESSION_INVENTORY_REFRESH_WAIT, refresh)
+                .await
+                .is_err()
+            {
+                warn!(
+                    session = %session.id,
+                    "provider inventory refresh is still running; using the cached models"
+                );
+            }
+        }
 
         Ok((agent, extension_results))
     }
