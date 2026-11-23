@@ -84,6 +84,43 @@
   flex-wrap:wrap;
 }
 
+.operations-dashboard .title-row {
+  display:flex;
+  align-items:center;
+  gap:10px;
+  margin:8px 0 12px;
+}
+
+.operations-dashboard .title-row h1 {
+  margin:0;
+}
+
+.operations-dashboard .refresh-button {
+  flex:none;
+  display:inline-grid;
+  place-items:center;
+  width:32px;
+  height:32px;
+  padding:0;
+  border:1px solid var(--border);
+  border-radius:8px;
+  background:var(--panel);
+  color:var(--muted);
+}
+
+.operations-dashboard .refresh-button:hover:not(:disabled) {
+  color:var(--text);
+  border-color:var(--accent);
+}
+
+.operations-dashboard .refresh-button:disabled svg {
+  animation:dashboard-spin .9s linear infinite;
+}
+
+@keyframes dashboard-spin {
+  to { transform:rotate(360deg); }
+}
+
 .operations-dashboard #refresh-status {
   font-size:13px;
   margin:0;
@@ -384,9 +421,9 @@
   .operations-dashboard .card {
     padding:16px;
   }
-  .operations-dashboard .page-heading button {
-    width:100%;
-    justify-content:center;
+  .operations-dashboard .refresh-button {
+    width:36px;
+    height:36px;
   }
   .operations-dashboard .section-heading {
     gap:4px;
