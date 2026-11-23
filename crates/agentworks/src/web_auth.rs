@@ -35,6 +35,7 @@ const PUBLIC: &[&str] = &[
     "/service-worker.js",
     "/icon-192.png",
     "/icon-512.png",
+    "/notification-badge.png",
 ];
 
 #[derive(Default)]

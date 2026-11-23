@@ -1,4 +1,4 @@
-import {appUrl, socketUrl, deploymentKey, localState as localStorage} from './hosting.js';
+import {appBase, appUrl, socketUrl, deploymentKey, localState as localStorage} from './hosting.js';
 // U-02 browser notifications.
 //
 // The server applies policy and only sends noteworthy, allowed events; this
@@ -68,26 +68,112 @@ function shouldNotify(event,{permission,activeId,focused}){
   return true;
 }
 
+function pwaEnabled(){
+  return typeof document!=='undefined'&&document.querySelector('meta[name="agentworks-pwa"]')?.content==='enabled';
+}
+
+function isStandaloneApp(){
+  try{
+    return globalThis.matchMedia?.('(display-mode: standalone)')?.matches||globalThis.navigator?.standalone===true;
+  }catch{return false;}
+}
+
+function isAndroidDevice(){
+  return /android/i.test(globalThis.navigator?.userAgent||'');
+}
+
+async function activeRegistration({waitForPending=false}={}){
+  if(typeof navigator==='undefined'||!('serviceWorker' in navigator)||typeof navigator.serviceWorker?.getRegistration!=='function')return null;
+  try{
+    let reg=await navigator.serviceWorker.getRegistration(appBase.href);
+    if(!reg&&!waitForPending)return null;
+    if((!reg||(!reg.active&&(reg.installing||reg.waiting)))&&(waitForPending&&pwaEnabled()||reg)){
+      reg=await Promise.race([
+        navigator.serviceWorker.ready,
+        new Promise(resolve=>setTimeout(()=>resolve(reg||null),1500)),
+      ]);
+    }
+    return reg?.active&&typeof reg.showNotification==='function'?reg:null;
+  }catch{return null;}
+}
+
+function notificationUrl(event){
+  if(!event.sessionId||event.sessionId==='test')return appUrl('/');
+  const params=new URLSearchParams({notificationSession:event.sessionId});
+  const seq=typeof event.id==='string'?Number(event.id.split(':').at(-1)):NaN;
+  if(Number.isSafeInteger(seq))params.set('notificationSeq',String(seq));
+  if(event.event)params.set('notificationEvent',event.event);
+  return appUrl('/?'+params);
+}
+
+function buildOptions(event,{forServiceWorker}){
+  const hasPwaAssets=pwaEnabled();
+  const options={
+    body:event.body||'',
+    tag:event.id,
+    renotify:Boolean(event.renotify),
+    silent:false,
+    icon:appUrl(hasPwaAssets?'icon-192.png':'favicon.svg'),
+  };
+  if(forServiceWorker){
+    if(hasPwaAssets)options.badge=appUrl('notification-badge.png');
+    options.data={sessionId:event.sessionId,url:notificationUrl(event)};
+  }
+  return options;
+}
+
 export function setupNotifications({getSessions,getActive,selectSession,toast}={}){
   const claim=claimStore();
   let settings=null,socket=null,delay=RECONNECT_MS,generation=0,statusNode=null;
   function connectionStatus(text){if(statusNode)statusNode.textContent=text;}
 
-  function show(event){
-    const title=event.title||'Agentworks';
-    let notice;
+  function openSession(sessionId){
+    if(!sessionId||sessionId==='test')return;
+    const session=(getSessions?.()||[]).find(s=>s.id===sessionId);
+    if(session)selectSession?.(session);
+    else fetch(appUrl(`/api/sessions/${encodeURIComponent(sessionId)}`)).then(r=>r.ok?r.json():null).then(data=>{if(data?.session)selectSession?.(data.session);}).catch(()=>toast?.('Could not open the source session.'));
+  }
+
+  if(typeof navigator!=='undefined'&&'serviceWorker' in navigator&&typeof navigator.serviceWorker?.addEventListener==='function'){
+    navigator.serviceWorker.addEventListener('message',message=>{
+      if(message.data?.type!=='agentworks-notification-click')return;
+      try{globalThis.focus();}catch{}
+      openSession(message.data.sessionId);
+    });
+  }
+
+  async function showViaWorker(reg,title,event){
     try{
-      notice=new Notification(title,{body:event.body||'',tag:event.id,renotify:false});
-    }catch{toast?.('This browser could not display a notification.');return;}
+      await reg.showNotification(title,buildOptions(event,{forServiceWorker:true}));
+      return true;
+    }catch{
+      toast?.('This browser could not display a notification. Check browser and OS notification settings.');
+      return false;
+    }
+  }
+
+  function showViaPage(title,event){
+    const notice=new Notification(title,buildOptions(event,{forServiceWorker:false}));
     notice.onerror=()=>toast?.('This browser could not display a notification. Check browser and OS notification settings.');
     notice.onclick=()=>{
       try{globalThis.focus();}catch{}
       notice.close();
-      const session=(getSessions?.()||[]).find(s=>s.id===event.sessionId);
-      if(session)selectSession(session);
-      else fetch(appUrl(`/api/sessions/${encodeURIComponent(event.sessionId)}`)).then(r=>r.ok?r.json():null).then(data=>{if(data?.session)selectSession(data.session);}).catch(()=>toast?.('Could not open the source session.'));
+      openSession(event.sessionId);
     };
     return notice;
+  }
+
+  async function show(event){
+    const title=event.title||'Agentworks';
+    const reg=await activeRegistration();
+    if(reg)return showViaWorker(reg,title,event);
+    try{
+      return showViaPage(title,event);
+    }catch{
+      const pendingReg=await activeRegistration({waitForPending:true});
+      if(pendingReg)return showViaWorker(pendingReg,title,event);
+      toast?.('This browser could not display a notification.');
+    }
   }
 
   function connect(){
@@ -164,6 +250,21 @@ export function setupNotifications({getSessions,getActive,selectSession,toast}={
     };
     row.append(toggle,document.createTextNode('Notify me about agent activity'));fieldset.append(row);
     const permission=document.createElement('div');fieldset.append(permission);renderPermission(permission);
+    const modeNode=document.createElement('p');modeNode.className='field-note';modeNode.id='notifications-delivery-mode';modeNode.setAttribute('role','status');
+    const appLabel=isStandaloneApp()?'Installed app':'Browser tab';
+    modeNode.textContent=`${appLabel} · checking notification delivery mode…`;
+    fieldset.append(modeNode);
+    activeRegistration().then(reg=>{
+      if(!modeNode.isConnected)return;
+      modeNode.textContent=reg
+        ?`${appLabel} · using service worker notifications.`
+        :`${appLabel} · using browser tab notifications (no active service worker).`;
+    });
+    if(isAndroidDevice()){
+      const androidHint=document.createElement('p');androidHint.className='field-note';
+      androidHint.textContent='On Android, Chrome routes web alerts through Chrome’s site notification channel. If alerts arrive silenced, check Android Settings → Apps → Chrome → Notifications → Notification categories → Sites for this origin, and ensure Chrome → Site settings → Notifications → Use quieter messaging is off.';
+      fieldset.append(androidHint);
+    }
     if(!settings?.enabled){
       const hint=document.createElement('p');hint.className='field-note';hint.textContent='Turn this on to be told about turn completion, approvals and failures from any session.';fieldset.append(hint);
     }
@@ -179,7 +280,7 @@ export function setupNotifications({getSessions,getActive,selectSession,toast}={
     }
     if(Notification.permission==='granted'){
       const test=document.createElement('button');test.type='button';test.className='text-button';test.textContent='Send a test notification';
-      test.onclick=()=>show({id:'test',sessionId:'test',title:'Agentworks',body:'Notifications are working.'});node.append(test);
+      test.onclick=()=>show({id:'test',sessionId:'test',title:'Agentworks',body:'Notifications are working.',renotify:true});node.append(test);
     }
   }
 

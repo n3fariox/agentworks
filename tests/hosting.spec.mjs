@@ -202,6 +202,16 @@ test('mounted notification stream navigates to an approval and mounted controls 
       constructor(title, options) {this.title=title; this.options=options; window.__notices.push(this);}
       close() {}
     };
+    if (typeof ServiceWorkerRegistration !== 'undefined') {
+      ServiceWorkerRegistration.prototype.showNotification = async function(title, options) {
+        window.__notices.push({
+          title,
+          options,
+          via: 'serviceWorker',
+          onclick: () => navigator.serviceWorker.dispatchEvent(new MessageEvent('message', {data: {type: 'agentworks-notification-click', sessionId: options?.data?.sessionId}})),
+        });
+      };
+    }
     const NativeSocket = window.WebSocket;
     window.WebSocket = class extends NativeSocket {
       constructor(url, ...args) {
@@ -212,6 +222,7 @@ test('mounted notification stream navigates to an approval and mounted controls 
   }, session.id);
   try {
     await page.goto(origin + mounts[0]);
+    await page.evaluate(() => navigator.serviceWorker.ready);
     await page.waitForFunction(() => window.__notifying);
     await expect.poll(async () => (await api(`/api/sessions/${background.id}`)).session.status).toBe('idle');
     const response = await page.evaluate(async id => {
@@ -221,6 +232,10 @@ test('mounted notification stream navigates to an approval and mounted controls 
     }, background.id);
     expect(response).toBe(200);
     await expect.poll(() => page.evaluate(() => window.__notices.some(n => n.options.body === 'Waiting for your approval.'))).toBe(true);
+    const approvalNotice = await page.evaluate(() => window.__notices.find(n => n.options.body === 'Waiting for your approval.'));
+    expect(approvalNotice.via).toBe('serviceWorker');
+    expect(approvalNotice.options.icon).toBe(origin + mounts[0] + 'icon-192.png');
+    expect(approvalNotice.options.badge).toBe(origin + mounts[0] + 'notification-badge.png');
     await page.evaluate(() => window.__notices.at(-1).onclick());
     await expect(page.locator('#header-title')).toHaveText('Mounted background');
     await page.getByRole('button',{name:'Allow once',exact:true}).click();
@@ -285,7 +300,7 @@ test('disablement removes only this mount worker and preserves state and sibling
   await expect(page.locator('link[rel=manifest]')).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => navigator.serviceWorker.getRegistrations().then(rs => rs.map(r => r.scope)))).toEqual([origin + mounts[1]]);
   expect(await page.evaluate(async () => (await import('./hosting.js')).localState.getItem('agentworks-session'))).toBe(session.id);
-  for (const path of ['manifest.webmanifest','service-worker.js','icon-192.png']) {
+  for (const path of ['manifest.webmanifest','service-worker.js','icon-192.png','notification-badge.png']) {
     expect((await fetch(upstream + '/' + path)).status).toBe(404);
   }
 });

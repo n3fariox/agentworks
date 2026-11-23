@@ -101,12 +101,15 @@ notice. This works without BroadcastChannel or Web Locks and retains the newest
 claims. If browser storage is unavailable, notices are suppressed to avoid
 cross-tab duplicates. A crash after claiming can lose a notice. The stream has no
 historical replay: disconnected browsers do not receive missed notices, and
-closing every tab stops delivery. There is no push service. PWA support (enabled
-by default) registers a network-only installation worker, but notifications still use the
-page constructor rather than worker `showNotification()` or push events.
-Most mobile browsers require service-worker notifications and may reject direct display; the
-app reports that failure when it occurs. Browser/OS delivery remains best effort.
-HTTPS, installation and permission alone do not provide mobile/background push support.
+closing every tab stops delivery. There is no push service. When PWA support (enabled
+by default) has an active service worker registration, notifications are displayed
+through `ServiceWorkerRegistration.showNotification()` with the app `icon`, monochrome
+`badge` (`notification-badge.png`), and `notificationclick` navigation, falling back
+to the page `Notification` constructor when no active service worker is present (such
+as when `AGENTWORKS_PWA=0`). On Android, Chrome still routes web and installed PWA
+notifications through Chrome's site notification channels, so OS-level silencing or
+quieter-messaging settings in Chrome must allow alerts for the origin.
+HTTPS, installation and permission alone do not provide closed-app background push support.
 iOS/iPadOS Web Push requires a supported OS (16.4+), a Home Screen web app and
 permission requested through direct user interaction. Supporting closed-page
 delivery needs push subscriptions and a server sender as well as worker handling;

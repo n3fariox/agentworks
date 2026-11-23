@@ -19,7 +19,7 @@ async function api(path,body,method){
   const response=await fetch(base+path,{method:method||(body?'POST':'GET'),headers:{Origin:base,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
   expect(response.ok,await response.clone().text()).toBe(true);return response.json();
 }
-// Records every Notification the page creates instead of showing it.
+// Records every Notification (page or service worker) the page creates instead of showing it.
 async function captureNotifications(page,permission='granted'){
   await page.addInitScript(permission=>{
     window.__permissionReads=[];window.__permissionRequests=[];window.__permission=permission;window.__handles=[];
@@ -27,12 +27,24 @@ async function captureNotifications(page,permission='granted'){
     window.WebSocket=class extends NativeSocket{constructor(url,...args){super(url,...args);if(String(url).endsWith('/api/notifications/events')){this.addEventListener('open',()=>window.__notificationConnected=true);}}};
     window.__notifications=[];
     class Fake{
-      constructor(title,options){window.__notifications.push({title,body:options?.body||'',tag:options?.tag});window.__handles.push(this);}
+      constructor(title,options){
+        window.__notifications.push({title,body:options?.body||'',tag:options?.tag,icon:options?.icon,badge:options?.badge,renotify:options?.renotify,via:'page'});
+        window.__handles.push(this);
+      }
       close(){}
     }
     Object.defineProperty(Fake,'permission',{get:()=>{window.__permissionReads.push(window.__permission);return window.__permission;}});
     Fake.requestPermission=async()=>{window.__permissionRequests.push(navigator.userActivation.isActive);window.__permission='granted';return 'granted';};
     window.Notification=Fake;globalThis.Notification=Fake;
+    if(typeof ServiceWorkerRegistration!=='undefined'){
+      ServiceWorkerRegistration.prototype.showNotification=async function(title,options){
+        window.__notifications.push({title,body:options?.body||'',tag:options?.tag,icon:options?.icon,badge:options?.badge,renotify:options?.renotify,data:options?.data,via:'serviceWorker'});
+        window.__handles.push({
+          via:'serviceWorker',
+          onclick:()=>navigator.serviceWorker.dispatchEvent(new MessageEvent('message',{data:{type:'agentworks-notification-click',sessionId:options?.data?.sessionId}})),
+        });
+      };
+    }
   },permission);
 }
 const shown=page=>page.evaluate(()=>window.__notifications);
@@ -389,12 +401,90 @@ test('the app Settings flow asks only on Allow and can test actual display',asyn
   await expect(page.getByRole('button',{name:'Allow notifications in this browser'})).toHaveCount(0);
   await page.getByRole('button',{name:'Send a test notification'}).click();
   expect((await shown(page)).map(n=>n.body)).toEqual(['Notifications are working.']);
-  // Both synchronous constructor and asynchronous browser failures are visible.
-  await page.evaluate(()=>window.__handles[0].onerror());
-  await expect(page.locator('#toast')).toContainText('could not display');
-  await page.evaluate(()=>{window.Notification=class{static permission='granted';constructor(){throw new TypeError('Use a service worker');}};});
+  const firstNotice=(await shown(page))[0];
+  expect(firstNotice.renotify).toBe(true);
+  expect(firstNotice.icon).toContain('/icon-192.png');
+  // Service worker notifications also include the monochrome Android badge when active.
+  await page.evaluate(()=>navigator.serviceWorker.ready);
+  await page.getByRole('button',{name:'Send a test notification'}).click();
+  const swNotice=(await shown(page)).at(-1);
+  expect(swNotice.via).toBe('serviceWorker');
+  expect(swNotice.badge).toContain('/notification-badge.png');
+  await expect(page.locator('#notifications-delivery-mode')).toContainText('service worker notifications');
+  // Service worker showNotification rejections are visible.
+  await page.evaluate(()=>{ServiceWorkerRegistration.prototype.showNotification=async()=>{throw new Error('Blocked');};});
   await page.getByRole('button',{name:'Send a test notification'}).click();
   await expect(page.locator('#toast')).toContainText('could not display');
+});
+
+test('page fallback detects missing service worker, reports display failures, and surfaces Android guidance',async({page})=>{
+  await page.addInitScript(()=>{
+    Object.defineProperty(navigator,'userAgent',{get:()=>'Mozilla/5.0 (Linux; Android 15) Chrome/130.0.0.0 Mobile'});
+  });
+  await harness(page);
+  await expect(page.locator('#notifications-delivery-mode')).toContainText('browser tab notifications');
+  await expect(page.locator('#controls')).toContainText('Notification categories');
+  await page.getByRole('button',{name:'Send a test notification'}).click();
+  const notice=(await shown(page))[0];
+  expect(notice.via).toBe('page');
+  expect(notice.renotify).toBe(true);
+  expect(notice.icon).toContain('/favicon.svg');
+  await page.evaluate(async()=>{
+    window.__toasts=[];
+    const {setupNotifications}=await import('/notifications.js');
+    const c=setupNotifications({toast:msg=>window.__toasts.push(msg)});
+    c.mount(document.querySelector('#controls'));
+  });
+  await page.getByRole('button',{name:'Send a test notification'}).click();
+  await page.evaluate(()=>window.__handles.at(-1).onerror());
+  await expect.poll(()=>page.evaluate(()=>window.__toasts.length)).toBe(1);
+  expect(await page.evaluate(()=>window.__toasts[0])).toContain('could not display');
+  // Verify synchronous constructor error handling when no service worker exists.
+  await page.evaluate(()=>{
+    window.Notification=class{static permission='granted';constructor(){throw new TypeError('Use a service worker');}};
+  });
+  await page.getByRole('button',{name:'Send a test notification'}).click();
+  await expect.poll(()=>page.evaluate(()=>window.__toasts.length)).toBe(2);
+  expect(await page.evaluate(()=>window.__toasts[1])).toContain('could not display');
+});
+
+test('service worker notificationclick focuses an open client or opens a window inside scope',async({page})=>{
+  const code=await readFile('web/service-worker.js','utf8');
+  await page.goto('about:blank');
+  const result=await page.evaluate(async source=>{
+    const listeners={};
+    const posted=[],opened=[];let focused=false;
+    const scope='https://example.test/mount/';
+    const selfStub={
+      registration:{scope},
+      clients:{
+        matchAll:async()=>[{url:scope+'?x=1',focused:false,focus:async()=>{focused=true;},postMessage:msg=>posted.push(msg)}],
+        openWindow:async url=>opened.push(url),
+      },
+      addEventListener:(name,fn)=>{listeners[name]=fn;},
+    };
+    new Function('self',source)(selfStub);
+    let waitPromise;
+    let closed=false;
+    listeners.notificationclick({
+      notification:{data:{sessionId:'sess-1',url:scope+'?notificationSession=sess-1'},close:()=>{closed=true;}},
+      waitUntil:p=>{waitPromise=p;},
+    });
+    await waitPromise;
+    // Also verify fallback to openWindow when no client matches scope, and cross-origin URL rejection.
+    selfStub.clients.matchAll=async()=>[{url:'https://example.test/other/',focused:true,focus:async()=>{},postMessage:()=>{}}];
+    let waitOpen;
+    listeners.notificationclick({
+      notification:{data:{sessionId:'sess-2',url:'https://evil.example/phish'},close:()=>{}},
+      waitUntil:p=>{waitOpen=p;},
+    });
+    await waitOpen;
+    return {closed,focused,posted,opened};
+  },code);
+  expect(result.closed).toBe(true);
+  expect(result.focused).toBe(true);
+  expect(result.posted).toEqual([{type:'agentworks-notification-click',sessionId:'sess-1'}]);
+  expect(result.opened).toEqual(['https://example.test/mount/']);
 });
 
 test('denied permission has recovery instructions and no Allow button',async({page})=>{

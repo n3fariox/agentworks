@@ -85,6 +85,10 @@ pub async fn asset(axum::extract::Path(name): axum::extract::Path<String>) -> Re
         ),
         "icon-192.png" if enabled() => ("image/png", include_bytes!("../../../web/icon-192.png")),
         "icon-512.png" if enabled() => ("image/png", include_bytes!("../../../web/icon-512.png")),
+        "notification-badge.png" if enabled() => (
+            "image/png",
+            include_bytes!("../../../web/notification-badge.png"),
+        ),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     ([(header::CONTENT_TYPE, mime)], body).into_response()
@@ -125,6 +129,9 @@ mod tests {
             asset(Path("dashboard-private".into())).await.status(),
             StatusCode::NOT_FOUND
         );
+        let badge = asset(Path("notification-badge.png".into())).await;
+        assert_eq!(badge.status(), StatusCode::OK);
+        assert_eq!(badge.headers()[header::CONTENT_TYPE], "image/png");
     }
 
     #[tokio::test]
