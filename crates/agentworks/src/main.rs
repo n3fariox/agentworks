@@ -986,6 +986,15 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(automations::scheduler(app.clone()));
     tokio::spawn(github_tracking::scheduler(app.clone()));
     tokio::spawn(idle_sleep::scheduler(app.clone()));
+    secrets::set_lock_minutes(
+        app.catalog
+            .lock()
+            .unwrap()
+            .data
+            .settings
+            .secrets_lock_minutes
+            .unwrap_or(catalog::DEFAULT_SECRETS_LOCK_MINUTES),
+    );
     tokio::spawn(mcp::serve_bridge(app.clone(), mcp_listener));
     let router = Router::new()
         .route(
@@ -1487,6 +1496,11 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/api/timeouts", get(get_timeouts).put(save_timeouts))
         .route("/api/secrets", get(secrets::list).post(secrets::create))
+        .route("/api/secrets/status", get(secrets::get_status))
+        .route("/api/secrets/unlock", post(secrets::unlock))
+        .route("/api/secrets/lock", post(secrets::lock_now))
+        .route("/api/secrets/password", axum::routing::put(secrets::set_password))
+        .route("/api/secrets/lock-timeout", axum::routing::put(secrets::set_lock_timeout))
         .route(
             "/api/secrets/{id}",
             axum::routing::put(secrets::update).delete(secrets::delete),
@@ -2201,6 +2215,8 @@ async fn save_settings(State(app): State<App>, Json(mut settings): Json<Settings
         settings.max_active_sessions = settings.max_active_sessions.or(current.max_active_sessions);
         settings.idle_sleep_minutes = settings.idle_sleep_minutes.or(current.idle_sleep_minutes);
         settings.notifications = current.notifications.clone();
+        // Set from Settings → Secrets, which saves on its own.
+        settings.secrets_lock_minutes = current.secrets_lock_minutes;
         settings.git = settings.git.take().or(current.git.clone());
         settings.hidden_providers = settings
             .hidden_providers

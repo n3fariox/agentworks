@@ -520,7 +520,7 @@ pub async fn run(
     if !secrets.unavailable.is_empty() {
         s.emit(
             "secrets_unavailable",
-            json!({"secrets": secrets.unavailable}),
+            json!({"secrets": secrets.unavailable, "locked": secrets.locked}),
         );
     }
     let (transport, _spawn_guard): (DynConnectTo<Client>, _) = if s.host_id == "local" {

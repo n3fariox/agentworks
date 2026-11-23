@@ -1,6 +1,6 @@
 # Session secrets (proposal)
 
-Status: storage, Settings → Secrets, per-session assignment, `environment` delivery (local and remote, with automatic restart), transcript scrubbing, discovery (`list_session_secrets`) and `run_with_secrets` are implemented. Delegation and project default assignments are not.
+Status: storage, Settings → Secrets, per-session assignment, `environment` delivery (local and remote, with automatic restart), transcript scrubbing, discovery (`list_session_secrets`), `run_with_secrets` and password unlock with an idle lock are implemented. Delegation, project default assignments and a manual **Restart with secrets** action are not.
 
 Users keep credentials that agents and tools need (API tokens, registry tokens) without leaving them exported in their shell. Agentworks stores these secrets encrypted on the server host and makes them available only to the sessions a human assigns them to, either as harness environment variables or through a templated MCP tool.
 
@@ -30,17 +30,21 @@ Envelope encryption, so a password can be added later without re-encrypting stor
 
 - **Values**: one SQLite row per secret, `AES-256-GCM(dataKey, nonce, value)` with the secret's ID and name as associated data, so ciphertexts cannot be swapped between rows.
 
-The server unwraps the data key at startup (or at unlock, once passwords exist) and holds it in memory, zeroized on drop. Encryption uses `ring`, already in the build through rustls; `argon2` is the only new library.
+The server unwraps the data key at startup, or at unlock when there is a password, and holds it in memory, zeroized on drop. Encryption uses `ring`, already in the build through rustls; `argon2` is the only new library.
 
-Without a password this keeps values out of database snapshots, recovery backups and exports, which are useless without the key file. It does not protect against a process running as the same user that reads both files, including agents. The password step below closes that.
+Without a password this keeps values out of database snapshots, recovery backups and exports, which are useless without the key file. It does not protect against a process running as the same user that reads both files, including agents. A password closes that while secrets are locked.
 
 Losing the key file makes stored values unrecoverable: a new key file is created, the secrets stay listed as **Needs re-entry**, and each value must be entered again. A damaged key file is never replaced; secrets stay unavailable until it is repaired or removed, and the rest of the server runs normally. Recovery backups copy only named files and do not include the key file.
 
-### Later: password
+### Password
 
-- Setting a password derives a new key-encryption key with a new salt, re-wraps the data key and sets `"password": true`. Changing or removing it is the same operation.
-- With a password, the server starts locked. A browser banner (**Unlock secrets**) prompts for it; the data key is held for a configurable idle timeout, then zeroized.
-- While locked, sessions start without their secrets and `run_with_secrets` waits for unlock up to its timeout, as described below.
+Settings → Secrets → **Password** sets, changes or removes it.
+
+- Setting a password derives a new key-encryption key with a new salt (argon2id, 64 MiB, 3 passes), re-wraps the same data key and sets `"password": true`. Changing it needs the current password; removing it re-wraps under the empty password. Stored values are never re-encrypted. The key file is replaced atomically (a private temporary file beside it, synced and renamed), and never with a file for a different key. Passwords need at least 8 characters. The password is never stored or logged.
+- With a password the server starts **locked**. Every page shows an **Unlock secrets** banner; unlocking reads the key file again and derives the key off the async workers. A wrong password fails the AES-GCM tag check; failed attempts wait 1, 2, 4 … up to 60 seconds before the next one. Unlocks, failures, locks and password changes are audited (`secrets.unlock`, `secrets.lock`, `secrets.password`).
+- **Lock after inactivity** (15 minutes to 24 hours, or never; default 1 hour) counts from the last time a value was sealed or opened: a harness start with environment secrets, a `run_with_secrets` release, or saving a value. Listing secrets does not count. **Lock now** locks at once. Locking drops the server's reference to the data key; a release already in progress finishes. Without a password there is nothing to lock, so the setting has no effect.
+- While locked, secrets are listed but cannot be added, changed or read (`423 Locked`). Sessions start without their `environment` secrets; the transcript says which, and unlocking restarts those sessions with them (now when idle, after their turn when busy). `run_with_secrets` waits for the unlock, as described below.
+- A forgotten password cannot be recovered. Remove the key file (Agentworks creates a new one) and enter the values again.
 
 ## Model
 
@@ -109,7 +113,7 @@ Because nothing in the prompt or tool list changes, assigning or editing a `tool
 
 At harness start, `environment` assignments are decrypted and added to the harness process environment after the mise environment and before the provider configuration, so provider-managed variables always win. Values that cannot be decrypted are left out and the transcript notes which (**Not available to this harness**); the harness still starts. Remote workers advertise `secretEnvironment`; a session with environment secrets refuses to start on an older worker rather than starting without them. Replacing a stored value reaches a session at its next harness start. Local sessions add them where the server spawns the harness; remote sessions receive them in the worker start request and apply them through the same `.envs()` path in `crates/agentworks-runtime/src/worker.rs`. Start requests carrying values are never logged or persisted, on either side.
 
-Changing a session's `environment` assignments restarts an idle harness automatically, as changing its Agentworks access already does; a busy one restarts when its turn ends. The UI also offers **Restart with secrets**. It stops the harness process and starts a new one with the current assignments, resuming the native conversation through the existing resume/load path in `session_runtime.rs`. Harnesses that support neither cannot use this; the UI offers a new session instead. Once passwords exist, the same action applies to sessions that started while secrets were locked.
+Changing a session's `environment` assignments restarts an idle harness automatically, as changing its Agentworks access already does; a busy one restarts when its turn ends. Sessions that started while secrets were locked restart the same way once they are unlocked. Planned: a manual **Restart with secrets** action that stops the harness process and starts a new one with the current assignments, resuming the native conversation through the existing resume/load path in `session_runtime.rs`.
 
 Codex writes no rollout until a thread's first turn, so resuming a session that was never prompted (for example after an environment change) fails with `no rollout found`. The Rust Codex adapter reports that as `ResourceNotFound`, and Agentworks then starts a new harness session, as it already did for Claude. Codex passes the harness environment to its commands by default (checked with Codex 0.165 via `codex sandbox`). If a user's Codex configuration sets `shell_environment_policy.ignore_default_excludes = false`, Codex drops variables whose names contain `KEY`, `SECRET` or `TOKEN`, including assigned secrets; use `tool` delivery for those. Agentworks does not override the policy: `include_only` would remove every other variable, and `set` would put values on the command line.
 
@@ -132,7 +136,7 @@ run_with_secrets {
 - The command always runs on the session's host, never on the server for a remote session. See [Where the tool runs](#where-the-tool-runs).
 - Output (stdout and stderr, 1 MiB cap each) is returned with every value used replaced by `[REDACTED:NAME]`, along with its base64, base64url, URL-encoded and JSON-escaped forms. This prevents accidental disclosure; it is not a boundary against a command that deliberately transforms the value.
 - `approval: eachUse` assignments raise a normal approval card during the turn, showing the templated command (never values). Answers: allow once, allow for this session, or deny. "Allow for this session" lasts until the session's assignments change or the server restarts. An unanswered approval is withdrawn after 10 minutes. The tool result tells the agent when the user approved a use. Codex cancels an MCP call after 300 seconds by default (Codex 0.165), so the Codex adapter gives the MCP servers Agentworks passes in a 4260-second limit (approval plus the longest command). Claude Code 2.1.319 waited the full 10 minutes without a setting.
-- Once passwords exist, a call while secrets are locked shows the **Unlock secrets** banner and waits instead of failing.
+- A call while secrets are locked waits instead of failing: the transcript says it is waiting, the **Unlock secrets** banner appears, and the facade polls as it does for an approval. Assignments are checked first, so an unassigned name is refused at once. After the unlock the call continues and may then ask for approval; an approval given before the vault locked is kept. A call still waiting after 10 minutes fails and tells the agent to ask the user to unlock.
 - The tool runs outside the harness's own sandbox and permission system. Assignments and `approval` are its only controls, which is why assignment is human-only.
 
 ### Where the tool runs
@@ -162,7 +166,8 @@ Values delivered to a session are registered with that session's scrubber when i
 - `GET/POST /api/secrets`, `PUT/DELETE /api/secrets/{id}`: definitions. `PUT` takes `description` and/or `value`. Responses never contain values.
 - `GET/PUT /api/sessions/{id}/secrets`: assignments, each with its origin (human or parent session ID). `PUT` replaces the whole list; retained secrets keep their origin. Changes are audited against the session and shown in its transcript by name and settings, never value.
 - `POST /api/sessions/{id}/secrets/restart`: restart with current assignments.
-- Later: `POST /api/secrets/unlock`, `POST /api/secrets/lock`, `PUT /api/secrets/password`.
+- `GET /api/secrets/status`: `{available, locked, password, lockMinutes, keyFile, error}`, also included in `GET /api/secrets`.
+- `POST /api/secrets/unlock {password}`, `POST /api/secrets/lock`, `PUT /api/secrets/password {current, password}` (empty `password` removes it), `PUT /api/secrets/lock-timeout {minutes}` (0 never, otherwise 5–1440).
 - MCP: `list_session_secrets`, `run_with_secrets` (executed by the facade on the session's host), and a `secrets` argument on `start_session`.
 - Bridge: `resolve_secrets`, the only operation that returns values, relayed for remote sessions.
 
@@ -174,7 +179,7 @@ Every value change, delivery, tool call, delegation and assignment change is aud
 2. Environment delivery for local and remote sessions, Restart with secrets, Codex include override, transcript scrubbing.
 3. `run_with_secrets` with facade-side execution and `resolve_secrets`, locally, then through the remote relay.
 4. Delegation through `start_session` and forks.
-5. Password, unlock prompt and idle timeout.
+5. Password, unlock prompt and idle timeout (done).
 
 ## Not planned
 

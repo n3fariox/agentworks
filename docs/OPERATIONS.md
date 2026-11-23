@@ -19,7 +19,7 @@ Sidebar view and collapse state are remembered per browser. Switching views pres
 
 Projects, settings, and host-local location IDs are saved in the catalog; session metadata and transcripts are saved in the session database beside it. Without `AGENTWORKS_CATALOG_PATH` and `AGENTWORKS_DB_PATH`, a server uses `.agentworks/dev/catalog.json` and `.agentworks/dev/catalog.sessions.sqlite3` in the checkout it was built from. That default is for development runs: `agentworks service --install` refuses a `service.env` that does not set both paths, so a test binary never opens the live store. Each server holds exclusive locks on the catalog (`catalog.json.lock`) and the database (`*.sqlite3.lock`); a second server pointed at either exits at startup. This catalog provides organization; file access still follows the server's allowed roots.
 
-[Secrets](SECRETS.md) are stored encrypted in the session database. Their key file sits beside it (`catalog.sessions.secrets.key` by default, or `AGENTWORKS_SECRETS_KEY_PATH`) and is not part of recovery backups, so back it up separately if you want stored values to survive losing this machine.
+[Secrets](SECRETS.md) are stored encrypted in the session database. Their key file sits beside it (`catalog.sessions.secrets.key` by default, or `AGENTWORKS_SECRETS_KEY_PATH`) and is not part of recovery backups, so back it up separately if you want stored values to survive losing this machine. With a password set in Settings → Secrets, the server starts with secrets locked until someone unlocks them in the browser; a forgotten password means removing the key file and entering the values again.
 
 ### Remote hosts
 

@@ -28,7 +28,7 @@ import {setupSidePanel} from './side-panel.js';
 import {setupContextMenu} from './context-menu.js';
 import {setupTimeoutControls} from './timeout-controls.js';
 import {setupParserScripts} from './parser-scripts.js';
-import {setupSecrets,setupSessionSecrets} from './secrets.js';
+import {setupSecrets,setupSecretsLock,setupSessionSecrets} from './secrets.js';
 import {setupInputQueue,setupPromptRecovery,BUSY,STARTING} from './input-queue.js';
 import {setupNotifications} from './notifications.js';
 import {setupNotificationTray, isAutoDismissEnabled} from './notification-tray.js';
@@ -113,7 +113,7 @@ const promptRecovery=setupPromptRecovery({area:$('prompt'),storage:sessionStorag
 let currentUserSeq=null;
 let sidePanel=null;
 setInterval(()=>usageStatus.render(),60000);
-let timeoutControls=null,parserScripts=null,secrets=null,sessionSecrets=null;
+let timeoutControls=null,parserScripts=null,secrets=null,sessionSecrets=null,secretsLock=null;
 let transcript=[], tools=new Map(), compactions=new Map(), approvals=new Map(), assistant=null, status='starting';
 const backgroundJobs=createBackgroundJobs({root:$('background-jobs'),api,getActive:()=>active,isConnected:()=>connected,onChange:()=>scheduleDraw()});
 const subagents=createSubagents({storage:localStorage,getSessionId:()=>active?.id,jobResult:job=>[`${job.name||'Background job'} · ${backgroundJobs.label(job.state)}`,...jobResultLines(job)].join('\n'),append:()=>{},tabs:$('session-tabs'),panel:$('subagent-view'),messages:$('messages'),onSelect:view=>{sessionTerminal.select(view);scheduleDraw();},uuid,applyToolUpdate,renderToolActivity,renderMessage:(body,item)=>{if(item.role==='Agent')updateMarkdown(item,body);else body.textContent=item.text;},el});
@@ -1098,6 +1098,7 @@ function consume(e,live=false){
   backgroundJobs.consume(e);
   if(subagents.consume(e,{live:live&&!replaying}))return;
   if(d?.continuationState&&active&&!rebuilding)active.continuation=d.continuationState;
+  if(e.kind==='secrets_locked'||(e.kind==='secrets_unavailable'&&d.locked))secretsLock?.refresh();
   {const t=timeoutControls?.notice(e.kind,d)??sessionSecrets?.notice(e.kind,d);if(t){transcript.push({id:itemId(),type:'notice',text:t});assistant=null;}}
   if(rebuilding&&['session_updated','continuation','models','permission_modes','attachment_policy','commands','status','storage_error'].includes(e.kind)){}
   else if(e.kind==='session_updated'){
@@ -1979,7 +1980,8 @@ const diffView=setupDiff({api,root:$('side-diff'),enhanceBlocks:display.enhance}
 sessionSecrets=setupSessionSecrets({$,api,el,getActive:()=>active});
 timeoutControls=setupTimeoutControls({$,api,getActive:()=>active,sections:[sessionSecrets]});
 parserScripts=setupParserScripts({$,api,el});
-secrets=setupSecrets({$,api,el,toast});
+secretsLock=setupSecretsLock({$,api,toast,onChange:()=>{if($('settings-dialog').open)secrets.refresh();}});
+secrets=setupSecrets({$,api,el,toast,lock:secretsLock});
 $('settings-dialog').addEventListener('close',()=>secrets.close());
 workspace=createWorkspace({api,toast,labels,uuid,imageViewer,
   viewChanged(view){

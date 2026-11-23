@@ -9,7 +9,7 @@ use agentworks_secrets::{
         Approval, Assignment, Delegation, Delivery, validate_description, validate_name,
         validate_value,
     },
-    vault::Vault,
+    vault::{self, Opened, PasswordError, Vault},
 };
 use axum::{
     Json,
@@ -21,38 +21,142 @@ use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU32, Ordering},
+    },
+    time::{Duration, Instant},
 };
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
 const MAX_ASSIGNMENTS: usize = 64;
 
+enum VaultState {
+    /// The key file is missing, damaged or unreadable.
+    Unavailable(String),
+    /// Password-protected and not unlocked. Unlocking reads the key file again.
+    Locked,
+    Unlocked {
+        vault: Arc<Vault>,
+        /// Whether the key file has a password, so the vault can be locked again.
+        password: bool,
+    },
+}
 struct Storage {
     path: PathBuf,
-    vault: Result<Vault, String>,
+    state: Mutex<VaultState>,
+    /// When a value was last sealed or opened; the idle lock counts from here.
+    used: Mutex<Instant>,
+    /// Consecutive failed unlocks and when the last one happened.
+    failures: Mutex<(u32, Instant)>,
 }
 static STORAGE: OnceLock<Storage> = OnceLock::new();
+/// Minutes without use before a password-protected vault locks itself; 0 never.
+static LOCK_MINUTES: AtomicU32 = AtomicU32::new(crate::catalog::DEFAULT_SECRETS_LOCK_MINUTES);
 
 /// Opens the key file, creating it on first use. Failure leaves secrets unavailable
-/// rather than stopping the server; a damaged key file is never replaced.
+/// rather than stopping the server; a damaged key file is never replaced. A
+/// password-protected key file starts locked.
 pub fn init(path: PathBuf) {
-    let vault = Vault::open_or_create(&path);
-    if let Err(error) = &vault {
-        eprintln!("agentworks: secrets unavailable: {error}");
+    let state = match vault::open(&path) {
+        Ok(Opened::Unlocked(vault)) => VaultState::Unlocked {
+            vault: Arc::from(vault),
+            password: false,
+        },
+        Ok(Opened::Locked(_)) => VaultState::Locked,
+        Err(error) => {
+            eprintln!("agentworks: secrets unavailable: {error}");
+            VaultState::Unavailable(error)
+        }
+    };
+    let _ = STORAGE.set(Storage {
+        path,
+        state: Mutex::new(state),
+        used: Mutex::new(Instant::now()),
+        failures: Mutex::new((0, Instant::now())),
+    });
+    tokio::spawn(async {
+        loop {
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            lock_if_idle();
+        }
+    });
+}
+pub fn set_lock_minutes(minutes: u32) {
+    LOCK_MINUTES.store(minutes, Ordering::Relaxed);
+}
+fn lock_if_idle() {
+    let Some(storage) = STORAGE.get() else { return };
+    if idle_expired(
+        LOCK_MINUTES.load(Ordering::Relaxed),
+        storage.used.lock().unwrap().elapsed(),
+    ) {
+        lock(storage);
     }
-    let _ = STORAGE.set(Storage { path, vault });
+}
+fn idle_expired(minutes: u32, idle: Duration) -> bool {
+    minutes != 0 && idle >= Duration::from_secs(60 * u64::from(minutes))
+}
+/// Drops the data key of a password-protected vault. Values being used right now finish.
+fn lock(storage: &Storage) -> bool {
+    let mut state = storage.state.lock().unwrap();
+    if !matches!(&*state, VaultState::Unlocked { password: true, .. }) {
+        return false;
+    }
+    match vault::open(&storage.path) {
+        Ok(Opened::Locked(_)) => *state = VaultState::Locked,
+        // The file changed under us; never keep a key it does not match.
+        Ok(Opened::Unlocked(_)) | Err(_) => {
+            *state = VaultState::Unavailable("the key file changed; restart Agentworks".into())
+        }
+    }
+    true
+}
+fn touch(storage: &Storage) {
+    *storage.used.lock().unwrap() = Instant::now();
 }
 
-fn loaded() -> Option<&'static Vault> {
-    STORAGE.get().and_then(|s| s.vault.as_ref().ok())
+/// The unlocked vault, counting as a use for the idle lock.
+fn loaded() -> Option<Arc<Vault>> {
+    let storage = STORAGE.get()?;
+    let vault = match &*storage.state.lock().unwrap() {
+        VaultState::Unlocked { vault, .. } => vault.clone(),
+        _ => return None,
+    };
+    touch(storage);
+    Some(vault)
 }
-fn vault() -> Result<&'static Vault, (StatusCode, String)> {
-    match STORAGE.get().map(|s| &s.vault) {
-        Some(Ok(vault)) => Ok(vault),
-        Some(Err(error)) => Err(unavailable(error)),
+/// The unlocked vault without counting a use, for listings.
+fn peek() -> Option<Arc<Vault>> {
+    STORAGE.get().and_then(|s| match &*s.state.lock().unwrap() {
+        VaultState::Unlocked { vault, .. } => Some(vault.clone()),
+        _ => None,
+    })
+}
+fn is_locked() -> bool {
+    STORAGE
+        .get()
+        .is_some_and(|s| matches!(&*s.state.lock().unwrap(), VaultState::Locked))
+}
+fn vault() -> Result<Arc<Vault>, (StatusCode, String)> {
+    if let Some(vault) = loaded() {
+        return Ok(vault);
+    }
+    match STORAGE.get().map(|s| s.state.lock().unwrap()) {
+        Some(state) => match &*state {
+            VaultState::Locked => Err(locked()),
+            VaultState::Unavailable(error) => Err(unavailable(error)),
+            VaultState::Unlocked { .. } => unreachable!("loaded() returns an unlocked vault"),
+        },
         None => Err(unavailable("not initialized")),
     }
+}
+fn locked() -> (StatusCode, String) {
+    fail(
+        StatusCode::LOCKED,
+        "Secrets are locked. Unlock them in Settings → Secrets",
+    )
 }
 fn unavailable(reason: &str) -> (StatusCode, String) {
     fail(
@@ -112,9 +216,198 @@ fn assignments(store: &agentworks_database::Store, session: &str) -> mail::Resul
         .collect())
 }
 
-pub async fn list(State(app): State<App>) -> ApiResult {
+/// Lock state for Settings → Secrets and the unlock banner.
+fn status() -> Value {
     let storage = STORAGE.get();
-    let vault = loaded();
+    let state = storage.map(|s| s.state.lock().unwrap());
+    let (available, locked, password, error) = match state.as_deref() {
+        Some(VaultState::Unlocked { password, .. }) => (true, false, *password, None),
+        Some(VaultState::Locked) => (true, true, true, None),
+        Some(VaultState::Unavailable(error)) => (false, false, false, Some(error.clone())),
+        None => (false, false, false, Some("not initialized".to_owned())),
+    };
+    json!({"available": available, "locked": locked, "password": password, "error": error,
+        "lockMinutes": LOCK_MINUTES.load(Ordering::Relaxed),
+        "keyFile": storage.map(|s| s.path.display().to_string())})
+}
+pub async fn get_status() -> Json<Value> {
+    Json(status())
+}
+
+/// Failed unlocks wait 1, 2, 4 … up to 60 seconds before the next attempt.
+fn backoff(failures: u32) -> Duration {
+    Duration::from_secs(1u64 << failures.saturating_sub(1).min(6)).min(Duration::from_secs(60))
+}
+fn audit_human(app: &App, action: &str, outcome: &str) -> mail::Result<()> {
+    app.store
+        .lock()
+        .unwrap()
+        .audit("human", action, "secrets", outcome)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Unlock {
+    password: Zeroizing<String>,
+}
+pub async fn unlock(State(app): State<App>, Json(input): Json<Unlock>) -> ApiResult {
+    let storage = STORAGE
+        .get()
+        .ok_or_else(|| unavailable("not initialized"))?;
+    {
+        let (failures, last) = *storage.failures.lock().unwrap();
+        let wait = backoff(failures).saturating_sub(last.elapsed());
+        if failures > 0 && !wait.is_zero() {
+            return Err(fail(
+                StatusCode::TOO_MANY_REQUESTS,
+                format!("Try again in {} seconds", wait.as_secs().max(1)),
+            ));
+        }
+    }
+    let file = match &*storage.state.lock().unwrap() {
+        VaultState::Locked => vault::open(&storage.path).map_err(|e| unavailable(&e))?,
+        VaultState::Unlocked { .. } => return Ok(Json(status())),
+        VaultState::Unavailable(error) => return Err(unavailable(error)),
+    };
+    let Opened::Locked(locked) = file else {
+        return Err(unavailable("the key file changed; restart Agentworks"));
+    };
+    // Key derivation is deliberately slow; keep it off the async workers.
+    let password = input.password;
+    let result = tokio::task::spawn_blocking(move || locked.unlock(&password))
+        .await
+        .map_err(|_| unavailable("unlock failed"))?;
+    match result {
+        Ok(vault) => {
+            {
+                let mut state = storage.state.lock().unwrap();
+                if matches!(&*state, VaultState::Locked) {
+                    *state = VaultState::Unlocked {
+                        vault: Arc::new(vault),
+                        password: true,
+                    };
+                }
+            }
+            *storage.failures.lock().unwrap() = (0, Instant::now());
+            touch(storage);
+            audit_human(&app, "secrets.unlock", "ok")?;
+            restart_started_locked(&app);
+            Ok(Json(status()))
+        }
+        Err(PasswordError::Wrong) => {
+            let mut failures = storage.failures.lock().unwrap();
+            *failures = (failures.0 + 1, Instant::now());
+            drop(failures);
+            audit_human(&app, "secrets.unlock", "failed")?;
+            Err(fail(StatusCode::FORBIDDEN, "The password is not correct"))
+        }
+        Err(error) => Err(unavailable(&error.to_string())),
+    }
+}
+/// Sessions that started while locked restart now, or after their turn, with their
+/// environment secrets.
+fn restart_started_locked(app: &App) {
+    let ids: Vec<String> = started_locked().drain().collect();
+    if ids.is_empty() {
+        return;
+    }
+    let app = app.clone();
+    tokio::spawn(async move {
+        for id in ids {
+            let Some(s) = app.sessions.lock().unwrap().get(&id).cloned() else {
+                continue;
+            };
+            let _gate = app.communication_lock.lock().await;
+            if let Err((_, error)) = crate::communication::refresh_harness(&app, &s, false).await {
+                tracing::warn!(session = %id, "Could not restart with unlocked secrets: {error}");
+            }
+        }
+    });
+}
+pub async fn lock_now(State(app): State<App>) -> ApiResult {
+    let storage = STORAGE
+        .get()
+        .ok_or_else(|| unavailable("not initialized"))?;
+    if lock(storage) {
+        audit_human(&app, "secrets.lock", "ok")?;
+    }
+    Ok(Json(status()))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Password {
+    #[serde(default)]
+    current: Zeroizing<String>,
+    /// Empty removes the password.
+    password: Zeroizing<String>,
+}
+/// Sets, changes or removes the password by re-wrapping the data key. Needs the vault
+/// unlocked, and the current password when there is one.
+pub async fn set_password(State(app): State<App>, Json(input): Json<Password>) -> ApiResult {
+    let storage = STORAGE
+        .get()
+        .ok_or_else(|| unavailable("not initialized"))?;
+    vault::validate_password(&input.password).map_err(bad)?;
+    let vault = vault()?;
+    let path = storage.path.clone();
+    let (current, new) = (input.current, input.password);
+    let removing = new.is_empty();
+    let result = tokio::task::spawn_blocking(move || {
+        vault.set_password(&path, &current, &new).map(|()| vault)
+    })
+    .await
+    .map_err(|_| unavailable("the password could not be saved"))?;
+    match result {
+        Ok(vault) => {
+            *storage.state.lock().unwrap() = VaultState::Unlocked {
+                vault,
+                password: !removing,
+            };
+            touch(storage);
+            audit_human(
+                &app,
+                "secrets.password",
+                if removing { "removed" } else { "set" },
+            )?;
+            Ok(Json(status()))
+        }
+        Err(PasswordError::Wrong) => {
+            audit_human(&app, "secrets.password", "failed")?;
+            Err(fail(
+                StatusCode::FORBIDDEN,
+                "The current password is not correct",
+            ))
+        }
+        Err(PasswordError::Invalid(message)) => Err(bad(message)),
+        Err(PasswordError::Storage(message)) => Err(unavailable(&message)),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LockTimeout {
+    minutes: u32,
+}
+pub async fn set_lock_timeout(State(app): State<App>, Json(input): Json<LockTimeout>) -> ApiResult {
+    if input.minutes != 0
+        && !(5..=crate::catalog::MAX_SECRETS_LOCK_MINUTES).contains(&input.minutes)
+    {
+        return Err(bad("Choose 5 minutes to 24 hours, or never"));
+    }
+    let _workspace = app.workspace_lock.lock().await;
+    crate::persist_settings(&app, |current| crate::catalog::Settings {
+        secrets_lock_minutes: Some(input.minutes),
+        ..current.clone()
+    })?;
+    set_lock_minutes(input.minutes);
+    Ok(Json(status()))
+}
+
+pub async fn list(State(app): State<App>) -> ApiResult {
+    // Listing is not a use, so it does not hold off the idle lock.
+    let vault = peek();
+    let vault = vault.as_deref();
     let store = app.store.lock().unwrap();
     let counts = store.secret_session_counts().map_err(db_error)?;
     let secrets: Vec<Value> = store
@@ -127,12 +420,9 @@ pub async fn list(State(app): State<App>) -> ApiResult {
             v
         })
         .collect();
-    Ok(Json(json!({
-        "available": vault.is_some(),
-        "error": storage.and_then(|s| s.vault.as_ref().err()),
-        "keyFile": storage.map(|s| s.path.display().to_string()),
-        "secrets": secrets,
-    })))
+    let mut out = status();
+    out["secrets"] = json!(secrets);
+    Ok(Json(out))
 }
 
 #[derive(Deserialize)]
@@ -170,7 +460,7 @@ pub async fn create(State(app): State<App>, Json(input): Json<Create>) -> ApiRes
                 format!("A secret named {name} already exists"),
             )
         })?;
-    Ok(Json(view(&saved, Some(vault))))
+    Ok(Json(view(&saved, Some(&vault))))
 }
 
 #[derive(Deserialize)]
@@ -208,7 +498,7 @@ pub async fn update(
         }
     }
     let seal = |current: &SealedSecret| -> Result<(Vec<u8>, Vec<u8>, usize), Failure> {
-        let (vault, value) = (vault.unwrap(), input.value.as_ref().unwrap());
+        let (vault, value) = (vault.as_ref().unwrap(), input.value.as_ref().unwrap());
         let (nonce, body) = vault
             .seal_value(&current.id, &current.name, value)
             .map_err(Failure::Seal)?;
@@ -221,7 +511,9 @@ pub async fn update(
         .update_secret(
             &id,
             description.as_deref(),
-            vault.map(|_| &seal as &dyn Fn(&SealedSecret) -> Result<_, Failure>),
+            vault
+                .as_ref()
+                .map(|_| &seal as &dyn Fn(&SealedSecret) -> Result<_, Failure>),
             now(),
         )
         .map_err(|failure| match failure {
@@ -229,7 +521,7 @@ pub async fn update(
             Failure::Seal(error) => unavailable(&error),
         })?
         .ok_or_else(not_found)?;
-    Ok(Json(view(&saved, loaded())))
+    Ok(Json(view(&saved, peek().as_deref())))
 }
 
 pub async fn delete(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
@@ -251,14 +543,23 @@ pub struct Environment {
     pub vars: Vec<(String, Zeroizing<String>)>,
     /// Names that could not be decrypted (storage unavailable or value needs re-entry).
     pub unavailable: Vec<String>,
+    /// The vault was locked; the session restarts with them once it is unlocked.
+    pub locked: bool,
+}
+/// Sessions whose harness started without environment secrets because the vault was
+/// locked.
+static STARTED_LOCKED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+fn started_locked() -> std::sync::MutexGuard<'static, HashSet<String>> {
+    STARTED_LOCKED.get_or_init(Default::default).lock().unwrap()
 }
 pub fn environment(store: &agentworks_database::Store, session: &str) -> mail::Result<Environment> {
     let mut out = Environment::default();
+    let vault = loaded();
     for a in assignments(store, session)? {
         if a.delivery != Delivery::Environment {
             continue;
         }
-        let plain = match loaded() {
+        let plain = match &vault {
             Some(vault) => store
                 .secret(&a.secret_id)
                 .map_err(db_error)?
@@ -269,6 +570,12 @@ pub fn environment(store: &agentworks_database::Store, session: &str) -> mail::R
             Some(plain) => out.vars.push((a.name, plain)),
             None => out.unavailable.push(a.name),
         }
+    }
+    out.locked = !out.unavailable.is_empty() && is_locked();
+    if out.locked {
+        started_locked().insert(session.to_owned());
+    } else {
+        started_locked().remove(session);
     }
     Ok(out)
 }
@@ -283,6 +590,7 @@ pub fn forget(session: &str) {
     SCRUBBERS.forget(session);
     delivered().remove(session);
     allowed_uses().remove(session);
+    started_locked().remove(session);
 }
 pub fn scrub_text(session: &str, text: &str) -> String {
     SCRUBBERS.text(session, text)
@@ -335,14 +643,24 @@ const MAX_NAMES_PER_USE: usize = 16;
 struct PendingUse {
     session: String,
     names: Vec<String>,
-    answer: oneshot::Receiver<Option<Value>>,
+    waiting: Waiting,
+}
+enum Waiting {
+    /// An approval card; the human's answer arrives here.
+    Human(oneshot::Receiver<Option<Value>>),
+    /// The vault is locked. `approved` carries an approval given before it locked.
+    Unlock {
+        approved: Approved,
+        request: UseRequest,
+        deadline: Instant,
+    },
 }
 static PENDING_USES: OnceLock<Mutex<HashMap<String, PendingUse>>> = OnceLock::new();
 fn pending_uses() -> std::sync::MutexGuard<'static, HashMap<String, PendingUse>> {
     PENDING_USES.get_or_init(Default::default).lock().unwrap()
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UseRequest {
     #[serde(default)]
@@ -375,10 +693,59 @@ pub fn resolve_use(app: &App, s: &Arc<Session>, arguments: Value) -> mail::Resul
     if names.is_empty() || names.len() > MAX_NAMES_PER_USE {
         return Err(bad("Use between 1 and 16 secrets in one call"));
     }
-    match authorize(app, s, &names, Approved::No)? {
-        Some(released) => Ok(released),
-        None => ask(s, names, &request),
+    proceed(app, s, names, request, Approved::No)
+}
+/// Releases the values, or starts the wait the use needs: an unlock, then an approval.
+fn proceed(
+    app: &App,
+    s: &Arc<Session>,
+    names: Vec<String>,
+    request: UseRequest,
+    approved: Approved,
+) -> mail::Result<Value> {
+    match authorize(app, s, &names, approved)? {
+        Outcome::Released(mut released) => {
+            if approved != Approved::No {
+                released["approval"] = json!(if approved == Approved::ForSession {
+                    "The user approved this use, and further uses of these secrets in this session."
+                } else {
+                    "The user approved this use."
+                });
+            }
+            Ok(released)
+        }
+        Outcome::Ask => ask(s, names, &request),
+        Outcome::Locked => Ok(wait_for_unlock(s, names, request, approved)),
     }
+}
+/// Holds a use until the human unlocks secrets; the facade polls like an approval.
+fn wait_for_unlock(
+    s: &Arc<Session>,
+    names: Vec<String>,
+    request: UseRequest,
+    approved: Approved,
+) -> Value {
+    let id = uuid::Uuid::new_v4().to_string();
+    s.emit("secrets_locked", json!({"secrets": names}));
+    pending_uses().insert(
+        id.clone(),
+        PendingUse {
+            session: s.id.clone(),
+            names,
+            waiting: Waiting::Unlock {
+                approved,
+                request,
+                deadline: Instant::now() + APPROVAL_WAIT,
+            },
+        },
+    );
+    let expiring = id.clone();
+    tokio::spawn(async move {
+        // Leave time for a last poll to see the outcome.
+        tokio::time::sleep(APPROVAL_WAIT + Duration::from_secs(30)).await;
+        pending_uses().remove(&expiring);
+    });
+    json!({"pending": id})
 }
 /// Whether the human approved this call, and for how long.
 #[derive(Clone, Copy, PartialEq)]
@@ -411,6 +778,13 @@ fn needs_approval<T>(picked: &[&(Assignment, T)], allowed: Option<&HashSet<Strin
         a.approval == Approval::EachUse && !allowed.is_some_and(|set| set.contains(&a.name))
     })
 }
+enum Outcome {
+    Released(Value),
+    /// The human must approve first; nothing was released.
+    Ask,
+    /// The vault is locked; nothing was released or recorded.
+    Locked,
+}
 /// Checks the current assignments and releases their values under one store lock.
 /// Assignment changes take the same lock and clear session-wide approvals before
 /// releasing it, so a use is always judged and served by one state. `None` means the
@@ -420,7 +794,7 @@ fn authorize(
     s: &Session,
     names: &[String],
     approved: Approved,
-) -> mail::Result<Option<Value>> {
+) -> mail::Result<Outcome> {
     let store = app.store.lock().unwrap();
     let rows: Vec<(Assignment, SealedSecret)> = store
         .assigned_secrets(&s.id)
@@ -429,10 +803,16 @@ fn authorize(
         .map(|(row, secret)| (assignment(row), secret))
         .collect();
     let picked = pick(&rows, names)?;
+    // Unlock first, then approve: the card is shown only once values can be released.
+    let vault = match vault() {
+        Ok(vault) => vault,
+        Err(_) if is_locked() => return Ok(Outcome::Locked),
+        Err(error) => return Err(error),
+    };
     {
         let mut allowed = allowed_uses();
         if approved == Approved::No && needs_approval(&picked, allowed.get(&s.id)) {
-            return Ok(None);
+            return Ok(Outcome::Ask);
         }
         if approved == Approved::ForSession {
             allowed
@@ -441,10 +821,9 @@ fn authorize(
                 .extend(names.iter().cloned());
         }
     }
-    let vault = vault()?;
     let mut values = Vec::new();
     for (a, secret) in picked {
-        let plain = value(secret, vault).ok_or_else(|| {
+        let plain = value(secret, &vault).ok_or_else(|| {
             fail(
                 StatusCode::CONFLICT,
                 format!("{} must be entered again in Settings → Secrets", a.name),
@@ -459,7 +838,7 @@ fn authorize(
         .iter()
         .map(|(name, value)| (name.clone(), json!(value.as_str())))
         .collect();
-    Ok(Some(json!({"values":map,"cwd":s.cwd()})))
+    Ok(Outcome::Released(json!({"values":map,"cwd":s.cwd()})))
 }
 fn ask(s: &Arc<Session>, names: Vec<String>, request: &UseRequest) -> mail::Result<Value> {
     let id = uuid::Uuid::new_v4().to_string();
@@ -495,7 +874,7 @@ fn ask(s: &Arc<Session>, names: Vec<String>, request: &UseRequest) -> mail::Resu
             PendingUse {
                 session: s.id.clone(),
                 names,
-                answer: receiver,
+                waiting: Waiting::Human(receiver),
             },
         );
         s.emit("approval", event);
@@ -511,7 +890,7 @@ fn ask(s: &Arc<Session>, names: Vec<String>, request: &UseRequest) -> mail::Resu
     });
     Ok(json!({"pending": id}))
 }
-fn poll_use(app: &App, s: &Session, id: &str) -> mail::Result<Value> {
+fn poll_use(app: &App, s: &Arc<Session>, id: &str) -> mail::Result<Value> {
     let (answer, names) = {
         let mut pending = pending_uses();
         let Some(entry) = pending.get_mut(id).filter(|p| p.session == s.id) else {
@@ -520,9 +899,38 @@ fn poll_use(app: &App, s: &Session, id: &str) -> mail::Result<Value> {
                 "This approval is no longer pending",
             ));
         };
-        match entry.answer.try_recv() {
-            Err(oneshot::error::TryRecvError::Empty) => return Ok(json!({"pending": id})),
-            result => (result, pending.remove(id).unwrap().names),
+        match &mut entry.waiting {
+            Waiting::Human(answer) => match answer.try_recv() {
+                Err(oneshot::error::TryRecvError::Empty) => return Ok(json!({"pending": id})),
+                result => (result, pending.remove(id).unwrap().names),
+            },
+            Waiting::Unlock { deadline, .. } => {
+                let expired = Instant::now() >= *deadline;
+                if is_locked() && !expired {
+                    return Ok(json!({"pending": id}));
+                }
+                let entry = pending.remove(id).unwrap();
+                drop(pending);
+                let Waiting::Unlock {
+                    approved, request, ..
+                } = entry.waiting
+                else {
+                    unreachable!()
+                };
+                if is_locked() {
+                    app.store.lock().unwrap().audit(
+                        &s.id,
+                        "secret.use",
+                        &entry.names.join(","),
+                        "locked",
+                    )?;
+                    return Err(fail(
+                        StatusCode::LOCKED,
+                        "Secrets stayed locked for 10 minutes. Ask the user to unlock them in Settings → Secrets, then try again",
+                    ));
+                }
+                return proceed(app, s, entry.names, request, approved);
+            }
         }
     };
     let record = |outcome: &str| {
@@ -540,14 +948,15 @@ fn poll_use(app: &App, s: &Session, id: &str) -> mail::Result<Value> {
             } else {
                 Approved::Once
             };
-            let mut released =
-                authorize(app, s, &names, approved)?.expect("an approved use is never asked again");
-            released["approval"] = json!(if option == "allow-session" {
-                "The user approved this use, and further uses of these secrets in this session."
-            } else {
-                "The user approved this use."
-            });
-            Ok(released)
+            let request = UseRequest {
+                names: names.clone(),
+                argv: Vec::new(),
+                env_keys: Vec::new(),
+                file_keys: Vec::new(),
+                cwd: None,
+                approval: None,
+            };
+            proceed(app, s, names, request, approved)
         }
         Ok(Some(_)) => {
             record("denied")?;
@@ -564,7 +973,8 @@ fn poll_use(app: &App, s: &Session, id: &str) -> mail::Result<Value> {
 }
 pub async fn get_assignments(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     crate::session(&app, &id)?;
-    let vault = loaded();
+    let vault = peek();
+    let vault = vault.as_deref();
     let store = app.store.lock().unwrap();
     let assigned = assignments(&store, &id)?;
     let secrets: Vec<Value> = store
@@ -702,6 +1112,18 @@ mod tests {
     }
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn failed_unlocks_back_off_and_idle_locks_respect_never() {
+        let waits: Vec<u64> = (1..=9).map(|n| backoff(n).as_secs()).collect();
+        assert_eq!(waits, [1, 2, 4, 8, 16, 32, 60, 60, 60]);
+        assert!(
+            !idle_expired(0, Duration::from_secs(u64::MAX / 2)),
+            "0 never locks"
+        );
+        assert!(!idle_expired(15, Duration::from_secs(15 * 60 - 1)));
+        assert!(idle_expired(15, Duration::from_secs(15 * 60)));
     }
 
     #[test]

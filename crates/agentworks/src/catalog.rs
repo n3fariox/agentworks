@@ -87,7 +87,12 @@ pub struct Settings {
     pub hidden_providers: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_routing: Option<crate::routing::Settings>,
+    /// Minutes without use before password-protected secrets lock; 0 never.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets_lock_minutes: Option<u32>,
 }
+pub const DEFAULT_SECRETS_LOCK_MINUTES: u32 = 60;
+pub const MAX_SECRETS_LOCK_MINUTES: u32 = 24 * 60;
 pub const DEFAULT_ACTIVE_SESSIONS: u32 = 32;
 pub const MAX_ACTIVE_SESSIONS: u32 = 256;
 /// Longer than the 1-hour extended prompt-cache lifetime, so sleeping never
@@ -942,10 +947,12 @@ mod tests {
                 git: None,
                 hidden_providers: None,
                 session_routing: None,
+                secrets_lock_minutes: Some(15),
             })
             .unwrap();
         let mut reopened = Catalog::open(path.clone()).unwrap();
         assert_eq!(reopened.data.settings.max_active_sessions, Some(48));
+        assert_eq!(reopened.data.settings.secrets_lock_minutes, Some(15));
         assert_eq!(reopened.data.settings.idle_sleep_minutes, Some(0));
         assert_eq!(reopened.data.projects[0].name, "Renamed");
         assert!(reopened.data.projects[0].archived);

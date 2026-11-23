@@ -287,6 +287,95 @@ test('agents discover secrets and use them through the facade without seeing val
   }
 });
 
+test('a password locks secrets until unlocked; commands wait and locked sessions restart with them',async({page})=>{
+  const value='password-protected-fixture-value';
+  const password='correct horse';
+  const secret=await (await api('/api/secrets',{name:'LOCKED_TOKEN',description:'Fixture',value})).json();
+  let session;
+  try{
+    const panel=await openPanel(page);
+    const section=panel.locator('[data-password-section]');
+    await expect(section).toContainText('No password');
+    await section.getByRole('button',{name:'Set password'}).click();
+    await page.locator('#secret-password-new').fill('short');
+    await page.locator('#secret-password-confirm').fill('short');
+    await section.getByRole('button',{name:'Save password'}).click();
+    await expect(panel.locator('[data-error]')).toContainText('at least 8 characters');
+    await page.locator('#secret-password-new').fill(password);
+    await page.locator('#secret-password-confirm').fill(password);
+    await section.getByRole('button',{name:'Save password'}).click();
+    await expect(section).toContainText('Unlocked');
+    await page.locator('#secret-lock-minutes').selectOption('15');
+    await expect.poll(async()=>(await (await api('/api/secrets/status')).json()).lockMinutes).toBe(15);
+    const key=await readFile(join(fixture,'sessions.secrets.key'),'utf8');
+    expect(JSON.parse(key).password).toBe(true);
+    expect(key).not.toContain(password);
+
+    // A password-protected key file starts locked; nothing can be sealed or opened.
+    await stop();await start();
+    const locked=await (await api('/api/secrets/status')).json();
+    expect([locked.locked,locked.password,locked.lockMinutes]).toEqual([true,true,15]);
+    expect((await api('/api/secrets',{name:'OTHER_TOKEN',value:'other-value'})).status).toBe(423);
+
+    // A session started while locked runs without its environment secret.
+    session=await (await api('/api/sessions',{provider:'demo',cwd:fixture,title:'Locked secrets'})).json();
+    expect((await api(`/api/sessions/${session.id}/secrets`,{assignments:[{secretId:secret.id,delivery:'environment'}]},'PUT')).ok).toBe(true);
+    await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),session.id);
+    await page.goto('/');
+    const conversation=page.locator('#conversation'),banner=page.locator('#secrets-banner');
+    const send=async text=>{await page.locator('#prompt-editor .cm-content').fill(text);await page.locator('#prompt-editor .cm-content').press('Enter');};
+    await expect(banner).toBeVisible();
+    await expect(conversation).toContainText('Secrets were locked when this harness started: LOCKED_TOKEN');
+    await expect(page.locator('#session-state')).toHaveText('Ready');
+    await send('env? LOCKED_TOKEN');
+    await expect(conversation).toContainText('LOCKED_TOKEN is not set.');
+    await expect(page.locator('#session-state')).toHaveText('Ready');
+
+    // A command that needs a secret waits for the unlock instead of failing.
+    await send('mcp run_with_secrets '+JSON.stringify({argv:['sh','-c','echo "unlocked-run $1"','sh','{{secret:LOCKED_TOKEN}}']}));
+    await expect(conversation).toContainText('Waiting for you to unlock secrets to run a command with LOCKED_TOKEN');
+    await banner.getByRole('button',{name:'Unlock secrets'}).click();
+    const dialog=page.locator('#secrets-unlock-dialog');
+    await dialog.getByLabel('Password').fill('wrong password');
+    await dialog.getByRole('button',{name:'Unlock'}).click();
+    await expect(dialog).toContainText('The password is not correct');
+    await page.waitForTimeout(1100);
+    await dialog.getByLabel('Password').fill(password);
+    await dialog.getByRole('button',{name:'Unlock'}).click();
+    await expect(dialog).toBeHidden();
+    await expect(banner).toBeHidden();
+    await expect(conversation).toContainText('unlocked-run [redacted:LOCKED_TOKEN]');
+    await expect(conversation).not.toContainText(value);
+
+    // Unlocking restarts the session with its environment secret once the turn ends.
+    let reply='';
+    for(let attempt=0;attempt<20&&!reply.includes('is set');attempt++){
+      await expect(page.locator('#session-state')).toHaveText('Ready');
+      await page.waitForTimeout(500);
+      await send('env? LOCKED_TOKEN');
+      await expect(conversation.locator('.message').last()).toContainText('LOCKED_TOKEN is');
+      reply=await conversation.locator('.message').last().innerText();
+    }
+    expect(reply).toContain(`LOCKED_TOKEN is set (${value.length} bytes).`);
+
+    // Changing the password needs the current one; locking and removing it work.
+    expect((await api('/api/secrets/password',{current:'wrong password',password:'battery staple'},'PUT')).status).toBe(403);
+    expect((await (await api('/api/secrets/lock',{})).json()).locked).toBe(true);
+    expect((await api('/api/secrets/password',{current:password,password:''},'PUT')).status).toBe(423);
+    expect((await (await api('/api/secrets/unlock',{password})).json()).locked).toBe(false);
+    expect((await api('/api/secrets/password',{current:password,password:''},'PUT')).ok).toBe(true);
+    await stop();await start();
+    const open=await (await api('/api/secrets/status')).json();
+    expect([open.locked,open.password]).toEqual([false,false]);
+    const list=await (await api('/api/secrets')).json();
+    expect(list.secrets.find(s=>s.name==='LOCKED_TOKEN').readable).toBe(true);
+    expect((await stored()).includes(Buffer.from(value))).toBe(false);
+  }finally{
+    if(session)await api(`/api/sessions/${session.id}`,undefined,'DELETE');
+    await api(`/api/secrets/${secret.id}`,undefined,'DELETE');
+  }
+});
+
 test('values stored with a lost key file need re-entry after restart',async({page})=>{
   await stop();
   await rm(join(fixture,'sessions.secrets.key'));
