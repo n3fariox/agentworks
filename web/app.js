@@ -2017,6 +2017,11 @@ async function init(){
     for(const key of ['notificationSession','notificationSeq','notificationEvent','notificationAutomation'])params.delete(key);
     history.replaceState(history.state,'',location.pathname+(params.size?'?'+params:'')+location.hash);
   }
+  if(params.has('session')){
+    const target=sessions.find(s=>s.id===params.get('session'));
+    if(target){selectSession(target);sessionTerminal.select('chat');}
+    params.delete('session');history.replaceState(history.state,'',location.pathname+(params.size?'?'+params:'')+location.hash);
+  }
   if(params.has('settings')){params.delete('settings');history.replaceState(history.state,'',location.pathname+(params.size?'?'+params:'')+location.hash);openSettings();}
   setInterval(()=>refreshSessions().catch(()=>{}),5000);
   notifications.start();

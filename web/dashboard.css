@@ -303,9 +303,20 @@
   margin-bottom:0;
 }
 
+.operations-dashboard .card.turns-card {
+  padding:0;
+}
+
+.operations-dashboard .turns-empty {
+  margin:0;
+  padding:14px 20px;
+  font-size:13px;
+  color:var(--muted);
+}
+
 .operations-dashboard .session-list {
   margin:0;
-  padding:0 20px 10px;
+  padding:0 20px;
   list-style:none;
 }
 
@@ -313,13 +324,64 @@
   border-top:1px solid var(--border);
   padding:13px 0;
   display:flex;
+  align-items:center;
   justify-content:space-between;
-  gap:16px;
+  gap:12px 16px;
+  flex-wrap:wrap;
+}
+
+.operations-dashboard .turns-card > .session-list > .session-row:first-child {
+  border-top:0;
+}
+
+.operations-dashboard .session-identity {
+  min-width:0;
+}
+
+.operations-dashboard .session-link {
+  color:var(--text);
+  font-weight:500;
+  text-decoration:none;
+}
+
+.operations-dashboard .session-link:hover {
+  text-decoration:underline;
 }
 
 .operations-dashboard .session-row small {
   display:block;
   color:var(--muted);
+}
+
+.operations-dashboard .waiting-badge {
+  color:#ffdb9b;
+  border-color:rgba(255,219,155,.35);
+  background:rgba(255,219,155,.08);
+  white-space:nowrap;
+}
+
+.operations-dashboard .idle-sessions {
+  border-top:1px solid var(--border);
+}
+
+.operations-dashboard .idle-sessions > summary {
+  padding:12px 20px;
+  min-height:40px;
+  font-size:13px;
+  color:var(--muted);
+}
+
+.operations-dashboard .idle-sessions > summary:hover {
+  color:var(--text);
+}
+
+.operations-dashboard .idle-sessions .session-link {
+  font-weight:400;
+  color:var(--muted);
+}
+
+.operations-dashboard .idle-sessions .session-link:hover {
+  color:var(--text);
 }
 
 .operations-dashboard .session-state {
@@ -428,12 +490,11 @@
   .operations-dashboard .section-heading {
     gap:4px;
   }
-  .operations-dashboard .session-row {
-    display:block;
+  .operations-dashboard .session-list {
+    padding:0 16px;
   }
-  .operations-dashboard .session-state {
-    text-align:left;
-    margin-top:6px;
+  .operations-dashboard .turns-empty,.operations-dashboard .idle-sessions > summary {
+    padding:12px 16px;
   }
   .operations-dashboard summary {
     padding:16px;

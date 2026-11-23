@@ -55,3 +55,55 @@ test('dashboard quota cards update live per host and account', async ({page}) =>
   await page.keyboard.press('Escape');
   await expect(body).toBeHidden();
 });
+
+test('dashboard active turns shows flat list, waiting badge, and collapsed awake idle sessions', async ({page}) => {
+  await page.route('http://turns.test/**', async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.startsWith('/api/')) {
+      const json = path === '/api/catalog' ? {
+        hosts:[{id:'local',name:'Local',kind:'local',status:'connected'},{id:'rock',name:'Rock',kind:'remote',status:'connected'}],
+        projects:[{id:'p1',name:'Agentworks'},{id:'p2',name:'Docs'},{id:'p3',name:'Empty Project'}],
+      } : path === '/api/sessions' ? [
+        {id:'s-run',title:'Running turn',projectId:'p1',hostId:'local',provider:'antigravity',status:'running',turnRunning:true},
+        {id:'s-wait',title:'Needs approval',projectId:'p2',hostId:'rock',provider:'claude',status:'waiting',turnRunning:true},
+        {id:'s-idle',title:'Awake idle',projectId:'p1',hostId:'local',provider:'codex',status:'idle',turnRunning:false,asleep:false},
+        {id:'s-sleep',title:'Sleeping harness',projectId:'p2',hostId:'local',provider:'claude',status:'suspended',turnRunning:false,asleep:true},
+        {id:'s-arch',title:'Archived active',projectId:'p1',hostId:'local',provider:'claude',status:'running',turnRunning:true,archived:true},
+      ] : path === '/api/model-providers' ? {profiles:[]} : {providers:[]};
+      return route.fulfill({json});
+    }
+    const file = path === '/dashboard' ? 'dashboard.html' : path.slice(1);
+    if (!/^[\w.-]+$/.test(file)) return route.fulfill({status:404});
+    try {
+      await route.fulfill({body:await readFile(resolve('web', file)), contentType:file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html'});
+    } catch { await route.fulfill({status:404}); }
+  });
+  await page.routeWebSocket('**/api/dashboard/host-usage/events', () => {});
+  await page.routeWebSocket('**/api/account-quota/events', ws => ws.send(JSON.stringify({kind:'snapshot', entries:[]})));
+  await page.goto('http://turns.test/dashboard');
+
+  const section = page.locator('#projects');
+  await expect(page.locator('#active-turns-summary')).toHaveText('1 waiting · 1 running · 1 idle');
+  // Waiting floats to the top with a badge; running omits redundant "Taking a turn".
+  const activeRows = section.locator('.turns-card > .session-list > .session-row');
+  await expect(activeRows).toHaveCount(2);
+  await expect(activeRows.nth(0)).toContainText('Needs approval');
+  await expect(activeRows.nth(0)).toContainText('Docs · claude · Rock');
+  await expect(activeRows.nth(0).locator('.waiting-badge')).toHaveText('Waiting for input');
+  await expect(activeRows.nth(0).locator('a.session-link')).toHaveAttribute('href', /\/\?session=s-wait$/);
+  await expect(activeRows.nth(1)).toContainText('Running turn');
+  await expect(activeRows.nth(1)).toContainText('Agentworks · antigravity · Local');
+  await expect(activeRows.nth(1).locator('.waiting-badge')).toHaveCount(0);
+  await expect(section).not.toContainText('Taking a turn');
+  await expect(section).not.toContainText('Empty Project');
+  await expect(section).not.toContainText('Sleeping harness');
+  await expect(section).not.toContainText('Archived active');
+
+  // Awake idle harnesses sit collapsed beneath active turns until expanded.
+  const idle = section.locator('.idle-sessions');
+  await expect(idle.locator('summary')).toHaveText('1 idle session');
+  await expect(idle.locator('.session-row')).toBeHidden();
+  await idle.locator('summary').click();
+  await expect(idle.locator('.session-row')).toBeVisible();
+  await expect(idle.locator('.session-row')).toContainText('Awake idle');
+});

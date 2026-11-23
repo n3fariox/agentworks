@@ -26,6 +26,9 @@ export function counts(sessions, activity = new Map()) {
   return result;
 }
 export function activelyTurning(session) { return session.turnRunning === true && session.archived !== true; }
+export function awakeIdle(session) {
+  return session.archived !== true && !activelyTurning(session) && session.status === 'idle' && session.asleep !== true;
+}
 // Kept short; where each time comes from is explained in docs/USER-GUIDE.md.
 function freshness(at, now) {
   if (at == null) return 'Update time unknown';
@@ -100,30 +103,64 @@ function renderHosts(catalog, sessions) {
   }
   renderHostMetrics();
 }
-function renderProjects(catalog, sessions) {
-  const root = document.querySelector('#projects'); root.replaceChildren();
-  if (!sessions) { root.append(note('Project active turn counts unavailable.')); return; }
-  const projects = catalog ? [...catalog.projects] : [];
-  for (const session of sessions) if (session.projectId && !projects.some(p => p.id === session.projectId)) projects.push({id:session.projectId, name:`Unknown project (${session.projectId})`});
-  projects.push({id:null, name:'Ungrouped'});
-  if (!catalog) root.append(note('Project catalog unavailable. Session project IDs are shown where reported.'));
-  for (const project of projects) {
-    const matching = sessions.filter(s => (s.projectId || null) === project.id);
-    const details = el('details', undefined, 'project');
-    const summary = el('summary');
-    summary.append(el('strong', `${project.name}${project.archived ? ' · archived' : ''} · ${matching.length} active ${matching.length === 1 ? 'turn' : 'turns'}`));
-    details.append(summary);
-    if (!matching.length) details.append(el('p', 'No sessions in this project.', 'session-list empty'));
-    const list = el('ul', undefined, 'session-list');
-    for (const session of matching) {
-      const item = el('li', undefined, 'session-row');
-      const identity = el('div', session.title || 'Untitled session');
-      identity.append(el('small', `${session.provider || 'Provider unknown'} · ${session.id}${session.archived ? ' · archived' : ''}`));
-      const status = el('div', 'Taking a turn', 'session-state running');
-      item.append(identity, status); list.append(item);
-    }
-    details.append(list); root.append(details);
+function sessionRow(session, projectName, hostName, {showWaiting = false} = {}) {
+  const item = el('li', undefined, 'session-row');
+  const identity = el('div', undefined, 'session-identity');
+  const link = el('a', session.title || 'Untitled session', 'session-link');
+  link.href = appUrl('/?' + new URLSearchParams({session:session.id}));
+  const meta = [projectName, session.provider || 'Provider unknown', hostName].filter(Boolean).join(' · ');
+  identity.append(link, el('small', meta));
+  item.append(identity);
+  if (showWaiting && session.status === 'waiting') item.append(el('span', 'Waiting for input', 'badge waiting-badge'));
+  return item;
+}
+function renderActiveTurns(catalog, sessions) {
+  const root = document.querySelector('#projects');
+  const summary = document.querySelector('#active-turns-summary');
+  const idleWasOpen = !!root.querySelector('.idle-sessions')?.open;
+  root.replaceChildren();
+  if (!sessions) {
+    if (summary) summary.textContent = '';
+    root.append(note('Active turns unavailable.'));
+    return;
   }
+  const projectName = id => !id ? 'Ungrouped' : catalog?.projects?.find(p => p.id === id)?.name || id;
+  const hostName = id => !id ? '' : catalog?.hosts?.find(h => h.id === id)?.name || id;
+  const byName = (a, b) => projectName(a.projectId).localeCompare(projectName(b.projectId)) || (a.title || '').localeCompare(b.title || '');
+  const active = sessions.filter(s => activelyTurning(s) || s.status === 'waiting')
+    .sort((a, b) => (b.status === 'waiting') - (a.status === 'waiting') || byName(a, b));
+  const idle = sessions.filter(awakeIdle).sort(byName);
+  const waiting = active.filter(s => s.status === 'waiting').length;
+  if (summary) {
+    const parts = [];
+    if (waiting) parts.push(`${waiting} waiting`);
+    if (active.length - waiting > 0 || (!waiting && active.length > 0)) parts.push(`${active.length - waiting} running`);
+    if (!active.length) parts.push('None running');
+    if (idle.length) parts.push(`${idle.length} idle`);
+    summary.textContent = parts.join(' · ');
+  }
+  if (!active.length && !idle.length) {
+    root.append(el('p', 'No active turns.', 'empty'));
+    return;
+  }
+  const card = el('div', undefined, 'card turns-card');
+  if (active.length) {
+    const list = el('ul', undefined, 'session-list');
+    for (const session of active) list.append(sessionRow(session, projectName(session.projectId), hostName(session.hostId), {showWaiting:true}));
+    card.append(list);
+  } else {
+    card.append(el('p', 'No active turns.', 'turns-empty'));
+  }
+  if (idle.length) {
+    const details = el('details', undefined, 'idle-sessions');
+    details.open = idleWasOpen;
+    details.append(el('summary', `${idle.length} idle ${idle.length === 1 ? 'session' : 'sessions'}`));
+    const list = el('ul', undefined, 'session-list');
+    for (const session of idle) list.append(sessionRow(session, projectName(session.projectId), hostName(session.hostId)));
+    details.append(list);
+    card.append(details);
+  }
+  root.append(card);
 }
 // Goose reaches models through provider profiles, so its quota is per profile.
 export function familyLabel(family, profiles = []) {
@@ -207,8 +244,8 @@ async function refresh() {
     const errors = document.querySelector('#errors'); errors.replaceChildren();
     const names = ['Host/project catalog','Session list','Provider configuration'];
     reads.slice(0, 3).forEach((result, i) => { if (result.status === 'rejected') errors.append(el('p', `${names[i]} unavailable. Refresh to retry.`, 'error')); });
-    const activeSessions = sessions?.filter(activelyTurning) ?? null;
-    renderHosts(catalog, activeSessions); renderProjects(catalog, activeSessions);
+    const activeSessions = sessions?.filter(s => activelyTurning(s) || s.status === 'waiting') ?? null;
+    renderHosts(catalog, activeSessions); renderActiveTurns(catalog, sessions);
     context = {status, catalog, profiles:profiles?.profiles || []};
     renderAccounts(context);
     statusLine.textContent = `Updated ${shortTime(Date.now())}${reads.slice(0, 3).some(r => r.status === 'rejected') ? ' · some data unavailable' : ''}`;
