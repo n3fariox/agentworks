@@ -1500,6 +1500,11 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/secrets/unlock", post(secrets::unlock))
         .route("/api/secrets/lock", post(secrets::lock_now))
         .route("/api/secrets/password", axum::routing::put(secrets::set_password))
+        .route("/api/secrets/passkeys", post(secrets::add_passkey))
+        .route(
+            "/api/secrets/passkeys/{id}",
+            axum::routing::delete(secrets::remove_passkey),
+        )
         .route("/api/secrets/lock-timeout", axum::routing::put(secrets::set_lock_timeout))
         .route(
             "/api/secrets/{id}",

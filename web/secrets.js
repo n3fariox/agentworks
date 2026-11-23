@@ -1,5 +1,58 @@
 // Session secrets in Settings: write-only values, encrypted on the server host.
 // Values are never returned; the list shows only length and freshness.
+// Passkeys unlock secrets through the WebAuthn PRF extension: the authenticator returns a
+// fixed 32-byte secret for each passkey and salt, and the server unwraps the key with it.
+// Nothing is verified server-side; a wrong secret simply fails to unwrap.
+const b64url={
+  encode(buffer){let text='';for(const byte of new Uint8Array(buffer))text+=String.fromCharCode(byte);return btoa(text).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');},
+  decode(text){const raw=atob(text.replace(/-/g,'+').replace(/_/g,'/'));return Uint8Array.from(raw,c=>c.charCodeAt(0));},
+};
+const randomBytes=n=>crypto.getRandomValues(new Uint8Array(n));
+/// Why passkeys cannot be used on this page, or '' when they can be tried.
+export async function passkeyBlocker(){
+  if(!window.isSecureContext||!window.PublicKeyCredential||!navigator.credentials?.create)return 'Passkeys need this page to be opened over HTTPS or on localhost.';
+  if(/^[\d.]+$|:/.test(location.hostname))return 'Passkeys cannot be used when this page is opened by IP address; open it by hostname or as localhost.';
+  try{
+    const capabilities=await PublicKeyCredential.getClientCapabilities?.();
+    if(capabilities&&'extension:prf' in capabilities&&!capabilities['extension:prf'])return "This browser cannot use passkeys to unlock secrets (no WebAuthn PRF support).";
+  }catch{}
+  return '';
+}
+/// Passkeys created for the site this page is on.
+const usable=passkeys=>(passkeys||[]).filter(p=>p.rpId===location.hostname);
+/// Asks the user for one of `passkeys` and returns it with the secret it produced.
+export async function evaluatePasskey(passkeys){
+  const evalByCredential={};for(const p of passkeys)evalByCredential[p.credentialId]={first:b64url.decode(p.prfSalt)};
+  const assertion=await navigator.credentials.get({publicKey:{challenge:randomBytes(32),rpId:location.hostname,userVerification:'required',
+    allowCredentials:passkeys.map(p=>({type:'public-key',id:b64url.decode(p.credentialId)})),extensions:{prf:{evalByCredential}}}});
+  const passkey=passkeys.find(p=>p.credentialId===b64url.encode(assertion.rawId));
+  const first=assertion.getClientExtensionResults().prf?.results?.first;
+  if(!passkey||!first)throw new Error("That passkey didn't return its unlock secret.");
+  return {passkey,prf:b64url.encode(first)};
+}
+/// Creates a passkey for this site and returns what the server needs to add it.
+async function createPasskey(existing){
+  const salt=randomBytes(32);
+  const credential=await navigator.credentials.create({publicKey:{
+    rp:{name:'Agentworks secrets'},user:{id:randomBytes(16),name:'agentworks-secrets',displayName:'Agentworks secrets'},
+    challenge:randomBytes(32),pubKeyCredParams:[{type:'public-key',alg:-7},{type:'public-key',alg:-8},{type:'public-key',alg:-257}],
+    authenticatorSelection:{residentKey:'preferred',userVerification:'required'},
+    excludeCredentials:usable(existing).map(p=>({type:'public-key',id:b64url.decode(p.credentialId)})),
+    extensions:{prf:{eval:{first:salt}}}}});
+  const result=credential.getClientExtensionResults().prf;
+  if(!result?.enabled&&!result?.results?.first)throw new Error("This passkey can't unlock secrets: it doesn't support the WebAuthn PRF extension.");
+  const passkey={credentialId:b64url.encode(credential.rawId),rpId:location.hostname,prfSalt:b64url.encode(salt)};
+  // Some authenticators return the secret only when the passkey is used, not when created.
+  const prf=result.results?.first?b64url.encode(result.results.first):(await evaluatePasskey([passkey])).prf;
+  return {...passkey,prf};
+}
+/// A name for a new passkey from the platform it is created on.
+function deviceName(){
+  const platform=navigator.userAgentData?.platform||(/Mac/.test(navigator.platform)?'Mac':/Win/.test(navigator.platform)?'Windows':/Android/.test(navigator.userAgent)?'Android':/iPhone|iPad/.test(navigator.userAgent)?'iPhone or iPad':'Linux');
+  return `Passkey on ${platform}`;
+}
+const passkeyError=e=>e?.name==='NotAllowedError'?'The passkey request was cancelled or timed out.':e?.name==='InvalidStateError'?'This passkey can already unlock secrets.':e?.message||String(e);
+
 const LOCK_TIMES=[[15,'15 minutes'],[60,'1 hour'],[240,'4 hours'],[720,'12 hours'],[1440,'24 hours'],[0,'Never']];
 
 // The Unlock secrets banner and dialog. `refresh` reads the lock state; `onChange`
@@ -7,12 +60,24 @@ const LOCK_TIMES=[[15,'15 minutes'],[60,'1 hour'],[240,'4 hours'],[720,'12 hours
 export function setupSecretsLock({$,api,toast,onChange}){
   const banner=$('secrets-banner'),dialog=$('secrets-unlock-dialog'),password=$('secrets-unlock-password'),error=$('secrets-unlock-error');
   let state=null,generation=0;
+  const passkeyArea=$('secrets-unlock-passkey-area');
   function show(status){state=status;banner.hidden=!status?.locked;}
+  async function unlocked(status){show(status);dialog.close();toast?.('Secrets unlocked','success');onChange?.(status);}
   async function refresh(){
     const current=++generation;
     try{const status=await api('/api/secrets/status');if(current===generation)show(status);return status;}catch{return state;}
   }
-  function open(){error.textContent='';password.value='';dialog.showModal();password.focus();}
+  async function open(){
+    error.textContent='';password.value='';passkeyArea.hidden=true;dialog.showModal();password.focus();
+    if(usable(state?.passkeys).length&&!(await passkeyBlocker())){passkeyArea.hidden=false;$('secrets-unlock-passkey').focus();}
+  }
+  $('secrets-unlock-passkey').onclick=async()=>{
+    error.textContent='';
+    try{
+      const {passkey,prf}=await evaluatePasskey(usable(state?.passkeys));
+      await unlocked(await api('/api/secrets/unlock',{method:'POST',body:JSON.stringify({passkey:{id:passkey.id,prf}})}));
+    }catch(e){error.textContent=passkeyError(e);}
+  };
   $('secrets-banner-unlock').onclick=open;
   $('secrets-unlock-dismiss').onclick=()=>dialog.close();
   dialog.addEventListener('close',()=>{password.value='';});
@@ -20,8 +85,7 @@ export function setupSecretsLock({$,api,toast,onChange}){
     event.preventDefault();error.textContent='';
     const submit=dialog.querySelector('button[type=submit]');submit.disabled=true;
     try{
-      const status=await api('/api/secrets/unlock',{method:'POST',body:JSON.stringify({password:password.value})});
-      show(status);dialog.close();toast?.('Secrets unlocked','success');onChange?.(status);
+      await unlocked(await api('/api/secrets/unlock',{method:'POST',body:JSON.stringify({password:password.value})}));
     }catch(e){error.textContent=e.message;password.select();}
     finally{submit.disabled=false;}
   };
@@ -51,6 +115,16 @@ export function setupSecrets({$,api,el,toast,lock}){
         <label for="secret-password-confirm" data-confirm-label>Confirm new password</label><input id="secret-password-confirm" type="password" autocomplete="new-password">
         <p class="field-note" data-password-help>At least 8 characters. It cannot be recovered: if you forget it, stored values must be entered again with a new key file.</p>
         <div class="model-provider-actions"><button type="button" class="text-button" data-password-cancel>Cancel</button><button type="button" class="primary" data-password-save>Save password</button></div>
+      </div>
+      <h3>Passkeys</h3>
+      <p class="field-note" data-passkey-note></p>
+      <div data-passkey-list></div>
+      <div class="secret-password-actions"><button type="button" class="settings-action" data-passkey-add hidden>Add passkey</button></div>
+      <div class="secret-password-form" data-passkey-form hidden>
+        <label for="secret-passkey-label">Passkey name</label><input id="secret-passkey-label" maxlength="60" autocomplete="off">
+        <input type="text" autocomplete="username" value="agentworks-secrets" hidden aria-hidden="true" tabindex="-1">
+        <label for="secret-passkey-password">Current password</label><input id="secret-passkey-password" type="password" autocomplete="current-password">
+        <div class="model-provider-actions"><button type="button" class="text-button" data-passkey-cancel>Cancel</button><button type="button" class="primary" data-passkey-save>Create passkey</button></div>
       </div>
       <label for="secret-lock-minutes">Lock after inactivity</label><select id="secret-lock-minutes"></select>
       <p class="field-note">Counted from the last time a session used a secret. Locking drops the key from memory.</p>
@@ -95,6 +169,37 @@ export function setupSecrets({$,api,el,toast,lock}){
     lockMinutes.value=String(status.lockMinutes);lockMinutes.disabled=!status.password;
     if(status.locked)closePassword();
   }
+  const passkeyLabel=$('secret-passkey-label'),passkeyPassword=$('secret-passkey-password');
+  function closePasskey(){q('[data-passkey-form]').hidden=true;passkeyPassword.value='';}
+  async function renderPasskeys(){
+    const passkeys=status.passkeys||[],blocker=await passkeyBlocker();
+    q('[data-passkey-note]').textContent=!status.password
+      ?'Set a password first. Passkeys unlock secrets with Touch ID, Windows Hello, a phone or a security key; the password stays as the fallback.'
+      :blocker||'Unlock with Touch ID, Windows Hello, a phone or a security key. A passkey works only on the site it was created for.';
+    q('[data-passkey-list]').replaceChildren(...passkeys.map(passkey=>{
+      const card=el('div','model-provider-card'),copy=el('div');
+      copy.append(el('strong','',passkey.label),el('p','field-note',`${passkey.rpId}${passkey.rpId===location.hostname?' · this site':''} · added ${new Date(passkey.created).toLocaleDateString()}`));
+      const remove=el('button','text-button','Remove');remove.type='button';
+      remove.onclick=async()=>{
+        if(!confirm(`Remove passkey "${passkey.label}"? It will no longer unlock secrets.`))return;
+        try{lock?.show(await api(`/api/secrets/passkeys/${encodeURIComponent(passkey.id)}`,{method:'DELETE'}));await refresh();}catch(e){error.textContent=e.message;}
+      };
+      const actions=el('div','model-provider-actions');actions.append(remove);card.append(copy,actions);return card;
+    }));
+    q('[data-passkey-add]').hidden=Boolean(blocker)||!status.password||status.locked;
+    if(status.locked)closePasskey();
+  }
+  q('[data-passkey-add]').onclick=()=>{error.textContent='';q('[data-passkey-form]').hidden=false;passkeyLabel.value=deviceName();passkeyPassword.focus();};
+  q('[data-passkey-cancel]').onclick=closePasskey;
+  q('[data-passkey-save]').onclick=async()=>{
+    error.textContent='';const save=q('[data-passkey-save]');save.disabled=true;
+    try{
+      if(!passkeyPassword.value)throw new Error('Enter the current password.');
+      const created=await createPasskey(status.passkeys);
+      lock?.show(await api('/api/secrets/passkeys',{method:'POST',body:JSON.stringify({current:passkeyPassword.value,label:passkeyLabel.value,...created})}));
+      closePasskey();await refresh();toast?.('Passkey added','success');
+    }catch(e){error.textContent=passkeyError(e);}finally{save.disabled=false;}
+  };
   q('[data-unlock]').onclick=()=>lock?.open();
   q('[data-password-edit]').onclick=()=>passwordForm(status.password?'change':'set');
   q('[data-password-remove]').onclick=()=>passwordForm('remove');
@@ -137,7 +242,7 @@ export function setupSecrets({$,api,el,toast,lock}){
       q('[data-key-note]').textContent=result.available
         ?`Encryption key file: ${result.keyFile}. It is not included in recovery backups; without it, stored values must be entered again.`
         :`Secret storage is unavailable: ${result.error}. Existing secrets cannot be read or changed until the key file is fixed.`;
-      renderPassword();
+      renderPassword();renderPasskeys();
       q('[data-new]').disabled=!available;
       list.replaceChildren(...(result.secrets.length?result.secrets.map(secret=>{
         const card=el('div','model-provider-card'),copy=el('div');
@@ -172,7 +277,7 @@ export function setupSecrets({$,api,el,toast,lock}){
       const saved=editing?.name||name.value.trim();closeEditor();await refresh();toast?.(`Saved ${saved}`,'success');
     }catch(e){error.textContent=e.message;}finally{q('[data-save]').disabled=false;}
   };
-  return {refresh,close(){closeEditor();closePassword();}};
+  return {refresh,close(){closeEditor();closePassword();closePasskey();}};
 }
 
 // Session settings: which stored secrets this session may use, and how.

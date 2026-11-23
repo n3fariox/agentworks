@@ -1,6 +1,6 @@
 # Session secrets (proposal)
 
-Status: storage, Settings → Secrets, per-session assignment, `environment` delivery (local and remote, with automatic restart), transcript scrubbing, discovery (`list_session_secrets`), `run_with_secrets` and password unlock with an idle lock are implemented. Delegation, project default assignments and a manual **Restart with secrets** action are not.
+Status: storage, Settings → Secrets, per-session assignment, `environment` delivery (local and remote, with automatic restart), transcript scrubbing, discovery (`list_session_secrets`), `run_with_secrets`, and password or passkey unlock with an idle lock are implemented. Delegation, project default assignments and a manual **Restart with secrets** action are not.
 
 Users keep credentials that agents and tools need (API tokens, registry tokens) without leaving them exported in their shell. Agentworks stores these secrets encrypted on the server host and makes them available only to the sessions a human assigns them to, either as harness environment variables or through a templated MCP tool.
 
@@ -18,15 +18,18 @@ Envelope encryption, so a password can be added later without re-encrypting stor
 
 - **Data key**: random 256-bit key, generated once. Encrypts every secret value.
 - **Key-encryption key**: `argon2id(password, salt)`. Wraps the data key. Until passwords exist, the password is empty.
-- **Key file**: beside the database as `<database>.secrets.key` (for example `sessions.secrets.key`), or `AGENTWORKS_SECRETS_KEY_PATH`. Mode 0600, created on first use:
+- **Key file**: beside the database as `<database>.secrets.key` (for example `sessions.secrets.key`), or `AGENTWORKS_SECRETS_KEY_PATH`. Mode 0600, created on first use. It holds *slots*, each the same data key wrapped under a different unlock secret: one password slot and any number of passkey slots.
 
   ```json
-  {"version": 1, "kdf": "argon2id", "params": {"m": 19456, "t": 2, "p": 1},
-   "salt": "<base64 16 bytes>", "wrappedKey": "<base64 nonce‖ciphertext‖tag>",
-   "password": false}
+  {"version": 2, "slots": [
+    {"kind": "password", "kdf": "argon2id", "params": {"m": 19456, "t": 2, "p": 1},
+     "salt": "<base64 16 bytes>", "wrappedKey": "<base64 nonce‖ciphertext‖tag>", "password": false},
+    {"kind": "passkey", "id": "<uuid>", "label": "Passkey on Mac", "credentialId": "<base64url>",
+     "rpId": "localhost", "prfSalt": "<base64url 32 bytes>", "wrappedKey": "<base64>", "created": 1795400000000}
+  ]}
   ```
 
-  The file never holds a usable key. A wrong password or mismatched file fails the AES-256-GCM tag check on `wrappedKey`; no separate password hash is stored.
+  The file never holds a usable key. A wrong password, a wrong passkey secret or a mismatched file fails the AES-256-GCM tag check on `wrappedKey`; no separate password hash is stored. Version 1 files (the password slot alone, with `version: 1`) are still read and are written as version 2 the first time they change.
 
 - **Values**: one SQLite row per secret, `AES-256-GCM(dataKey, nonce, value)` with the secret's ID and name as associated data, so ciphertexts cannot be swapped between rows.
 
@@ -45,6 +48,17 @@ Settings → Secrets → **Password** sets, changes or removes it.
 - **Lock after inactivity** (15 minutes to 24 hours, or never; default 1 hour) counts from the last time a value was sealed or opened: a harness start with environment secrets, a `run_with_secrets` release, or saving a value. Listing secrets does not count. **Lock now** locks at once. Locking drops the server's reference to the data key; a release already in progress finishes. Without a password there is nothing to lock, so the setting has no effect.
 - While locked, secrets are listed but cannot be added, changed or read (`423 Locked`). Sessions start without their `environment` secrets; the transcript says which, and unlocking restarts those sessions with them (now when idle, after their turn when busy). `run_with_secrets` waits for the unlock, as described below.
 - A forgotten password cannot be recovered. Remove the key file (Agentworks creates a new one) and enter the values again.
+
+### Passkeys
+
+Settings → Secrets → **Passkeys** adds passkeys (Touch ID, Windows Hello, a phone or a security key) that can unlock secrets as well as the password. They use the WebAuthn PRF extension: for a given passkey and 32-byte salt, the authenticator returns a fixed 32-byte secret, which never leaves the browser except to unlock.
+
+- Adding one needs secrets unlocked and the current password, so an open browser tab cannot add a way in. The browser creates the passkey with a random salt and evaluates it; the server derives a key with HKDF-SHA256 (salt: the slot's PRF salt, info: the slot ID) and wraps the data key under it. Some authenticators return the secret only when a passkey is used, so the browser then asks for it once more.
+- Unlocking: the banner's dialog offers **Unlock with a passkey** when this page's hostname has one. The browser sends the slot ID and secret, and the server unwraps that slot. Nothing is verified besides the unwrap: a wrong secret fails the tag check, counts as a failed unlock and is audited (`secrets.unlock` with `ok:passkey` or `failed:passkey`).
+- A password is required as the fallback. Passkeys need one to exist; the password cannot be removed while passkeys remain; changing it keeps them. Removing a passkey needs no key and works even while locked. At most 16.
+- Passkeys need HTTPS or `localhost`, and a hostname: a page opened by IP address cannot use them. Each passkey belongs to the hostname it was created on (for example `localhost` and a remote hostname need one each), and is offered only there. Browsers without PRF support (`PublicKeyCredential.getClientCapabilities()` reports it) do not offer them.
+- No third-party library is involved: the browser's WebAuthn API on one side, `ring` (HKDF, AES-GCM) on the other.
+- Not done: replacing the stored secret on every unlock. The browser could request the current and a new secret in one prompt so that each unlock re-wraps the slot under a fresh salt; until then a captured passkey secret keeps working, like a captured password.
 
 ## Model
 
@@ -166,8 +180,8 @@ Values delivered to a session are registered with that session's scrubber when i
 - `GET/POST /api/secrets`, `PUT/DELETE /api/secrets/{id}`: definitions. `PUT` takes `description` and/or `value`. Responses never contain values.
 - `GET/PUT /api/sessions/{id}/secrets`: assignments, each with its origin (human or parent session ID). `PUT` replaces the whole list; retained secrets keep their origin. Changes are audited against the session and shown in its transcript by name and settings, never value.
 - `POST /api/sessions/{id}/secrets/restart`: restart with current assignments.
-- `GET /api/secrets/status`: `{available, locked, password, lockMinutes, keyFile, error}`, also included in `GET /api/secrets`.
-- `POST /api/secrets/unlock {password}`, `POST /api/secrets/lock`, `PUT /api/secrets/password {current, password}` (empty `password` removes it), `PUT /api/secrets/lock-timeout {minutes}` (0 never, otherwise 5–1440).
+- `GET /api/secrets/status`: `{available, locked, password, passkeys, lockMinutes, keyFile, error}`, also included in `GET /api/secrets`.
+- `POST /api/secrets/unlock {password}` or `{passkey: {id, prf}}`, `POST /api/secrets/passkeys {current, label, credentialId, rpId, prfSalt, prf}`, `DELETE /api/secrets/passkeys/{id}`, `POST /api/secrets/lock`, `PUT /api/secrets/password {current, password}` (empty `password` removes it), `PUT /api/secrets/lock-timeout {minutes}` (0 never, otherwise 5–1440).
 - MCP: `list_session_secrets`, `run_with_secrets` (executed by the facade on the session's host), and a `secrets` argument on `start_session`.
 - Bridge: `resolve_secrets`, the only operation that returns values, relayed for remote sessions.
 

@@ -1,21 +1,39 @@
 //! Values encrypted at rest. A random data key encrypts each value (AES-256-GCM, bound
-//! to the row's ID and name); the key file holds that data key wrapped by
-//! `argon2id(password, salt)`, never the key itself. Without a password the password is
-//! empty and the key file opens on its own. Setting, changing or removing a password
-//! re-wraps the same data key, so stored values are never re-encrypted.
+//! to the row's ID and name). The key file never holds that key: it holds one or more
+//! *slots*, each the same data key wrapped under a different unlock secret.
+//!
+//! - One password slot: `argon2id(password, salt)`. Without a password the password is
+//!   empty and the key file opens on its own.
+//! - Any number of passkey slots: HKDF-SHA256 of the 32-byte secret a passkey returns
+//!   through the WebAuthn PRF extension for that slot's salt. Passkeys need a password
+//!   as the fallback.
+//!
+//! Adding or removing a way to unlock re-wraps the same data key, so stored values are
+//! never re-encrypted. Version 1 key files (a single password slot) are read as-is and
+//! written as version 2 when they change.
 use argon2::{Algorithm, Argon2, Params, Version};
-use base64::{Engine, engine::general_purpose::STANDARD};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use ring::{
     aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey},
+    hkdf,
     rand::{SecureRandom, SystemRandom},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{io::Write, path::Path};
 use zeroize::Zeroizing;
 
 const KEY_LEN: usize = 32;
 const SALT_LEN: usize = 16;
 const WRAP_AAD: &[u8] = b"agentworks-secrets-key:v1";
+const FORMAT: u32 = 2;
+/// WebAuthn PRF inputs and outputs are 32 bytes.
+const PRF_LEN: usize = 32;
+const MAX_PASSKEYS: usize = 16;
+const MAX_LABEL_CHARS: usize = 60;
 
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Debug)]
 struct KdfParams {
@@ -38,15 +56,67 @@ const PASSWORD_KDF: KdfParams = KdfParams {
 const MIN_PASSWORD_CHARS: usize = 8;
 const MAX_PASSWORD_BYTES: usize = 1024;
 
-#[derive(Serialize, Deserialize)]
+/// The data key wrapped under `argon2id(password, salt)`; `password` is false for the
+/// empty password. Also the whole of a version 1 key file, plus its `version`.
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct KeyFile {
-    version: u32,
+struct PasswordSlot {
     kdf: String,
     params: KdfParams,
     salt: String,
     wrapped_key: String,
     password: bool,
+}
+/// The data key wrapped under a passkey's PRF secret for `prf_salt`.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PasskeySlot {
+    id: String,
+    label: String,
+    /// base64url, as WebAuthn reports it.
+    credential_id: String,
+    /// The hostname the passkey was created for; browsers offer it only there.
+    rp_id: String,
+    /// base64url of the 32-byte PRF input.
+    prf_salt: String,
+    wrapped_key: String,
+    created: i64,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum Slot {
+    Password(PasswordSlot),
+    Passkey(PasskeySlot),
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct KeyFile {
+    version: u32,
+    slots: Vec<Slot>,
+}
+impl KeyFile {
+    fn password(&self) -> &PasswordSlot {
+        self.slots
+            .iter()
+            .find_map(|slot| match slot {
+                Slot::Password(slot) => Some(slot),
+                Slot::Passkey(_) => None,
+            })
+            .expect("read_key_file checks for one password slot")
+    }
+    fn passkeys(&self) -> impl Iterator<Item = &PasskeySlot> {
+        self.slots.iter().filter_map(|slot| match slot {
+            Slot::Passkey(slot) => Some(slot),
+            Slot::Password(_) => None,
+        })
+    }
+    fn with_password(&self, password: PasswordSlot) -> Self {
+        let mut slots = vec![Slot::Password(password)];
+        slots.extend(self.passkeys().cloned().map(Slot::Passkey));
+        Self {
+            version: FORMAT,
+            slots,
+        }
+    }
 }
 
 /// The unwrapped data key. Dropping it zeroizes the key bytes this crate holds.
@@ -64,9 +134,9 @@ pub enum Opened {
 }
 #[derive(Debug, PartialEq)]
 pub enum PasswordError {
-    /// The password does not unwrap the key file.
+    /// The password or passkey secret does not unwrap the key file.
     Wrong,
-    /// The new password is not acceptable.
+    /// The new password or passkey is not acceptable.
     Invalid(String),
     /// The key file could not be read, written or understood.
     Storage(String),
@@ -79,6 +149,39 @@ impl std::fmt::Display for PasswordError {
         }
     }
 }
+/// A passkey that can unlock the key file, as the browser needs it. Nothing here is
+/// secret: the salt is useless without the authenticator.
+#[derive(Clone, Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Passkey {
+    pub id: String,
+    pub label: String,
+    pub credential_id: String,
+    pub rp_id: String,
+    pub prf_salt: String,
+    pub created: i64,
+}
+impl From<&PasskeySlot> for Passkey {
+    fn from(slot: &PasskeySlot) -> Self {
+        Self {
+            id: slot.id.clone(),
+            label: slot.label.clone(),
+            credential_id: slot.credential_id.clone(),
+            rp_id: slot.rp_id.clone(),
+            prf_salt: slot.prf_salt.clone(),
+            created: slot.created,
+        }
+    }
+}
+/// A passkey the browser just created, with the PRF secret it returned for `prf_salt`.
+pub struct NewPasskey {
+    pub label: String,
+    pub credential_id: String,
+    pub rp_id: String,
+    pub prf_salt: String,
+    pub prf: Zeroizing<Vec<u8>>,
+}
+
 /// A new password: at least 8 characters; empty means no password.
 pub fn validate_password(password: &str) -> Result<(), String> {
     if !password.is_empty() && password.chars().count() < MIN_PASSWORD_CHARS {
@@ -94,9 +197,35 @@ pub fn validate_password(password: &str) -> Result<(), String> {
 pub fn open(path: &Path) -> Result<Opened, String> {
     open_with(path, DEFAULT_KDF)
 }
+/// The passkeys that can unlock the key file.
+pub fn passkeys(path: &Path) -> Result<Vec<Passkey>, String> {
+    Ok(read_key_file(path)?.passkeys().map(Passkey::from).collect())
+}
+/// Removes a passkey slot. Needs no key: it only takes a way to unlock away.
+pub fn remove_passkey(path: &Path, id: &str) -> Result<bool, PasswordError> {
+    let mut file = read_key_file(path).map_err(PasswordError::Storage)?;
+    let before = file.slots.len();
+    file.slots
+        .retain(|slot| !matches!(slot, Slot::Passkey(p) if p.id == id));
+    if file.slots.len() == before {
+        return Ok(false);
+    }
+    file.version = FORMAT;
+    save(path, &file)?;
+    Ok(true)
+}
 impl Locked {
     pub fn unlock(&self, password: &str) -> Result<Vault, PasswordError> {
-        unwrap(&self.file, password.as_bytes()).map(Vault::new)
+        unwrap(self.file.password(), password.as_bytes()).map(Vault::new)
+    }
+    /// Unlocks with the PRF secret the passkey slot `id` returned.
+    pub fn unlock_passkey(&self, id: &str, prf: &[u8]) -> Result<Vault, PasswordError> {
+        let slot = self
+            .file
+            .passkeys()
+            .find(|slot| slot.id == id)
+            .ok_or_else(|| PasswordError::Invalid("That passkey was removed".into()))?;
+        unwrap_passkey(slot, prf).map(Vault::new)
     }
 }
 impl std::fmt::Debug for Vault {
@@ -111,9 +240,22 @@ impl Vault {
             data_key,
         }
     }
+    /// Reads the key file and checks that `current` opens its password slot (any value
+    /// when there is no password) and that it holds this vault's key.
+    fn verified(&self, path: &Path, current: &str) -> Result<KeyFile, PasswordError> {
+        let file = read_key_file(path).map_err(PasswordError::Storage)?;
+        let slot = file.password();
+        let current = if slot.password { current } else { "" };
+        if unwrap(slot, current.as_bytes())? != self.data_key {
+            return Err(PasswordError::Storage(
+                "the key file no longer holds this server's key; restart Agentworks".into(),
+            ));
+        }
+        Ok(file)
+    }
     /// Re-wraps this vault's data key under `new` (empty removes the password) and
-    /// replaces the key file atomically. `current` must unwrap the existing file when it
-    /// has a password, and the file must hold this vault's key.
+    /// replaces the key file atomically, keeping its passkeys. `current` must unwrap the
+    /// existing file when it has a password, and the file must hold this vault's key.
     pub fn set_password(&self, path: &Path, current: &str, new: &str) -> Result<(), PasswordError> {
         self.set_password_with(path, current, new, PASSWORD_KDF)
     }
@@ -125,11 +267,10 @@ impl Vault {
         password_kdf: KdfParams,
     ) -> Result<(), PasswordError> {
         validate_password(new).map_err(PasswordError::Invalid)?;
-        let file = read_key_file(path).map_err(PasswordError::Storage)?;
-        let current = if file.password { current } else { "" };
-        if unwrap(&file, current.as_bytes())? != self.data_key {
-            return Err(PasswordError::Storage(
-                "the key file no longer holds this server's key; restart Agentworks".into(),
+        let file = self.verified(path, current)?;
+        if new.is_empty() && file.passkeys().next().is_some() {
+            return Err(PasswordError::Invalid(
+                "Remove the passkeys first; they need a password to fall back on".into(),
             ));
         }
         let kdf = if new.is_empty() {
@@ -137,9 +278,83 @@ impl Vault {
         } else {
             password_kdf
         };
-        let wrapped = wrap(&self.data_key, new.as_bytes(), kdf).map_err(PasswordError::Storage)?;
-        replace_key_file(path, &wrapped)
-            .map_err(|e| PasswordError::Storage(format!("could not save {}: {e}", path.display())))
+        let slot = wrap(&self.data_key, new.as_bytes(), kdf).map_err(PasswordError::Storage)?;
+        save(path, &file.with_password(slot))
+    }
+    /// Adds a passkey slot. Needs the current password, which must exist.
+    pub fn add_passkey(
+        &self,
+        path: &Path,
+        current: &str,
+        new: NewPasskey,
+        now: i64,
+    ) -> Result<Passkey, PasswordError> {
+        let mut file = self.verified(path, current)?;
+        if !file.password().password {
+            return Err(PasswordError::Invalid(
+                "Set a password first; passkeys need it to fall back on".into(),
+            ));
+        }
+        let invalid = |message: &str| PasswordError::Invalid(message.into());
+        let label = match new.label.trim() {
+            "" => "Passkey",
+            label => label,
+        };
+        if label.chars().count() > MAX_LABEL_CHARS {
+            return Err(invalid("Passkey names are limited to 60 characters"));
+        }
+        if !URL_SAFE_NO_PAD
+            .decode(&new.credential_id)
+            .is_ok_and(|id| !id.is_empty() && id.len() <= 1024)
+        {
+            return Err(invalid("The passkey's credential ID is not valid"));
+        }
+        let rp_id = new.rp_id.to_ascii_lowercase();
+        if rp_id.is_empty()
+            || rp_id.len() > 253
+            || !rp_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        {
+            return Err(invalid("The passkey's site is not a valid hostname"));
+        }
+        let salt = URL_SAFE_NO_PAD
+            .decode(&new.prf_salt)
+            .ok()
+            .filter(|salt| salt.len() == PRF_LEN)
+            .ok_or_else(|| invalid("The passkey's salt must be 32 bytes"))?;
+        if new.prf.len() != PRF_LEN {
+            return Err(invalid("This passkey did not return a 32-byte secret"));
+        }
+        if file
+            .passkeys()
+            .any(|slot| slot.credential_id == new.credential_id)
+        {
+            return Err(invalid("This passkey can already unlock secrets"));
+        }
+        if file.passkeys().count() >= MAX_PASSKEYS {
+            return Err(invalid(
+                "Remove a passkey before adding another (16 at most)",
+            ));
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let kek = passkey_kek(&new.prf, &salt, &id).map_err(PasswordError::Storage)?;
+        let wrapped = aead_seal(&aead(&*kek), &passkey_info(&id), &self.data_key)
+            .map_err(PasswordError::Storage)?;
+        let slot = PasskeySlot {
+            id,
+            label: label.to_owned(),
+            credential_id: new.credential_id,
+            rp_id,
+            prf_salt: new.prf_salt,
+            wrapped_key: STANDARD.encode(wrapped),
+            created: now,
+        };
+        let added = Passkey::from(&slot);
+        file.slots.push(Slot::Passkey(slot));
+        file.version = FORMAT;
+        save(path, &file)?;
+        Ok(added)
     }
     /// Encrypts a value for the secret row `id`/`name`, as (nonce, ciphertext‖tag).
     pub fn seal_value(
@@ -215,12 +430,26 @@ fn derive(
     Ok(out)
 }
 
+/// Binds a passkey slot's key and wrapping to that slot.
+fn passkey_info(id: &str) -> Vec<u8> {
+    format!("agentworks-secrets-passkey:v1\0{id}").into_bytes()
+}
+fn passkey_kek(prf: &[u8], salt: &[u8], id: &str) -> Result<Zeroizing<[u8; KEY_LEN]>, String> {
+    let info = passkey_info(id);
+    let mut out = Zeroizing::new([0u8; KEY_LEN]);
+    hkdf::Salt::new(hkdf::HKDF_SHA256, salt)
+        .extract(prf)
+        .expand(&[&info], hkdf::HKDF_SHA256)
+        .and_then(|okm| okm.fill(&mut *out))
+        .map_err(|_| "key derivation failed".to_owned())?;
+    Ok(out)
+}
+
 /// Wraps `data_key` under a key derived from `password` with a fresh salt.
-fn wrap(data_key: &[u8], password: &[u8], kdf: KdfParams) -> Result<KeyFile, String> {
+fn wrap(data_key: &[u8], password: &[u8], kdf: KdfParams) -> Result<PasswordSlot, String> {
     let salt = random::<SALT_LEN>()?;
     let kek = derive(password, &salt, kdf)?;
-    Ok(KeyFile {
-        version: 1,
+    Ok(PasswordSlot {
         kdf: "argon2id".into(),
         params: kdf,
         salt: STANDARD.encode(salt),
@@ -229,47 +458,89 @@ fn wrap(data_key: &[u8], password: &[u8], kdf: KdfParams) -> Result<KeyFile, Str
     })
 }
 
-fn unwrap(file: &KeyFile, password: &[u8]) -> Result<Zeroizing<Vec<u8>>, PasswordError> {
-    let damaged = || PasswordError::Storage("the key file is damaged".into());
-    if file.version != 1 || file.kdf != "argon2id" {
+fn damaged() -> PasswordError {
+    PasswordError::Storage("the key file is damaged".into())
+}
+fn unwrap(slot: &PasswordSlot, password: &[u8]) -> Result<Zeroizing<Vec<u8>>, PasswordError> {
+    if slot.kdf != "argon2id" {
         return Err(PasswordError::Storage(
             "the key file uses an unsupported format".into(),
         ));
     }
-    let salt = STANDARD.decode(&file.salt).map_err(|_| damaged())?;
-    let wrapped = STANDARD.decode(&file.wrapped_key).map_err(|_| damaged())?;
-    let kek = derive(password, &salt, file.params).map_err(PasswordError::Storage)?;
+    let salt = STANDARD.decode(&slot.salt).map_err(|_| damaged())?;
+    let wrapped = STANDARD.decode(&slot.wrapped_key).map_err(|_| damaged())?;
+    let kek = derive(password, &salt, slot.params).map_err(PasswordError::Storage)?;
     // A wrong password and a tampered file both fail the tag check; without a
     // password, failure can only mean damage.
     match aead_open(&aead(&*kek), WRAP_AAD, &wrapped) {
         Some(key) if key.len() == KEY_LEN => Ok(key),
         Some(_) => Err(damaged()),
-        None if file.password => Err(PasswordError::Wrong),
+        None if slot.password => Err(PasswordError::Wrong),
         None => Err(PasswordError::Storage(
             "the key file could not be unwrapped".into(),
         )),
     }
 }
+fn unwrap_passkey(slot: &PasskeySlot, prf: &[u8]) -> Result<Zeroizing<Vec<u8>>, PasswordError> {
+    if prf.len() != PRF_LEN {
+        return Err(PasswordError::Wrong);
+    }
+    let salt = URL_SAFE_NO_PAD
+        .decode(&slot.prf_salt)
+        .map_err(|_| damaged())?;
+    let wrapped = STANDARD.decode(&slot.wrapped_key).map_err(|_| damaged())?;
+    let kek = passkey_kek(prf, &salt, &slot.id).map_err(PasswordError::Storage)?;
+    match aead_open(&aead(&*kek), &passkey_info(&slot.id), &wrapped) {
+        Some(key) if key.len() == KEY_LEN => Ok(key),
+        Some(_) => Err(damaged()),
+        None => Err(PasswordError::Wrong),
+    }
+}
 
+/// Reads either format. Version 1 is a single password slot with a `version` field.
 fn read_key_file(path: &Path) -> Result<KeyFile, String> {
     let bytes =
         std::fs::read(path).map_err(|e| format!("could not read {}: {e}", path.display()))?;
-    serde_json::from_slice(&bytes).map_err(|_| format!("{} is damaged", path.display()))
+    let damaged = || format!("{} is damaged", path.display());
+    let value: Value = serde_json::from_slice(&bytes).map_err(|_| damaged())?;
+    let file = match value["version"].as_u64() {
+        Some(1) => KeyFile {
+            version: 1,
+            slots: vec![Slot::Password(
+                serde_json::from_value(value).map_err(|_| damaged())?,
+            )],
+        },
+        Some(2) => serde_json::from_value(value).map_err(|_| damaged())?,
+        _ => return Err(format!("{} uses an unsupported format", path.display())),
+    };
+    let passwords = file
+        .slots
+        .iter()
+        .filter(|slot| matches!(slot, Slot::Password(_)))
+        .count();
+    if passwords != 1 {
+        return Err(damaged());
+    }
+    Ok(file)
 }
 
 fn open_with(path: &Path, kdf: KdfParams) -> Result<Opened, String> {
     match std::fs::metadata(path) {
         Ok(_) => {
             let file = read_key_file(path)?;
-            if file.password {
+            if file.password().password {
                 return Ok(Opened::Locked(Locked { file }));
             }
-            let key = unwrap(&file, b"").map_err(|e| e.to_string())?;
+            let key = unwrap(file.password(), b"").map_err(|e| e.to_string())?;
             Ok(Opened::Unlocked(Box::new(Vault::new(key))))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let key = Zeroizing::new(random::<KEY_LEN>()?.to_vec());
-            write_key_file(path, &wrap(&key, b"", kdf)?)
+            let file = KeyFile {
+                version: FORMAT,
+                slots: vec![Slot::Password(wrap(&key, b"", kdf)?)],
+            };
+            write_key_file(path, &file)
                 .map_err(|e| format!("could not create {}: {e}", path.display()))?;
             Ok(Opened::Unlocked(Box::new(Vault::new(key))))
         }
@@ -277,6 +548,10 @@ fn open_with(path: &Path, kdf: KdfParams) -> Result<Opened, String> {
     }
 }
 
+fn save(path: &Path, file: &KeyFile) -> Result<(), PasswordError> {
+    replace_key_file(path, file)
+        .map_err(|e| PasswordError::Storage(format!("could not save {}: {e}", path.display())))
+}
 /// Replaces the key file: a private temporary file beside it is written, synced and
 /// renamed over it, so a crash leaves either the old file or the new one.
 fn replace_key_file(path: &Path, file: &KeyFile) -> std::io::Result<()> {
@@ -322,7 +597,6 @@ fn value_aad(id: &str, name: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Value;
     use std::path::PathBuf;
 
     // Minimum Argon2 cost keeps debug-build tests fast; production uses DEFAULT_KDF.
@@ -352,10 +626,19 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600);
         }
         let file: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(file["kdf"], "argon2id");
-        assert_eq!(file["password"], false);
+        assert_eq!(file["version"], 2);
+        let slot = &file["slots"][0];
+        assert_eq!(
+            (
+                slot["kind"].as_str(),
+                slot["kdf"].as_str(),
+                &slot["password"]
+            ),
+            (Some("password"), Some("argon2id"), &Value::Bool(false))
+        );
+        assert_eq!(file["slots"].as_array().unwrap().len(), 1);
         let wrapped = STANDARD
-            .decode(file["wrappedKey"].as_str().unwrap())
+            .decode(slot["wrappedKey"].as_str().unwrap())
             .unwrap();
         assert_eq!(wrapped.len(), NONCE_LEN + KEY_LEN + AES_256_GCM.tag_len());
         let second = open_or_create(&path, TEST_KDF).unwrap();
@@ -497,6 +780,154 @@ mod tests {
             Err(PasswordError::Storage(_))
         ));
         assert_eq!(std::fs::read(&second).unwrap(), before);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn new_passkey(credential: &[u8], salt: [u8; 32], prf: [u8; 32]) -> NewPasskey {
+        NewPasskey {
+            label: " Laptop Touch ID ".into(),
+            credential_id: URL_SAFE_NO_PAD.encode(credential),
+            rp_id: "LocalHost".into(),
+            prf_salt: URL_SAFE_NO_PAD.encode(salt),
+            prf: Zeroizing::new(prf.to_vec()),
+        }
+    }
+    fn locked(path: &Path) -> Locked {
+        match open_with(path, TEST_KDF).unwrap() {
+            Opened::Locked(locked) => locked,
+            Opened::Unlocked(_) => panic!("expected a locked key file"),
+        }
+    }
+
+    #[test]
+    fn a_version_1_key_file_opens_and_is_upgraded_when_it_changes() {
+        let dir = temp();
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("k");
+        let key = random::<KEY_LEN>().unwrap();
+        let slot = wrap(&key, b"", TEST_KDF).unwrap();
+        let mut legacy = serde_json::to_value(&slot).unwrap();
+        legacy["version"] = 1.into();
+        std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let vault = open_or_create(&path, TEST_KDF).unwrap();
+        assert_eq!(&*vault.data_key, &key);
+        assert!(passkeys(&path).unwrap().is_empty());
+        vault
+            .set_password_with(&path, "", "correct horse", TEST_KDF)
+            .unwrap();
+        let file: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(file["version"], 2);
+        assert_eq!(
+            &*locked(&path).unlock("correct horse").unwrap().data_key,
+            &key
+        );
+        let mut unknown = legacy.clone();
+        unknown["version"] = 9.into();
+        std::fs::write(&path, serde_json::to_vec(&unknown).unwrap()).unwrap();
+        assert!(
+            open_with(&path, TEST_KDF)
+                .err()
+                .unwrap()
+                .contains("unsupported format")
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn passkeys_unlock_the_same_key_and_need_a_password_to_fall_back_on() {
+        let dir = temp();
+        let path = dir.join("k");
+        let vault = open_or_create(&path, TEST_KDF).unwrap();
+        let (salt, prf) = (random::<32>().unwrap(), random::<32>().unwrap());
+        assert!(matches!(
+            vault.add_passkey(&path, "", new_passkey(b"cred-1", salt, prf), 1),
+            Err(PasswordError::Invalid(message)) if message.contains("Set a password first")
+        ));
+        vault
+            .set_password_with(&path, "", "correct horse", TEST_KDF)
+            .unwrap();
+        assert_eq!(
+            vault
+                .add_passkey(&path, "wrong one", new_passkey(b"cred-1", salt, prf), 1)
+                .unwrap_err(),
+            PasswordError::Wrong
+        );
+        let mut short = new_passkey(b"cred-1", salt, prf);
+        short.prf = Zeroizing::new(vec![1; 16]);
+        assert!(matches!(
+            vault.add_passkey(&path, "correct horse", short, 1),
+            Err(PasswordError::Invalid(_))
+        ));
+        let added = vault
+            .add_passkey(&path, "correct horse", new_passkey(b"cred-1", salt, prf), 7)
+            .unwrap();
+        assert_eq!(
+            (added.label.as_str(), added.rp_id.as_str(), added.created),
+            ("Laptop Touch ID", "localhost", 7)
+        );
+        assert!(matches!(
+            vault.add_passkey(&path, "correct horse", new_passkey(b"cred-1", salt, prf), 8),
+            Err(PasswordError::Invalid(message)) if message.contains("already")
+        ));
+        let (salt2, prf2) = (random::<32>().unwrap(), random::<32>().unwrap());
+        let second = vault
+            .add_passkey(
+                &path,
+                "correct horse",
+                new_passkey(b"cred-2", salt2, prf2),
+                9,
+            )
+            .unwrap();
+        assert_eq!(passkeys(&path).unwrap(), [added.clone(), second.clone()]);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains(&URL_SAFE_NO_PAD.encode(prf)),
+            "secrets are never stored"
+        );
+
+        // Each passkey opens the same key; a wrong secret or another slot's does not.
+        let file = locked(&path);
+        assert_eq!(
+            &*file.unlock_passkey(&added.id, &prf).unwrap().data_key,
+            &*vault.data_key
+        );
+        assert_eq!(
+            &*file.unlock_passkey(&second.id, &prf2).unwrap().data_key,
+            &*vault.data_key
+        );
+        assert_eq!(
+            file.unlock_passkey(&added.id, &prf2).unwrap_err(),
+            PasswordError::Wrong
+        );
+        assert_eq!(
+            file.unlock_passkey(&added.id, &[0; 5]).unwrap_err(),
+            PasswordError::Wrong
+        );
+        assert!(matches!(
+            file.unlock_passkey("missing", &prf),
+            Err(PasswordError::Invalid(_))
+        ));
+
+        // Changing the password keeps the passkeys; removing it needs them gone first.
+        vault
+            .set_password_with(&path, "correct horse", "battery staple", TEST_KDF)
+            .unwrap();
+        assert!(locked(&path).unlock_passkey(&added.id, &prf).is_ok());
+        assert!(matches!(
+            vault.set_password_with(&path, "battery staple", "", TEST_KDF),
+            Err(PasswordError::Invalid(message)) if message.contains("Remove the passkeys")
+        ));
+        assert!(remove_passkey(&path, &added.id).unwrap());
+        assert!(!remove_passkey(&path, &added.id).unwrap());
+        assert!(matches!(
+            locked(&path).unlock_passkey(&added.id, &prf),
+            Err(PasswordError::Invalid(_))
+        ));
+        assert!(remove_passkey(&path, &second.id).unwrap());
+        vault
+            .set_password_with(&path, "battery staple", "", TEST_KDF)
+            .unwrap();
+        assert!(open_or_create(&path, TEST_KDF).is_ok());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

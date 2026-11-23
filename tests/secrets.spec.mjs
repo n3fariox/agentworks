@@ -57,8 +57,8 @@ test('adds, edits and replaces a secret without ever returning its value',async(
   await expect(panel).toContainText('No secrets yet.');
 
   await panel.getByRole('button',{name:'＋ Add secret'}).click();
-  await panel.getByLabel('Name').fill('github_token');
-  await expect(panel.getByLabel('Name')).toHaveValue('GITHUB_TOKEN');
+  await panel.getByLabel('Name',{exact:true}).fill('github_token');
+  await expect(panel.getByLabel('Name',{exact:true})).toHaveValue('GITHUB_TOKEN');
   await panel.getByLabel('Description').fill('Read-only API token');
   await panel.getByLabel('Value').fill(VALUE);
   await panel.getByRole('button',{name:'Save secret'}).click();
@@ -73,11 +73,12 @@ test('adds, edits and replaces a secret without ever returning its value',async(
   const key=await stat(join(fixture,'sessions.secrets.key'));
   expect(key.mode&0o777).toBe(0o600);
   const keyFile=JSON.parse(await readFile(join(fixture,'sessions.secrets.key'),'utf8'));
-  expect(keyFile).toMatchObject({version:1,kdf:'argon2id',password:false});
+  expect(keyFile.version).toBe(2);
+  expect(keyFile.slots).toMatchObject([{kind:'password',kdf:'argon2id',password:false}]);
 
   // Editing without a value keeps it; the name cannot change.
   await card.getByRole('button',{name:'Edit'}).click();
-  await expect(panel.getByLabel('Name')).toHaveJSProperty('readOnly',true);
+  await expect(panel.getByLabel('Name',{exact:true})).toHaveJSProperty('readOnly',true);
   await expect(panel.getByLabel('Value')).toHaveValue('');
   await panel.getByLabel('Description').fill('Org token');
   await panel.getByRole('button',{name:'Save secret'}).click();
@@ -96,7 +97,7 @@ test('rejects invalid, managed and duplicate names',async({page})=>{
   const panel=await openPanel(page);
   for(const [name,message] of [['PATH','cannot be a secret'],['OPENAI_API_KEY','cannot be a secret'],['GOOSE_MODEL','cannot be a secret'],['2FA','environment variable name'],['GITHUB_TOKEN','already exists']]){
     await panel.getByRole('button',{name:'＋ Add secret'}).click();
-    await panel.getByLabel('Name').fill(name);
+    await panel.getByLabel('Name',{exact:true}).fill(name);
     await panel.getByLabel('Value').fill('x');
     await panel.getByRole('button',{name:'Save secret'}).click();
     await expect(panel.locator('[data-error]')).toContainText(message);
@@ -308,7 +309,7 @@ test('a password locks secrets until unlocked; commands wait and locked sessions
     await page.locator('#secret-lock-minutes').selectOption('15');
     await expect.poll(async()=>(await (await api('/api/secrets/status')).json()).lockMinutes).toBe(15);
     const key=await readFile(join(fixture,'sessions.secrets.key'),'utf8');
-    expect(JSON.parse(key).password).toBe(true);
+    expect(JSON.parse(key).slots[0]).toMatchObject({kind:'password',password:true});
     expect(key).not.toContain(password);
 
     // A password-protected key file starts locked; nothing can be sealed or opened.
@@ -373,6 +374,87 @@ test('a password locks secrets until unlocked; commands wait and locked sessions
   }finally{
     if(session)await api(`/api/sessions/${session.id}`,undefined,'DELETE');
     await api(`/api/secrets/${secret.id}`,undefined,'DELETE');
+  }
+});
+
+test('passkeys unlock secrets through the WebAuthn PRF extension, with the password as fallback',async({page})=>{
+  // Passkeys need a hostname: localhost, not 127.0.0.1.
+  const local='http://localhost:4545';
+  const password='correct horse';
+  const cdp=await page.context().newCDPSession(page);
+  await cdp.send('WebAuthn.enable');
+  const {authenticatorId}=await cdp.send('WebAuthn.addVirtualAuthenticator',{options:{protocol:'ctap2',transport:'internal',
+    hasResidentKey:true,hasUserVerification:true,isUserVerified:true,automaticPresenceSimulation:true,hasPrf:true}});
+  const openLocal=async()=>{
+    await page.goto(local+'/');
+    await page.locator('#nav-settings').evaluate(n=>n.click());
+    await page.locator('#settings-tab-secrets').click();
+    return page.locator('[data-password-section]');
+  };
+  try{
+    // Passkeys need a password to fall back on.
+    let section=await openLocal();
+    await expect(section.locator('[data-passkey-note]')).toContainText('Set a password first');
+    await expect(section.getByRole('button',{name:'Add passkey'})).toBeHidden();
+    expect((await api('/api/secrets/password',{password},'PUT')).ok).toBe(true);
+
+    section=await openLocal();
+    await section.getByRole('button',{name:'Add passkey'}).click();
+    await page.locator('#secret-passkey-label').fill('Test authenticator');
+    await page.locator('#secret-passkey-password').fill('wrong password');
+    await section.getByRole('button',{name:'Create passkey'}).click();
+    await expect(page.locator('#secret-controls [data-error]')).toContainText('current password is not correct');
+    await page.locator('#secret-passkey-password').fill(password);
+    await section.getByRole('button',{name:'Create passkey'}).click();
+    await expect(section.locator('[data-passkey-list]')).toContainText('Test authenticator');
+    await expect(section.locator('[data-passkey-list]')).toContainText('localhost · this site');
+    const file=JSON.parse(await readFile(join(fixture,'sessions.secrets.key'),'utf8'));
+    expect(file.version).toBe(2);
+    expect(file.slots.map(s=>s.kind)).toEqual(['password','passkey']);
+    expect(JSON.stringify(file)).not.toContain(password);
+
+    // The password cannot be removed while a passkey depends on it.
+    const refused=await api('/api/secrets/password',{current:password,password:''},'PUT');
+    expect(refused.status).toBe(400);
+    expect(await refused.text()).toContain('Remove the passkeys first');
+
+    // After a restart, the passkey unlocks.
+    await stop();await start();
+    const locked=await (await api('/api/secrets/status')).json();
+    expect([locked.locked,locked.passkeys.length]).toEqual([true,1]);
+    await page.goto(local+'/');
+    await page.locator('#secrets-banner').getByRole('button',{name:'Unlock secrets'}).click();
+    const dialog=page.locator('#secrets-unlock-dialog');
+    await dialog.getByRole('button',{name:'Unlock with a passkey'}).click();
+    await expect(dialog).toBeHidden();
+    await expect(page.locator('#secrets-banner')).toBeHidden();
+    expect((await (await api('/api/secrets/status')).json()).locked).toBe(false);
+
+    // A passkey is offered only on its own site; the password still works everywhere.
+    expect((await (await api('/api/secrets/lock',{})).json()).locked).toBe(true);
+    await page.goto(base+'/');
+    await page.locator('#secrets-banner').getByRole('button',{name:'Unlock secrets'}).click();
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole('button',{name:'Unlock with a passkey'})).toBeHidden();
+    await dialog.getByLabel('Password').fill(password);
+    await dialog.getByRole('button',{name:'Unlock'}).click();
+    await expect(dialog).toBeHidden();
+
+    // A secret from a different authenticator is refused.
+    expect((await api('/api/secrets/lock',{})).ok).toBe(true);
+    const wrong=await api('/api/secrets/unlock',{passkey:{id:locked.passkeys[0].id,prf:Buffer.alloc(32,7).toString('base64url')}});
+    expect(wrong.status).toBe(403);
+    await page.waitForTimeout(1100);
+    expect((await (await api('/api/secrets/unlock',{password})).json()).locked).toBe(false);
+
+    // Removing the passkey lets the password be removed again.
+    section=await openLocal();
+    page.once('dialog',d=>d.accept());
+    await section.locator('[data-passkey-list]').getByRole('button',{name:'Remove'}).click();
+    await expect(section.locator('[data-passkey-list]')).not.toContainText('Test authenticator');
+    expect((await api('/api/secrets/password',{current:password,password:''},'PUT')).ok).toBe(true);
+  }finally{
+    await cdp.send('WebAuthn.removeVirtualAuthenticator',{authenticatorId}).catch(()=>{});
   }
 });
 

@@ -226,8 +226,12 @@ fn status() -> Value {
         Some(VaultState::Unavailable(error)) => (false, false, false, Some(error.clone())),
         None => (false, false, false, Some("not initialized".to_owned())),
     };
+    let passkeys = match storage {
+        Some(s) if available => vault::passkeys(&s.path).unwrap_or_default(),
+        _ => Vec::new(),
+    };
     json!({"available": available, "locked": locked, "password": password, "error": error,
-        "lockMinutes": LOCK_MINUTES.load(Ordering::Relaxed),
+        "passkeys": passkeys, "lockMinutes": LOCK_MINUTES.load(Ordering::Relaxed),
         "keyFile": storage.map(|s| s.path.display().to_string())})
 }
 pub async fn get_status() -> Json<Value> {
@@ -245,10 +249,29 @@ fn audit_human(app: &App, action: &str, outcome: &str) -> mail::Result<()> {
         .audit("human", action, "secrets", outcome)
 }
 
+/// Exactly one of a password or a passkey's PRF secret.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Unlock {
-    password: Zeroizing<String>,
+    #[serde(default)]
+    password: Option<Zeroizing<String>>,
+    #[serde(default)]
+    passkey: Option<PasskeyUnlock>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PasskeyUnlock {
+    /// The passkey slot, as listed in the status.
+    id: String,
+    /// base64url of the 32-byte PRF result for the slot's salt.
+    prf: Zeroizing<String>,
+}
+fn prf_bytes(prf: &str) -> Result<Zeroizing<Vec<u8>>, (StatusCode, String)> {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(prf)
+        .map(Zeroizing::new)
+        .map_err(|_| bad("The passkey secret is not valid base64url"))
 }
 pub async fn unlock(State(app): State<App>, Json(input): Json<Unlock>) -> ApiResult {
     let storage = STORAGE
@@ -273,10 +296,19 @@ pub async fn unlock(State(app): State<App>, Json(input): Json<Unlock>) -> ApiRes
         return Err(unavailable("the key file changed; restart Agentworks"));
     };
     // Key derivation is deliberately slow; keep it off the async workers.
-    let password = input.password;
-    let result = tokio::task::spawn_blocking(move || locked.unlock(&password))
-        .await
-        .map_err(|_| unavailable("unlock failed"))?;
+    let (method, result) = match (input.password, input.passkey) {
+        (Some(password), None) => (
+            "password",
+            tokio::task::spawn_blocking(move || locked.unlock(&password))
+                .await
+                .map_err(|_| unavailable("unlock failed"))?,
+        ),
+        (None, Some(passkey)) => {
+            let prf = prf_bytes(&passkey.prf)?;
+            ("passkey", locked.unlock_passkey(&passkey.id, &prf))
+        }
+        _ => return Err(bad("Send a password or a passkey")),
+    };
     match result {
         Ok(vault) => {
             {
@@ -290,7 +322,7 @@ pub async fn unlock(State(app): State<App>, Json(input): Json<Unlock>) -> ApiRes
             }
             *storage.failures.lock().unwrap() = (0, Instant::now());
             touch(storage);
-            audit_human(&app, "secrets.unlock", "ok")?;
+            audit_human(&app, "secrets.unlock", &format!("ok:{method}"))?;
             restart_started_locked(&app);
             Ok(Json(status()))
         }
@@ -298,10 +330,18 @@ pub async fn unlock(State(app): State<App>, Json(input): Json<Unlock>) -> ApiRes
             let mut failures = storage.failures.lock().unwrap();
             *failures = (failures.0 + 1, Instant::now());
             drop(failures);
-            audit_human(&app, "secrets.unlock", "failed")?;
-            Err(fail(StatusCode::FORBIDDEN, "The password is not correct"))
+            audit_human(&app, "secrets.unlock", &format!("failed:{method}"))?;
+            Err(fail(
+                StatusCode::FORBIDDEN,
+                if method == "passkey" {
+                    "That passkey did not unlock secrets"
+                } else {
+                    "The password is not correct"
+                },
+            ))
         }
-        Err(error) => Err(unavailable(&error.to_string())),
+        Err(PasswordError::Invalid(message)) => Err(bad(message)),
+        Err(PasswordError::Storage(message)) => Err(unavailable(&message)),
     }
 }
 /// Sessions that started while locked restart now, or after their turn, with their
@@ -382,6 +422,73 @@ pub async fn set_password(State(app): State<App>, Json(input): Json<Password>) -
         Err(PasswordError::Invalid(message)) => Err(bad(message)),
         Err(PasswordError::Storage(message)) => Err(unavailable(&message)),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AddPasskey {
+    current: Zeroizing<String>,
+    #[serde(default)]
+    label: String,
+    credential_id: String,
+    rp_id: String,
+    prf_salt: String,
+    /// base64url of the PRF result for `prf_salt`.
+    prf: Zeroizing<String>,
+}
+/// Adds a passkey that can unlock secrets. Needs secrets unlocked and the current
+/// password, so an open browser tab alone cannot add a way in.
+pub async fn add_passkey(State(app): State<App>, Json(input): Json<AddPasskey>) -> ApiResult {
+    let storage = STORAGE
+        .get()
+        .ok_or_else(|| unavailable("not initialized"))?;
+    let vault = vault()?;
+    let prf = prf_bytes(&input.prf)?;
+    let path = storage.path.clone();
+    let current = input.current;
+    let new = vault::NewPasskey {
+        label: input.label,
+        credential_id: input.credential_id,
+        rp_id: input.rp_id,
+        prf_salt: input.prf_salt,
+        prf,
+    };
+    let result =
+        tokio::task::spawn_blocking(move || vault.add_passkey(&path, &current, new, now()))
+            .await
+            .map_err(|_| unavailable("the passkey could not be saved"))?;
+    match result {
+        Ok(added) => {
+            touch(storage);
+            audit_human(&app, "secrets.passkey", &format!("added:{}", added.label))?;
+            Ok(Json(status()))
+        }
+        Err(PasswordError::Wrong) => {
+            audit_human(&app, "secrets.passkey", "failed")?;
+            Err(fail(
+                StatusCode::FORBIDDEN,
+                "The current password is not correct",
+            ))
+        }
+        Err(PasswordError::Invalid(message)) => Err(bad(message)),
+        Err(PasswordError::Storage(message)) => Err(unavailable(&message)),
+    }
+}
+/// Removes a passkey. Needs no key: it only takes a way to unlock away.
+pub async fn remove_passkey(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
+    let storage = STORAGE
+        .get()
+        .ok_or_else(|| unavailable("not initialized"))?;
+    let path = storage.path.clone();
+    let removed = tokio::task::spawn_blocking(move || vault::remove_passkey(&path, &id))
+        .await
+        .map_err(|_| unavailable("the passkey could not be removed"))?
+        .map_err(|e| unavailable(&e.to_string()))?;
+    if !removed {
+        return Err(fail(StatusCode::NOT_FOUND, "Passkey not found"));
+    }
+    audit_human(&app, "secrets.passkey", "removed")?;
+    Ok(Json(status()))
 }
 
 #[derive(Deserialize)]
