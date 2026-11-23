@@ -36,7 +36,7 @@ test('Codex subscription display preserves window identity, sparse freshness, re
   await expect(page.locator('#chip')).toHaveText('ctx 1% · 5h 85% left');
   await label.click();
   await expect(page.locator('#usage-status-details')).toContainText('codex primary (5h):');
-  await expect(page.locator('#usage-status-details')).toContainText('15% used / 85% remaining');
+  await expect(page.locator('#usage-status-details')).toContainText('codex primary (5h): 85% left');
   await expect(page.locator('#usage-status-details')).toContainText('reset unknown');
   const reset=await page.evaluate(()=>Object.values(ui.state.codexQuota)[0].resetsAt.value);
   expect(reset).toBe(1792385436000);
@@ -49,7 +49,7 @@ test('Codex subscription display preserves window identity, sparse freshness, re
   await page.evaluate(()=>ui.reset());
   await consume(first,false);
   await label.click();
-  await expect(page.locator('#usage-status-details')).toContainText('(replayed)');
+  await expect(page.locator('#usage-status-details')).toContainText(/codex primary \(5h\): 85% left · .* · updated /);
   await page.clock.fastForward(600001);
   await consume({sessionUpdate:'usage_update',used:2000,size:200000});
   await expect(label).toContainText('2.0k/200k · 1%');

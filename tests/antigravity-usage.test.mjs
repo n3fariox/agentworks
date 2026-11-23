@@ -10,7 +10,12 @@ let view=usageView(state,{now:at,provider:'antigravity',model:'gemini-4-argon'})
 assert(!view.details.some(s=>s.includes('Gemini Models · 5h: 75% left')));
 assert.match(view.label,/Argon · weekly 20% left/);
 assert.equal(view.known,true);assert.equal(view.stale,false);
-assert.match(view.short,/Argon · weekly 20% left/);
+assert.equal(view.short,'7d 20% left','the pill names the window by length only');
+assert.equal(usageView(state,{now:at,provider:'antigravity',model:'gemini-3.8-flash-high'}).short,'5h 75% left');
+const thirdParty=applyUsageEvent(emptyUsage(),{kind:'antigravity_quota',data:{observedAtMs:at,windows:[{id:'3p-weekly',group:'Third party',remainingFraction:0.5,resetTime:null},{id:'3p-5h',group:'Third party',window:'5hr',remainingFraction:0.3,resetTime:null}]}});
+assert.equal(usageView(thirdParty,{now:at,provider:'antigravity',model:'claude-opus-5-5'}).short,'5h 30% left','tightest window shown by normalized length only');
+const thirdPartyWeeklyOnly=applyUsageEvent(emptyUsage(),{kind:'antigravity_quota',data:{observedAtMs:at,windows:[{id:'3p-weekly',group:'Third party',remainingFraction:0.5,resetTime:null}]}});
+assert.equal(usageView(thirdPartyWeeklyOnly,{now:at,provider:'antigravity',model:'claude-opus-5-5'}).short,'7d 50% left','window length falls back to the bucket ID');
 const flash=usageView(state,{now:at,provider:'antigravity',model:'gemini-3.8-flash-high'});
 assert.match(flash.label,/75% left/);assert(!flash.details.some(s=>s.includes('Argon')));
 assert(flash.details.some(s=>s.includes('resets in 4h')));
@@ -24,7 +29,7 @@ assert.match(hv.label,/Hydrogen · weekly 40% left/);assert(!hv.details.some(s=>
 // Orchestrator draws on Argon and shared Gemini; label leads with Argon even when Gemini is tighter.
 const orchState=applyUsageEvent(emptyUsage(),{kind:'antigravity_quota',data:{...report,windows:[{...report.windows[0],remainingFraction:0.05},report.windows[1]]}});
 const orch=usageView(orchState,{now:at,provider:'antigravity',model:'gemini-pro-orchestrator-g1-pro'});
-assert.match(orch.label,/Argon · weekly 20% left/);assert.match(orch.short,/Argon · weekly 20% left/);
+assert.match(orch.label,/Argon · weekly 20% left/);assert.equal(orch.short,'7d 20% left');
 assert(orch.details.some(s=>s.includes('Argon'))&&orch.details.some(s=>s.includes('Gemini Models')));
 assert(orch.details.findIndex(s=>s.includes('Argon'))<orch.details.findIndex(s=>s.includes('Gemini Models')));
 assert(usageView(state,{now:at,provider:'antigravity',model:'unknown-model'}).details.some(s=>s.includes('mapping unavailable')));
