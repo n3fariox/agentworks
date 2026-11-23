@@ -1809,6 +1809,20 @@ function updateRoutingDecisionVisibility(){
 }
 $('routing-approach').onchange=updateRoutingDecisionVisibility;
 $('routing-decision-provider').onchange=updateRoutingDecisionVisibility;
+function inferRoutingTier(provider,model){
+  const m=(model||'').trim().toLowerCase();
+  if(m){
+    const tokens=m.split(/[^a-z0-9]+/).filter(Boolean);
+    const hasTok=list=>tokens.some(t=>list.some(tok=>t===tok||(t.startsWith(tok)&&/^\d+$/.test(t.slice(tok.length)))));
+    if(hasTok(['haiku','hydrogen','flash','mini','nano','lite','quick','luna','spark','small','fast']))return 'fast';
+    if(hasTok(['opus','argon','max','ultra','heavy','deep','steady','pro']))return 'deep';
+    if(hasTok(['sonnet','neon','sol','codex','medium','standard','balanced','gpt']))return 'balanced';
+    return '';
+  }
+  if(provider==='opencode')return 'fast';
+  if(provider==='claude-rust'||provider==='claude'||provider==='codex-rust'||provider==='codex'||provider==='antigravity')return 'balanced';
+  return '';
+}
 function addRoutingCandidateRow(candidate={}){
   const row=el('div','routing-candidate-row');
   const provider=el('select');
@@ -1818,23 +1832,32 @@ function addRoutingCandidateRow(candidate={}){
   for(const profile of routingModelProfiles)mp.append(new Option(profile.name,profile.id));
   mp.value=candidate.modelProvider||'';
   const model=el('input');model.placeholder='Default model';model.maxLength=256;model.value=candidate.model||'';
+  const tier=el('select');tier.setAttribute('aria-label','Model tier');
+  const autoTier=new Option('Auto','');
+  tier.append(autoTier,new Option('Fast (low cost)','fast'),new Option('Balanced','balanced'),new Option('Deep (high cost)','deep'));
+  tier.value=candidate.tier||'';
   const notes=el('input');notes.placeholder='Optional routing hint (e.g. fast edits)';notes.maxLength=500;notes.value=candidate.notes||'';
   const enabledLabel=el('label','workspace-check');const enabled=el('input');enabled.type='checkbox';enabled.checked=candidate.enabled!==false;enabledLabel.append(enabled,document.createTextNode('Enabled'));
   const remove=el('button','text-button','Remove');remove.type='button';remove.onclick=()=>row.remove();
-  const syncMp=()=>{mp.hidden=provider.value!=='goose';};
-  provider.onchange=syncMp;syncMp();
-  row.append(provider,mp,model,notes,enabledLabel,remove);
+  const syncRow=()=>{
+    mp.hidden=provider.value!=='goose';
+    const inferred=inferRoutingTier(provider.value,model.value);
+    autoTier.textContent=inferred?`Auto (${inferred})`:'Auto';
+  };
+  provider.onchange=syncRow;model.oninput=syncRow;syncRow();
+  row.append(provider,mp,model,tier,notes,enabledLabel,remove);
   $('routing-candidates').append(row);
 }
 $('add-routing-candidate').onclick=()=>addRoutingCandidateRow();
 function readRoutingSettings(){
   const candidates=[...$('routing-candidates').querySelectorAll('.routing-candidate-row')].map(row=>{
-    const [provider,mp,model,notes]=row.querySelectorAll('select,input');
+    const [provider,mp,model,tier,notes]=row.querySelectorAll('select,input');
     const enabled=row.querySelector('input[type="checkbox"]').checked;
     return {
       provider:provider.value,
       ...(provider.value==='goose'&&mp.value?{modelProvider:mp.value}:{}),
       ...(model.value.trim()?{model:model.value.trim()}:{}),
+      ...(tier.value?{tier:tier.value}:{}),
       ...(notes.value.trim()?{notes:notes.value.trim()}:{}),
       enabled,
     };

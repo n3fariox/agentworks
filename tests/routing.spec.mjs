@@ -51,8 +51,13 @@ test('global and project session router settings drive new session dialog',async
   const row=page.locator('.routing-candidate-row').first();
   await row.locator('select').first().selectOption('demo');
   await row.locator('input[placeholder="Default model"]').fill('demo/quick');
+  const tierSelect=row.locator('select[aria-label="Model tier"]');
+  await expect(tierSelect.locator('option[value=""]')).toHaveText('Auto (fast)');
+  await tierSelect.selectOption('balanced');
   await page.locator('#save-settings').click();
   await expect(page.locator('#settings-dialog')).toBeHidden();
+  const savedSettings=await api('/api/settings');
+  expect(savedSettings.sessionRouting.candidates[0].tier).toBe('balanced');
 
   // New session defaults to Auto · routed and submits initial prompt.
   await page.locator('#welcome-new').click();

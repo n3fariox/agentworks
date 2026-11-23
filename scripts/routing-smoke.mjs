@@ -2,10 +2,11 @@ import {removeFixture} from '../tests/support/cleanup.mjs';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import {spawn} from 'node:child_process';
-import {mkdtemp} from 'node:fs/promises';
+import {mkdir,mkdtemp} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import {once} from 'node:events';
 
+await mkdir('.cache',{recursive:true});
 const dir=await mkdtemp(resolve('.cache/routing-'));
 const port=process.env.AGENTWORKS_ROUTING_PORT||'4328',base=`http://127.0.0.1:${port}`;
 let server;
@@ -187,7 +188,10 @@ try{
   assert.equal(lastPayload.model,'gpt-6-luna');
   assert.equal(lastPayload.questions[0].type,'choice');
   assert.equal(lastPayload.questions[0].choices.length,2);
+  assert(lastPayload.questions[0].choices.every(c=>typeof c.description==='string'&&c.description.includes('tier=')));
   assert(lastPayload.input.includes('Quick typo fix'));
+  assert(lastPayload.input.includes('"tier": "deep"')||lastPayload.input.includes('"tier":"deep"'));
+  assert(lastPayload.input.includes('"costAndQuotaImpact"'));
   assert.equal(dmSession.routing.approach,'decision_model');
   assert.equal(dmSession.routing.fallback,false);
   assert.equal(dmSession.model,'demo/quick');
@@ -216,7 +220,8 @@ try{
   assert.equal(lastHeaders['authorization'],undefined);
   assert.equal(lastPayload.model,'gemini-decision-1');
   assert.equal(lastPayload.questions.candidate.type,'choice');
-  assert(lastPayload.questions.candidate.criteria['demo · demo/quick']);
+  assert(lastPayload.questions.candidate.criteria['demo · demo/quick'].includes('tier=fast'));
+  assert(lastPayload.questions.candidate.criteria['demo · demo/steady'].includes('tier=deep'));
   assert(lastPayload.input.includes('Gemini typo check'));
   assert.equal(gemSession.routing.approach,'decision_model');
   assert.equal(gemSession.model,'demo/quick');
@@ -240,8 +245,10 @@ try{
   assert.equal(lastPath,'/v1/systemone');
   assert.equal(lastPayload.model,'kev-4b');
   assert.equal(lastPayload.questions.candidate.type,'choice');
-  assert(lastPayload.questions.candidate.criteria['demo · demo/quick']);
+  assert(lastPayload.questions.candidate.criteria['demo · demo/quick'].includes('tier=fast'));
+  assert(lastPayload.questions.candidate.criteria['demo · demo/steady'].includes('tier=deep'));
   assert(lastPayload.state.includes('Another quick edit'));
+  assert(lastPayload.state.includes('costAndQuotaImpact'));
   assert.equal(sysSession.routing.approach,'decision_model');
   assert.equal(sysSession.routing.fallback,false);
   assert.equal(sysSession.model,'demo/quick');
