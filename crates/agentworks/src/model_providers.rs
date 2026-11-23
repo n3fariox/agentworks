@@ -69,6 +69,43 @@ pub async fn selected(
         .cloned())
 }
 
+/// Whether a saved profile is an OpenAI-compatible endpoint, whose own `/models`
+/// list defines the models Goose can use with it.
+pub fn is_endpoint_profile(id: &str) -> bool {
+    profiles::list_profiles().is_ok_and(|all| {
+        all.iter()
+            .any(|p| p.id == id && p.kind == "openai-compatible")
+    })
+}
+
+/// Lists an OpenAI-compatible profile's models from the host that runs Goose,
+/// without starting Goose. Goose's own inventory is a cache, refreshed only
+/// when a session starts.
+pub async fn endpoint_models(
+    id: &str,
+    host_id: &str,
+    live: Option<&agentworks_runtime::remote::Live>,
+) -> Result<Value, String> {
+    let connection = profiles::connection(id, host_id)?;
+    if connection.profile.kind != "openai-compatible" {
+        return Err("Model listing is supported only for OpenAI-compatible providers".into());
+    }
+    let request = connection.test_request("models");
+    let result = match live {
+        Some(live) => live.model_providers(request).await?,
+        None if host_id == "local" => profiles::execute(&request).await?,
+        None => return Err("The remote host is not connected.".into()),
+    };
+    let options = result["options"]
+        .as_array()
+        .ok_or("Provider did not return a model list")?;
+    Ok(json!({
+        "configId":"model",
+        "currentValue":connection.profile.default_model,
+        "options":options
+    }))
+}
+
 pub async fn update(
     State(app): State<App>,
     Query(query): Query<HostQuery>,

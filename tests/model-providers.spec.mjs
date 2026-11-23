@@ -22,7 +22,7 @@ echo "CLAUDE_LOGIN_FIXTURE_OK"
 `);await chmod(claude,0o700);
   fixture=createServer((req,res)=>{
     if(req.headers.authorization!=='Bearer ui-fixture-key'){res.writeHead(401);res.end();return;}
-    res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({data:[{id:'ui-fixture-model'}]}));
+    res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({data:[{id:'ui-fixture-model'},{id:'ui-fixture-other'}]}));
   });
   await new Promise(r=>fixture.listen(0,'127.0.0.1',r));providerUrl=`http://127.0.0.1:${fixture.address().port}/v1`;
   server=spawn(resolve(process.env.AGENTWORKS_TEST_BINARY||'target/debug/agentworks'),[],{env:{...process.env,
@@ -50,9 +50,15 @@ test('configure a provider, discover models, create a bound session, and keep it
   await page.locator('#model-provider-editor').getByLabel('Base URL',{exact:true}).fill(providerUrl);
   await page.locator('#model-provider-editor').getByLabel('API key optional',{exact:true}).fill('ui-fixture-key');
   await page.locator('#load-model-provider-models').click();
-  await expect(page.locator('#model-provider-message')).toContainText('1 models found');
+  await expect(page.locator('#model-provider-message')).toContainText('2 models found');
   expect((await api('/api/model-providers')).profiles).toHaveLength(0);
+  // Every discovered model stays listed whatever the field holds; a datalist filtered them by the typed value.
+  const choices=page.locator('#model-provider-editor').getByLabel('Available models',{exact:true});
+  await choices.selectOption('ui-fixture-other');
+  await expect(page.locator('#model-provider-model')).toHaveValue('ui-fixture-other');
   await page.locator('#model-provider-editor').getByLabel('Default model',{exact:true}).fill('ui-fixture-model');
+  await expect(choices).toHaveValue('ui-fixture-model');
+  await expect(choices.locator('option')).toHaveText(['Custom model ID','ui-fixture-model','ui-fixture-other']);
   await page.locator('#save-model-provider').click();
   await expect(page.locator('#model-provider-list')).toContainText('Local test provider');
   const profile=(await api('/api/model-providers')).profiles[0];expect(profile.keyConfigured).toBe(true);expect(profile.hostIds.sort()).toEqual(['local',remote.id].sort());
@@ -75,12 +81,19 @@ test('configure a provider, discover models, create a bound session, and keep it
   await expect(page.locator('#create-model')).toHaveValue('ui-fixture-model');
   await page.locator('#directory').fill(dir);await page.locator('#load-models').click();
   await expect(page.locator('#model-note')).toContainText('Model is applied');
+  // The picker lists the endpoint's own models, not Goose's cached inventory.
+  await expect(page.locator('#create-model option')).toHaveText(['Harness default','ui-fixture-model · ui-fixture-model','ui-fixture-other · ui-fixture-other']);
+  await page.locator('#create-model').selectOption('ui-fixture-other');
   await page.locator('#create-submit').click();
   await expect(page.locator('#create-dialog')).toBeHidden();
   await expect.poll(async()=>{
     const sessions=await api('/api/sessions');return sessions.find(s=>s.provider==='goose')?.status;
   }).toBe('idle');
   const session=(await api('/api/sessions')).find(s=>s.provider==='goose');expect(session.modelProvider).toBe(profile.id);
+  expect(session.model).toBe('ui-fixture-other');
+  // Goose refreshed its inventory from the endpoint at session start, so the session can switch to the other model.
+  await api(`/api/sessions/${session.id}/model`,{model:'ui-fixture-model'});
+  await expect.poll(async()=>(await api('/api/sessions')).find(s=>s.id===session.id)?.model).toBe('ui-fixture-model');
   await page.reload();await expect(page.locator('#provider-label')).toContainText('Goose');
   expect((await readFile(join(dir,'providers','profiles.json'),'utf8'))).not.toContain('ui-fixture-key');
   await page.goto(base+'/?settings');await page.getByRole('tab',{name:'Model providers',exact:true}).click();

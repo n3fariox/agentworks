@@ -49,7 +49,14 @@ export function setupModelProviders({$,api,el,getHosts,selectionChanged,socketUr
     $('model-provider-api-fields').hidden=subscription;$('model-provider-auth-note').hidden=!subscription;
     $('test-model-provider').hidden=subscription;$('load-model-provider-models').hidden=subscription;
   }
-  $('model-provider-kind').onchange=()=>{kindChanged();$('model-provider-model').value=kind()==='claude-code'?'default':kind()==='chatgpt_codex'?'gpt-6.1-sol':'';};
+  // A browser datalist filters by the typed value, so a filled-in model hid the rest.
+  // Loaded models are listed in a select; the input still accepts any custom ID.
+  const choices=$('model-provider-model-options');
+  const clearChoices=()=>{choices.replaceChildren();$('model-provider-model-choices').hidden=true;};
+  const syncChoice=()=>{const id=$('model-provider-model').value.trim();choices.value=[...choices.options].some(o=>o.value===id)?id:'';};
+  choices.onchange=()=>{if(choices.value)$('model-provider-model').value=choices.value;};
+  $('model-provider-model').oninput=syncChoice;
+  $('model-provider-kind').onchange=()=>{kindChanged();clearChoices();$('model-provider-model').value=kind()==='claude-code'?'default':kind()==='chatgpt_codex'?'gpt-6.1-sol':'';};
   const endpoint=host=>'/api/model-providers?hostId='+encodeURIComponent(host||'local');
   const hostOptions=()=>[{id:'local',name:'Local',status:'connected'},...getHosts().filter(h=>h.kind==='remote')];
   const hostName=id=>hostOptions().find(h=>h.id===id)?.name||id;
@@ -77,7 +84,7 @@ export function setupModelProviders({$,api,el,getHosts,selectionChanged,socketUr
     editing=p;$('model-provider-editor').hidden=false;$('model-provider-kind').value=p?.kind||'openai-compatible';kindChanged();
     $('model-provider-editor-title').textContent=p?'Edit provider':'Add provider';
     $('model-provider-name').value=p?.name||'';$('model-provider-url').value=p?.baseUrl||'';
-    $('model-provider-model').value=p?.defaultModel||'';$('model-provider-models').replaceChildren();
+    $('model-provider-model').value=p?.defaultModel||'';clearChoices();
     $('model-provider-key').value='';$('model-provider-remove-key').checked=false;
     $('model-provider-key').placeholder=p?.keyConfigured?'Configured · leave blank to keep':'Optional';
     $('model-provider-key-note').textContent=p?.keyConfigured?'A key is saved for this provider and supplied only to enabled hosts. Its value is never returned.':'No API key is stored for this provider.';
@@ -133,7 +140,8 @@ export function setupModelProviders({$,api,el,getHosts,selectionChanged,socketUr
       if(operation==='save'){
         closeEditor();await refreshProviders();await loadCreate();message('Provider saved. Available on '+(p.hostIds.map(hostName).join(', ')||'no hosts')+'.');
       }else{
-        $('model-provider-models').replaceChildren(...result.options.map(o=>new Option(o.name||o.value,o.value)));
+        choices.replaceChildren(new Option('Custom model ID',''),...result.options.map(o=>new Option(o.name||o.value,o.value)));
+        $('model-provider-model-choices').hidden=false;syncChoice();
         message(`Connected from ${hostName(selectedHost)}. Model listing accepted${p.apiKey||editing?.keyConfigured?' the API key':''}; ${result.options.length} models found. No inference request was sent.`);
       }
     }catch(e){if(generation===settingsGeneration)message(e.message);}

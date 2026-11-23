@@ -485,6 +485,9 @@ pub fn configure_connection(
         .env("OPENAI_CUSTOM_HEADERS", "")
         .env("OPENAI_ORGANIZATION", "")
         .env("OPENAI_PROJECT", "")
+        // The endpoint's own list defines the models; Goose refreshes its
+        // inventory at each session start instead of trusting a cached copy.
+        .env("AGENTWORKS_GOOSE_SESSION_INVENTORY", "1")
         .env(
             "GOOSE_PATH_ROOT",
             directory().join("goose").join(&id).to_string_lossy(),
@@ -536,6 +539,11 @@ mod tests {
                 expected_root.to_string_lossy()
             );
             assert!(!config.environment().contains_key("OPENAI_BASE_PATH"));
+            assert!(
+                !config
+                    .environment()
+                    .contains_key("AGENTWORKS_GOOSE_SESSION_INVENTORY")
+            );
             if kind == "claude-code" {
                 assert_eq!(config.environment()["ANTHROPIC_API_KEY"], "");
             }
@@ -563,6 +571,10 @@ mod tests {
             "/v1/chat/completions"
         );
         assert_eq!(config.environment()["OPENAI_API_KEY"], "fixture-key");
+        assert_eq!(
+            config.environment()["AGENTWORKS_GOOSE_SESSION_INVENTORY"],
+            "1"
+        );
     }
 }
 

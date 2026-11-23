@@ -700,7 +700,21 @@ pub async fn run(
                 return Err(agent_client_protocol::Error::internal_error().data("OpenCode did not advertise any free models; no paid model was selected"));
             }
             if let Some(model)=&desired_model {
-                if !model_config["options"].as_array().is_some_and(|items|items.iter().any(|o|o["value"]==*model)) {
+                let advertised=|config:&Value|config["options"].as_array().is_some_and(|items|items.iter().any(|o|o["value"]==*model));
+                // Goose waits only briefly for its inventory refresh, so a slow endpoint can
+                // leave a stale list. Goose accepts any ID, so the endpoint's own list decides.
+                let endpoint_model=!advertised(&model_config) && s.provider=="goose" && {
+                    let profile=s.data.lock().unwrap().model_provider.clone();
+                    match profile.filter(|id|crate::model_providers::is_endpoint_profile(id)) {
+                        Some(id)=>{
+                            let live=crate::hosts::registry().and_then(|hosts|hosts.live(&s.host_id));
+                            crate::model_providers::endpoint_models(&id,&s.host_id,live.as_deref()).await
+                                .is_ok_and(|models|advertised(&models))
+                        }
+                        None=>false,
+                    }
+                };
+                if !advertised(&model_config) && !endpoint_model {
                     return Err(agent_client_protocol::Error::invalid_params().data("Selected/default model is no longer advertised. Load models and choose another, or clear the default in Settings."));
                 }
                 model_config["currentValue"]=json!(model);
