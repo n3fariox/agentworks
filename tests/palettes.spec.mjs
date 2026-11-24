@@ -190,6 +190,22 @@ test('session entries carry title, project, host, directory and status context',
   expect(sessionItems([],context)).toEqual([]);
 });
 
+test('archived sessions are listed only on request, marked and kept after live work',()=>{
+  const sessions=[
+    {id:'old',title:'Old chat',provider:'demo',status:'suspended',cwd:'/srv/old',hostId:'local',archived:true},
+    {id:'live',title:'Live chat',provider:'demo',status:'idle',cwd:'/srv/live',hostId:'local'},
+    {id:'here',title:'Here chat',provider:'demo',status:'suspended',cwd:'/srv/here',hostId:'local',archived:true},
+  ];
+  const context={labels:{demo:'Demo agent'},hosts:[{id:'local',name:'Local'}],activeId:'here'};
+  // Off by default; the current session stays listed even when it is archived.
+  expect(sessionItems(sessions,context).map(i=>i.id)).toEqual(['live','here']);
+  expect(sessionItems(sessions,{...context,activeId:null}).map(i=>i.id)).toEqual(['live']);
+  const all=sessionItems(sessions,{...context,includeArchived:true});
+  expect(all.map(i=>i.id)).toEqual(['live','old','here']);
+  expect(all[1].detail).toBe('Archived · Demo agent · Local · old');
+  expect(all[2].detail).toBe('Current · Archived · Demo agent · Local · here');
+});
+
 test('actions expose existing UI work and refuse commands until the session is ready',()=>{
   const called=[];
   const handlers={newSession:()=>called.push('new'),insertCommand:t=>called.push(t),stop:()=>called.push('stop')};
@@ -586,4 +602,45 @@ for(const mobile of [false,true])test(`GitHub settings opens directly from the c
   await expect(page.locator('#settings-tab-github')).toHaveAttribute('aria-selected','true');
   await expect(page.locator('#settings-panel-github')).toBeVisible();
   expect(await page.evaluate(()=>localStorage.getItem('agentworks-session'))).toBe(session.id);
+});
+
+test('browser: the session palette includes archived sessions only while its switch is on',async({page})=>{
+  const create=title=>api('/api/sessions',{provider:'demo',cwd:alpha(),title,hostId:'local'});
+  const kept=await create('Gamma kept'),gone=await create('Gamma archived');
+  await api(`/api/sessions/${gone.id}`,{archived:true},'PATCH');
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  await page.addInitScript(id=>localStorage.setItem('agentworks-session',id),kept.id);
+  await page.goto(base);
+  await expect(page.locator('#session-state')).toHaveText('Ready');
+  const options=page.locator('#palette-list [role=option]'),toggle=page.locator('#palette-archived');
+  // Actions mode has no archived switch.
+  await page.keyboard.press('Control+k');
+  await expect(page.locator('#palette-archived-row')).toBeHidden();
+  await page.keyboard.press('Control+p');
+  await expect(page.locator('#palette-archived-row')).toBeVisible();
+  await expect(toggle).not.toBeChecked();
+  await expect(page.locator('#palette-archived-count')).toHaveText('(1)');
+  await page.locator('#palette-input').fill('gamma');
+  await expect(options).toHaveCount(1);
+  await expect(options.first()).toContainText('Gamma kept');
+  // Turning it on keeps the query, lists the archived session last and marks it.
+  await page.locator('#palette-archived-row .switch').click();
+  await expect(toggle).toBeChecked();
+  await expect(page.locator('#palette-input')).toBeFocused();
+  await expect(page.locator('#palette-input')).toHaveValue('gamma');
+  await expect(options).toHaveCount(2);
+  await expect(options.nth(1)).toContainText('Gamma archived');
+  await expect(options.nth(1)).toContainText('Archived');
+  // Each open starts with the switch off again.
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Control+p');
+  await expect(toggle).not.toBeChecked();
+  await page.locator('#palette-input').fill('gamma');
+  await expect(options).toHaveCount(1);
+  // An archived session can still be opened from the palette.
+  await page.locator('#palette-archived-row .switch').click();
+  await page.locator('#palette-input').fill('gamma archived');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#header-title')).toHaveText('Gamma archived');
+  expect(errors).toEqual([]);
 });

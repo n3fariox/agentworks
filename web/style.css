@@ -54,7 +54,20 @@
 .palette-modes button{flex:1;background:#171a1f;color:var(--muted);border:1px solid var(--border);border-radius:7px;padding:8px;font-size:11px}
 .palette-modes button[aria-pressed=true]{background:#2b2636;color:#d6c9f6;border-color:#463c5c}
 #palette-dialog>label{margin:14px 29px 6px}
-#palette-input{border-width:1px 0;border-radius:0;padding:12px 29px;font-size:15px;background:#121417}
+.palette-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:12px 29px 0}
+.palette-footer #palette-status{margin:0}
+.palette-archived{display:flex;margin-left:auto}
+.palette-archived[hidden]{display:none}
+.palette-archived .switch{display:inline-flex;align-items:center;gap:8px;margin:0;font-size:11px;color:var(--muted);cursor:pointer;user-select:none}
+.palette-archived .switch input{position:absolute;opacity:0;width:1px;height:1px;margin:0}
+.palette-archived .switch-track{position:relative;width:28px;height:16px;border-radius:8px;background:#171a1f;border:1px solid var(--border);transition:background .15s,border-color .15s}
+.palette-archived .switch-track::after{content:'';position:absolute;top:2px;left:2px;width:10px;height:10px;border-radius:50%;background:var(--muted);transition:transform .15s,background .15s}
+.palette-archived .switch input:checked+.switch-track{background:#2b2636;border-color:#463c5c}
+.palette-archived .switch input:checked+.switch-track::after{transform:translateX(12px);background:#d6c9f6}
+.palette-archived .switch input:focus-visible+.switch-track{outline:2px solid var(--accent);outline-offset:2px}
+.palette-archived .switch input:disabled~*{opacity:.5;cursor:default}
+@media(pointer:coarse){.palette-archived .switch{min-height:44px}}
+#palette-input{margin-top:14px;border-width:1px 0;border-radius:0;padding:12px 29px;font-size:15px;background:#121417}
 #palette-list{max-height:min(50dvh,420px);overflow:auto;overscroll-behavior:contain;padding:8px 14px}
 .palette-option{display:grid;grid-template-columns:1fr auto;gap:2px 10px;padding:9px 11px;border:1px solid transparent;border-radius:8px;cursor:pointer}
 .palette-option[aria-selected=true]{background:#2a2536;border-color:#453a5e}
@@ -66,7 +79,6 @@
 .palette-option-detail,.palette-option-reason{grid-column:1/-1;font-size:11px;color:var(--muted);overflow-wrap:anywhere}
 .palette-option-reason{color:#d8b17a}
 .palette-empty,.palette-keys{color:var(--muted)}
-#palette-status{margin-top:12px}
 @media(pointer:coarse){.palette-option{padding:12px 11px;min-height:44px}.palette-keys{display:none}}
 /* Display preferences: code/literal blocks (web/display-preferences.js) and toast tone */
 .code-block{margin:0 0 13px;min-width:0;max-width:100%;background:#171a1e;border:1px solid var(--border);border-radius:8px;overflow:hidden}

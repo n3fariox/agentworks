@@ -111,8 +111,9 @@ export function statusLabel(status){
     waiting:'Waiting for approval',idle:'Ready',suspended:'Suspended',error:'Error',closed:'Closed'}[status]||status||'Unknown';
 }
 
-export function sessionItems(sessions,{labels={},hosts=[],projects=[],activeId=null}={}){
-  const list=sessions||[];
+export function sessionItems(sessions,{labels={},hosts=[],projects=[],activeId=null,includeArchived=false}={}){
+  // Archived sessions stay out unless asked for; the current session is always listed so it never vanishes.
+  const list=(sessions||[]).filter(session=>includeArchived||!session.archived||session.id===activeId);
   const hostName=id=>hosts.find(h=>h.id===id)?.name||id||'Local';
   const projectName=id=>projects.find(p=>p.id===id)?.name||null;
   const titles=new Map();
@@ -123,15 +124,17 @@ export function sessionItems(sessions,{labels={},hosts=[],projects=[],activeId=n
     const directory=pathTail(session.cwd,(titles.get(session.title)||0)>1?3:1);
     // Status is the right-hand caption; the line under the title carries the context needed to tell two
     // similarly named sessions apart: current marker, automation, agent, project, host and directory.
-    const detail=[session.id===activeId?'Current':null,session.automation?'Automation':null,labels[session.provider]||session.provider,project,host,directory].filter(Boolean).join(' · ');
+    const detail=[session.id===activeId?'Current':null,session.archived?'Archived':null,session.automation?'Automation':null,labels[session.provider]||session.provider,project,host,directory].filter(Boolean).join(' · ');
     return {id:session.id,label:session.title,group:statusLabel(session.status),detail,hint:session.cwd,
       // The searchable tail keeps ordinary matches strong; path holds the whole directory at a lower weight.
       search:[session.title,project,host,pathTail(session.cwd,3),labels[session.provider]||session.provider,statusLabel(session.status)].filter(Boolean).join(' '),
       path:session.cwd,status:session.status,current:session.id===activeId,session};
   });
   // Unprompted lists keep running work visible first; the session API already returns newest first.
+  // Archived sessions, when included, follow everything still in use.
   const busy=items.filter(item=>['running','waiting','starting','resuming','configuring','cancelling'].includes(item.status));
-  return busy.length?[...busy,...items.filter(item=>!busy.includes(item))]:items;
+  const rest=items.filter(item=>!busy.includes(item));
+  return [...busy,...rest.filter(item=>!item.session.archived),...rest.filter(item=>item.session.archived)];
 }
 
 export function sessionRanking(query,items,options={}){
@@ -211,13 +214,14 @@ export function setupPalettes({$,state=()=>({}),handlers={},selectSession,labels
   if(!dialog||!input||!list)return null;
   input.maxLength=QUERY_LIMIT;
   const tabs=[$('palette-mode-actions'),$('palette-mode-sessions')].filter(Boolean);
+  const archivedRow=$('palette-archived-row'),archivedSwitch=$('palette-archived'),archivedCount=$('palette-archived-count');
   const placeholders={actions:'Search actions and harness commands…',sessions:'Search session titles, projects, hosts or directories…'};
   let mode='actions',ranked=[],active=0,restoreFocus=null,cleaned=true,keepFocus=false;
   const list0=()=>state().sessions||sessions,hosts0=()=>state().hosts||hosts,projects0=()=>state().projects||projects;
 
   function build(){
     const current=state();
-    return mode==='sessions'?sessionItems(list0(),{labels,hosts:hosts0(),projects:projects0(),activeId:current.active?.id}):actionItems(current,handlers);
+    return mode==='sessions'?sessionItems(list0(),{labels,hosts:hosts0(),projects:projects0(),activeId:current.active?.id,includeArchived:!!archivedSwitch?.checked}):actionItems(current,handlers);
   }
   function highlighted(parent,text,positions){
     const source=String(text??''),set=positions&&positions.length?new Set(positions):null;
@@ -302,6 +306,14 @@ export function setupPalettes({$,state=()=>({}),handlers={},selectSession,labels
     for(const tab of tabs)tab.setAttribute('aria-pressed',String(tab.id==='palette-mode-'+mode));
     $('palette-title').textContent=mode==='sessions'?'Switch session':'Command palette';
     input.placeholder=placeholders[mode];
+    // The archived switch belongs to the session list and starts off on every open.
+    if(archivedSwitch)archivedSwitch.checked=false;
+    if(archivedRow){
+      const archived=(list0()||[]).filter(session=>session.archived).length;
+      archivedRow.hidden=mode!=='sessions';
+      if(archivedCount)archivedCount.textContent=archived?`(${archived})`:'';
+      if(archivedSwitch)archivedSwitch.disabled=!archived;
+    }
     if(!dialog.open)dialog.showModal();
     render();input.focus();onOpen?.(mode);
     return true;
@@ -332,6 +344,8 @@ export function setupPalettes({$,state=()=>({}),handlers={},selectSession,labels
   $('dismiss-palette').onclick=()=>close();
   for(const tab of tabs)tab.onclick=()=>show(tab.id==='palette-mode-sessions'?'sessions':'actions');
   input.addEventListener('input',()=>{active=0;render();});
+  // Flipping the switch keeps the query and hands the keyboard back to the search box.
+  archivedSwitch?.addEventListener('change',()=>{active=0;render();input.focus();});
   input.addEventListener('keydown',event=>{
     if(event.isComposing)return;
     // Only vertical keys are claimed: horizontal keys, Home/End and Tab keep their normal text-editing and
