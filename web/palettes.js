@@ -131,10 +131,10 @@ export function sessionItems(sessions,{labels={},hosts=[],projects=[],activeId=n
       path:session.cwd,status:session.status,current:session.id===activeId,session};
   });
   // Unprompted lists keep running work visible first; the session API already returns newest first.
-  // Archived sessions, when included, follow everything still in use.
-  const busy=items.filter(item=>['running','waiting','starting','resuming','configuring','cancelling'].includes(item.status));
-  const rest=items.filter(item=>!busy.includes(item));
-  return [...busy,...rest.filter(item=>!item.session.archived),...rest.filter(item=>item.session.archived)];
+  // Archived sessions, when included, follow every other session; each group keeps busy work first.
+  const busy=item=>['running','waiting','starting','resuming','configuring','cancelling'].includes(item.status);
+  const ordered=group=>[...group.filter(busy),...group.filter(item=>!busy(item))];
+  return [...ordered(items.filter(item=>!item.session.archived)),...ordered(items.filter(item=>item.session.archived))];
 }
 
 export function sessionRanking(query,items,options={}){

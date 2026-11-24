@@ -204,6 +204,14 @@ test('archived sessions are listed only on request, marked and kept after live w
   expect(all.map(i=>i.id)).toEqual(['live','old','here']);
   expect(all[1].detail).toBe('Archived · Demo agent · Local · old');
   expect(all[2].detail).toBe('Current · Archived · Demo agent · Local · here');
+  // An archived session that still reports a busy status stays after idle live sessions; busy-first holds within each group.
+  const mixed=[
+    {id:'arch-idle',title:'A',provider:'demo',status:'idle',cwd:'/a',hostId:'local',archived:true},
+    {id:'arch-busy',title:'B',provider:'demo',status:'running',cwd:'/b',hostId:'local',archived:true},
+    {id:'live-idle',title:'C',provider:'demo',status:'idle',cwd:'/c',hostId:'local'},
+    {id:'live-busy',title:'D',provider:'demo',status:'waiting',cwd:'/d',hostId:'local'},
+  ];
+  expect(sessionItems(mixed,{...context,activeId:null,includeArchived:true}).map(i=>i.id)).toEqual(['live-busy','live-idle','arch-busy','arch-idle']);
 });
 
 test('actions expose existing UI work and refuse commands until the session is ready',()=>{
