@@ -66,23 +66,27 @@ test('composer usage statusline: live, replay, partial, attributed, session swit
   await openMenu(page);await toggle(page).click();
   await expect(toggle(page)).toHaveAttribute('aria-expanded','true');
   await expect(details(page)).toBeVisible();
-  await expect(details(page)).toContainText('browser-observed');
-  await expect(details(page)).toContainText('Provider-reported cost: 0.1000 USD');
+  await expect(details(page)).toContainText(/Context: 50,000 \/ 200,000 tokens \(25\.0%\) · updated /);
+  await expect(details(page)).toContainText('Cost: 0.1000 USD');
+  // How numbers are gathered sits behind the panel's "?", not in the lines themselves.
+  await expect(details(page).locator('.usage-help p').first()).toBeHidden();
+  await details(page).locator('.usage-help summary').click();
+  await expect(details(page).locator('.usage-help')).toContainText('Agentworks never queries it');
   await expect(details(page)).toContainText('5h quota: not reported');
   // Reload replays timestamp-less persisted events: freshness must be unknown, not "now".
   await page.reload();await expect(page.locator('#session-state')).toHaveText('Ready');
   await expect(toggle(page)).toHaveText('⚠ 50k/200k · 25%');
   await openMenu(page);await toggle(page).click();
-  await expect(details(page)).toContainText('freshness unknown (replayed');
-  await expect(details(page)).not.toContainText('browser-observed');
+  await expect(details(page)).toContainText('update time unknown');
+  await expect(details(page)).not.toContainText('updated ');
   // A live context-only update (ACP requires used/size) must not freshen replayed cost.
   await inject(page,{used:60000,size:200000});
   await expect(toggle(page)).toHaveText('60k/200k · 30%');
-  await expect(details(page).locator('div',{hasText:'Provider-reported cost'})).toContainText('0.1000 USD · scope and account billing not verified · freshness unknown (replayed');
+  await expect(details(page).locator('div',{hasText:'Context:'})).toContainText(/60,000 \/ 200,000 tokens \(30\.0%\) · updated /);
+  await expect(details(page).locator('div',{hasText:'Cost:'})).toHaveText('Cost: 0.1000 USD');
   // Subagent-attributed usage cannot overwrite the parent composer.
   await inject(page,{used:999,size:1000,_meta:{parentToolUseId:'toolu_demo'}});
   await expect(toggle(page)).toHaveText('60k/200k · 30%');
-  await expect(details(page)).toContainText('1 subagent/parent-attributed ignored');
   // Switching sessions resets the statusline to that session's own events.
   await open(page,b.id);
   await expect(toggle(page)).toHaveText('Context unknown');
@@ -100,8 +104,8 @@ test('composer usage statusline: live, replay, partial, attributed, session swit
   await chip(page).click();await expect(toggle(page)).toBeVisible();
   await page.keyboard.press('Escape');await expect(toggle(page)).toBeHidden();
   await openMenu(page);await toggle(page).click();
-  await expect(details(page)).toContainText('5h quota (reported): 77% remaining · status allowed');
-  await expect(details(page)).toContainText('7d quota (reported): 90% remaining');
+  await expect(details(page)).toContainText('5h quota: 77% left · resets in');
+  await expect(details(page)).toContainText('7d quota: 90% left');
   // Invalid fractions are rejected and do not overwrite reported windows.
   await inject(page,{used:70000,size:1000000,_meta:{'_claude/rateLimit':{unifiedWindows:{five_hour:{utilization:1.5},seven_day:{utilization:-0.2}}}}});
   await expect(toggle(page)).toHaveText(quota('70k/1.0M · 7%'));
@@ -112,7 +116,7 @@ test('composer usage statusline: live, replay, partial, attributed, session swit
   await inject(page,{used:80000,size:0});
   await expect(toggle(page)).toHaveText(quota('80k ctx · size unknown'));
   await openMenu(page);await toggle(page).click();
-  await expect(details(page).locator('div',{hasText:'5h quota'})).toContainText('Agentworks-observed');
+  await expect(details(page).locator('div',{hasText:'5h quota'})).toContainText('· updated ');
   // Quota is per account: A (same host and provider family) shows B's report
   // without one of its own, and a newer report from B arrives while A is open.
   await open(page,a.id);

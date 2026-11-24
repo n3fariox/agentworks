@@ -110,6 +110,10 @@ body[data-code-wrap=scroll] .tool-card pre,body[data-code-wrap=scroll] .approval
 .usage-status-toggle{background:none;border:0;color:inherit;opacity:.75;cursor:pointer;font:inherit;padding:4px 6px;min-height:28px}
 .usage-status-toggle.stale,.usage-status-toggle.unknown{opacity:.55;font-style:italic}
 .usage-status-details{width:100%;max-width:640px;padding:8px 10px;border:1px solid rgba(127,127,127,.35);border-radius:8px;display:grid;gap:4px;overflow-wrap:anywhere}
+.usage-help>summary{list-style:none;display:inline-grid;place-items:center;width:20px;height:20px;border:1px solid rgba(127,127,127,.5);border-radius:50%;cursor:pointer;font-size:11px;font-weight:600;opacity:.75}
+.usage-help>summary::-webkit-details-marker{display:none}
+.usage-help[open]>summary,.usage-help>summary:hover{opacity:1}
+.usage-help p{margin:4px 0 0;opacity:.8}
 @media (max-width:640px){.usage-status{align-items:stretch}.usage-status-toggle{text-align:left;min-height:36px}}
 /* L-05 activity indicator and queued inputs */
 .activity-indicator{display:flex;align-items:center;gap:.5rem;font-size:.85rem;padding:.35rem .25rem;color:var(--muted,#aaa)}
@@ -476,7 +480,7 @@ dialog.image-viewer{width:96vw;max-width:96vw;height:92dvh;max-height:92dvh;padd
 }
 
 .model-provider-card{display:flex;justify-content:space-between;gap:16px;padding:14px 0;border-bottom:1px solid var(--border);overflow-wrap:anywhere}.model-provider-card p{margin:5px 0}.model-provider-actions{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin-top:15px}#model-provider-editor{margin-top:20px;padding-top:15px;border-top:1px solid var(--border)}#model-provider-message{white-space:pre-wrap;margin-top:14px}
-.routing-candidate-row{display:grid;grid-template-columns:minmax(110px,1fr) minmax(110px,1fr) minmax(120px,1.2fr) minmax(140px,1.5fr) auto auto;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)}.routing-candidate-row .workspace-check{margin:0;white-space:nowrap}
+.routing-candidate-row{display:grid;grid-template-columns:minmax(105px,1fr) minmax(105px,1fr) minmax(115px,1.15fr) minmax(115px,0.9fr) minmax(135px,1.4fr) auto auto;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)}.routing-candidate-row .workspace-check{margin:0;white-space:nowrap}
 #create-initial-prompt,#routing-decision-instructions{background:#111417;border:1px solid #3a3d45;border-radius:7px;color:var(--text);padding:11px 12px;width:100%;box-sizing:border-box;font:inherit;font-size:12px;resize:vertical}#create-initial-prompt:focus,#routing-decision-instructions:focus{outline:1px solid #8c7ca8}
 
 .model-provider-availability{margin:18px 0;padding:10px 12px;border:1px solid var(--border);border-radius:8px}#model-provider-hosts{display:flex;flex-wrap:wrap;gap:8px 20px}:is(#settings-dialog,#host-settings-dialog) .model-provider-host-choice{display:flex;align-items:center;gap:9px;margin:0;min-height:42px}:is(#settings-dialog,#host-settings-dialog) .model-provider-host-choice input{width:17px;min-height:17px;height:17px;margin:0}

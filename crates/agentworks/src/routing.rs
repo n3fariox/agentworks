@@ -77,6 +77,87 @@ fn default_enabled() -> bool {
     true
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelTier {
+    Fast,
+    Balanced,
+    Deep,
+}
+
+impl ModelTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Balanced => "balanced",
+            Self::Deep => "deep",
+        }
+    }
+
+    pub fn cost_and_quota_impact(self) -> &'static str {
+        match self {
+            Self::Fast => "low",
+            Self::Balanced => "medium",
+            Self::Deep => "high",
+        }
+    }
+
+    pub fn summary(self) -> &'static str {
+        match self {
+            Self::Fast => "fast (low cost & quota burn; quick edits, simple fixes, lookups)",
+            Self::Balanced => {
+                "balanced (moderate cost & quota burn; everyday coding & multi-file work)"
+            }
+            Self::Deep => {
+                "deep (high cost & quota burn; complex architecture, hard debugging, deep reasoning)"
+            }
+        }
+    }
+}
+
+/// Infers a default capability/cost tier for well-known model families and harnesses
+/// when the candidate does not specify an explicit `tier`.
+pub fn infer_tier(provider: &str, model: Option<&str>) -> Option<ModelTier> {
+    if let Some(m) = model.map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()) {
+        // Match separator-delimited model tokens (with optional trailing version digits) so
+        // substrings inside family names like "gemini" don't collide with "mini".
+        let tokens: Vec<&str> = m
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let has_tok = |list: &[&str]| {
+            tokens.iter().any(|t| {
+                list.iter().any(|tok| {
+                    *t == *tok
+                        || t.strip_prefix(tok)
+                            .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+                })
+            })
+        };
+        if has_tok(&[
+            "haiku", "hydrogen", "flash", "mini", "nano", "lite", "quick", "luna", "spark",
+            "small", "fast",
+        ]) {
+            return Some(ModelTier::Fast);
+        }
+        if has_tok(&["opus", "argon", "max", "ultra", "heavy", "deep", "steady", "pro"]) {
+            return Some(ModelTier::Deep);
+        }
+        if has_tok(&[
+            "sonnet", "neon", "sol", "codex", "medium", "standard", "balanced", "gpt",
+        ]) {
+            return Some(ModelTier::Balanced);
+        }
+        return None;
+    }
+
+    match agentworks_runtime::provider::cli_provider(provider) {
+        "claude" | "codex" | "antigravity" => Some(ModelTier::Balanced),
+        "opencode" => Some(ModelTier::Fast),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Candidate {
@@ -85,6 +166,8 @@ pub struct Candidate {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<ModelTier>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
     #[serde(default = "default_enabled")]
@@ -428,6 +511,7 @@ struct EligibleCandidate {
     provider: String,
     model: Option<String>,
     model_provider: Option<String>,
+    tier: Option<ModelTier>,
     notes: Option<String>,
     family: String,
     quota_used: f64,
@@ -590,6 +674,7 @@ fn build_pool(
                         provider: "goose".into(),
                         model: Some(p.default_model.clone()),
                         model_provider: Some(p.id.clone()),
+                        tier: None,
                         notes: Some(p.name.clone()),
                         enabled: true,
                     });
@@ -600,6 +685,7 @@ fn build_pool(
                 provider: provider.into(),
                 model: None,
                 model_provider: None,
+                tier: None,
                 notes: None,
                 enabled: true,
             });
@@ -699,11 +785,15 @@ fn build_pool(
         let quota_entry = app.account_quota.get(host_id, &family);
         let (quota_used, exhausted) = quota_summary(quota_entry.as_ref(), &c.provider, now);
         let (session_load, active_sessions) = family_loads.get(&family).copied().unwrap_or((0.0, 0));
+        let tier = c
+            .tier
+            .or_else(|| infer_tier(&c.provider, resolved_model.as_deref()));
 
         pool.push(EligibleCandidate {
             provider: c.provider,
             model: resolved_model,
             model_provider: c.model_provider,
+            tier,
             notes: c.notes,
             family,
             quota_used,
@@ -876,6 +966,11 @@ fn candidate_options(pool: &[EligibleCandidate]) -> Vec<(String, String, usize)>
             }
             if let Some(mp) = &c.model_provider {
                 parts.push(format!("modelProvider={mp}"));
+            }
+            if let Some(tier) = c.tier {
+                parts.push(format!("tier={}", tier.summary()));
+            } else {
+                parts.push("tier=unknown".into());
             }
             parts.push(format!("quotaUsed={:.0}%", c.quota_used * 100.0));
             parts.push(format!("activeSessions={}", c.active_sessions));
@@ -1159,6 +1254,8 @@ async fn call_decision_model(
                 "provider": c.provider,
                 "defaultModel": c.model,
                 "modelProvider": c.model_provider,
+                "tier": c.tier.map(|t| t.as_str()),
+                "costAndQuotaImpact": c.tier.map(|t| t.cost_and_quota_impact()),
                 "quotaFamily": c.family,
                 "notes": c.notes,
                 "quotaUsedPercent": (c.quota_used * 100.0).round(),
@@ -1192,7 +1289,7 @@ async fn call_decision_model(
     });
 
     let mut base_instructions = String::from(
-        "Choose the best eligible agent/model candidate for this new session based on the task title, description/prompt, role, candidate notes, quota usage, and active sessions. Prefer non-exhausted candidates and balance load when options are otherwise comparable.",
+        "Choose the best eligible agent/model candidate for this new session. Match the task complexity in title/description/prompt/role against each candidate's tier and implied cost/quota burn (`fast` = low cost/quota for quick edits & simple tasks; `balanced` = medium cost/quota for everyday coding; `deep` = high cost/quota for complex architecture & hard debugging). Avoid exhausted candidates and favor lower quotaUsed and fewer activeSessions when tiers are similarly suitable.",
     );
     if let Some(extra) = dm.instructions.as_deref()
         && !extra.trim().is_empty()
@@ -1549,6 +1646,7 @@ mod tests {
                 provider: "claude-rust".into(),
                 model: Some("claude-sonnet".into()),
                 model_provider: None,
+                tier: Some(ModelTier::Balanced),
                 notes: None,
                 family: "claude".into(),
                 quota_used: 0.75,
@@ -1561,6 +1659,7 @@ mod tests {
                 provider: "codex-rust".into(),
                 model: Some("codex-mini".into()),
                 model_provider: None,
+                tier: Some(ModelTier::Fast),
                 notes: None,
                 family: "codex".into(),
                 quota_used: 0.10,
@@ -1604,6 +1703,7 @@ mod tests {
                         provider: "opencode".into(),
                         model: None,
                         model_provider: None,
+                        tier: None,
                         notes: None,
                         enabled: true,
                     },
@@ -1611,6 +1711,7 @@ mod tests {
                         provider: "demo".into(),
                         model: Some("demo-role-model".into()),
                         model_provider: None,
+                        tier: None,
                         notes: None,
                         enabled: true,
                     },
@@ -1682,5 +1783,62 @@ mod tests {
             protocol_sequence(DecisionProtocol::Auto, "http://127.0.0.1:8080", "kev-4b")[0],
             DecisionProtocol::Systemone
         );
+    }
+
+    #[test]
+    fn infer_tier_covers_known_families_and_defaults() {
+        assert_eq!(infer_tier("claude-rust", Some("claude-haiku-test")), Some(ModelTier::Fast));
+        assert_eq!(infer_tier("claude-rust", Some("claude-sonnet")), Some(ModelTier::Balanced));
+        assert_eq!(infer_tier("claude-rust", Some("claude-opus-5-5")), Some(ModelTier::Deep));
+
+        assert_eq!(infer_tier("antigravity", Some("gemini-4-hydrogen")), Some(ModelTier::Fast));
+        assert_eq!(infer_tier("antigravity", Some("gemini-4-neon")), Some(ModelTier::Balanced));
+        assert_eq!(infer_tier("antigravity", Some("gemini-4-argon")), Some(ModelTier::Deep));
+
+        assert_eq!(infer_tier("codex-rust", Some("gpt-5-mini")), Some(ModelTier::Fast));
+        assert_eq!(infer_tier("codex-rust", Some("gpt-5-pro")), Some(ModelTier::Deep));
+        assert_eq!(infer_tier("codex-rust", Some("gpt-6.1-sol")), Some(ModelTier::Balanced));
+
+        assert_eq!(infer_tier("demo", Some("demo/quick")), Some(ModelTier::Fast));
+        assert_eq!(infer_tier("demo", Some("demo/steady")), Some(ModelTier::Deep));
+
+        assert_eq!(infer_tier("claude-rust", None), Some(ModelTier::Balanced));
+        assert_eq!(infer_tier("codex-rust", None), Some(ModelTier::Balanced));
+        assert_eq!(infer_tier("antigravity", None), Some(ModelTier::Balanced));
+        assert_eq!(infer_tier("opencode", None), Some(ModelTier::Fast));
+        assert_eq!(infer_tier("demo", None), None);
+
+        let pool = vec![
+            EligibleCandidate {
+                provider: "claude-rust".into(),
+                model: Some("claude-haiku-test".into()),
+                model_provider: None,
+                tier: infer_tier("claude-rust", Some("claude-haiku-test")),
+                notes: None,
+                family: "claude".into(),
+                quota_used: 0.2,
+                exhausted: false,
+                session_load: 0.0,
+                active_sessions: 0,
+                candidate_key: candidate_key("claude-rust", None, Some("claude-haiku-test")),
+            },
+            EligibleCandidate {
+                provider: "antigravity".into(),
+                model: Some("gemini-4-argon".into()),
+                model_provider: None,
+                tier: infer_tier("antigravity", Some("gemini-4-argon")),
+                notes: None,
+                family: "antigravity".into(),
+                quota_used: 0.4,
+                exhausted: false,
+                session_load: 0.0,
+                active_sessions: 0,
+                candidate_key: candidate_key("antigravity", None, Some("gemini-4-argon")),
+            },
+        ];
+        let options = candidate_options(&pool);
+        assert_eq!(options.len(), 2);
+        assert!(options[0].1.contains("tier=fast"));
+        assert!(options[1].1.contains("tier=deep"));
     }
 }

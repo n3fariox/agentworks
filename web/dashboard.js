@@ -1,7 +1,7 @@
 import {setupNotificationTray} from './notification-tray.js';
 import {renderHostUsage, startHostUsage} from './host-usage.js';
 import {appUrl, socketUrl} from './hosting.js';
-import {STALE_MS, countdown, watchSharedQuota, antigravityWindows} from './usage-status.js';
+import {STALE_MS, countdown, shortTime, watchSharedQuota, antigravityWindows} from './usage-status.js';
 
 const STATES = ['running', 'waiting', 'idle', 'stopped', 'unknown'];
 const LABELS = {running:'Running', waiting:'Waiting for approval/input', idle:'Idle', stopped:'Stopped', unknown:'Unknown'};
@@ -26,36 +26,40 @@ export function counts(sessions, activity = new Map()) {
   return result;
 }
 export function activelyTurning(session) { return session.turnRunning === true && session.archived !== true; }
-function freshness(value, now, observer = 'Adapter observed') {
-  if (value?.at == null) return 'Freshness unknown · persisted observation has no source timestamp';
-  return `${observer} ${new Date(value.at).toLocaleString()}${now - value.at > STALE_MS ? ' · stale (over 10 minutes old)' : ''}${value.at > now ? ' · source clock is ahead' : ''}`;
+export function awakeIdle(session) {
+  return session.archived !== true && !activelyTurning(session) && session.status === 'idle' && session.asleep !== true;
+}
+// Kept short; where each time comes from is explained in docs/USER-GUIDE.md.
+function freshness(at, now) {
+  if (at == null) return 'Update time unknown';
+  return `Updated ${shortTime(at, now)}${now - at > STALE_MS ? ' · stale' : ''}${at > now ? ' · source clock ahead' : ''}`;
 }
 function quotaReset(at, now) {
-  if (typeof at !== 'number' || !Number.isFinite(at) || at < 0 || at > 8.64e15) return 'Reset unavailable';
-  const date = new Date(at).toLocaleString(undefined, {timeZoneName:'short'});
+  if (typeof at !== 'number' || !Number.isFinite(at) || at < 0 || at > 8.64e15) return 'Reset unknown';
   const remaining = countdown(at - now);
-  return remaining ? `Resets in ${remaining} · ${date}` : `Reported reset time passed · ${date} · awaiting a new provider report`;
+  return remaining ? `Resets in ${remaining}` : 'Reset time passed';
 }
+const windowLength = minutes => minutes % 1440 === 0 ? `${minutes / 1440}d` : minutes % 60 === 0 ? `${minutes / 60}h` : `${minutes}m`;
 export function usageMeters(state, now = Date.now()) {
   const meters = [];
   if (state.context?.percent !== undefined) meters.push({
-    label:'Session context occupancy', percent:state.context.percent,
-    detail:`${state.context.used} of ${state.context.size} reported tokens · freshness unknown (persisted event)`
+    kind:'context', label:'Context', percent:state.context.percent,
+    detail:`${state.context.used} of ${state.context.size} tokens`
   });
   for (const [label, quota] of Object.entries(state.quota)) meters.push({
-    label:`Reported ${label} quota used`, percent:quota.usedPercent,
-    detail:`${quotaReset(quota.resetsAt, now)} · ${freshness(quota, now, 'Agentworks received')}`
+    label:`${label} quota used`, percent:quota.usedPercent,
+    detail:`${quotaReset(quota.resetsAt, now)} · ${freshness(quota.at, now)}`
   });
   for (const quota of Object.values(state.codexQuota)) {
     if (quota.usedPercent?.value === undefined) continue;
     const minutes = quota.windowDurationMins?.value;
-    const duration = minutes === undefined ? 'window duration unknown' : `${minutes} minute window`;
-    meters.push({label:`${quota.limitName || quota.limitId} · ${quota.role} · ${duration} · quota used`,
-      percent:quota.usedPercent.value, detail:`${quotaReset(quota.resetsAt?.value, now)}${quota.resetsAt?.value !== undefined ? ` · Reset freshness: ${freshness(quota.resetsAt, now)}` : ''} · Usage freshness: ${freshness(quota.usedPercent, now)}`});
+    const name = [quota.limitId === 'codex' ? '' : quota.limitName || quota.limitId, minutes === undefined ? quota.role : windowLength(minutes)].filter(Boolean).join(' ');
+    meters.push({label:`${name} quota used`, percent:quota.usedPercent.value,
+      detail:`${quotaReset(quota.resetsAt?.value, now)} · ${freshness(quota.usedPercent.at, now)}`});
   }
   for(const quota of antigravityWindows(state,now)){
     if(quota.percent===null)continue;
-    meters.push({label:`${quota.label} · quota used`,percent:100-quota.percent,detail:quota.detail});
+    meters.push({label:`${quota.label} quota used`,percent:100-quota.percent,detail:`${quotaReset(quota.resetsAt,now)} · ${freshness(quota.observedAtMs,now)}`});
   }
   return meters;
 }
@@ -99,30 +103,64 @@ function renderHosts(catalog, sessions) {
   }
   renderHostMetrics();
 }
-function renderProjects(catalog, sessions) {
-  const root = document.querySelector('#projects'); root.replaceChildren();
-  if (!sessions) { root.append(note('Project active turn counts unavailable.')); return; }
-  const projects = catalog ? [...catalog.projects] : [];
-  for (const session of sessions) if (session.projectId && !projects.some(p => p.id === session.projectId)) projects.push({id:session.projectId, name:`Unknown project (${session.projectId})`});
-  projects.push({id:null, name:'Ungrouped'});
-  if (!catalog) root.append(note('Project catalog unavailable. Session project IDs are shown where reported.'));
-  for (const project of projects) {
-    const matching = sessions.filter(s => (s.projectId || null) === project.id);
-    const details = el('details', undefined, 'project');
-    const summary = el('summary');
-    summary.append(el('strong', `${project.name}${project.archived ? ' · archived' : ''} · ${matching.length} active ${matching.length === 1 ? 'turn' : 'turns'}`));
-    details.append(summary);
-    if (!matching.length) details.append(el('p', 'No sessions in this project.', 'session-list empty'));
-    const list = el('ul', undefined, 'session-list');
-    for (const session of matching) {
-      const item = el('li', undefined, 'session-row');
-      const identity = el('div', session.title || 'Untitled session');
-      identity.append(el('small', `${session.provider || 'Provider unknown'} · ${session.id}${session.archived ? ' · archived' : ''}`));
-      const status = el('div', 'Taking a turn', 'session-state running');
-      item.append(identity, status); list.append(item);
-    }
-    details.append(list); root.append(details);
+function sessionRow(session, projectName, hostName, {showWaiting = false} = {}) {
+  const item = el('li', undefined, 'session-row');
+  const identity = el('div', undefined, 'session-identity');
+  const link = el('a', session.title || 'Untitled session', 'session-link');
+  link.href = appUrl('/?' + new URLSearchParams({session:session.id}));
+  const meta = [projectName, session.provider || 'Provider unknown', hostName].filter(Boolean).join(' · ');
+  identity.append(link, el('small', meta));
+  item.append(identity);
+  if (showWaiting && session.status === 'waiting') item.append(el('span', 'Waiting for input', 'badge waiting-badge'));
+  return item;
+}
+function renderActiveTurns(catalog, sessions) {
+  const root = document.querySelector('#projects');
+  const summary = document.querySelector('#active-turns-summary');
+  const idleWasOpen = !!root.querySelector('.idle-sessions')?.open;
+  root.replaceChildren();
+  if (!sessions) {
+    if (summary) summary.textContent = '';
+    root.append(note('Active turns unavailable.'));
+    return;
   }
+  const projectName = id => !id ? 'Ungrouped' : catalog?.projects?.find(p => p.id === id)?.name || id;
+  const hostName = id => !id ? '' : catalog?.hosts?.find(h => h.id === id)?.name || id;
+  const byName = (a, b) => projectName(a.projectId).localeCompare(projectName(b.projectId)) || (a.title || '').localeCompare(b.title || '');
+  const active = sessions.filter(s => activelyTurning(s) || s.status === 'waiting')
+    .sort((a, b) => (b.status === 'waiting') - (a.status === 'waiting') || byName(a, b));
+  const idle = sessions.filter(awakeIdle).sort(byName);
+  const waiting = active.filter(s => s.status === 'waiting').length;
+  if (summary) {
+    const parts = [];
+    if (waiting) parts.push(`${waiting} waiting`);
+    if (active.length - waiting > 0 || (!waiting && active.length > 0)) parts.push(`${active.length - waiting} running`);
+    if (!active.length) parts.push('None running');
+    if (idle.length) parts.push(`${idle.length} idle`);
+    summary.textContent = parts.join(' · ');
+  }
+  if (!active.length && !idle.length) {
+    root.append(el('p', 'No active turns.', 'empty'));
+    return;
+  }
+  const card = el('div', undefined, 'card turns-card');
+  if (active.length) {
+    const list = el('ul', undefined, 'session-list');
+    for (const session of active) list.append(sessionRow(session, projectName(session.projectId), hostName(session.hostId), {showWaiting:true}));
+    card.append(list);
+  } else {
+    card.append(el('p', 'No active turns.', 'turns-empty'));
+  }
+  if (idle.length) {
+    const details = el('details', undefined, 'idle-sessions');
+    details.open = idleWasOpen;
+    details.append(el('summary', `${idle.length} idle ${idle.length === 1 ? 'session' : 'sessions'}`));
+    const list = el('ul', undefined, 'session-list');
+    for (const session of idle) list.append(sessionRow(session, projectName(session.projectId), hostName(session.hostId)));
+    details.append(list);
+    card.append(details);
+  }
+  root.append(card);
 }
 // Goose reaches models through provider profiles, so its quota is per profile.
 export function familyLabel(family, profiles = []) {
@@ -134,14 +172,14 @@ export function familyLabel(family, profiles = []) {
   return `Goose · ${id === 'default' ? 'default provider' : profiles.find(p => p.id === id)?.name || id}`;
 }
 function renderQuotaMeters(root, key, state) {
-  const meters = usageMeters(state).filter(value => value.label !== 'Session context occupancy');
-  if (!meters.length) { root.append(note('This account reported no usable quota windows.')); return; }
+  const meters = usageMeters(state).filter(value => value.kind !== 'context');
+  if (!meters.length) { root.append(note('No usable quota windows reported.')); return; }
   for (const [i, value] of meters.entries()) {
     const box = el('div', undefined, 'usage-meter');
-    const label = el('label', `${value.label}: ${value.percent.toFixed(1)}%`, 'meter-label');
+    const label = el('label', `${value.label}: ${Math.round(value.percent)}%`, 'meter-label');
     const meter = el('meter'); meter.id = `usage-${key.replace(/[^\w-]/g, '_')}-${i}`; label.htmlFor = meter.id;
     meter.min = 0; meter.max = 100; meter.value = Math.min(100, value.percent);
-    meter.textContent = `${value.percent.toFixed(1)}%`;
+    meter.textContent = `${Math.round(value.percent)}%`;
     const detail = el('div', value.detail, 'usage-detail'); detail.id = `${meter.id}-detail`;
     meter.setAttribute('aria-describedby', detail.id);
     box.append(label, meter, detail); root.append(box);
@@ -165,14 +203,12 @@ function renderAccounts({status, catalog, profiles} = {}) {
     const provider = configs.find(p => p.installed) || configs[0];
     if (provider) {
       const adapter = provider.installed === true ? 'available' : provider.installed === false ? 'unavailable' : 'unknown';
-      const mode = provider.authMode === 'existing' ? 'existing host sign-in (unverified)' : provider.authMode === 'api_key' ? 'API key' : 'unknown';
-      const key = provider.authMode === 'api_key' ? ` · API key presence: ${provider.keyPresent === true ? 'configured (unverified)' : provider.keyPresent === false ? 'not configured' : 'unknown'}` : '';
-      card.append(el('p', `Adapter: ${adapter} · Authentication mode: ${mode}${key}`, 'account-config'));
+      const key = provider.keyPresent === true ? 'configured' : provider.keyPresent === false ? 'not configured' : 'unknown';
+      const auth = provider.authMode === 'existing' ? 'host sign-in' : provider.authMode === 'api_key' ? `API key (${key})` : 'unknown';
+      card.append(el('p', `Adapter: ${adapter} · Auth: ${auth}`, 'account-config'));
     }
-    if (account.state) {
-      card.append(el('h4', 'Reported quota windows', 'quota-state'), note('Latest report from any session on this host and account. Percentages describe reported windows only; account spending cap and USD used / total are unavailable.'));
-      renderQuotaMeters(card, `${account.hostId}-${account.family}`, account.state);
-    } else card.append(el('h4', 'No quota reported', 'quota-state'), note('No retained or live session has reported subscription quota for this provider. This does not establish a no-usage-cap plan. Account spend / limit in USD is unavailable.'));
+    if (account.state) renderQuotaMeters(card, `${account.hostId}-${account.family}`, account.state);
+    else card.append(el('h4', 'No quota reported', 'quota-state'));
     if(account.family==='antigravity'&&account.state?.antigravityQuota?.sessionId){
       const refresh=el('button','Refresh quota');refresh.type='button';
       refresh.onclick=async()=>{
@@ -189,9 +225,7 @@ function renderAccounts({status, catalog, profiles} = {}) {
 }
 let context = {};
 const sharedQuota = typeof document === 'undefined' ? null : watchSharedQuota(socketUrl('api/account-quota/events'), connected => {
-  document.querySelector('#quota-status').textContent = connected
-    ? 'Live: updates as soon as any session reports quota.'
-    : 'Live quota feed disconnected. Reconnecting…';
+  document.querySelector('#quota-status').textContent = connected ? 'Live' : 'Disconnected · reconnecting…';
   renderAccounts(context);
 });
 let refreshing = false;
@@ -201,7 +235,7 @@ async function refresh() {
   const button = document.querySelector('#refresh');
   button.disabled = true;
   const statusLine = document.querySelector('#refresh-status');
-  statusLine.textContent = 'Reading workspace snapshots…';
+  statusLine.textContent = 'Refreshing…';
   try {
     const paths = ['api/catalog','api/sessions','api/status','api/model-providers'];
     const reads = await Promise.allSettled(paths.map(read));
@@ -210,13 +244,13 @@ async function refresh() {
     const errors = document.querySelector('#errors'); errors.replaceChildren();
     const names = ['Host/project catalog','Session list','Provider configuration'];
     reads.slice(0, 3).forEach((result, i) => { if (result.status === 'rejected') errors.append(el('p', `${names[i]} unavailable. Refresh to retry.`, 'error')); });
-    const activeSessions = sessions?.filter(activelyTurning) ?? null;
-    renderHosts(catalog, activeSessions); renderProjects(catalog, activeSessions);
+    const activeSessions = sessions?.filter(s => activelyTurning(s) || s.status === 'waiting') ?? null;
+    renderHosts(catalog, activeSessions); renderActiveTurns(catalog, sessions);
     context = {status, catalog, profiles:profiles?.profiles || []};
     renderAccounts(context);
-    statusLine.textContent = `Snapshot read ${new Date().toLocaleString()}.${reads.slice(0, 3).some(r => r.status === 'rejected') ? ' Some data is unavailable.' : ''}`;
+    statusLine.textContent = `Updated ${shortTime(Date.now())}${reads.slice(0, 3).some(r => r.status === 'rejected') ? ' · some data unavailable' : ''}`;
   } catch {
-    statusLine.textContent = 'Snapshot read failed. Refresh to retry.';
+    statusLine.textContent = 'Refresh failed. Try again.';
   } finally {
     button.disabled = false;
     refreshing = false;
@@ -225,6 +259,9 @@ async function refresh() {
 if (typeof document !== 'undefined') {
   startHostUsage({onState(sample, status) { hostSample = sample; hostMetricStatus = status; renderHostMetrics(); }});
   document.querySelector('#refresh').addEventListener('click', () => refresh());
+  const tips = () => [...document.querySelectorAll('details.help-tip[open]')];
+  document.addEventListener('click', e => { for (const t of tips()) if (!t.contains(e.target)) t.open = false; });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') for (const t of tips()) t.open = false; });
   refresh();
 }
 
