@@ -294,6 +294,9 @@ test('a password locks secrets until unlocked; commands wait and locked sessions
   const secret=await (await api('/api/secrets',{name:'LOCKED_TOKEN',description:'Fixture',value})).json();
   let session;
   try{
+    const keyPath=join(fixture,'sessions.secrets.key');
+    // A copy of the key file taken while it had no password.
+    const copied=await readFile(keyPath);
     const panel=await openPanel(page);
     const section=panel.locator('[data-password-section]');
     await expect(section).toContainText('No password');
@@ -308,12 +311,24 @@ test('a password locks secrets until unlocked; commands wait and locked sessions
     await expect(section).toContainText('Unlocked');
     await page.locator('#secret-lock-minutes').selectOption('15');
     await expect.poll(async()=>(await (await api('/api/secrets/status')).json()).lockMinutes).toBe(15);
-    const key=await readFile(join(fixture,'sessions.secrets.key'),'utf8');
+    const key=await readFile(keyPath,'utf8');
     expect(JSON.parse(key).slots[0]).toMatchObject({kind:'password',password:true});
+    expect(JSON.parse(key).previousKey).toBeUndefined();
     expect(key).not.toContain(password);
 
+    // The first password replaced the key and re-encrypted every value: the copy taken
+    // before opens on its own but reads nothing.
+    await stop();
+    await writeFile(keyPath,copied);
+    await start();
+    const withCopy=await (await api('/api/secrets')).json();
+    expect([withCopy.locked,withCopy.password]).toEqual([false,false]);
+    expect(withCopy.secrets.find(s=>s.name==='LOCKED_TOKEN').readable).toBe(false);
+    await stop();
+    await writeFile(keyPath,key);
+
     // A password-protected key file starts locked; nothing can be sealed or opened.
-    await stop();await start();
+    await start();
     const locked=await (await api('/api/secrets/status')).json();
     expect([locked.locked,locked.password,locked.lockMinutes]).toEqual([true,true,15]);
     expect((await api('/api/secrets',{name:'OTHER_TOKEN',value:'other-value'})).status).toBe(423);
@@ -358,6 +373,21 @@ test('a password locks secrets until unlocked; commands wait and locked sessions
       reply=await conversation.locator('.message').last().innerText();
     }
     expect(reply).toContain(`LOCKED_TOKEN is set (${value.length} bytes).`);
+
+    // Replacing the key again re-encrypts in place; values stay readable.
+    const settings=await openPanel(page);
+    await settings.getByRole('button',{name:'Replace encryption key'}).click();
+    await page.locator('#secret-password-current').fill('wrong password');
+    await settings.getByRole('button',{name:'Replace key'}).click();
+    await expect(settings.locator('[data-error]')).toContainText('current password is not correct');
+    const beforeRotation=await readFile(keyPath,'utf8');
+    await page.locator('#secret-password-current').fill(password);
+    await settings.getByRole('button',{name:'Replace key'}).click();
+    await expect(settings.locator('[data-password-form]')).toBeHidden();
+    const afterRotation=await readFile(keyPath,'utf8');
+    expect(afterRotation).not.toBe(beforeRotation);
+    expect(JSON.parse(afterRotation).previousKey).toBeUndefined();
+    expect((await (await api('/api/secrets')).json()).secrets.find(s=>s.name==='LOCKED_TOKEN').readable).toBe(true);
 
     // Changing the password needs the current one; locking and removing it work.
     expect((await api('/api/secrets/password',{current:'wrong password',password:'battery staple'},'PUT')).status).toBe(403);

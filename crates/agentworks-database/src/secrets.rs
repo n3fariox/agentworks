@@ -163,6 +163,31 @@ impl Store {
         tx.commit()?;
         Ok(saved)
     }
+    /// Replaces every value `reseal` returns a new (nonce, ciphertext‖tag) for, in one
+    /// transaction, and returns how many changed. Used when the data key is replaced;
+    /// `updated` is left alone because the values themselves do not change.
+    pub fn reseal_secrets<E: From<rusqlite::Error>>(
+        &mut self,
+        reseal: impl Fn(&SealedSecret) -> Result<Option<(Vec<u8>, Vec<u8>)>, E>,
+    ) -> Result<usize, E> {
+        let tx = self.connection.transaction()?;
+        let secrets: Vec<SealedSecret> = tx
+            .prepare(&format!("SELECT {COLUMNS} FROM secrets"))?
+            .query_map([], row)?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut changed = 0;
+        for secret in &secrets {
+            if let Some((nonce, body)) = reseal(secret)? {
+                tx.execute(
+                    "UPDATE secrets SET nonce=?2,value=?3 WHERE id=?1",
+                    params![secret.id, nonce, body],
+                )?;
+                changed += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
     /// Deletes a secret, its assignments (by cascade) and records the audit. False when
     /// it did not exist.
     pub fn delete_secret(&mut self, id: &str, now: i64) -> rusqlite::Result<bool> {
@@ -351,6 +376,27 @@ mod tests {
             .unwrap();
         assert_eq!(kept[0].origin, "human");
         assert_eq!(db.secret_session_counts().unwrap()["1"], 1);
+        // Re-sealing replaces values in one transaction; an error changes nothing.
+        let fails = db.reseal_secrets(|s| {
+            if s.name == "B_TOKEN" {
+                Err(rusqlite::Error::InvalidQuery)
+            } else {
+                Ok(Some((b"xx".to_vec(), b"aborted".to_vec())))
+            }
+        });
+        assert!(fails.is_err());
+        assert_eq!(db.secret("2").unwrap().unwrap().sealed, b"nnalpha");
+        let changed = db
+            .reseal_secrets::<rusqlite::Error>(|s| {
+                Ok((s.name == "A_TOKEN").then(|| (b"zz".to_vec(), b"resealed".to_vec())))
+            })
+            .unwrap();
+        assert_eq!(changed, 1);
+        let resealed = db.secret("2").unwrap().unwrap();
+        assert_eq!(
+            (resealed.sealed.as_slice(), resealed.updated),
+            (&b"zzresealed"[..], 1)
+        );
         let assigned = db.assigned_secrets("s").unwrap();
         assert_eq!(
             assigned.len(),

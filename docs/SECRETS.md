@@ -29,7 +29,7 @@ Envelope encryption, so a password can be added later without re-encrypting stor
   ]}
   ```
 
-  The file never holds a usable key. A wrong password, a wrong passkey secret or a mismatched file fails the AES-256-GCM tag check on `wrappedKey`; no separate password hash is stored. Version 1 files (the password slot alone, with `version: 1`) are still read and are written as version 2 the first time they change.
+  The file never holds a usable key. A wrong password, a wrong passkey secret or a mismatched file fails the AES-256-GCM tag check on `wrappedKey`; no separate password hash is stored. Version 1 files (the password slot alone, with `version: 1`) are still read and are written as version 2 the first time they change. During a key replacement the file also has `previousKey`: the old data key, wrapped under the new one.
 
 - **Values**: one SQLite row per secret, `AES-256-GCM(dataKey, nonce, value)` with the secret's ID and name as associated data, so ciphertexts cannot be swapped between rows.
 
@@ -43,11 +43,21 @@ Losing the key file makes stored values unrecoverable: a new key file is created
 
 Settings → Secrets → **Password** sets, changes or removes it.
 
-- Setting a password derives a new key-encryption key with a new salt (argon2id, 64 MiB, 3 passes), re-wraps the same data key and sets `"password": true`. Changing it needs the current password; removing it re-wraps under the empty password. Stored values are never re-encrypted. The key file is replaced atomically (a private temporary file beside it, synced and renamed), and never with a file for a different key. Passwords need at least 8 characters. The password is never stored or logged.
+- Setting the **first** password also replaces the data key and re-encrypts every value (see [Replacing the key](#replacing-the-key)): a copy of the key file taken while it had no password would otherwise still open every value. The new key is wrapped under argon2id (64 MiB, 3 passes) with a new salt and `"password": true`. Changing the password needs the current one and re-wraps the same data key; removing it re-wraps under the empty password. Neither re-encrypts values. The key file is replaced atomically (a private temporary file beside it, synced and renamed), and never with a file for a different key. Passwords need at least 8 characters. The password is never stored or logged.
 - With a password the server starts **locked**. Every page shows an **Unlock secrets** banner; unlocking reads the key file again and derives the key off the async workers. A wrong password fails the AES-GCM tag check; failed attempts wait 1, 2, 4 … up to 60 seconds before the next one. Unlocks, failures, locks and password changes are audited (`secrets.unlock`, `secrets.lock`, `secrets.password`).
 - **Lock after inactivity** (15 minutes to 24 hours, or never; default 1 hour) counts from the last time a value was sealed or opened: a harness start with environment secrets, a `run_with_secrets` release, or saving a value. Listing secrets does not count. **Lock now** locks at once. Locking drops the server's reference to the data key; a release already in progress finishes. Without a password there is nothing to lock, so the setting has no effect.
 - While locked, secrets are listed but cannot be added, changed or read (`423 Locked`). Sessions start without their `environment` secrets; the transcript says which, and unlocking restarts those sessions with them (now when idle, after their turn when busy). `run_with_secrets` waits for the unlock, as described below.
 - A forgotten password cannot be recovered. Remove the key file (Agentworks creates a new one) and enter the values again.
+
+### Replacing the key
+
+**Replace encryption key** in Settings → Secrets (`POST /api/secrets/rotate`, with the current password when there is one), and the first password, generate a new data key and re-encrypt every stored value under it. Use it if an older copy of the key file may have been taken. The key file and the database cannot change together, so it runs in three steps:
+
+1. Write a key file with the new key in its password slot and the old key wrapped under the new one (`previousKey`).
+2. Re-encrypt every value in one database transaction. Values that open under neither key (**Needs re-entry**) are left as they are.
+3. Rewrite the key file without `previousKey`.
+
+A crash at any point leaves a key file that opens every value: until step 3, values open under either key. Startup, or the next unlock when there is a password, finishes an interrupted replacement. Values are sealed under the store lock, so one saved during a replacement is either re-encrypted by step 2 or sealed with the new key. Key-file changes (password, passkeys, replacement) run one at a time. Passkeys are removed, because their secrets never reach the server and cannot be re-wrapped; add them again afterwards. Each replacement is audited (`secrets.rotate`: `started`, then `finished:<values re-encrypted>`).
 
 ### Passkeys
 
@@ -181,7 +191,7 @@ Values delivered to a session are registered with that session's scrubber when i
 - `GET/PUT /api/sessions/{id}/secrets`: assignments, each with its origin (human or parent session ID). `PUT` replaces the whole list; retained secrets keep their origin. Changes are audited against the session and shown in its transcript by name and settings, never value.
 - `POST /api/sessions/{id}/secrets/restart`: restart with current assignments.
 - `GET /api/secrets/status`: `{available, locked, password, passkeys, lockMinutes, keyFile, error}`, also included in `GET /api/secrets`.
-- `POST /api/secrets/unlock {password}` or `{passkey: {id, prf}}`, `POST /api/secrets/passkeys {current, label, credentialId, rpId, prfSalt, prf}`, `DELETE /api/secrets/passkeys/{id}`, `POST /api/secrets/lock`, `PUT /api/secrets/password {current, password}` (empty `password` removes it), `PUT /api/secrets/lock-timeout {minutes}` (0 never, otherwise 5–1440).
+- `POST /api/secrets/unlock {password}` or `{passkey: {id, prf}}`, `POST /api/secrets/passkeys {current, label, credentialId, rpId, prfSalt, prf}`, `DELETE /api/secrets/passkeys/{id}`, `POST /api/secrets/rotate {current}`, `POST /api/secrets/lock`, `PUT /api/secrets/password {current, password}` (empty `password` removes it), `PUT /api/secrets/lock-timeout {minutes}` (0 never, otherwise 5–1440).
 - MCP: `list_session_secrets`, `run_with_secrets` (executed by the facade on the session's host), and a `secrets` argument on `start_session`.
 - Bridge: `resolve_secrets`, the only operation that returns values, relayed for remote sessions.
 

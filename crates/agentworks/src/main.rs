@@ -995,6 +995,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             .secrets_lock_minutes
             .unwrap_or(catalog::DEFAULT_SECRETS_LOCK_MINUTES),
     );
+    secrets::resume_rotation(&app);
     tokio::spawn(mcp::serve_bridge(app.clone(), mcp_listener));
     let router = Router::new()
         .route(
@@ -1500,6 +1501,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/secrets/unlock", post(secrets::unlock))
         .route("/api/secrets/lock", post(secrets::lock_now))
         .route("/api/secrets/password", axum::routing::put(secrets::set_password))
+        .route("/api/secrets/rotate", post(secrets::rotate_key))
         .route("/api/secrets/passkeys", post(secrets::add_passkey))
         .route(
             "/api/secrets/passkeys/{id}",

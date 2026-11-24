@@ -50,6 +50,9 @@ struct Storage {
     used: Mutex<Instant>,
     /// Consecutive failed unlocks and when the last one happened.
     failures: Mutex<(u32, Instant)>,
+    /// Held while the key file changes, so password, passkey and key changes run one
+    /// at a time.
+    changes: tokio::sync::Mutex<()>,
 }
 static STORAGE: OnceLock<Storage> = OnceLock::new();
 /// Minutes without use before a password-protected vault locks itself; 0 never.
@@ -75,6 +78,7 @@ pub fn init(path: PathBuf) {
         state: Mutex::new(state),
         used: Mutex::new(Instant::now()),
         failures: Mutex::new((0, Instant::now())),
+        changes: tokio::sync::Mutex::new(()),
     });
     tokio::spawn(async {
         loop {
@@ -152,6 +156,102 @@ fn vault() -> Result<Arc<Vault>, (StatusCode, String)> {
         None => Err(unavailable("not initialized")),
     }
 }
+/// Sealing failures are storage-unavailable errors, not database errors.
+enum Failure {
+    Database,
+    Seal(String),
+}
+impl From<agentworks_database::StorageError> for Failure {
+    fn from(_: agentworks_database::StorageError) -> Self {
+        Self::Database
+    }
+}
+impl From<Failure> for (StatusCode, String) {
+    fn from(failure: Failure) -> Self {
+        match failure {
+            Failure::Database => db_error(""),
+            Failure::Seal(error) => unavailable(&error),
+        }
+    }
+}
+fn password_error(error: PasswordError) -> (StatusCode, String) {
+    match error {
+        PasswordError::Wrong => fail(StatusCode::FORBIDDEN, "The current password is not correct"),
+        PasswordError::Invalid(message) => bad(message),
+        PasswordError::Storage(message) => unavailable(&message),
+    }
+}
+/// Re-seals every value under the vault's current key, then drops the previous key from
+/// the key file and serves the finished vault. Values sealed while this runs use the
+/// new key: sealing happens under the store lock, which this holds.
+fn complete_rotation(app: &App, storage: &Storage, vault: Arc<Vault>) -> mail::Result<()> {
+    let changed = app.store.lock().unwrap().reseal_secrets(|secret| {
+        match vault.reseal_value(&secret.id, &secret.name, &secret.sealed) {
+            None => Ok(None),
+            Some(Ok(sealed)) => Ok(Some(sealed)),
+            Some(Err(error)) => Err(Failure::Seal(error)),
+        }
+    })?;
+    let finished = Arc::new(
+        vault
+            .finish_rotation(&storage.path)
+            .map_err(password_error)?,
+    );
+    {
+        let mut state = storage.state.lock().unwrap();
+        if let VaultState::Unlocked { vault: current, .. } = &mut *state
+            && Arc::ptr_eq(current, &vault)
+        {
+            *current = finished;
+        }
+    }
+    audit_human(app, "secrets.rotate", &format!("finished:{changed}"))
+}
+/// Finishes a key change that a restart interrupted, once the vault is unlocked.
+pub fn resume_rotation(app: &App) {
+    let Some(storage) = STORAGE.get() else { return };
+    let Some(vault) = peek().filter(|vault| vault.rotating()) else {
+        return;
+    };
+    if let Err((_, error)) = complete_rotation(app, storage, vault) {
+        tracing::error!("Could not finish changing the secrets key: {error}");
+    }
+}
+/// Replaces the data key: a new key file, then every value re-sealed, then the old key
+/// dropped. `new_password` replaces the password at the same time.
+async fn rotate(
+    app: &App,
+    storage: &'static Storage,
+    current: Zeroizing<String>,
+    new_password: Option<Zeroizing<String>>,
+) -> mail::Result<()> {
+    let vault = vault()?;
+    let path = storage.path.clone();
+    let rotated = tokio::task::spawn_blocking(move || {
+        vault.rotate(&path, &current, new_password.as_deref().map(|p| p.as_str()))
+    })
+    .await
+    .map_err(|_| unavailable("the key could not be changed"))?
+    .map_err(|error| {
+        if error == PasswordError::Wrong {
+            let _ = audit_human(app, "secrets.rotate", "failed");
+        }
+        password_error(error)
+    })?;
+    let rotated = Arc::new(rotated);
+    {
+        let mut state = storage.state.lock().unwrap();
+        let password = matches!(&*state, VaultState::Unlocked { password: true, .. });
+        *state = VaultState::Unlocked {
+            vault: rotated.clone(),
+            password,
+        };
+    }
+    touch(storage);
+    audit_human(app, "secrets.rotate", "started")?;
+    complete_rotation(app, storage, rotated)
+}
+
 fn locked() -> (StatusCode, String) {
     fail(
         StatusCode::LOCKED,
@@ -323,6 +423,7 @@ pub async fn unlock(State(app): State<App>, Json(input): Json<Unlock>) -> ApiRes
             *storage.failures.lock().unwrap() = (0, Instant::now());
             touch(storage);
             audit_human(&app, "secrets.unlock", &format!("ok:{method}"))?;
+            resume_rotation(&app);
             restart_started_locked(&app);
             Ok(Json(status()))
         }
@@ -389,10 +490,29 @@ pub async fn set_password(State(app): State<App>, Json(input): Json<Password>) -
         .get()
         .ok_or_else(|| unavailable("not initialized"))?;
     vault::validate_password(&input.password).map_err(bad)?;
-    let vault = vault()?;
-    let path = storage.path.clone();
+    let _changes = storage.changes.lock().await;
     let (current, new) = (input.current, input.password);
     let removing = new.is_empty();
+    // The first password also replaces the key: a copy of the key file from before had
+    // no password and would otherwise still open every value.
+    let first = !removing
+        && matches!(
+            &*storage.state.lock().unwrap(),
+            VaultState::Unlocked {
+                password: false,
+                ..
+            }
+        );
+    if first {
+        rotate(&app, storage, current, Some(new)).await?;
+        if let VaultState::Unlocked { password, .. } = &mut *storage.state.lock().unwrap() {
+            *password = true;
+        }
+        audit_human(&app, "secrets.password", "set")?;
+        return Ok(Json(status()));
+    }
+    let vault = vault()?;
+    let path = storage.path.clone();
     let result = tokio::task::spawn_blocking(move || {
         vault.set_password(&path, &current, &new).map(|()| vault)
     })
@@ -425,6 +545,22 @@ pub async fn set_password(State(app): State<App>, Json(input): Json<Password>) -
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Rotate {
+    #[serde(default)]
+    current: Zeroizing<String>,
+}
+/// Replaces the data key, keeping the password and removing passkeys.
+pub async fn rotate_key(State(app): State<App>, Json(input): Json<Rotate>) -> ApiResult {
+    let storage = STORAGE
+        .get()
+        .ok_or_else(|| unavailable("not initialized"))?;
+    let _changes = storage.changes.lock().await;
+    rotate(&app, storage, input.current, None).await?;
+    Ok(Json(status()))
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AddPasskey {
     current: Zeroizing<String>,
@@ -442,6 +578,7 @@ pub async fn add_passkey(State(app): State<App>, Json(input): Json<AddPasskey>) 
     let storage = STORAGE
         .get()
         .ok_or_else(|| unavailable("not initialized"))?;
+    let _changes = storage.changes.lock().await;
     let vault = vault()?;
     let prf = prf_bytes(&input.prf)?;
     let path = storage.path.clone();
@@ -479,6 +616,7 @@ pub async fn remove_passkey(State(app): State<App>, Path(id): Path<String>) -> A
     let storage = STORAGE
         .get()
         .ok_or_else(|| unavailable("not initialized"))?;
+    let _changes = storage.changes.lock().await;
     let path = storage.path.clone();
     let removed = tokio::task::spawn_blocking(move || vault::remove_passkey(&path, &id))
         .await
@@ -541,12 +679,15 @@ pub struct Create {
 }
 
 pub async fn create(State(app): State<App>, Json(input): Json<Create>) -> ApiResult {
-    let vault = vault()?;
     let name = input.name.trim();
     validate_name(name).map_err(bad)?;
     validate_value(&input.value).map_err(bad)?;
     let description = validate_description(&input.description).map_err(bad)?;
     let id = uuid::Uuid::new_v4().to_string();
+    // Seal under the store lock, so a key rotation re-seals this value or it uses the
+    // new key.
+    let mut store = app.store.lock().unwrap();
+    let vault = vault()?;
     let (nonce, body) = vault
         .seal_value(&id, name, &input.value)
         .map_err(|e| unavailable(&e))?;
@@ -555,10 +696,7 @@ pub async fn create(State(app): State<App>, Json(input): Json<Create>) -> ApiRes
         body: &body,
         length: input.value.len(),
     };
-    let saved = app
-        .store
-        .lock()
-        .unwrap()
+    let saved = store
         .create_secret(&id, name, &description, &sealed, now())
         .map_err(db_error)?
         .ok_or_else(|| {
@@ -594,18 +732,10 @@ pub async fn update(
         }
         None => None,
     };
-    /// Sealing failures are storage-unavailable errors, not database errors.
-    enum Failure {
-        Database,
-        Seal(String),
-    }
-    impl From<agentworks_database::StorageError> for Failure {
-        fn from(_: agentworks_database::StorageError) -> Self {
-            Self::Database
-        }
-    }
     let seal = |current: &SealedSecret| -> Result<(Vec<u8>, Vec<u8>, usize), Failure> {
-        let (vault, value) = (vault.as_ref().unwrap(), input.value.as_ref().unwrap());
+        // The vault is read here, under the store lock, for the same reason as in create.
+        let vault = self::vault().map_err(|(_, error)| Failure::Seal(error))?;
+        let value = input.value.as_ref().unwrap();
         let (nonce, body) = vault
             .seal_value(&current.id, &current.name, value)
             .map_err(Failure::Seal)?;
@@ -623,10 +753,7 @@ pub async fn update(
                 .map(|_| &seal as &dyn Fn(&SealedSecret) -> Result<_, Failure>),
             now(),
         )
-        .map_err(|failure| match failure {
-            Failure::Database => db_error(""),
-            Failure::Seal(error) => unavailable(&error),
-        })?
+        .map_err(<(StatusCode, String)>::from)?
         .ok_or_else(not_found)?;
     Ok(Json(view(&saved, peek().as_deref())))
 }

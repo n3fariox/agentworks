@@ -11,6 +11,12 @@
 //! Adding or removing a way to unlock re-wraps the same data key, so stored values are
 //! never re-encrypted. Version 1 key files (a single password slot) are read as-is and
 //! written as version 2 when they change.
+//!
+//! *Rotating* replaces the data key itself, for when an older key file may have been
+//! copied (for example while it had no password). The new key file also carries the
+//! previous data key, wrapped under the new one, until every value has been re-sealed;
+//! `finish_rotation` then drops it. A crash at any point leaves a key file that opens
+//! every value.
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{
     Engine,
@@ -29,6 +35,7 @@ use zeroize::Zeroizing;
 const KEY_LEN: usize = 32;
 const SALT_LEN: usize = 16;
 const WRAP_AAD: &[u8] = b"agentworks-secrets-key:v1";
+const PREVIOUS_AAD: &[u8] = b"agentworks-secrets-previous-key:v1";
 const FORMAT: u32 = 2;
 /// WebAuthn PRF inputs and outputs are 32 bytes.
 const PRF_LEN: usize = 32;
@@ -92,6 +99,13 @@ enum Slot {
 struct KeyFile {
     version: u32,
     slots: Vec<Slot>,
+    /// During a rotation: the previous data key, wrapped under the current one.
+    #[serde(
+        default,
+        rename = "previousKey",
+        skip_serializing_if = "Option::is_none"
+    )]
+    previous_key: Option<String>,
 }
 impl KeyFile {
     fn password(&self) -> &PasswordSlot {
@@ -115,14 +129,20 @@ impl KeyFile {
         Self {
             version: FORMAT,
             slots,
+            previous_key: self.previous_key.clone(),
         }
     }
 }
+
+/// A sealed value as (nonce, ciphertext‖tag).
+pub type Sealed = (Vec<u8>, Vec<u8>);
 
 /// The unwrapped data key. Dropping it zeroizes the key bytes this crate holds.
 pub struct Vault {
     key: LessSafeKey,
     data_key: Zeroizing<Vec<u8>>,
+    /// During a rotation, the data key values may still be sealed under.
+    previous: Option<LessSafeKey>,
 }
 /// A password-protected key file that has not been unlocked.
 pub struct Locked {
@@ -216,7 +236,10 @@ pub fn remove_passkey(path: &Path, id: &str) -> Result<bool, PasswordError> {
 }
 impl Locked {
     pub fn unlock(&self, password: &str) -> Result<Vault, PasswordError> {
-        unwrap(self.file.password(), password.as_bytes()).map(Vault::new)
+        Vault::from_file(
+            unwrap(self.file.password(), password.as_bytes())?,
+            &self.file,
+        )
     }
     /// Unlocks with the PRF secret the passkey slot `id` returned.
     pub fn unlock_passkey(&self, id: &str, prf: &[u8]) -> Result<Vault, PasswordError> {
@@ -225,7 +248,7 @@ impl Locked {
             .passkeys()
             .find(|slot| slot.id == id)
             .ok_or_else(|| PasswordError::Invalid("That passkey was removed".into()))?;
-        unwrap_passkey(slot, prf).map(Vault::new)
+        Vault::from_file(unwrap_passkey(slot, prf)?, &self.file)
     }
 }
 impl std::fmt::Debug for Vault {
@@ -238,7 +261,109 @@ impl Vault {
         Self {
             key: aead(&data_key),
             data_key,
+            previous: None,
         }
+    }
+    /// The vault for `data_key`, with the previous key when `file` is mid-rotation.
+    fn from_file(data_key: Zeroizing<Vec<u8>>, file: &KeyFile) -> Result<Self, PasswordError> {
+        let mut vault = Self::new(data_key);
+        if let Some(previous) = &file.previous_key {
+            let wrapped = STANDARD.decode(previous).map_err(|_| damaged())?;
+            let key = aead_open(&vault.key, PREVIOUS_AAD, &wrapped)
+                .filter(|key| key.len() == KEY_LEN)
+                .ok_or_else(damaged)?;
+            vault.previous = Some(aead(&key));
+        }
+        Ok(vault)
+    }
+    /// Whether a rotation is unfinished: some values may still be sealed under the
+    /// previous key. Re-seal them, then call `finish_rotation`.
+    pub fn rotating(&self) -> bool {
+        self.previous.is_some()
+    }
+    /// Replaces the data key. The new key file has one password slot, under
+    /// `new_password` when given or else the current password, and keeps the old key
+    /// wrapped under the new one until `finish_rotation`. Passkey slots are removed:
+    /// their secrets never reach the server, so they cannot be moved to the new key.
+    pub fn rotate(
+        &self,
+        path: &Path,
+        current: &str,
+        new_password: Option<&str>,
+    ) -> Result<Vault, PasswordError> {
+        self.rotate_with(path, current, new_password, PASSWORD_KDF)
+    }
+    fn rotate_with(
+        &self,
+        path: &Path,
+        current: &str,
+        new_password: Option<&str>,
+        password_kdf: KdfParams,
+    ) -> Result<Vault, PasswordError> {
+        if self.rotating() {
+            return Err(PasswordError::Invalid(
+                "The previous key change has not finished yet".into(),
+            ));
+        }
+        let file = self.verified(path, current)?;
+        let password = match new_password {
+            Some(new) => new,
+            None if file.password().password => current,
+            None => "",
+        };
+        validate_password(password).map_err(PasswordError::Invalid)?;
+        let kdf = if password.is_empty() {
+            DEFAULT_KDF
+        } else {
+            password_kdf
+        };
+        let data_key = Zeroizing::new(
+            random::<KEY_LEN>()
+                .map_err(PasswordError::Storage)?
+                .to_vec(),
+        );
+        let mut rotated = Self::new(data_key);
+        let previous = aead_seal(&rotated.key, PREVIOUS_AAD, &self.data_key)
+            .map_err(PasswordError::Storage)?;
+        let slot =
+            wrap(&rotated.data_key, password.as_bytes(), kdf).map_err(PasswordError::Storage)?;
+        save(
+            path,
+            &KeyFile {
+                version: FORMAT,
+                slots: vec![Slot::Password(slot)],
+                previous_key: Some(STANDARD.encode(previous)),
+            },
+        )?;
+        rotated.previous = Some(aead(&self.data_key));
+        Ok(rotated)
+    }
+    /// Re-seals a value under the current key. `None` when it opens under neither key
+    /// (it was stored with a different key file and needs re-entry).
+    pub fn reseal_value(
+        &self,
+        id: &str,
+        name: &str,
+        sealed: &[u8],
+    ) -> Option<Result<Sealed, String>> {
+        let value = self.open_value(id, name, sealed)?;
+        Some(self.seal_value(id, name, &value))
+    }
+    /// Drops the previous key from the key file once every value is re-sealed, and
+    /// returns the vault without it. Checks that the file was rotated by this vault.
+    pub fn finish_rotation(&self, path: &Path) -> Result<Vault, PasswordError> {
+        let mut file = read_key_file(path).map_err(PasswordError::Storage)?;
+        if let Some(previous) = &file.previous_key {
+            let wrapped = STANDARD.decode(previous).map_err(|_| damaged())?;
+            if aead_open(&self.key, PREVIOUS_AAD, &wrapped).is_none() {
+                return Err(PasswordError::Storage(
+                    "the key file no longer holds this server's key; restart Agentworks".into(),
+                ));
+            }
+            file.previous_key = None;
+            save(path, &file)?;
+        }
+        Ok(Self::new(self.data_key.clone()))
     }
     /// Reads the key file and checks that `current` opens its password slot (any value
     /// when there is no password) and that it holds this vault's key.
@@ -370,7 +495,9 @@ impl Vault {
     /// Decrypts a value sealed for the same row; `None` when it was sealed under another
     /// key file or for another row.
     pub fn open_value(&self, id: &str, name: &str, sealed: &[u8]) -> Option<Zeroizing<String>> {
-        let bytes = aead_open(&self.key, &value_aad(id, name), sealed)?;
+        let aad = value_aad(id, name);
+        let bytes = aead_open(&self.key, &aad, sealed)
+            .or_else(|| aead_open(self.previous.as_ref()?, &aad, sealed))?;
         String::from_utf8(bytes.to_vec()).ok().map(Zeroizing::new)
     }
 }
@@ -509,6 +636,7 @@ fn read_key_file(path: &Path) -> Result<KeyFile, String> {
             slots: vec![Slot::Password(
                 serde_json::from_value(value).map_err(|_| damaged())?,
             )],
+            previous_key: None,
         },
         Some(2) => serde_json::from_value(value).map_err(|_| damaged())?,
         _ => return Err(format!("{} uses an unsupported format", path.display())),
@@ -532,13 +660,15 @@ fn open_with(path: &Path, kdf: KdfParams) -> Result<Opened, String> {
                 return Ok(Opened::Locked(Locked { file }));
             }
             let key = unwrap(file.password(), b"").map_err(|e| e.to_string())?;
-            Ok(Opened::Unlocked(Box::new(Vault::new(key))))
+            let vault = Vault::from_file(key, &file).map_err(|e| e.to_string())?;
+            Ok(Opened::Unlocked(Box::new(vault)))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let key = Zeroizing::new(random::<KEY_LEN>()?.to_vec());
             let file = KeyFile {
                 version: FORMAT,
                 slots: vec![Slot::Password(wrap(&key, b"", kdf)?)],
+                previous_key: None,
             };
             write_key_file(path, &file)
                 .map_err(|e| format!("could not create {}: {e}", path.display()))?;
@@ -928,6 +1058,100 @@ mod tests {
             .set_password_with(&path, "battery staple", "", TEST_KDF)
             .unwrap();
         assert!(open_or_create(&path, TEST_KDF).is_ok());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn rotating_replaces_the_data_key_and_any_crash_leaves_values_readable() {
+        let dir = temp();
+        let path = dir.join("k");
+        let vault = open_or_create(&path, TEST_KDF).unwrap();
+        let sealed = |v: &Vault, value: &str| {
+            let (nonce, body) = v.seal_value("id-a", "TOKEN_A", value).unwrap();
+            [nonce, body].concat()
+        };
+        let old_value = sealed(&vault, "value-a");
+        // Someone copies the key file while it has no password.
+        let copy = dir.join("copy");
+        std::fs::copy(&path, &copy).unwrap();
+        let foreign = sealed(&open_or_create(&dir.join("other"), TEST_KDF).unwrap(), "x");
+
+        // Step 1: the new key file holds the new key and, under it, the old one.
+        let rotated = vault
+            .rotate_with(&path, "", Some("correct horse"), TEST_KDF)
+            .unwrap();
+        assert!(rotated.rotating());
+        assert!(matches!(
+            rotated.rotate_with(&path, "correct horse", None, TEST_KDF),
+            Err(PasswordError::Invalid(_))
+        ));
+        // A crash here: reopening finds the rotation unfinished and reads old values.
+        let reopened = locked(&path).unlock("correct horse").unwrap();
+        assert!(reopened.rotating());
+        assert_eq!(
+            reopened
+                .open_value("id-a", "TOKEN_A", &old_value)
+                .unwrap()
+                .as_str(),
+            "value-a"
+        );
+        // Step 2: values are re-sealed under the new key; foreign ones are left alone.
+        let (nonce, body) = reopened
+            .reseal_value("id-a", "TOKEN_A", &old_value)
+            .unwrap()
+            .unwrap();
+        let new_value = [nonce, body].concat();
+        assert!(reopened.reseal_value("id-a", "TOKEN_A", &foreign).is_none());
+        // A crash before step 3 still opens both.
+        let again = locked(&path).unlock("correct horse").unwrap();
+        assert!(again.open_value("id-a", "TOKEN_A", &old_value).is_some());
+        assert!(again.open_value("id-a", "TOKEN_A", &new_value).is_some());
+        // Step 3: the old key leaves the key file.
+        let finished = again.finish_rotation(&path).unwrap();
+        assert!(!finished.rotating());
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("previousKey")
+        );
+        assert!(finished.open_value("id-a", "TOKEN_A", &new_value).is_some());
+        assert!(finished.open_value("id-a", "TOKEN_A", &old_value).is_none());
+        assert!(!locked(&path).unlock("correct horse").unwrap().rotating());
+        // The copied key file opens nothing written after the rotation.
+        let old_key = open_or_create(&copy, TEST_KDF).unwrap();
+        assert!(old_key.open_value("id-a", "TOKEN_A", &new_value).is_none());
+        // Finishing again is harmless.
+        assert!(!finished.finish_rotation(&path).unwrap().rotating());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn rotating_keeps_the_password_and_removes_passkeys() {
+        let dir = temp();
+        let path = dir.join("k");
+        let vault = open_or_create(&path, TEST_KDF).unwrap();
+        vault
+            .set_password_with(&path, "", "correct horse", TEST_KDF)
+            .unwrap();
+        let (salt, prf) = (random::<32>().unwrap(), random::<32>().unwrap());
+        vault
+            .add_passkey(&path, "correct horse", new_passkey(b"cred", salt, prf), 1)
+            .unwrap();
+        assert_eq!(
+            vault
+                .rotate_with(&path, "wrong one", None, TEST_KDF)
+                .unwrap_err(),
+            PasswordError::Wrong
+        );
+        let rotated = vault
+            .rotate_with(&path, "correct horse", None, TEST_KDF)
+            .unwrap()
+            .finish_rotation(&path)
+            .unwrap();
+        assert!(passkeys(&path).unwrap().is_empty());
+        let reopened = locked(&path).unlock("correct horse").unwrap();
+        assert_eq!(&*reopened.data_key, &*rotated.data_key);
+        assert_ne!(&*reopened.data_key, &*vault.data_key);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

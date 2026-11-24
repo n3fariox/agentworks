@@ -107,7 +107,9 @@ export function setupSecrets({$,api,el,toast,lock}){
         <button type="button" class="settings-action" data-password-edit></button>
         <button type="button" class="settings-action" data-password-remove hidden>Remove password</button>
         <button type="button" class="settings-action" data-lock hidden>Lock now</button>
+        <button type="button" class="settings-action" data-rotate hidden>Replace encryption key</button>
       </div>
+      <p class="field-note" data-rotate-note hidden>Replaces the key that encrypts stored values and re-encrypts them all. Use it if an older copy of the key file may have been taken. Setting the first password does this automatically.</p>
       <div class="secret-password-form" data-password-form hidden>
         <input type="text" autocomplete="username" value="agentworks-secrets" hidden aria-hidden="true" tabindex="-1">
         <label for="secret-password-current" data-current-label>Current password</label><input id="secret-password-current" type="password" autocomplete="current-password">
@@ -151,10 +153,11 @@ export function setupSecrets({$,api,el,toast,lock}){
   function closePassword(){q('[data-password-form]').hidden=true;passwordMode=null;current.value=fresh.value=confirmPassword.value='';}
   function passwordForm(mode){
     passwordMode=mode;error.textContent='';q('[data-password-form]').hidden=false;
-    const removing=mode==='remove';
+    const removing=mode==='remove',rotating=mode==='rotate';
     current.hidden=q('[data-current-label]').hidden=!status.password;
-    for(const node of [fresh,confirmPassword,q('[data-new-label]'),q('[data-confirm-label]'),q('[data-password-help]')])node.hidden=removing;
-    q('[data-password-save]').textContent=removing?'Remove password':'Save password';
+    for(const node of [fresh,confirmPassword,q('[data-new-label]'),q('[data-confirm-label]'),q('[data-password-help]')])node.hidden=removing||rotating;
+    q('[data-rotate-note]').hidden=!rotating;
+    q('[data-password-save]').textContent=removing?'Remove password':rotating?'Replace key':'Save password';
     (status.password?current:fresh).focus();
   }
   function renderPassword(){
@@ -166,6 +169,7 @@ export function setupSecrets({$,api,el,toast,lock}){
     q('[data-unlock]').hidden=!status.locked;
     q('[data-password-edit]').hidden=status.locked;q('[data-password-edit]').textContent=status.password?'Change password':'Set password';
     q('[data-password-remove]').hidden=q('[data-lock]').hidden=status.locked||!status.password;
+    q('[data-rotate]').hidden=status.locked||!status.available;
     lockMinutes.value=String(status.lockMinutes);lockMinutes.disabled=!status.password;
     if(status.locked)closePassword();
   }
@@ -203,19 +207,31 @@ export function setupSecrets({$,api,el,toast,lock}){
   q('[data-unlock]').onclick=()=>lock?.open();
   q('[data-password-edit]').onclick=()=>passwordForm(status.password?'change':'set');
   q('[data-password-remove]').onclick=()=>passwordForm('remove');
+  q('[data-rotate]').onclick=()=>passwordForm('rotate');
   q('[data-password-cancel]').onclick=closePassword;
   q('[data-lock]').onclick=async()=>{
     try{lock?.show(await api('/api/secrets/lock',{method:'POST'}));await refresh();toast?.('Secrets locked','success');}catch(e){error.textContent=e.message;}
   };
   q('[data-password-save]').onclick=async()=>{
     error.textContent='';
-    const removing=passwordMode==='remove';
+    const removing=passwordMode==='remove',rotating=passwordMode==='rotate';
+    if(rotating){
+      const passkeys=(status.passkeys||[]).length;
+      if(passkeys&&!confirm(`Replacing the key removes ${passkeys===1?'the passkey':`all ${passkeys} passkeys`}; add ${passkeys===1?'it':'them'} again afterwards. Continue?`))return;
+      const save=q('[data-password-save]');save.disabled=true;
+      try{
+        lock?.show(await api('/api/secrets/rotate',{method:'POST',body:JSON.stringify({current:current.value})}));
+        closePassword();await refresh();toast?.('Encryption key replaced; every secret was re-encrypted','success');
+      }catch(e){error.textContent=e.message;}finally{save.disabled=false;}
+      return;
+    }
     if(!removing&&fresh.value!==confirmPassword.value){error.textContent='The new passwords do not match.';return;}
     if(!removing&&!fresh.value){error.textContent='Enter a new password.';return;}
     const save=q('[data-password-save]');save.disabled=true;
+    const first=!removing&&!status.password;
     try{
       lock?.show(await api('/api/secrets/password',{method:'PUT',body:JSON.stringify({current:current.value,password:removing?'':fresh.value})}));
-      closePassword();await refresh();toast?.(removing?'Password removed':'Password saved','success');
+      closePassword();await refresh();toast?.(removing?'Password removed':first?'Password saved; the encryption key was replaced':'Password saved','success');
     }catch(e){error.textContent=e.message;}finally{save.disabled=false;}
   };
   lockMinutes.onchange=async()=>{
