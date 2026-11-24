@@ -223,6 +223,7 @@ pub fn passkeys(path: &Path) -> Result<Vec<Passkey>, String> {
 }
 /// Removes a passkey slot. Needs no key: it only takes a way to unlock away.
 pub fn remove_passkey(path: &Path, id: &str) -> Result<bool, PasswordError> {
+    let _lock = lock_key_file(path)?;
     let mut file = read_key_file(path).map_err(PasswordError::Storage)?;
     let before = file.slots.len();
     file.slots
@@ -300,6 +301,7 @@ impl Vault {
         new_password: Option<&str>,
         password_kdf: KdfParams,
     ) -> Result<Vault, PasswordError> {
+        let _lock = lock_key_file(path)?;
         if self.rotating() {
             return Err(PasswordError::Invalid(
                 "The previous key change has not finished yet".into(),
@@ -352,6 +354,7 @@ impl Vault {
     /// Drops the previous key from the key file once every value is re-sealed, and
     /// returns the vault without it. Checks that the file was rotated by this vault.
     pub fn finish_rotation(&self, path: &Path) -> Result<Vault, PasswordError> {
+        let _lock = lock_key_file(path)?;
         let mut file = read_key_file(path).map_err(PasswordError::Storage)?;
         if let Some(previous) = &file.previous_key {
             let wrapped = STANDARD.decode(previous).map_err(|_| damaged())?;
@@ -391,6 +394,7 @@ impl Vault {
         new: &str,
         password_kdf: KdfParams,
     ) -> Result<(), PasswordError> {
+        let _lock = lock_key_file(path)?;
         validate_password(new).map_err(PasswordError::Invalid)?;
         let file = self.verified(path, current)?;
         if new.is_empty() && file.passkeys().next().is_some() {
@@ -414,6 +418,7 @@ impl Vault {
         new: NewPasskey,
         now: i64,
     ) -> Result<Passkey, PasswordError> {
+        let _lock = lock_key_file(path)?;
         let mut file = self.verified(path, current)?;
         if !file.password().password {
             return Err(PasswordError::Invalid(
@@ -678,6 +683,29 @@ fn open_with(path: &Path, kdf: KdfParams) -> Result<Opened, String> {
     }
 }
 
+/// Holds an exclusive lock on a sidecar of the key file for one read-modify-replace, so
+/// concurrent changes (threads or processes) never lose each other's slots. The key
+/// file itself cannot carry the lock: it is replaced by rename.
+fn lock_key_file(path: &Path) -> Result<std::fs::File, PasswordError> {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let lock_path = path.with_file_name(format!(".{name}.lock"));
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let failed = |e: std::io::Error| {
+        PasswordError::Storage(format!("could not lock {}: {e}", lock_path.display()))
+    };
+    let file = options.open(&lock_path).map_err(failed)?;
+    file.lock().map_err(failed)?;
+    Ok(file)
+}
 fn save(path: &Path, file: &KeyFile) -> Result<(), PasswordError> {
     replace_key_file(path, file)
         .map_err(|e| PasswordError::Storage(format!("could not save {}: {e}", path.display())))
@@ -894,7 +922,14 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().file_name())
             .collect();
-        assert_eq!(leftovers, ["k"], "no temporary files remain");
+        assert_eq!(
+            leftovers
+                .iter()
+                .filter(|n| *n != ".k.lock")
+                .collect::<Vec<_>>(),
+            ["k"],
+            "no temporary files remain"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1153,5 +1188,81 @@ mod tests {
         assert_eq!(&*reopened.data_key, &*rotated.data_key);
         assert_ne!(&*reopened.data_key, &*vault.data_key);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_key_file_changes_never_lose_each_other() {
+        for round in 0..5 {
+            let dir = temp();
+            let path = dir.join("k");
+            let vault = open_or_create(&path, TEST_KDF).unwrap();
+            vault
+                .set_password_with(&path, "", "correct horse", TEST_KDF)
+                .unwrap();
+            let doomed = vault
+                .add_passkey(
+                    &path,
+                    "correct horse",
+                    new_passkey(b"doomed", random().unwrap(), random().unwrap()),
+                    0,
+                )
+                .unwrap();
+            // A rotation left unfinished, as after a restart, then finished while other
+            // changes run.
+            let rotating = std::sync::Arc::new(
+                vault
+                    .rotate_with(&path, "correct horse", None, TEST_KDF)
+                    .unwrap(),
+            );
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(10));
+            let mut threads = Vec::new();
+            for i in 0..8u8 {
+                let (vault, path, barrier) = (rotating.clone(), path.clone(), barrier.clone());
+                threads.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    vault
+                        .add_passkey(
+                            &path,
+                            "correct horse",
+                            new_passkey(&[b'c', i], random().unwrap(), random().unwrap()),
+                            i64::from(i),
+                        )
+                        .unwrap();
+                }));
+            }
+            {
+                let (vault, path, barrier) = (rotating.clone(), path.clone(), barrier.clone());
+                threads.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    vault.finish_rotation(&path).unwrap();
+                }));
+            }
+            {
+                let (path, barrier, id) = (path.clone(), barrier.clone(), doomed.id.clone());
+                threads.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    // Rotation already removed it; removing again must not resurrect it.
+                    assert!(!remove_passkey(&path, &id).unwrap());
+                }));
+            }
+            for thread in threads {
+                thread.join().unwrap();
+            }
+            let file: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert!(
+                file.get("previousKey").is_none(),
+                "round {round}: rotation finished"
+            );
+            let mut created: Vec<i64> =
+                passkeys(&path).unwrap().iter().map(|p| p.created).collect();
+            created.sort();
+            assert_eq!(
+                created,
+                (0..8).collect::<Vec<_>>(),
+                "round {round}: no passkey lost"
+            );
+            assert!(locked(&path).unlock("correct horse").is_ok());
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 }

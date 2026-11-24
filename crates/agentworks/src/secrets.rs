@@ -184,6 +184,7 @@ fn password_error(error: PasswordError) -> (StatusCode, String) {
 /// Re-seals every value under the vault's current key, then drops the previous key from
 /// the key file and serves the finished vault. Values sealed while this runs use the
 /// new key: sealing happens under the store lock, which this holds.
+/// Callers hold `Storage::changes`, so no other key-file change interleaves.
 fn complete_rotation(app: &App, storage: &Storage, vault: Arc<Vault>) -> mail::Result<()> {
     let changed = app.store.lock().unwrap().reseal_secrets(|secret| {
         match vault.reseal_value(&secret.id, &secret.name, &secret.sealed) {
@@ -208,8 +209,13 @@ fn complete_rotation(app: &App, storage: &Storage, vault: Arc<Vault>) -> mail::R
     audit_human(app, "secrets.rotate", &format!("finished:{changed}"))
 }
 /// Finishes a key change that a restart interrupted, once the vault is unlocked.
-pub fn resume_rotation(app: &App) {
+pub async fn resume_rotation(app: &App) {
     let Some(storage) = STORAGE.get() else { return };
+    let _changes = storage.changes.lock().await;
+    resume_rotation_locked(app, storage);
+}
+/// As `resume_rotation`, for callers already holding `Storage::changes`.
+fn resume_rotation_locked(app: &App, storage: &Storage) {
     let Some(vault) = peek().filter(|vault| vault.rotating()) else {
         return;
     };
@@ -387,6 +393,9 @@ pub async fn unlock(State(app): State<App>, Json(input): Json<Unlock>) -> ApiRes
             ));
         }
     }
+    // Held from reading the key file until an interrupted key change is finished, so no
+    // password or passkey change can run against the vault in between.
+    let _changes = storage.changes.lock().await;
     let file = match &*storage.state.lock().unwrap() {
         VaultState::Locked => vault::open(&storage.path).map_err(|e| unavailable(&e))?,
         VaultState::Unlocked { .. } => return Ok(Json(status())),
@@ -423,7 +432,7 @@ pub async fn unlock(State(app): State<App>, Json(input): Json<Unlock>) -> ApiRes
             *storage.failures.lock().unwrap() = (0, Instant::now());
             touch(storage);
             audit_human(&app, "secrets.unlock", &format!("ok:{method}"))?;
-            resume_rotation(&app);
+            resume_rotation_locked(&app, storage);
             restart_started_locked(&app);
             Ok(Json(status()))
         }

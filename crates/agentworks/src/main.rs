@@ -995,7 +995,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             .secrets_lock_minutes
             .unwrap_or(catalog::DEFAULT_SECRETS_LOCK_MINUTES),
     );
-    secrets::resume_rotation(&app);
+    secrets::resume_rotation(&app).await;
     tokio::spawn(mcp::serve_bridge(app.clone(), mcp_listener));
     let router = Router::new()
         .route(
