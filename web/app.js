@@ -696,7 +696,10 @@ function sidebar(){
       area.append(top.group);
     }
   }
-  area.scrollTop=scroll;updateProjectControls();github.refreshBadges();updateNotificationIndicators();
+  // Restore the scroll only after the rows are complete: restoring before the
+  // badges are painted clamps it against a shorter list, and scroll anchoring
+  // then pushes it further down each time the badges grow the rows back.
+  updateProjectControls();github.refreshBadges();updateNotificationIndicators();area.scrollTop=scroll;
 }
 // The orchestrator slot: one ungrouped session that routes and manages work across
 // every project. It can be started fresh, forked to another harness (the fork takes the

@@ -181,6 +181,31 @@ for(const mobile of [false,true])test(`session browser PR badges ${mobile?'mobil
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);expect(errors).toEqual([]);
 });
 
+test('session list scroll stays put while refreshes repaint badges',async({page})=>{
+  await trackingSocket(page);
+  const ids=new Set();
+  // Suspend each fixture so later tests stay under the live-session limit.
+  for(let i=0;i<24;i++){const {id}=await api('/api/sessions',{provider:'demo',cwd:linked,title:`Scroll fixture ${i}`});ids.add(id);await api(`/api/sessions/${id}/suspend`,{});}
+  await page.setViewportSize({width:1280,height:600});
+  await page.route('**/api/sessions/*/github*',route=>{
+    const id=new URL(route.request().url()).pathname.split('/')[3];
+    if(!ids.has(id))return route.fulfill({json:{status:'no_origin'}});
+    return route.fulfill({json:{status:'ready',links:[],badgesAt:Date.now(),badges:['bug','enhancement','needs-review','ci'].map(l=>({id:'label.'+l,label:l,tone:'info',tooltip:l}))}});
+  });
+  await page.goto(base);
+  const area=page.locator('#sessions');
+  // Badges load for visible rows only; scroll through once so every row has them.
+  await expect.poll(()=>page.locator('.session-item .session-badge').count()).toBeGreaterThan(0);
+  await expect.poll(async()=>{await area.evaluate(n=>n.scrollTop+=n.clientHeight/2);return page.locator('.session-item .session-badge').count();},{intervals:[300]}).toBeGreaterThanOrEqual(ids.size*4);
+  for(const fraction of [0.5,0.9]){
+    const target=await area.evaluate((n,f)=>{n.scrollTop=Math.round((n.scrollHeight-n.clientHeight)*f);return n.scrollTop;},fraction);
+    expect(target).toBeGreaterThan(0);
+    // The session list refreshes every 5 s; cover two refreshes.
+    await page.waitForTimeout(11000);
+    expect(await area.evaluate(n=>n.scrollTop)).toBe(target);
+  }
+});
+
 test('existing hooks set/update/clear stored badges, isolate sessions, survive restart and push live updates',async({page})=>{
   const plain=join(fixture,'badge-plain');await mkdir(plain,{recursive:true});
   const source=`load("@agentworks//chat.star", "ChatContext")
