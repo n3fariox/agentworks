@@ -559,3 +559,41 @@ fn worker_git_settings(worker: &serde_json::Value, settings: &mut serde_json::Va
         }
     }
 }
+
+/// Hosts an agent may start sessions on: the local host and every enrolled remote host,
+/// with live status, roots and installed harnesses, so it can pick where work runs.
+pub fn agent_list(app: &App) -> Value {
+    let local_roots: Vec<_> = crate::effective_roots(app)
+        .into_iter()
+        .map(|r| r.to_string_lossy().into_owned())
+        .collect();
+    let mut rows =
+        vec![json!({"id":"local","name":"Local","status":"connected","roots":local_roots})];
+    let remotes = app.catalog.lock().unwrap().data.hosts.clone();
+    for h in remotes {
+        let link = app.hosts.link(&h.id);
+        rows.push(json!({"id":h.id,"name":h.name,"status":link.status,"roots":h.roots,"providers":link.worker.as_ref().map(|w| w["providers"].clone())}));
+    }
+    json!({ "hosts": rows })
+}
+/// Resolves a host by ID or name (case-insensitive) for agent tools.
+pub fn agent_ref(app: &App, r: &str) -> Result<String, (StatusCode, String)> {
+    let r = r.trim();
+    if r.is_empty() || r.eq_ignore_ascii_case("local") {
+        return Ok("local".into());
+    }
+    app.catalog
+        .lock()
+        .unwrap()
+        .data
+        .hosts
+        .iter()
+        .find(|h| h.id == r || h.name.eq_ignore_ascii_case(r))
+        .map(|h| h.id.clone())
+        .ok_or_else(|| {
+            fail(
+                StatusCode::NOT_FOUND,
+                "Host not found; list_hosts names the hosts you can use",
+            )
+        })
+}

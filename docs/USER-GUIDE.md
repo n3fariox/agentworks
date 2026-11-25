@@ -28,7 +28,7 @@ Entries are ranked by fuzzy matching, where every typed word must match somethin
 
 **↑ ↓** and **Page Up/Down** move the highlighted option and **Enter** runs it. Left/right arrows, **Home**, **End** and **Tab** keep their normal meaning in the search box.
 
-Actions call existing controls only (new/resumed session, new project, files, automations, settings, agents and inbox, workspace info, resume, stop, usage, delete). Entries that cannot run right now stay readable, explain why, and refuse to run. Advertised harness commands are typed into the composer for review; choosing one never submits a turn. Switching sessions uses the same path as the sidebar, so each draft and every running turn is preserved.
+Actions call existing controls only (new/resumed session, new project, files, automations, settings, agents and inbox, workspace info, resume, stop, usage, delete). Fork, archive, directory and delete actions are left out for the orchestrator, which is managed from its slot. Entries that cannot run right now stay readable, explain why, and refuse to run. Advertised harness commands are typed into the composer for review; choosing one never submits a turn. Switching sessions uses the same path as the sidebar, so each draft and every running turn is preserved.
 
 ## Automations
 
@@ -60,6 +60,17 @@ Choose **Agentworks access** in New session, or open **Agents & inbox** on an ex
 - **Custom**: individually enable those capabilities. Coordinator does not include editing/deleting records, changing settings, granting access, or approving harness permission requests.
 
 Only the human control interface changes grants. Coordinator-created sessions use the configured project/global default role; they do not copy grants from the creating coordinator. Automation runs remain Off. Put sessions in the same logical project to communicate, even when their working directories differ; Ungrouped does not provide a shared communication scope. Moving a session changes its permitted peers immediately. Historical messages remain in its own inbox.
+
+A coordinator's `start_session` can name a `hostId` (from `list_hosts`) to start work on another enrolled host, for example to build on another platform. Without one, the session starts on the coordinator's own host.
+
+### Orchestrator
+
+The **orchestrator** slot sits above the session list. **＋ New orchestrator** asks only for a name, harness and model. It starts a session that routes and manages work across every project. That session runs in its own empty directory with coordinator access and the Orchestrator role, and is told not to write code.
+
+- **What it can do.** It can message, start, prompt, cancel and archive any session, read completion reports, list projects, hosts and automations, run project automations, and read and write tickets in projects that have tasks enabled.
+- **What project sessions see.** Project sessions that can message see it as `@orchestrator` and can write to it. They still cannot write to other projects. In the orchestrator's composer, `@` lists sessions as `@project/session`.
+- **The slot's ⋯ menu.** **Fork to another harness…** moves the conversation to a new orchestrator and deletes the old one. **Clear slot** deletes it. Both wait until its turn ends.
+- **What it cannot do.** The orchestrator cannot be archived, deleted, forked, moved to a project or given other directories directly; those actions are hidden for it. See [the orchestrator section](AGENT-COMMUNICATION.md#orchestrator-prototype) for details.
 
 Messages, replies, acknowledgements, grants, and control activity persist in SQLite. Sender/recipient IDs and names remain on messages after a session is deleted. Sending never interrupts a turn. A message from a peer session starts a turn in the idle recipient after a 30-second debounce, including one idle-sleeping to save resources, and it can be turned off or limited per session under Agents & inbox. An explicitly suspended session holds its mail until resumed. Agents can also read their inbox through tools at useful checkpoints. The browser shows sent and received messages, supports acknowledgement, and can add a received message to your existing draft with **Use as next turn**; you review and send it explicitly. Acknowledgement records receipt, not completion of requested work. Inbox messages support text and reply references. See [inbox delivery](INBOX-DELIVERY.md) for the automatic turn policy.
 

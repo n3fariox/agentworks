@@ -42,12 +42,13 @@ function updateNotificationIndicators(alerts=notificationTray?.getAlerts?.()||[]
     }
   }
   const activeIds=new Set(alerts.map(a=>a.sessionId));
-  for(const row of document.querySelectorAll('#sessions .session-item[data-session-id]')){
+  for(const row of document.querySelectorAll(':is(#sessions,#orchestrator-slot) .session-item[data-session-id]')){
     row.classList.toggle('has-notifications',activeIds.has(row.dataset.sessionId));
   }
   const boldProjectIds=new Set();
   for(const s of sessions){
-    if(!s.archived&&activeIds.has(s.id)){
+    // The orchestrator sits in its own slot, not under Ungrouped.
+    if(!s.archived&&activeIds.has(s.id)&&s.id!==orchestratorId){
       boldProjectIds.add(s.projectId||'ungrouped');
     }
   }
@@ -74,7 +75,7 @@ const currentProvider=id=>({claude:'claude-rust',codex:'codex-rust'})[id]||id;
 const icons = {goose:'◉',demo:'◈',claude:'✳','claude-rust':'✳',codex:'⌘','codex-rust':'⌘',opencode:'▣',antigravity:'△'};
 function readStorage(storage,key,fallback){try{return JSON.parse(storage.getItem(key))??fallback;}catch{return fallback;}}
 let workspace;
-let projects=[],locations=[],hosts=[{id:'local',name:'Local',status:'connected'}];
+let projects=[],locations=[],hosts=[{id:'local',name:'Local',status:'connected'}],orchestratorId=null;
 let sidebarView=localStorage.getItem('agentworks-sidebar-view')==='hosts'?'hosts':'projects';
 let collapsedGroups=new Set(readStorage(localStorage,'agentworks-tree-collapsed',[]));
 let editingProject=null,savingProject=false;
@@ -121,7 +122,9 @@ const subagents=createSubagents({storage:localStorage,getSessionId:()=>active?.i
 const questions=setupQuestions({api,uuid:()=>uuid(),storage:localStorage,getActive:()=>active,isConnected:()=>connected,agentName:request=>subagents.name(request?.sessionId)||labels[active?.provider]||'the agent'});
 const inputQueue=setupInputQueue({$,api,uuid:()=>uuid(),getActive:()=>active,getStatus:()=>status,toolActive:()=>[...tools.values()].some(t=>['pending','in_progress'].includes(t.status))});
 let permissionModes=null,sessionConfig=null;
-const mentions=setupMentions({prompt:$('prompt'),list:$('mention-list'),getActive:()=>active,getSessions:()=>sessions});
+const mentions=setupMentions({prompt:$('prompt'),list:$('mention-list'),getActive:()=>active,getSessions:()=>sessions,getProjects:()=>projects,getOrchestrator:()=>orchestratorId,canCommunicate:()=>!!active?.communicates});
+// Whether the active session may message; the orchestrator is hidden from those that cannot.
+async function refreshCommunicates(id){try{const access=await api(`/api/sessions/${id}/agent-access`);if(active?.id===id)active.communicates=!!access.communicate;}catch{}}
 const taskMentions=setupTaskMentions({prompt:$('prompt'),list:$('mention-list'),api,getActive:()=>active,getProject:id=>projects.find(p=>p.id===id)});
 const projectTasks=setupTasks({api,uuid,getProject:id=>projects.find(p=>p.id===id),decorate:node=>decorateMarkdown(node),onWrite:()=>taskMentions.refresh()});
 $('project-tasks').onclick=()=>{if(editingProject)projectTasks.open(editingProject);};
@@ -143,7 +146,7 @@ let eventSeq=null;
 const nodes=new Map();
 let pendingCreate=readStorage(sessionStorage,'agentworks-pending-create',null);
 // L-08: set only while the new-session dialog is pre-filled from an existing session.
-let forkSource=null,forkGeneration=0,modelPicked=false,roleLibrary=[];
+let forkSource=null,forkGeneration=0,modelPicked=false,roleLibrary=[],slotIntent=false,pendingRole=null;
 const worktrees=setupWorktreeControls({$,api,onChange:()=>{if(config)providerNote();}});
 const createSections=setupCreateSections({$,storage:localStorage});
 // A place counts as used when it has a saved or remembered directory or a session.
@@ -214,7 +217,7 @@ function providerNote() {
 function createChanged(){createSections.summarize();createPlace.sync();}
 // Roles add instructions to the agent's system prompt; they never change Agentworks access.
 function renderRoles(){
-  const select=$('create-role'),previous=select.value;select.replaceChildren(new Option('No role',''));
+  const select=$('create-role'),previous=pendingRole||select.value;pendingRole=null;select.replaceChildren(new Option('No role',''));
   for(const [label,builtin] of [['Built-in',true],['Custom',false]]){
     const items=roleLibrary.filter(r=>r.builtin===builtin);if(!items.length)continue;
     const group=document.createElement('optgroup');group.label=label;
@@ -263,7 +266,7 @@ function openCreate(context={}) {
   githubCreate=context.githubPr||null;worktrees.setPrefill(context.worktreePrefill||null);
   $('create-github-note').hidden=!githubCreate;$('create-github-note').textContent=githubCreate?`PR #${githubCreate.number} · ${githubCreate.host}/${githubCreate.owner}/${githubCreate.repo}. Choose a matching project/source directory. The worktree starts at this PR head; the session opens without a prompt.`:'';
   if(context.provider)context.provider=currentProvider(context.provider);
-  forkSource=context.fork||null;const generation=++forkGeneration;modelPicked=false;
+  forkSource=context.fork||null;slotIntent=!!context.orchestrator;pendingRole=context.role||null;const generation=++forkGeneration;modelPicked=false;
   const workspaceContext=workspace?.context();
   const projectId=Object.hasOwn(context,'projectId')?context.projectId:workspaceContext?.projectId??active?.projectId??null;
   $('create-project').value=projectId||'';
@@ -274,12 +277,17 @@ function openCreate(context={}) {
   $('create-initial-prompt').value='';$('create-send-initial-prompt').checked=true;$('create-initial-prompt-field').hidden=!!forkSource;
   $('create-role').value='';api('/api/roles').then(list=>{roleLibrary=Array.isArray(list)?list:[];renderRoles();}).catch(()=>{});
   $('create-agent-access').value='';updateCommunicationDefault();$('create-error').textContent='';$('directory').value=context.cwd||(projectId?projectRoot('local',projectId):workspaceContext?.cwd||remembered.ungrouped||(active?.hostId==='local'?active.cwd:null))||config.roots[0];$('session-title').value=context.title||'';
+  if(slotIntent&&!forkSource)$('create-agent-access').value='coordinator';
   const effective=effectiveSessionRouting(projectId);
   if(effective.mode==='always')$('provider').value='auto';
   else if(context.provider&&$('provider').querySelector(`option[value="${context.provider}"]`))$('provider').value=context.provider;
   else if(effective.mode==='default'&&!forkSource)$('provider').value='auto';
   $('fork-boundary').replaceChildren(new Option('Latest completed turn at submission',''));$('fork-context').value='auto';$('fork-summary').value='';
   renderForkHeader();fillCreateHosts(context.hostId||'local',context.cwd);providerNote();updateRoleNote();
+  // The slot owns the orchestrator's place, workspace and access; only harness, model and title are asked.
+  $('create-description').dataset.default??=$('create-description').textContent;$('create-description').textContent=$('create-description').dataset.default;
+  if(slotIntent){$('create-dialog').dataset.slot='';$('create-eyebrow').textContent='ORCHESTRATOR';$('create-heading').textContent=forkSource?'Fork orchestrator':'New orchestrator';$('create-submit').textContent=forkSource?'Fork orchestrator ↗':'Start orchestrator ↗';$('create-initial-prompt-field').hidden=true;$('create-description').textContent='Pick the agent that routes and manages work across every project. It runs in its own empty directory, with coordinator access, and does not write code.';if(!$('directory').value)$('directory').value=config.roots[0]||'/';}
+  else delete $('create-dialog').dataset.slot;
   // Forking suggests its own worktree so the new session starts from this one's
   // position; the base revision is filled in from Git once the policy has loaded.
   worktrees.projectChanged(context.workspaceMode);
@@ -362,11 +370,11 @@ function applyForkModel(model){
   if(!modelPicked)resetCreateModels();
 }
 // L-08: the session a fork is taken from. Cleared by any non-fork open.
-async function openFork(parent=active){
+async function openFork(parent=active,extra={}){
   if(!parent||!config)return;
   $('lifecycle-menu').open=false;
   const generation=openCreate({fork:{id:parent.id,title:parent.title,provider:parent.provider,hostId:parent.hostId||'local',modelProvider:parent.modelProvider||null,cwd:parent.cwd,model:(active?.id===parent.id?modelConfig?.currentValue:null)||parent.model||null,role:parent.role||null,turns:0},
-    hostId:parent.hostId||'local',projectId:parent.projectId??null,cwd:parent.cwd,title:`${parent.title} (fork)`,provider:parent.provider,workspaceMode:'newWorktree'});
+    hostId:parent.hostId||'local',projectId:parent.projectId??null,cwd:parent.cwd,title:`${parent.title} (fork)`,provider:parent.provider,workspaceMode:'newWorktree',...extra});
   const id=parent.id;
   try{
     // The parent's committed position becomes the fork's default base revision, but
@@ -641,7 +649,9 @@ function syncModelLabel(){
 }
 function sidebar(){
   const filter=$('session-filter').value;
-  const visibleSessions=sessions.filter(s=>filter==='all'||!!s.archived===(filter==='archived'));
+  // The slotted orchestrator lives above the tree, never among regular sessions.
+  const visibleSessions=sessions.filter(s=>s.id!==orchestratorId&&(filter==='all'||!!s.archived===(filter==='archived')));
+  renderOrchestratorSlot();
   // Archived projects appear with archived sessions; active projects holding archived sessions do too.
   const visibleProjects=projects.filter(p=>filter==='all'||(filter==='archived'?p.archived||visibleSessions.some(s=>s.projectId===p.id):!p.archived));
   $('section-title').textContent=sidebarView==='hosts'?'HOSTS':'SESSIONS';
@@ -686,9 +696,40 @@ function sidebar(){
   }
   area.scrollTop=scroll;updateProjectControls();github.refreshBadges();updateNotificationIndicators();
 }
+// The orchestrator slot: one ungrouped session that routes and manages work across
+// every project. It can be cleared (archiving it), started fresh, or forked to another
+// harness, which moves the slot to the fork.
+let closeSlotMenu=null;
+function renderOrchestratorSlot(){
+  closeSlotMenu?.();
+  const area=$('orchestrator-slot');area.replaceChildren();
+  const s=sessions.find(x=>x.id===orchestratorId);
+  if(!s){
+    const start=el('button','orchestrator-empty','＋ New orchestrator');start.type='button';
+    start.title='Start a session that routes and manages work across every project';
+    start.onclick=()=>openCreate({orchestrator:true,projectId:null,title:'Orchestrator'});
+    area.append(start);return;
+  }
+  const row=sessionButton(s);row.classList.add('orchestrator-item');
+  row.querySelector('small').textContent=`Orchestrator · ${labels[s.provider]||s.provider}${s.model?' · '+s.model:''}`;
+  const more=el('button','group-action orchestrator-more','⋯');more.type='button';more.setAttribute('aria-label','Orchestrator actions');more.setAttribute('aria-haspopup','menu');
+  const menu=el('div','orchestrator-menu');menu.setAttribute('role','menu');menu.hidden=true;
+  const busy=()=>['running','waiting','cancelling'].includes(s.status);
+  const item=(label,run)=>{const b=el('button','',label);b.type='button';b.setAttribute('role','menuitem');b.onclick=e=>{e.stopPropagation();closeSlotMenu?.();if(busy()){toast('The orchestrator is mid-turn; wait for it to finish, or stop it.');return;}run();};menu.append(b);};
+  item('Fork to another harness…',()=>openFork(s,{orchestrator:true,projectId:null,title:s.title,workspaceMode:'directory'}));
+  item('Clear slot',async()=>{if(!confirm(`Clear the orchestrator slot? “${s.title}” and its conversation will be deleted.`))return;try{await api('/api/orchestrator',{method:'DELETE'});orchestratorId=null;await refreshSessions();}catch(error){toast(error.message);}});
+  more.onclick=e=>{
+    e.stopPropagation();if(!menu.hidden){closeSlotMenu?.();return;}
+    menu.hidden=false;
+    const outside=ev=>{if(!menu.contains(ev.target))closeSlotMenu?.();};
+    closeSlotMenu=()=>{menu.hidden=true;document.removeEventListener('click',outside);closeSlotMenu=null;};
+    document.addEventListener('click',outside);
+  };
+  row.append(more,menu);area.append(row);
+}
 async function refreshSessions(){
   const [list,catalog]=await Promise.all([api('/api/sessions?archived=all'),api('/api/catalog')]);
-  sessions=list;projects=catalog.projects;locations=catalog.locations||[];hosts=catalog.hosts;
+  sessions=list;projects=catalog.projects;locations=catalog.locations||[];hosts=catalog.hosts;orchestratorId=catalog.orchestratorId||null;
   if(terminalHost&&!hosts.some(host=>host.id===terminalHost.id)){terminalHost=null;if(document.body.dataset.workspaceView==='host-terminal')workspace.showView('sessions');}
   if(active){const current=sessions.find(s=>s.id===active.id);if(current){active.projectId=current.projectId;active.hostId=current.hostId;active.automation=current.automation;active.archived=current.archived;}}
   sidebar();workspace?.sync(catalog,sessions);taskMentions.refresh();
@@ -790,7 +831,7 @@ function selectSession(s) {
   clearTimeout(retryTimer);generation++;socket?.close();socket=null;connected=false;
   active=s;storedEvents=[];older={mode:'none',loading:false,error:''};currentUserSeq=null;promptRecovery.render();status=s.status;modelConfig=null;permissionModes=null;sessionConfig=null;availableCommands=[];commandsOpen=false;renderCommands();mentions.close();taskMentions.close();taskMentions.refresh();composerMenu.close();sessionMenu.close();resetTranscript();usageStatus.reset();inputQueue.reset();
   localStorage.setItem('agentworks-session',s.id);$('welcome').hidden=true;$('conversation').hidden=false;
-  github.sessionChanged();
+  github.sessionChanged();refreshCommunicates(s.id);
   setTitle(s.title);$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;showPlace();
   $('session-notice').hidden=true;document.body.classList.remove('menu-open');sidebarPin.close();sidebar();updateControls();connect(generation);
   workspace?.sessionSelected(s);sidePanel?.sessionChanged();sessionTerminal?.sessionChanged();promptResize.size();renderComposer();
@@ -843,6 +884,7 @@ function applySocketMessage(text){
       if(tool){tool.header=d.header;scheduleDraw();}return;
     }
     if(Number.isSafeInteger(e.seq)&&e.kind!=='snapshot')eventSeq=Math.max(eventSeq??0,e.seq);
+    if(e.kind==='agent_access'){if(active)active.communicates=!!e.data?.communicate;return;}
     if(e.kind==='mailbox_updated'){if(Number.isSafeInteger(e.data.unacknowledged)){active.unacknowledged=e.data.unacknowledged;renderUnread();}return;}
     if(e.kind==='snapshot'){
       // A full snapshot replaces the transcript; a resumed one adds only newer events.
@@ -1237,6 +1279,11 @@ function updateControls(){
   $('show-usage').textContent=active?.provider==='antigravity'?'Refresh quota':'Usage ↗';
   $('show-usage').disabled=!connected||status!=='idle';
   $('delete-provider-history').hidden=!active?.providerCapabilities?.delete;
+  // The slotted orchestrator is managed only through its slot.
+  const slotted=!!active&&active.id===orchestratorId;
+  for(const id of ['fork-session','change-directory','additional-directories','archive-session','close-session','session-project'])$(id).hidden=slotted;
+  $('session-project').previousElementSibling.hidden=slotted;
+  if(slotted)$('delete-provider-history').hidden=true;
   renderSessionConfig();
   const modePicker=$('permission-mode-picker');modePicker.hidden=!permissionModes?.options?.length;
   const modeSignature=JSON.stringify(permissionModes);
@@ -1658,8 +1705,9 @@ $('model-picker').onchange=async event=>{
 };
 $('create-form').onsubmit=async event=>{
   event.preventDefault();if(creating||worktrees.blocked())return;creating=true;providerNote();$('create-error').textContent='';
-  const fork=forkSource,githubPr=githubCreate;
+  const fork=forkSource,githubPr=githubCreate,slot=slotIntent;
   try{
+    if(slot&&$('provider').value==='auto')throw new Error('Choose a harness for the orchestrator.');
     const source=$('directory').value.trim(),initialText=!fork?$('create-initial-prompt').value:'';
     const sendPrompt=!!(initialText.trim()&&$('create-send-initial-prompt').checked);
     const payload={resumePolicy:{enabled:$('create-resume-policy').checked},provider:$('provider').value,modelProvider:modelProviders.selection(),...worktrees.submission(),title:$('session-title').value,projectId:$('create-project').value||null,hostId:$('create-host').value,model:$('create-model').value,...(initialText.trim()?(sendPrompt?{prompt:initialText}:{description:initialText}):{}),...(!fork&&$('create-role').value?{role:$('create-role').value}:{}),...($('create-agent-access').value?{agentAccess:{communicate:$('create-agent-access').value!=='off',...Object.fromEntries(['startSessions','promptSessions','cancelSessions','runAutomations'].map(key=>[key,$('create-agent-access').value==='coordinator']))}}:{})};
@@ -1667,11 +1715,15 @@ $('create-form').onsubmit=async event=>{
     const signature=JSON.stringify({source:fork?.id||null,payload});
     if(!pendingCreate||pendingCreate.signature!==signature)pendingCreate={signature,requestId:uuid()};
     sessionStorage.setItem('agentworks-pending-create',JSON.stringify(pendingCreate));
-    const path=fork?`/api/sessions/${fork.id}/fork`:'/api/sessions';
-    const created=await api(path,{method:'POST',body:JSON.stringify({...payload,requestId:pendingCreate.requestId})});
+    const path=slot?(fork?'/api/orchestrator/fork':'/api/orchestrator'):fork?`/api/sessions/${fork.id}/fork`:'/api/sessions';
+    // The slot only takes the harness, model and title; it owns the directory and access.
+    const body=slot?{provider:payload.provider,model:payload.model||null,modelProvider:payload.modelProvider||null,title:payload.title||null,...(fork?{boundarySeq:payload.boundarySeq,context:payload.context,summary:payload.summary}:{})}:payload;
+    const response=await api(path,{method:'POST',body:JSON.stringify({...body,requestId:pendingCreate.requestId})});
+    const created=slot&&fork?response.session:response;
+    if(slot){if(fork){sessions=sessions.filter(s=>s.id!==fork.id);if(response.warning)toast(response.warning);}orchestratorId=created.id;}
     pendingCreate=null;sessionStorage.removeItem('agentworks-pending-create');
     // Remember the chosen source directory, never a worktree created from it.
-    const remembered=readStorage(localStorage,'agentworks-project-locations',{});remembered[created.hostId&&created.hostId!=='local'?created.hostId+':'+(created.projectId||'ungrouped'):created.projectId||'ungrouped']=source;try{localStorage.setItem('agentworks-project-locations',JSON.stringify(remembered));}catch{}
+    if(!slot){const remembered=readStorage(localStorage,'agentworks-project-locations',{});remembered[created.hostId&&created.hostId!=='local'?created.hostId+':'+(created.projectId||'ungrouped'):created.projectId||'ungrouped']=source;try{localStorage.setItem('agentworks-project-locations',JSON.stringify(remembered));}catch{}}
     const used=readStorage(localStorage,'agentworks-provider-used',{});used[created.provider]=Date.now();try{localStorage.setItem('agentworks-provider-used',JSON.stringify(used));}catch{}
     if(githubPr){try{await api(`/api/sessions/${created.id}/github`,{method:'POST',body:JSON.stringify({links:[{host:githubPr.host,owner:githubPr.owner,repo:githubPr.repo,kind:'pullRequest',number:githubPr.number}]})});}catch(error){toast('Session created; could not attach PR: '+error.message);}}
     sessions.unshift(created);$('create-dialog').close();selectSession(created);
@@ -2050,12 +2102,12 @@ async function init(){
   if(params.has('settings')){params.delete('settings');history.replaceState(history.state,'',location.pathname+(params.size?'?'+params:'')+location.hash);openSettings();}
   setInterval(()=>refreshSessions().catch(()=>{}),5000);
   notifications.start();
-  notificationTray=setupNotificationTray({openAlert:openNotificationAlert,onAlertsChange:updateNotificationIndicators});
+  notificationTray=setupNotificationTray({openAlert:openNotificationAlert,onAlertsChange:updateNotificationIndicators,getOrchestrator:()=>orchestratorId});
   window.addEventListener('focus',()=>{if(isAutoDismissEnabled()&&active?.id)notificationTray?.dismissSessionAlerts(active.id);});
 }
 init().catch(error=>toast('Cannot reach the local server: '+error.message));
 
-setupCommunication({api,getActive:()=>active,getSessions:()=>sessions,selectSession,toast});
+setupCommunication({api,getActive:()=>active,getSessions:()=>sessions,selectSession,toast,getOrchestrator:()=>orchestratorId});
 setupInboxDelivery({api,getActive:()=>active,toast,uuid});
 
 const github=setupGithub({api,getActive:()=>active});
@@ -2077,7 +2129,7 @@ function usageCommand(){return availableCommands.find(c=>c.name===(active?.provi
 setupPalettes({
   $,labels,selectSession,
   fallbackFocus:()=>active?$('prompt'):null,
-  state:()=>({active,status,connected,sessions,projects,hosts,commands:availableCommands,
+  state:()=>({active,orchestrator:!!active&&active.id===orchestratorId,status,connected,sessions,projects,hosts,commands:availableCommands,
     usageAvailable:!!active&&(active.provider==='antigravity'||['claude','claude-rust','codex','codex-rust'].includes(active.provider)&&!!usageCommand()),
     views:{files:()=>$('nav-files').click(),automations:()=>$('nav-automations').click()}}),
   handlers:{

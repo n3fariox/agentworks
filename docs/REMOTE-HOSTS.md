@@ -213,7 +213,8 @@ This slice permits exactly `tools/list`, `list_sessions`, `read_inbox`,
 ends reject other operations; the server filters discovery to the intersection of
 this list and the caller's current grants, plus `run_with_secrets`, which the facade
 runs on the host. Coordinator operations and completion tools remain unavailable
-through this relay even when granted locally. The bridge format is the boundary:
+through this relay even when granted locally. A local coordinator can still start
+sessions on a remote host by passing `hostId` to `start_session` (see `list_hosts`). The bridge format is the boundary:
 adding worker-native inbox/send commands would duplicate the server's durable mail,
 project scoping, permission and audit logic, and would not configure an MCP client
 for the provider. The native MCP facade continues to translate MCP `tools/call`

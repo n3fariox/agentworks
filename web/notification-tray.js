@@ -13,7 +13,7 @@ const element=(tag,className,text)=>{
 };
 const attention=alert=>!alert.resolved&&['approval','error','taskBlocked','automationIssue'].includes(alert.event);
 
-export function setupNotificationTray({openAlert, onAlertsChange}={}){
+export function setupNotificationTray({openAlert, onAlertsChange, getOrchestrator=()=>null}={}){
   const nav=document.querySelector('#workspace-nav');if(!nav)return;
   const bell=element('button','workspace-nav-item notification-bell');bell.type='button';bell.id='nav-notifications';
   bell.title='Notifications (Alt+N)';
@@ -75,7 +75,7 @@ export function setupNotificationTray({openAlert, onAlertsChange}={}){
         if(alert.sessionId)link.dataset.sessionId=alert.sessionId;
         link.append(element('strong','',alert.resolved?'Request resolved':alert.question?'Answer needed':labels[alert.event]||'Session activity'));
         const time=element('time');time.dateTime=new Date(alert.created).toISOString();time.textContent=new Date(alert.created).toLocaleString();link.append(time);
-        link.append(element('span','notification-source',`${alert.title} · ${alert.projectName||'Ungrouped'}`),element('p','notification-body',alert.body),element('span','notification-destination',alert.automationId?'Open automation →':alert.event==='approval'&&!alert.resolved?'Open request →':'Open session →'));
+        link.append(element('span','notification-source',`${alert.title} · ${alert.sessionId&&alert.sessionId===getOrchestrator()?'Orchestrator':alert.projectName||'Ungrouped'}`),element('p','notification-body',alert.body),element('span','notification-destination',alert.automationId?'Open automation →':alert.event==='approval'&&!alert.resolved?'Open request →':'Open session →'));
         link.addEventListener('click',async event=>{
           if(!openAlert||event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;
           event.preventDefault();

@@ -1175,8 +1175,9 @@ struct AgentTarget {
 fn invalid(message: &str) -> (StatusCode, String) {
     fail(StatusCode::BAD_REQUEST, message)
 }
-/// The caller's project, provided it may read automations there.
-fn agent_scope(app: &App, a: &mail::Actor) -> mail::Result<(mail::Access, String)> {
+/// The caller's project, provided it may read automations there; `None` is every
+/// project, for the orchestrator.
+fn agent_scope(app: &App, a: &mail::Actor) -> mail::Result<(mail::Access, Option<String>)> {
     let access = mail::actor_access(app, a)?;
     if !access.run_automations && !access.manage_automations {
         return Err(fail(
@@ -1184,11 +1185,14 @@ fn agent_scope(app: &App, a: &mail::Actor) -> mail::Result<(mail::Access, String
             "Agentworks capability not granted: run_automations or manage_automations",
         ));
     }
+    if mail::actor_orchestrates(app, a) {
+        return Ok((access, None));
+    }
     let project = a
         .project
         .clone()
         .ok_or_else(|| fail(StatusCode::FORBIDDEN, "Assign a project first"))?;
-    Ok((access, project))
+    Ok((access, Some(project)))
 }
 fn in_project(app: &App, id: &str, project: &str) -> mail::Result<Definition> {
     existing(app, id)?
@@ -1220,7 +1224,35 @@ pub async fn agent(
     operation: &str,
     args: serde_json::Value,
 ) -> mail::Result<serde_json::Value> {
-    let (access, project) = agent_scope(app, a)?;
+    let (access, scope) = agent_scope(app, a)?;
+    // The orchestrator reads automations in every project, optionally filtered by
+    // `project`. Writing them stays with sessions inside the project.
+    let filter = match &scope {
+        Some(project) => Some(project.clone()),
+        None => match args.get("project").and_then(serde_json::Value::as_str) {
+            Some(r) => Some(mail::project_ref(app, r)?),
+            None => None,
+        },
+    };
+    let mut args = args;
+    if scope.is_none()
+        && let Some(o) = args.as_object_mut()
+    {
+        o.remove("project");
+    }
+    let slugs: std::collections::HashMap<String, String> = app
+        .catalog
+        .lock()
+        .unwrap()
+        .data
+        .projects
+        .iter()
+        .map(|p| (p.id.clone(), p.slug.clone()))
+        .collect();
+    let readable = |d: Definition| match &filter {
+        Some(p) => d.filter_project(p),
+        None => d.project_id.is_some().then_some(d),
+    };
     match operation {
         "list_automations" => {
             let defs = app
@@ -1232,9 +1264,13 @@ pub async fn agent(
             let now = now() as i64;
             let defs = defs
                 .into_iter()
-                .filter_map(|d| d.filter_project(&project))
+                .filter_map(readable)
                 .map(|d| {
-                    if access.manage_automations {
+                    let place = scope.is_none().then(|| {
+                        let id = d.project_id.clone().unwrap_or_default();
+                        json!({"projectId":id,"projectSlug":slugs.get(&id)})
+                    });
+                    let mut summary = if access.manage_automations {
                         let mut summary = json!({"id":d.id,"name":d.name,"enabled":d.enabled,"revision":d.revision,"nextRun":view(&d, now, &[])["nextRun"],"trigger":d.workflow.as_ref().map_or(json!({"kind":"manual"}),|w|json!(w.trigger))});
                         if let Some(author) = &d.created_by {
                             summary["createdBy"] = json!(author);
@@ -1242,7 +1278,12 @@ pub async fn agent(
                         summary
                     } else {
                         json!({"id":d.id,"name":d.name,"enabled":d.enabled})
+                    };
+                    if let Some(place) = place {
+                        summary["projectId"] = place["projectId"].clone();
+                        summary["projectSlug"] = place["projectSlug"].clone();
                     }
+                    summary
                 })
                 .collect::<Vec<_>>();
             return Ok(json!({ "automations": defs }));
@@ -1250,7 +1291,8 @@ pub async fn agent(
         "get_automation" | "list_automation_runs" => {
             let target: AgentTarget =
                 serde_json::from_value(args).map_err(|_| invalid("Invalid automation query"))?;
-            let def = in_project(app, &target.automation_id, &project)?;
+            let def = readable(existing(app, &target.automation_id)?)
+                .ok_or_else(|| fail(StatusCode::FORBIDDEN, "Automation is outside this project"))?;
             return Ok(if operation == "get_automation" {
                 view(&def, now() as i64, &profiles_for(&[&def]))
             } else {
@@ -1259,6 +1301,12 @@ pub async fn agent(
         }
         _ => {}
     }
+    let Some(project) = scope else {
+        return Err(fail(
+            StatusCode::FORBIDDEN,
+            "The orchestrator reads and runs automations; ask a session in the project to change them",
+        ));
+    };
     mail::require_actor(app, a, "manage_automations")?;
     let request = args["requestId"]
         .as_str()

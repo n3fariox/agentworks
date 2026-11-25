@@ -337,7 +337,7 @@ fn execute(
     Ok(response)
 }
 /// MCP caller holds the communication gate; scope and grants are always reread.
-pub fn agent(app: &App, a: &mail::Actor, args: Value, operation: &str) -> mail::Result<Value> {
+pub fn agent(app: &App, a: &mail::Actor, mut args: Value, operation: &str) -> mail::Result<Value> {
     let access = mail::actor_access(app, a)?;
     let write = !matches!(operation, "list_tasks" | "get_task");
     if (write && (a.session.is_none() || !mail::coordinator(&access)))
@@ -345,13 +345,35 @@ pub fn agent(app: &App, a: &mail::Actor, args: Value, operation: &str) -> mail::
     {
         return Err(fail(StatusCode::FORBIDDEN, "Task capability not granted"));
     }
-    let project = a
-        .project
-        .as_deref()
-        .ok_or_else(|| fail(StatusCode::FORBIDDEN, "Tasks require project membership"))?;
+    // The orchestrator names the project: `project`, or the slug in a task URI.
+    let project = if mail::actor_orchestrates(app, a) {
+        let named = args.as_object_mut().and_then(|o| o.remove("project"));
+        let from_uri = args["taskId"].as_str().and_then(|uri| {
+            uri.strip_prefix("agentworks://projects/")?
+                .split_once("/tasks/")
+                .map(|(slug, _)| slug.to_owned())
+        });
+        match named
+            .as_ref()
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or(from_uri)
+        {
+            Some(r) => mail::project_ref(app, &r)?,
+            None => {
+                return Err(bad(
+                    "Pass project (a slug or ID from list_projects) or a task URI",
+                ));
+            }
+        }
+    } else {
+        a.project
+            .clone()
+            .ok_or_else(|| fail(StatusCode::FORBIDDEN, "Tasks require project membership"))?
+    };
     execute(
         &mut app.catalog.lock().unwrap(),
-        project,
+        &project,
         &a.id,
         args,
         operation,

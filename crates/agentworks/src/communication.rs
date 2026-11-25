@@ -263,8 +263,158 @@ pub fn message_ref(v: &Value) -> Option<i64> {
     };
     (n > 0).then_some(n)
 }
-pub fn peer(app: &App, actor: &Session, id: &str) -> Result<Arc<Session>> {
-    peer_of(app, &project(actor), id)
+/// Whether a recipient session may still receive mail from `sender`: same project, or
+/// either side is the orchestrator. Inbox delivery rechecks this at dispatch.
+pub fn peer(app: &App, recipient: &Session, sender: &str) -> Result<Arc<Session>> {
+    let target = session(app, session_ref(sender))?;
+    let scope = project(recipient);
+    if (scope.is_some() && scope == project(&target))
+        || orchestrates(app, recipient)
+        || orchestrates(app, &target)
+    {
+        return Ok(target);
+    }
+    Err(outside())
+}
+fn outside() -> (StatusCode, String) {
+    fail(
+        StatusCode::FORBIDDEN,
+        "Target is outside this session's project",
+    )
+}
+/// The session in the orchestrator slot, while it is live. The slot is set only by the
+/// human (`PUT /api/orchestrator`); it is not a grant and is never inherited.
+pub fn orchestrates(app: &App, s: &Session) -> bool {
+    let slotted = app.catalog.lock().unwrap().data.orchestrator.as_deref() == Some(&s.id);
+    slotted && {
+        let d = s.data.lock().unwrap();
+        d.project_id.is_none() && !d.lifecycle.archived
+    }
+}
+pub fn actor_orchestrates(app: &App, a: &Actor) -> bool {
+    a.session.as_ref().is_some_and(|s| orchestrates(app, s))
+}
+static ORCHESTRATOR_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+/// Server-owned, empty working directory for the orchestrator, next to the catalog. It is
+/// not an allowed root (so no project or agent can pick it); `checked_cwd` admits exactly it.
+pub fn init_orchestrator_dir(catalog: &std::path::Path) -> std::io::Result<()> {
+    let dir = catalog
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("orchestrator");
+    std::fs::create_dir_all(&dir)?;
+    let _ = ORCHESTRATOR_DIR.set(std::fs::canonicalize(dir)?);
+    Ok(())
+}
+pub fn orchestrator_dir() -> Option<&'static std::path::Path> {
+    ORCHESTRATOR_DIR.get().map(|p| p.as_path())
+}
+/// The live orchestrator session, if any.
+pub fn orchestrator(app: &App) -> Option<Arc<Session>> {
+    let id = app.catalog.lock().unwrap().data.orchestrator.clone()?;
+    let s = app.sessions.lock().unwrap().get(&id).cloned()?;
+    orchestrates(app, &s).then_some(s)
+}
+/// Whether `s` holds the orchestrator slot, archived or not. The slotted session is managed
+/// only through the slot: it cannot be archived, deleted, forked, moved or regrouped directly.
+pub fn slotted(app: &App, s: &Session) -> bool {
+    app.catalog.lock().unwrap().data.orchestrator.as_deref() == Some(&s.id)
+}
+pub fn not_slotted(app: &App, s: &Session, action: &str) -> Result<()> {
+    if slotted(app, s) {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            format!("{action} is not available for the orchestrator; use its slot instead"),
+        ));
+    }
+    Ok(())
+}
+/// A session's own working directory is still usable: inside the allowed roots, or the
+/// orchestrator directory for the slotted orchestrator only.
+pub fn session_cwd_ok(app: &App, s: &Session) -> bool {
+    let cwd = s.cwd();
+    if orchestrator_dir() == Some(cwd.as_path()) {
+        return orchestrates(app, s);
+    }
+    crate::checked_cwd(app, &cwd.to_string_lossy()).is_ok_and(|c| c == cwd)
+}
+/// Coordinator scope: a same-project session, or any session at all for the orchestrator.
+pub fn peer_for(app: &App, a: &Actor, id: &str) -> Result<Arc<Session>> {
+    if actor_orchestrates(app, a) {
+        return session(app, session_ref(id));
+    }
+    peer_of(app, &a.project, id)
+}
+/// Messaging scope: coordinator scope, plus the orchestrator for any project session.
+pub fn contact(app: &App, a: &Actor, id: &str) -> Result<Arc<Session>> {
+    let target = session(app, session_ref(id))?;
+    if a.session.is_some() && a.project.is_some() && orchestrates(app, &target) {
+        return Ok(target);
+    }
+    peer_for(app, a, id)
+}
+/// Resolves a project by ID or slug, for orchestrator tools.
+pub fn project_ref(app: &App, r: &str) -> Result<String> {
+    let r = r.trim().trim_start_matches('@');
+    let r = r.strip_prefix("agentworks://projects/").unwrap_or(r);
+    app.catalog
+        .lock()
+        .unwrap()
+        .data
+        .projects
+        .iter()
+        .find(|p| p.id == r || p.slug == r)
+        .map(|p| p.id.clone())
+        .ok_or_else(|| fail(StatusCode::NOT_FOUND, "Project not found"))
+}
+pub fn projects(app: &App, a: &Actor) -> Result<Value> {
+    if !actor_orchestrates(app, a) {
+        return Err(fail(
+            StatusCode::FORBIDDEN,
+            "Only the orchestrator can list projects",
+        ));
+    }
+    // Copy the rows out first: event publication locks session state before the catalog.
+    let rows: Vec<_> = app
+        .catalog
+        .lock()
+        .unwrap()
+        .data
+        .projects
+        .iter()
+        .filter(|p| !p.archived)
+        .cloned()
+        .collect();
+    let hosts: std::collections::HashMap<String, Value> = crate::hosts::agent_list(app)["hosts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|h| Some((h["id"].as_str()?.to_owned(), h.clone())))
+        .collect();
+    let sessions: Vec<_> = app.sessions.lock().unwrap().values().cloned().collect();
+    let projects: Vec<Value> = rows
+        .iter()
+        .map(|p| {
+            let (mut active, mut total) = (0, 0);
+            for s in &sessions {
+                let d = s.data.lock().unwrap();
+                if d.project_id.as_deref() == Some(&p.id) && !d.lifecycle.archived {
+                    total += 1;
+                    active += usize::from(d.turn_active);
+                }
+            }
+            let directories: Vec<_> = p
+                .default_locations
+                .iter()
+                .map(|(host, path)| {
+                    let h = hosts.get(host);
+                    json!({"hostId":host,"hostName":h.map(|h| &h["name"]),"hostStatus":h.map(|h| &h["status"]),"path":path})
+                })
+                .collect();
+            json!({"id":p.id,"slug":p.slug,"uri":format!("agentworks://projects/{}",p.slug),"name":p.name,"directories":directories,"sessions":total,"running":active,"tasksEnabled":p.tasks_enabled})
+        })
+        .collect();
+    Ok(json!({"projects":projects}))
 }
 pub fn peer_of(app: &App, scope: &Option<String>, id: &str) -> Result<Arc<Session>> {
     let target = session(app, session_ref(id))?;
@@ -299,6 +449,7 @@ pub fn peers_as(app: &App, a: &Actor) -> Result<Value> {
     }
     let coordinator = coordinator(&grants) || (a.session.is_none() && grants.archive_sessions);
     let scope = a.project.clone();
+    let everywhere = actor_orchestrates(app, a);
     let candidates: Vec<_> = app.sessions.lock().unwrap().values().cloned().collect();
     let mut values = Vec::new();
     let mut controllers = Vec::new();
@@ -312,17 +463,44 @@ pub fn peers_as(app: &App, a: &Actor) -> Result<Value> {
             }
         }
     }
-    if scope.is_some() {
+    let slugs: std::collections::HashMap<String, String> = app
+        .catalog
+        .lock()
+        .unwrap()
+        .data
+        .projects
+        .iter()
+        .map(|p| (p.id.clone(), p.slug.clone()))
+        .collect();
+    let mut orchestrator = Value::Null;
+    if scope.is_some() || everywhere {
         for p in candidates {
-            if p.id != a.id && project(&p) == scope && (coordinator || access(app, &p)?.communicate)
+            if p.id == a.id {
+                continue;
+            }
+            let target = project(&p);
+            let visible = everywhere || (scope.is_some() && target == scope);
+            if visible && (coordinator || access(app, &p)?.communicate) {
+                let d = p.data.lock().unwrap();
+                let slug = target.as_ref().and_then(|id| slugs.get(id));
+                let mut row = json!({"id":p.id,"uri":session_uri(&p.id),"title":d.lifecycle.title.as_deref().unwrap_or(&p.title),"archived":d.lifecycle.archived,"provider":p.provider,"status":d.status,"hostId":p.host_id});
+                if everywhere {
+                    row["projectId"] = json!(target);
+                    row["projectSlug"] = json!(slug);
+                }
+                values.push(row);
+            } else if a.session.is_some()
+                && scope.is_some()
+                && grants.communicate
+                && orchestrates(app, &p)
             {
                 let d = p.data.lock().unwrap();
-                values.push(json!({"id":p.id,"uri":session_uri(&p.id),"title":d.lifecycle.title.as_deref().unwrap_or(&p.title),"archived":d.lifecycle.archived,"provider":p.provider,"status":d.status,"hostId":p.host_id}));
+                orchestrator = json!({"id":p.id,"uri":session_uri(&p.id),"title":d.lifecycle.title.as_deref().unwrap_or(&p.title),"status":d.status,"kind":"orchestrator"});
             }
         }
     }
     Ok(
-        json!({"self":a.id,"selfUri":actor_uri(&a.id),"projectId":scope,"sessions":values,"controllers":controllers}),
+        json!({"self":a.id,"selfUri":actor_uri(&a.id),"projectId":scope,"orchestrates":everywhere,"orchestrator":orchestrator,"sessions":values,"controllers":controllers}),
     )
 }
 pub fn send(app: &App, s: &Arc<Session>, mut req: SendMessage) -> Result<Value> {
@@ -341,7 +519,8 @@ pub fn send_as(app: &App, s: &Actor, req: SendMessage) -> Result<Value> {
             "Message must be 1–16384 bytes with a request ID up to 100 bytes",
         ));
     }
-    // Recipient is a same-project session or a live messaging controller.
+    // Recipient is a same-project session, a live messaging controller, or across
+    // projects when either side is the orchestrator.
     let (target_id, target_title, target) =
         if let Some(id) = crate::controllers::reference(&req.recipient) {
             let c = app
@@ -361,7 +540,7 @@ pub fn send_as(app: &App, s: &Actor, req: SendMessage) -> Result<Value> {
             }
             (crate::controllers::actor_id(&c.id), c.name, None)
         } else {
-            let target = peer_of(app, &s.project, &req.recipient)?;
+            let target = contact(app, s, &req.recipient)?;
             require(app, &target, "communicate")?;
             // Archived sessions keep their old mail but are not active recipients.
             if target.data.lock().unwrap().lifecycle.archived {

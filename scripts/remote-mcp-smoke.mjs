@@ -43,8 +43,10 @@ try {
  const outsideProject=await api('/api/projects',{name:'Other',defaultCommunicationRole:'participant'});
  const outsider=await create({projectId:outsideProject.id});
  const off=await create({agentAccess:{}});
- assert.deepEqual((await call(off.id,'tools/list')).tools,[]);denied(await call(off.id,'read_inbox'));
- const names=(await call(a.id,'tools/list')).tools.map(t=>t.name).sort();
+ // Secrets tools are listed for every session, whatever its Agentworks access.
+ const own=new Set(['list_session_secrets','run_with_secrets']);
+ assert.deepEqual((await call(off.id,'tools/list')).tools.filter(t=>!own.has(t.name)),[]);denied(await call(off.id,'read_inbox'));
+ const names=(await call(a.id,'tools/list')).tools.map(t=>t.name).filter(n=>!own.has(n)).sort();
  assert.deepEqual(names,['acknowledge_message','list_sessions','read_inbox','read_message','send_message']);
  const peers=value(await call(a.id,'list_sessions'));
  assert(peers.sessions.some(p=>p.id===b.id));assert(peers.sessions.some(p=>p.id===c.id));
@@ -61,6 +63,17 @@ try {
  assert.equal(value(await call(c.id,'read_inbox')).messages[0].sender,b.id);
  value(await call(c.id,'send_message',{recipient:a.id,text:'Local to remote',requestId:'return'}));
  assert(value(await call(a.id,'read_inbox')).messages.some(m=>m.text==='Local to remote'));
+ // A local coordinator starts sessions on remote hosts, by host ID or name.
+ await api(`/api/sessions/${c.id}/agent-access`,{communicate:true,startSessions:true},'PUT');await idle(c.id);
+ const hosts=value(await call(c.id,'list_hosts')).hosts;
+ assert.deepEqual(hosts.map(h=>h.id),['local',box.id,other.id]);assert(hosts.every(h=>h.status==='connected'));
+ assert.deepEqual(hosts.find(h=>h.id===box.id).roots,[root]);
+ const there=value(await call(c.id,'start_session',{provider:'demo',cwd:repo,hostId:box.id,title:'Started remotely',requestId:'remote-start'}));
+ assert.equal(there.hostId,box.id);assert.equal(there.projectId,project.id);await idle(there.id);
+ const byName=value(await call(c.id,'start_session',{provider:'demo',cwd:repo,hostId:'remote b',title:'By name',requestId:'remote-name'}));
+ assert.equal(byName.hostId,other.id);await idle(byName.id);
+ denied(await call(c.id,'start_session',{provider:'demo',cwd:local,hostId:box.id,requestId:'remote-outside'}));
+ denied(await call(c.id,'start_session',{provider:'demo',cwd:repo,hostId:'nowhere',requestId:'remote-unknown'}),404);
  // Cached configuration cannot retain a revoked grant; denied methods cannot be called directly.
  await api(`/api/sessions/${a.id}/agent-access`,{},'PUT');
  denied(await call(a.id,'read_inbox'));denied(await call(a.id,'send_message',{...args,requestId:'revoked'}));
@@ -72,5 +85,5 @@ try {
  await until(async()=>(await snapshot(a.id)).session.status==='suspended');
  await api(`/api/sessions/${a.id}/resume`,{});await idle(a.id);
  assert.equal(value(await call(a.id,'send_message',args)).id,sent.id);
- console.log('PASS remote MCP: native discovery, two workers/local peers, grants, scope, spoof denial, retries, reconnect/resume');
+ console.log('PASS remote MCP: native discovery, remote starts by host, two workers/local peers, grants, scope, spoof denial, retries, reconnect/resume');
 } finally {if(server)await stop();await removeFixture(dir);}

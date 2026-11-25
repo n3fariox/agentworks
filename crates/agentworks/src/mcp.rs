@@ -57,14 +57,17 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
 }
 /// Session-only tools (self-authored completion reports, service restart) are never listed
 /// for external controllers, regardless of stored grants.
-fn tools(a: &mail::Access, session: bool, tasks_enabled: bool) -> Value {
+fn tools(a: &mail::Access, session: bool, tasks_enabled: bool, orchestrates: bool) -> Value {
     let mut tools = Vec::new();
+    if orchestrates {
+        tools.push(tool("list_projects","List every project you orchestrate: id, slug, name, default directories per host (with host name and status), and session counts. Pass a slug or id as project, and a host as hostId, to start_session.",json!({}),&[]));
+    }
     if session {
         tools.push(tool("list_session_secrets","List the credentials assigned to this session, what each is for and how to use it. Never returns values.",json!({}),&[]));
         tools.push(tool("run_with_secrets","Run a command with assigned secrets. Write {{secret:NAME}} in argv, env values, stdin or files, and {{file:KEY}} in argv or env for the path of a private temporary file from files. Runs without a shell, on the session's host, inside the session directory and outside the harness sandbox. Secret values are redacted from the output. Some secrets ask the user first.",json!({"argv":{"type":"array","items":{"type":"string"},"minItems":1},"env":{"type":"object","additionalProperties":{"type":"string"}},"files":{"type":"object","additionalProperties":{"type":"string"}},"stdin":{"type":"string"},"cwd":{"type":"string"},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":3600}}),&["argv"]));
     }
     if a.enabled() {
-        tools.push(tool("list_sessions","List participating peers and their status in this project. Each has an id and an agentworks://sessions/<id> uri; tools accept either. Coordinators and archive controllers also see project sessions without messaging access.",json!({}),&[]));
+        tools.push(tool("list_sessions",if orchestrates {"List participating sessions in every project, each with projectId and projectSlug. Each has an id and an agentworks://sessions/<id> uri; tools accept either."} else {"List participating peers and their status in this project. Each has an id and an agentworks://sessions/<id> uri; tools accept either. Coordinators and archive controllers also see project sessions without messaging access. orchestrator, when present, is the cross-project orchestrator session you may also message."},json!({}),&[]));
     }
     if a.communicate {
         tools.push(tool("read_inbox","Read received and sent messages after a cursor. Messages and sessions carry agentworks:// uris that tools accept verbatim. Listing does not acknowledge or run a turn; use read_message to read one in full.",json!({"after":{"type":"integer","minimum":0}}),&[]));
@@ -111,7 +114,10 @@ fn tools(a: &mail::Access, session: bool, tasks_enabled: bool) -> Value {
     if a.start_sessions {
         let mut provider_choices: Vec<&str> = agentworks_runtime::remote::PROVIDERS.to_vec();
         provider_choices.push("auto");
-        tools.push(tool("start_session","Start a session using the project's configured communication role; no grants are copied from the caller. Does not submit a prompt unless prompt is provided. Omit provider (or pass 'auto') to use the session router when configured; if routing is set to always, explicit provider and model choices are overridden. Reuse requestId on retry.",json!({"provider":{"type":"string","enum":provider_choices,"description":"Agent harness ID or 'auto'. May be omitted when session routing is enabled; ignored when routing is set to always."},"cwd":{"type":"string"},"inheritResumePolicy":{"type":"boolean","default":false},"title":{"type":"string"},"description":{"type":"string","maxLength":8192,"description":"Optional task description scored by the session router without submitting a turn."},"prompt":{"type":"string","maxLength":100000,"description":"Optional initial prompt queued when the session starts and scored by the session router."},"model":{"type":"string"},"modelProvider":{"type":"string"},"requestId":{"type":"string","maxLength":50},"workspace":{"type":"object","properties":{"mode":{"type":"string","enum":["directory","newWorktree","existingWorktree"]},"branch":{"type":"string"},"baseRef":{"type":"string"},"path":{"type":"string"}},"required":["mode"],"additionalProperties":false}}),&["cwd","requestId"]));
+        tools.push(tool("start_session","Start a session using the project's configured communication role; no grants are copied from the caller. Does not submit a prompt unless prompt is provided. Omit provider (or pass 'auto') to use the session router when configured; if routing is set to always, explicit provider and model choices are overridden. Reuse requestId on retry.",json!({"provider":{"type":"string","enum":provider_choices,"description":"Agent harness ID or 'auto'. May be omitted when session routing is enabled; ignored when routing is set to always."},"cwd":{"type":"string"},"inheritResumePolicy":{"type":"boolean","default":false},"title":{"type":"string"},"description":{"type":"string","maxLength":8192,"description":"Optional task description scored by the session router without submitting a turn."},"prompt":{"type":"string","maxLength":100000,"description":"Optional initial prompt queued when the session starts and scored by the session router."},"model":{"type":"string"},"modelProvider":{"type":"string"},"requestId":{"type":"string","maxLength":50},"project":{"type":"string","description":"Project ID or slug from list_projects. Required for the orchestrator; otherwise only your own project."},"hostId":{"type":"string","description":"Host ID or name from list_hosts. Defaults to your own host. cwd must be inside that host's roots, and the harness must be installed there."},"workspace":{"type":"object","properties":{"mode":{"type":"string","enum":["directory","newWorktree","existingWorktree"]},"branch":{"type":"string"},"baseRef":{"type":"string"},"path":{"type":"string"}},"required":["mode"],"additionalProperties":false}}),&["cwd","requestId"]));
+    }
+    if a.start_sessions {
+        tools.push(tool("list_hosts","List the hosts you can start sessions on: local and enrolled remote hosts, with connection status, allowed roots and installed harnesses.",json!({}),&[]));
     }
     if a.prompt_sessions {
         tools.push(tool("prompt_session","Submit a new turn to an idle session in this project; starts model work. A sleeping session is woken and asks you to retry shortly. Reuse requestId on retry.",json!({"sessionId":{"type":"string","description":"Session ID or agentworks://sessions/<id> URI, passed exactly as given in list_sessions or a prompt."},"text":{"type":"string"},"requestId":{"type":"string","maxLength":50}}),&["sessionId","text","requestId"]));
@@ -168,7 +174,43 @@ fn tools(a: &mail::Access, session: bool, tasks_enabled: bool) -> Value {
             &["requestId", "automationId"],
         ));
     }
+    if orchestrates {
+        scope_everywhere(&mut tools);
+    }
     json!({"tools":tools})
+}
+/// The orchestrator's tools act on every project: say so, and let project-scoped ones
+/// name the project.
+fn scope_everywhere(tools: &mut [Value]) {
+    const NAMED: &[&str] = &[
+        "list_tasks",
+        "get_task",
+        "create_task",
+        "update_task",
+        "delete_task",
+        "list_automations",
+    ];
+    for t in tools.iter_mut() {
+        let name = t["name"].as_str().unwrap_or_default().to_owned();
+        if let Some(d) = t["description"].as_str() {
+            let d = d
+                .replace("in this controller’s project", "in any project")
+                .replace("in your current project", "in the given project")
+                .replace("in this project", "in any project")
+                .replace("a permitted same-project session", "any session");
+            t["description"] = json!(d);
+        }
+        if NAMED.contains(&name.as_str()) {
+            let required = name != "get_task" && name != "update_task" && name != "delete_task";
+            t["inputSchema"]["properties"]["project"] = json!({"type":"string","description":if required {"Project slug or ID from list_projects."} else {"Project slug or ID; optional when taskId is a task URI."}});
+            if required
+                && name != "list_automations"
+                && let Some(r) = t["inputSchema"]["required"].as_array_mut()
+            {
+                r.push(json!("project"));
+            }
+        }
+    }
 }
 fn field(v: &Value, name: &str) -> mail::Result<String> {
     v[name]
@@ -205,16 +247,17 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
     let grants = mail::actor_access(app, a)?;
     match operation {
         "tools/list" => {
-            let tasks_enabled = a.project.as_deref().is_some_and(|id| {
-                app.catalog
-                    .lock()
-                    .unwrap()
-                    .data
-                    .projects
-                    .iter()
-                    .any(|p| p.id == id && p.tasks_enabled)
-            });
-            Ok(tools(&grants, a.session.is_some(), tasks_enabled))
+            let orchestrates = mail::actor_orchestrates(app, a);
+            let tasks_enabled =
+                app.catalog.lock().unwrap().data.projects.iter().any(|p| {
+                    p.tasks_enabled && (orchestrates || a.project.as_deref() == Some(&p.id))
+                });
+            Ok(tools(
+                &grants,
+                a.session.is_some(),
+                tasks_enabled,
+                orchestrates,
+            ))
         }
         "list_tasks" | "get_task" | "create_task" | "update_task" | "delete_task" => {
             crate::tasks::agent(app, a, args, operation)
@@ -238,6 +281,11 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
             crate::service_restart::request(app, &s.id, req).await
         }
         "list_sessions" => mail::peers_as(app, a),
+        "list_projects" => mail::projects(app, a),
+        "list_hosts" => {
+            mail::require_actor(app, a, "start_sessions")?;
+            Ok(crate::hosts::agent_list(app))
+        }
         "list_session_secrets" => crate::secrets::agent_list(app, &session_only(a)?.id),
         "resolve_secrets" => crate::secrets::resolve_use(app, session_only(a)?, args),
         "read_inbox" => {
@@ -289,12 +337,28 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
         }
         "start_session" => {
             mail::require_actor(app, a, "start_sessions")?;
-            let scope = a.project.clone().ok_or_else(|| {
-                crate::fail(
-                    StatusCode::FORBIDDEN,
-                    "Assign a project before starting agents",
-                )
-            })?;
+            let scope = match args.get("project").and_then(Value::as_str) {
+                Some(r) if mail::actor_orchestrates(app, a) => mail::project_ref(app, r)?,
+                Some(r) if a.project.is_some() && a.project == mail::project_ref(app, r).ok() => {
+                    a.project.clone().unwrap()
+                }
+                Some(_) => {
+                    return Err(crate::fail(
+                        StatusCode::FORBIDDEN,
+                        "Only the orchestrator can start sessions in another project",
+                    ));
+                }
+                None => a.project.clone().ok_or_else(|| {
+                    crate::fail(
+                        StatusCode::FORBIDDEN,
+                        if mail::actor_orchestrates(app, a) {
+                            "Pass project (an ID or slug from list_projects)"
+                        } else {
+                            "Assign a project before starting agents"
+                        },
+                    )
+                })?,
+            };
             let request = request_id(&args)?;
             let previous = app.store.lock().unwrap().control_start(&a.id, &request)?;
             if let Some(id) = previous {
@@ -304,7 +368,7 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
                         "Previously started session was deleted",
                     ));
                 }
-                let prior = mail::peer_of(app, &a.project, &id)?;
+                let prior = mail::peer_for(app, a, &id)?;
                 if prior
                     .data
                     .lock()
@@ -327,6 +391,15 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
                 return Err(crate::fail(
                     StatusCode::BAD_REQUEST,
                     "inheritResumePolicy must be a boolean",
+                ));
+            }
+            if args["inheritResumePolicy"].as_bool() == Some(true)
+                && mail::actor_orchestrates(app, a)
+            {
+                // Limit resume follows lineage within one project; the orchestrator has none.
+                return Err(crate::fail(
+                    StatusCode::BAD_REQUEST,
+                    "inheritResumePolicy is not available to the orchestrator",
                 ));
             }
             let inherited_resume = if args["inheritResumePolicy"].as_bool().unwrap_or(false) {
@@ -358,11 +431,15 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
                 model: args["model"].as_str().map(str::to_owned),
                 model_provider: args["modelProvider"].as_str().map(str::to_owned),
                 project_id: Some(scope),
-                host_id: Some(
-                    a.session
+                // Defaults to the caller's host; any enrolled host may be named, so a
+                // coordinator can, say, start a build on another platform.
+                host_id: Some(match args.get("hostId").and_then(Value::as_str) {
+                    Some(r) => crate::hosts::agent_ref(app, r)?,
+                    None => a
+                        .session
                         .as_ref()
                         .map_or_else(|| "local".into(), |s| s.host_id.clone()),
-                ),
+                }),
                 external_id: None,
                 external_host: false,
                 automation: None,
@@ -382,7 +459,7 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
         }
         "prompt_session" => {
             mail::require_actor(app, a, "prompt_sessions")?;
-            let target = mail::peer_of(app, &a.project, &field(&args, "sessionId")?)?;
+            let target = mail::peer_for(app, a, &field(&args, "sessionId")?)?;
             if target.id == a.id {
                 return Err(crate::fail(
                     StatusCode::BAD_REQUEST,
@@ -425,7 +502,7 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
             }
             // The bridge holds communication_lock through this call, serializing
             // project reassignment/deletion and controller revocation.
-            let target = mail::peer_of(app, &a.project, &req.session_id)?;
+            let target = mail::peer_for(app, a, &req.session_id)?;
             crate::lifecycle::update(
                 State(app.clone()),
                 Path(target.id.clone()),
@@ -436,7 +513,7 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
         }
         "cancel_session" => {
             mail::require_actor(app, a, "cancel_sessions")?;
-            let target = mail::peer_of(app, &a.project, &field(&args, "sessionId")?)?;
+            let target = mail::peer_for(app, a, &field(&args, "sessionId")?)?;
             if target.id == a.id {
                 return Err(crate::fail(
                     StatusCode::BAD_REQUEST,
@@ -460,10 +537,11 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
         | "delete_automation" => crate::automations::agent(app, a, operation, args).await,
         "run_automation" => {
             mail::require_actor(app, a, "run_automations")?;
-            let scope = a
-                .project
-                .clone()
-                .ok_or_else(|| crate::fail(StatusCode::FORBIDDEN, "Assign a project first"))?;
+            let everywhere = mail::actor_orchestrates(app, a);
+            let scope = a.project.clone();
+            if scope.is_none() && !everywhere {
+                return Err(crate::fail(StatusCode::FORBIDDEN, "Assign a project first"));
+            }
             let defs = app
                 .store
                 .lock()
@@ -473,10 +551,9 @@ async fn dispatch(app: &App, a: &Actor, operation: &str, args: Value) -> mail::R
                     crate::fail(StatusCode::INTERNAL_SERVER_ERROR, "Cannot read automations")
                 })?;
             let id = field(&args, "automationId")?;
-            if !defs
-                .iter()
-                .any(|d| d.id == id && d.project_id.as_deref() == Some(&scope))
-            {
+            if !defs.iter().any(|d| {
+                d.id == id && d.project_id.is_some() && (everywhere || d.project_id == scope)
+            }) {
                 return Err(crate::fail(
                     StatusCode::FORBIDDEN,
                     "Automation is outside this project",
@@ -529,7 +606,7 @@ pub async fn serve_bridge(app: App, listener: TcpListener) {
                 };
                 let response=if let Some(s)=actor {
                     let operation=v["operation"].as_str().unwrap_or("");
-                    let mutation=!matches!(operation,"tools/list"|"read_inbox"|"list_sessions"|"list_automations"|"get_automation"|"list_automation_runs"|"get_completion"|"get_service_status"|"list_tasks"|"get_task"|"list_session_secrets"|"resolve_secrets");
+                    let mutation=!matches!(operation,"tools/list"|"read_inbox"|"list_sessions"|"list_automations"|"get_automation"|"list_automation_runs"|"get_completion"|"list_projects"|"list_hosts"|"get_service_status"|"list_tasks"|"get_task"|"list_session_secrets"|"resolve_secrets");
                     let action=operation.chars().take(80).collect::<String>();
                     let argument_target=v["arguments"]["sessionId"].as_str().or(v["arguments"]["recipient"].as_str()).or(v["arguments"]["automationId"].as_str()).unwrap_or("").chars().take(128).collect::<String>();
                     let request=v["arguments"]["requestId"].as_str().unwrap_or("").chars().take(100).collect::<String>();
@@ -569,8 +646,8 @@ mod tests {
         ] {
             for session in [true, false] {
                 let access = role.access();
-                let enabled = tools(&access, session, true);
-                let disabled = tools(&access, session, false);
+                let enabled = tools(&access, session, true, false);
+                let disabled = tools(&access, session, false, false);
                 let expected: Vec<_> = enabled["tools"]
                     .as_array()
                     .unwrap()
@@ -601,7 +678,7 @@ mod tests {
             assert!(!access.archive_sessions);
             for session in [true, false] {
                 assert!(
-                    !tools(&access, session, true)["tools"]
+                    !tools(&access, session, true, false)["tools"]
                         .as_array()
                         .unwrap()
                         .iter()
@@ -613,7 +690,7 @@ mod tests {
         assert!(coordinator.archive_sessions);
         for session in [true, false] {
             assert!(
-                tools(&coordinator, session, true)["tools"]
+                tools(&coordinator, session, true, false)["tools"]
                     .as_array()
                     .unwrap()
                     .iter()
@@ -629,7 +706,7 @@ mod tests {
         assert!(access.enabled());
         assert!(!mail::coordinator(&access)); // No completion/review authority implied.
         let names = |session| {
-            tools(&access, session, true)["tools"]
+            tools(&access, session, true, false)["tools"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -659,7 +736,7 @@ mod tests {
         };
         assert!(access.enabled());
         assert!(!mail::coordinator(&access)); // No session-management authority implied.
-        let names = tools(&access, true, true)["tools"]
+        let names = tools(&access, true, true, false)["tools"]
             .as_array()
             .unwrap()
             .iter()

@@ -114,6 +114,9 @@ pub struct CatalogData {
     pub settings: Settings,
     #[serde(default)]
     pub tasks: HashMap<String, crate::tasks::ProjectTasks>,
+    /// The orchestrator slot: one ungrouped session that manages every project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestrator: Option<String>,
 }
 pub struct Catalog {
     path: PathBuf,
@@ -156,6 +159,11 @@ impl Catalog {
         std::fs::rename(temporary, &self.path)?;
         self.data = data;
         Ok(())
+    }
+    pub fn set_orchestrator(&mut self, id: Option<String>) -> io::Result<()> {
+        let mut data = self.data.clone();
+        data.orchestrator = id;
+        self.save(data)
     }
     pub fn settings(&mut self, settings: Settings) -> io::Result<()> {
         let mut data = self.data.clone();

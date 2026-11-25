@@ -66,6 +66,9 @@ pub async fn update(
             "worktree, confirmDirty and confirmUnused only apply when archiving",
         ));
     }
+    if req.archived == Some(true) {
+        crate::communication::not_slotted(&app, &s, "Archiving")?;
+    }
     let was_archived = s.data.lock().unwrap().lifecycle.archived;
     let mut cleanup = None;
     if req.archived == Some(true) && !was_archived {

@@ -20,6 +20,7 @@ pub async fn change(
 ) -> ApiResult {
     let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
+    crate::communication::not_slotted(&app, &s, "Changing the directory")?;
     let running = reopenable(&s, "Change the directory")?;
     if running {
         // A running harness must not start a turn between this check and the restart.
@@ -103,6 +104,7 @@ pub async fn set_additional(
     }
     let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
+    crate::communication::not_slotted(&app, &s, "Adding directories")?;
     let running = reopenable(&s, "Change additional directories")?;
     if running {
         service_restart::allow_start(&app)?;

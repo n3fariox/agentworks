@@ -126,7 +126,10 @@ function renderActiveTurns(catalog, sessions) {
   }
   const projectName = id => !id ? 'Ungrouped' : catalog?.projects?.find(p => p.id === id)?.name || id;
   const hostName = id => !id ? '' : catalog?.hosts?.find(h => h.id === id)?.name || id;
-  const byName = (a, b) => projectName(a.projectId).localeCompare(projectName(b.projectId)) || (a.title || '').localeCompare(b.title || '');
+  // The orchestrator is labelled as itself and listed first.
+  const isOrchestrator = s => !!catalog?.orchestratorId && s.id === catalog.orchestratorId;
+  const place = s => isOrchestrator(s) ? 'Orchestrator' : projectName(s.projectId);
+  const byName = (a, b) => isOrchestrator(b) - isOrchestrator(a) || place(a).localeCompare(place(b)) || (a.title || '').localeCompare(b.title || '');
   const active = sessions.filter(s => activelyTurning(s) || s.status === 'waiting')
     .sort((a, b) => (b.status === 'waiting') - (a.status === 'waiting') || byName(a, b));
   const idle = sessions.filter(awakeIdle).sort(byName);
@@ -146,7 +149,7 @@ function renderActiveTurns(catalog, sessions) {
   const card = el('div', undefined, 'card turns-card');
   if (active.length) {
     const list = el('ul', undefined, 'session-list');
-    for (const session of active) list.append(sessionRow(session, projectName(session.projectId), hostName(session.hostId), {showWaiting:true}));
+    for (const session of active) list.append(sessionRow(session, place(session), hostName(session.hostId), {showWaiting:true}));
     card.append(list);
   } else {
     card.append(el('p', 'No active turns.', 'turns-empty'));
@@ -156,7 +159,7 @@ function renderActiveTurns(catalog, sessions) {
     details.open = idleWasOpen;
     details.append(el('summary', `${idle.length} idle ${idle.length === 1 ? 'session' : 'sessions'}`));
     const list = el('ul', undefined, 'session-list');
-    for (const session of idle) list.append(sessionRow(session, projectName(session.projectId), hostName(session.hostId)));
+    for (const session of idle) list.append(sessionRow(session, place(session), hostName(session.hostId)));
     details.append(list);
     card.append(details);
   }

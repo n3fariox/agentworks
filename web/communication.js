@@ -1,4 +1,4 @@
-export function setupCommunication({api,getActive,getSessions,selectSession,toast}) {
+export function setupCommunication({api,getActive,getSessions,selectSession,toast,getOrchestrator=()=>null}) {
   const $=id=>document.getElementById(id);
   const capabilities=[['communicate','Exchange messages and read project tickets'],['startSessions','Create sessions in this project'],['promptSessions','Start turns in project sessions'],['cancelSessions','Cancel turns in project sessions'],['runAutomations','Run existing project automations'],['manageAutomations','Create, edit, pause and delete project automations (explicit opt-in)'],['restartService','GLOBAL: restart the service and affect ALL projects (explicit opt-in)']];
   const reportPanel=nodePanel();
@@ -59,7 +59,10 @@ export function setupCommunication({api,getActive,getSessions,selectSession,toas
   $('agent-refresh-messages').addEventListener('click',()=>refresh(true));
   $('session-agents').addEventListener('click',async()=>{
     const active=getActive();if(!active)return;const ticket=++openGeneration;id=active.id;after=0;messages=[];renderReport(null);$('agent-preset').disabled=true;for(const [key] of capabilities)$('agent-grant-'+key).disabled=true;$('agent-error').textContent='';$('agent-inbox').replaceChildren();
-    $('agent-scope').textContent=active.projectId?'Scope: this session’s logical project, including its registered directories.':'Assign this session to a project to discover or contact peers.';
+    const orchestrator=active.id===getOrchestrator();
+    $('agent-scope').textContent=orchestrator?'Scope: every project and every session (orchestrator). These grants apply everywhere; removing them takes the tools away but keeps the slot.':active.projectId?'Scope: this session’s logical project, including its registered directories.':'Assign this session to a project to discover or contact peers.';
+    // Capability labels speak of "this project"; for the orchestrator that means every project.
+    for(const [key,label] of capabilities){const row=$('agent-grant-'+key).parentElement;row.lastChild.textContent=orchestrator?label.replace(/in this project|in project sessions/,'in every project').replace('read project tickets','read tickets in every project'):label;}
     $('agents-dialog').showModal();$('save-agent-access').disabled=true;
     try{const access=await api(`/api/sessions/${id}/agent-access`);if(ticket!==openGeneration||!id)return;$('agent-preset').disabled=false;for(const [key] of capabilities)$('agent-grant-'+key).disabled=false;for(const [key] of capabilities)$('agent-grant-'+key).checked=!!access[key];const all=capabilities.filter(([k])=>!['restartService','manageAutomations'].includes(k)).every(([k])=>access[k])&&!access.restartService&&!access.manageAutomations;$('agent-preset').value=all?'coordinator':access.communicate&&capabilities.slice(1).every(([k])=>!access[k])?'participant':capabilities.every(([k])=>!access[k])?'off':'custom';$('save-agent-access').disabled=false;await refresh(true);timer=setInterval(()=>refresh(),3000);}catch(e){$('agent-error').textContent=e.message;}
   });

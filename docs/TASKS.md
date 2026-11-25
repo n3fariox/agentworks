@@ -38,7 +38,7 @@ Use the number in the URL, not a `taskId` body field. Project creation (`POST /a
 
 `taskId` is a positive integer or a canonical URI belonging to the caller's project. Numeric strings, display keys and other-project URIs are rejected. Callers cannot supply a project override or impersonate an actor.
 
-A project participant with communication access may read tasks. A coordinator session may read and write (the coordinator capability is any of start sessions, prompt sessions, cancel sessions or run automations). Ungrouped sessions have no task scope. External controllers with communication/coordinator access may read only: even controllers with orchestration grants cannot mutate tasks. Tools are filtered by grants, and authorization is checked again on every call, including retries; revocation applies to already-connected clients. Archive status is checked before mutation receipts are replayed.
+A project participant with communication access may read tasks. A coordinator session may read and write (the coordinator capability is any of start sessions, prompt sessions, cancel sessions or run automations). Ungrouped sessions have no task scope, except the [orchestrator](AGENT-COMMUNICATION.md#orchestrator-prototype): its task tools take `project` (a slug or ID), or a task URI that names the project, and work in any project with tasks enabled. External controllers with communication/coordinator access may read only: even controllers with orchestration grants cannot mutate tasks. Tools are filtered by grants, and authorization is checked again on every call, including retries; revocation applies to already-connected clients. Archive status is checked before mutation receipts are replayed.
 
 ## Concurrency, retries and limits
 

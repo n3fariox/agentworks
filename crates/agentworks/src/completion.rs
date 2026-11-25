@@ -143,11 +143,12 @@ pub fn get(app: &App, a: &mail::Actor, req: Query) -> mail::Result<Value> {
     let scope = if id == a.id {
         None
     } else {
-        let target = mail::peer_of(app, &a.project, id)?;
+        let target = mail::peer_for(app, a, id)?;
         if !mail::coordinator(&grants) {
             mail::require(app, &target, "communicate")?;
         }
-        a.project.clone()
+        // The orchestrator reads reports saved in the target's current project.
+        mail::project(&target).or_else(|| a.project.clone())
     };
     app.store
         .lock()

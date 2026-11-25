@@ -466,13 +466,14 @@ pub async fn configure(
         return snapshot(&app, &id);
     }
     input.validate(now())?;
+    let orchestrator = mail::orchestrates(&app, &s);
     let (project, native, cwd) = {
         let d = s.data.lock().unwrap();
         if input.enabled
             && (d.lifecycle.archived
                 || d.lifecycle.suspended
                 || d.provider_session_id.is_none()
-                || d.project_id.is_none()
+                || (d.project_id.is_none() && !orchestrator)
                 || d.storage_error.is_some()
                 || !matches!(d.status.as_str(), "idle" | "running" | "waiting"))
         {
@@ -700,6 +701,7 @@ pub fn dispatch_one(app: &App, s: &Session, human_pending: bool) -> Result<()> {
 /// Why delivery is waiting even though the human's authorization stands. Mail stays queued
 /// (within the pending cap) and is delivered once the condition clears.
 fn hold_reason(app: &App, s: &Session) -> Option<&'static str> {
+    let orchestrator = mail::orchestrates(app, s);
     {
         let d = s.data.lock().unwrap();
         if d.lifecycle.archived {
@@ -714,7 +716,7 @@ fn hold_reason(app: &App, s: &Session) -> Option<&'static str> {
         if matches!(d.status.as_str(), "error" | "closed") {
             return Some("session needs attention");
         }
-        if d.project_id.is_none() {
+        if d.project_id.is_none() && !orchestrator {
             return Some("session is not in a project");
         }
         if d.provider_session_id.is_none() {
@@ -729,9 +731,7 @@ fn hold_reason(app: &App, s: &Session) -> Option<&'static str> {
     if mail::require(app, s, "communicate").is_err() {
         return Some("communication grant is off");
     }
-    if s.host_id == "local"
-        && !crate::checked_cwd(app, &s.cwd().to_string_lossy()).is_ok_and(|cwd| cwd == s.cwd())
-    {
+    if s.host_id == "local" && !mail::session_cwd_ok(app, s) {
         return Some("working directory unavailable");
     }
     if s.commands.lock().unwrap().is_none() {
@@ -1281,6 +1281,89 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+    fn send_from(
+        f: &Fixture,
+        from: &std::sync::Arc<Session>,
+        to: &Session,
+        request: &str,
+    ) -> mail::Result<Value> {
+        mail::send(
+            &f.app,
+            from,
+            mail::SendMessage {
+                recipient: to.id.clone(),
+                text: "cross-project".into(),
+                request_id: request.into(),
+                reply_to: None,
+                expect_reply: false,
+            },
+        )
+    }
+    fn orchestrate(f: &Fixture, s: &Session, on: bool) {
+        f.app
+            .catalog
+            .lock()
+            .unwrap()
+            .set_orchestrator(on.then(|| s.id.clone()))
+            .unwrap();
+    }
+    #[tokio::test]
+    async fn orchestrator_reaches_every_project_and_projects_reach_only_it() {
+        let mut f = Fixture::new();
+        // Another project is out of reach without the orchestrator scope.
+        f.sender.data.lock().unwrap().project_id = None;
+        assert_eq!(
+            send_from(&f, &f.sender, &f.recipient, "denied")
+                .unwrap_err()
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        // A slotted session that joined a project does not orchestrate.
+        f.sender.data.lock().unwrap().project_id = Some("elsewhere".into());
+        orchestrate(&f, &f.sender, true);
+        assert!(!mail::orchestrates(&f.app, &f.sender));
+        assert!(send_from(&f, &f.sender, &f.recipient, "grouped").is_err());
+        // Ungrouped, it reaches any project session, which can answer it.
+        f.sender.data.lock().unwrap().project_id = None;
+        assert!(mail::orchestrates(&f.app, &f.sender));
+        send_from(&f, &f.sender, &f.recipient, "one").unwrap();
+        send_from(&f, &f.recipient, &f.sender, "reply").unwrap();
+        // Discovery: the orchestrator sees project sessions; they see it.
+        let seen = mail::peers(&f.app, &f.sender).unwrap();
+        assert_eq!(seen["orchestrates"], true);
+        assert_eq!(seen["sessions"][0]["id"], "recipient");
+        assert_eq!(seen["sessions"][0]["projectId"], "project");
+        let seen = mail::peers(&f.app, &f.recipient).unwrap();
+        assert_eq!(seen["orchestrator"]["id"], "sender");
+        // Its mail wakes the project session like a same-project peer.
+        f.app
+            .store
+            .lock()
+            .unwrap()
+            .test_connection()
+            .execute("UPDATE agent_messages SET created=created-10000", [])
+            .unwrap();
+        f.dispatch(false);
+        assert!(matches!(
+            f.receiver.try_recv(),
+            Ok(crate::session_runtime::Command::InboxPrompt { .. })
+        ));
+        // Revoking the scope cuts both directions.
+        orchestrate(&f, &f.sender, false);
+        assert!(send_from(&f, &f.recipient, &f.sender, "after").is_err());
+        assert!(send_from(&f, &f.sender, &f.recipient, "after").is_err());
+    }
+    #[tokio::test]
+    async fn ungrouped_orchestrator_is_not_held_for_lacking_a_project() {
+        let f = Fixture::new();
+        f.recipient.data.lock().unwrap().project_id = None;
+        assert_eq!(
+            hold_reason(&f.app, &f.recipient),
+            Some("session is not in a project")
+        );
+        orchestrate(&f, &f.recipient, true);
+        assert_eq!(hold_reason(&f.app, &f.recipient), None);
     }
     #[tokio::test]
     async fn idle_sleep_waits_for_quiet_and_mail_marks_it_for_waking() {

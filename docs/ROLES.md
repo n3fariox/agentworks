@@ -4,7 +4,7 @@ A role is a named set of instructions that Agentworks adds to an agent's system 
 
 ## Library
 
-Four built-in roles ship with Agentworks: Coordinator, Implementer, Reviewer and Researcher. Built-in roles are read-only and follow the shipped text. Custom roles are stored in the Agentworks SQLite database:
+Five built-in roles ship with Agentworks: Coordinator, Orchestrator, Implementer, Reviewer and Researcher. The orchestrator slot applies Orchestrator automatically when its harness supports roles. Built-in roles are read-only and follow the shipped text. Custom roles are stored in the Agentworks SQLite database:
 
 | Method | Path | Body |
 | --- | --- | --- |

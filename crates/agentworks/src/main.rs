@@ -8,6 +8,7 @@ mod codex_oauth;
 mod codex_transcript;
 mod communication;
 mod completion;
+mod orchestrator;
 mod controllers;
 mod diff;
 mod directories;
@@ -821,6 +822,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = catalog_path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
+    communication::init_orchestrator_dir(&catalog_path)?;
     let _catalog_lock = store::exclusive(
         &catalog_path.with_extension("json.lock"),
         "Another Agentworks process is already using this catalog",
@@ -1544,6 +1546,13 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             post(account_quota::refresh),
         )
         .route("/api/catalog", get(get_catalog))
+        .route(
+            "/api/orchestrator",
+            get(orchestrator::get)
+                .post(orchestrator::create)
+                .delete(orchestrator::clear),
+        )
+        .route("/api/orchestrator/fork", post(orchestrator::fork))
         .route("/api/hosts", post(hosts::add))
         .route("/api/hosts/enroll/events", get(enrollment::upgrade))
         .route(
@@ -2519,6 +2528,8 @@ async fn import_session(State(app): State<App>, Json(req): Json<ImportSession>) 
     .await
 }
 async fn get_catalog(State(app): State<App>) -> Json<Value> {
+    // Resolved before the catalog guard; it reads sessions and grants.
+    let orchestrator = communication::orchestrator(&app).map(|s| s.id.clone());
     let catalog = app.catalog.lock().unwrap();
     let mut hosts = vec![json!({"id":"local","name":"Local","status":"connected","kind":"local"})];
     hosts.extend(
@@ -2532,6 +2543,7 @@ async fn get_catalog(State(app): State<App>) -> Json<Value> {
         "hosts": hosts,
         "projects": catalog.data.projects,
         "locations": catalog.data.locations,
+        "orchestratorId": orchestrator,
     }))
 }
 #[derive(Deserialize)]
@@ -2791,6 +2803,12 @@ async fn assign_project(
     let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
     let mut catalog = app.catalog.lock().unwrap();
+    if req.project_id.is_some() && catalog.data.orchestrator.as_deref() == Some(&s.id) {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "The orchestrator cannot join a project; clear its slot first",
+        ));
+    }
     if req
         .project_id
         .as_deref()
@@ -2934,6 +2952,18 @@ async fn fork_session(
     Path(id): Path<String>,
     Json(req): Json<Fork>,
 ) -> ApiResult {
+    communication::not_slotted(&app, &*session(&app, &id)?, "Forking")?;
+    fork_session_inner(&app, &id, req, false).await
+}
+/// `orchestrator_slot` is set only by the orchestrator slot's own fork.
+async fn fork_session_inner(
+    app: &App,
+    id: &str,
+    req: Fork,
+    orchestrator_slot: bool,
+) -> ApiResult {
+    let app = app.clone();
+    let id = id.to_owned();
     let _run = app.run_lock.lock().await;
     service_restart::allow_start(&app)?;
     limit_resume::new_policy(req.resume_policy.clone())?;
@@ -3083,6 +3113,7 @@ async fn fork_session(
             control_origin: None,
             fork: Some(seed),
             already_routed,
+            orchestrator_slot,
         },
         Some(&key),
     )
@@ -3142,6 +3173,9 @@ struct Create {
     fork: Option<fork::Seed>,
     #[serde(skip)]
     already_routed: Option<agentworks_session::model::RoutingDecision>,
+    /// Created by the orchestrator slot: the only way into the orchestrator directory.
+    #[serde(skip)]
+    orchestrator_slot: bool,
 }
 async fn create_session(State(app): State<App>, Json(req): Json<Create>) -> ApiResult {
     limit_resume::new_policy(req.resume_policy.clone())?;
@@ -3321,6 +3355,16 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
                 "Remote directory validation timed out",
             )
         })??,
+        None if req.orchestrator_slot && req.project_id.is_none() => {
+            communication::orchestrator_dir()
+                .map(std::path::Path::to_path_buf)
+                .ok_or_else(|| {
+                    fail(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "The orchestrator directory is unavailable",
+                    )
+                })?
+        }
         None => checked_cwd(app, &req.cwd)?,
     };
     tracing::info!(
@@ -3377,6 +3421,9 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
     let step = std::time::Instant::now();
     let (cwd, owned_worktree) = if let Some(host) = remote_host.as_deref() {
         hosts::prepare_workspace(app, host, &req, source, creation_key).await?
+    } else if req.orchestrator_slot {
+        // The orchestrator directory is used as is: no worktree, no further root check.
+        (source, None)
     } else {
         tokio::time::timeout(
             std::time::Duration::from_secs(120),
@@ -4089,6 +4136,7 @@ async fn delete_session(
     let _gate = app.communication_lock.lock().await;
     let _run = app.run_lock.lock().await;
     let s = session(&app, &id)?;
+    communication::not_slotted(&app, &s, "Deleting")?;
     inbox_delivery::drop_from_sender(&app, &s, "Sender deleted")?;
     let _ = lifecycle::suspend_locked(&s).await?;
     git_settings::exit(&app, &s, "delete", &[]).await?;
@@ -4104,6 +4152,15 @@ async fn delete_session(
     }
     delete_session_locked(&app, &s).await?;
     Ok(Json(json!({"ok":true})))
+}
+/// Deletes a session the orchestrator slot has already released. The caller holds the
+/// communication lock; this takes the run lock and stops the harness first.
+async fn delete_session_unlocked(app: &App, s: &Session) -> Result<(), (StatusCode, String)> {
+    let _run = app.run_lock.lock().await;
+    inbox_delivery::drop_from_sender(app, s, "Sender deleted")?;
+    let _ = lifecycle::suspend_locked(s).await?;
+    git_settings::exit(app, s, "delete", &[]).await?;
+    delete_session_locked(app, s).await
 }
 /// Callers hold the communication and run locks, have stopped the harness, and completed exit hooks.
 async fn delete_session_locked(app: &App, s: &Session) -> Result<(), (StatusCode, String)> {
