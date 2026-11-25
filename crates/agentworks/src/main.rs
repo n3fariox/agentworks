@@ -2173,6 +2173,17 @@ async fn save_settings(State(app): State<App>, Json(mut settings): Json<Settings
             normalized.push(path);
         }
     }
+    // Refused whether or not the slot is filled: the directory is fixed at startup, so no
+    // saved root can ever contain it, and slot create/fork need no lock against this save.
+    if let Some(root) = communication::root_over_orchestrator_dir(&normalized) {
+        return Err(fail(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "The root {} contains the orchestrator directory; choose a narrower root or set AGENTWORKS_ORCHESTRATOR_DIR elsewhere",
+                root.display()
+            ),
+        ));
+    }
     if settings
         .max_active_sessions
         .is_some_and(|n| !(1..=catalog::MAX_ACTIVE_SESSIONS).contains(&n))
