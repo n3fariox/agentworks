@@ -111,7 +111,7 @@ export function statusLabel(status){
     waiting:'Waiting for approval',idle:'Ready',suspended:'Suspended',error:'Error',closed:'Closed'}[status]||status||'Unknown';
 }
 
-export function sessionItems(sessions,{labels={},hosts=[],projects=[],activeId=null,includeArchived=false}={}){
+export function sessionItems(sessions,{labels={},hosts=[],projects=[],activeId=null,includeArchived=false,recent=[]}={}){
   // Archived sessions stay out unless asked for; the current session is always listed so it never vanishes.
   const list=(sessions||[]).filter(session=>includeArchived||!session.archived||session.id===activeId);
   const hostName=id=>hosts.find(h=>h.id===id)?.name||id||'Local';
@@ -130,11 +130,19 @@ export function sessionItems(sessions,{labels={},hosts=[],projects=[],activeId=n
       search:[session.title,project,host,pathTail(session.cwd,3),labels[session.provider]||session.provider,statusLabel(session.status)].filter(Boolean).join(' '),
       path:session.cwd,status:session.status,current:session.id===activeId,session};
   });
-  // Unprompted lists keep running work visible first; the session API already returns newest first.
-  // Archived sessions, when included, follow every other session; each group keeps busy work first.
+  // Unprompted lists open on the current session, then the sessions this browser visited most recently so
+  // two of them can be flipped between, then live work (busy, ready, then suspended or stopped), then
+  // archived sessions. The session API already returns newest first, which breaks every remaining tie.
   const busy=item=>['running','waiting','starting','resuming','configuring','cancelling'].includes(item.status);
-  const ordered=group=>[...group.filter(busy),...group.filter(item=>!busy(item))];
-  return [...ordered(items.filter(item=>!item.session.archived)),...ordered(items.filter(item=>item.session.archived))];
+  const visited=new Map((recent||[]).map((id,index)=>[id,index]));
+  const tier=item=>item.current?0:item.session.archived?(busy(item)?5:6):visited.has(item.id)?1:busy(item)?2:item.status==='idle'?3:4;
+  return items.map((item,index)=>({item,index,tier:tier(item),seen:visited.get(item.id)??0}))
+    .sort((a,b)=>a.tier-b.tier||(a.tier===1?a.seen-b.seen:0)||a.index-b.index).map(entry=>entry.item);
+}
+
+// Most recent first, without repeats, capped so the stored list stays small.
+export function rememberVisit(recent,id,limit=10){
+  return [id,...(Array.isArray(recent)?recent:[]).filter(other=>other!==id)].slice(0,limit);
 }
 
 export function sessionRanking(query,items,options={}){
@@ -221,7 +229,7 @@ export function setupPalettes({$,state=()=>({}),handlers={},selectSession,labels
 
   function build(){
     const current=state();
-    return mode==='sessions'?sessionItems(list0(),{labels,hosts:hosts0(),projects:projects0(),activeId:current.active?.id,includeArchived:!!archivedSwitch?.checked}):actionItems(current,handlers);
+    return mode==='sessions'?sessionItems(list0(),{labels,hosts:hosts0(),projects:projects0(),activeId:current.active?.id,includeArchived:!!archivedSwitch?.checked,recent:current.recent}):actionItems(current,handlers);
   }
   function highlighted(parent,text,positions){
     const source=String(text??''),set=positions&&positions.length?new Set(positions):null;
@@ -278,6 +286,12 @@ export function setupPalettes({$,state=()=>({}),handlers={},selectSession,labels
     status.textContent=ranked.length?ranked.length+(ranked.length===1?' result':' results')+(chosen?.disabled?' · selected entry unavailable':''):'No results';
     paint();
   }
+  // With nothing typed, the session list highlights the session visited before this one, so Ctrl/Cmd+P then
+  // Enter flips back to it.
+  function startPosition(){
+    if(mode!=='sessions'||input.value.trim()||!ranked[0]?.current||ranked.length<2)return;
+    active=1;paint();
+  }
   function paint(){
     const options=list.querySelectorAll('[role=option]');
     for(const option of options)option.setAttribute('aria-selected',String(Number(option.dataset.index)===active));
@@ -315,7 +329,7 @@ export function setupPalettes({$,state=()=>({}),handlers={},selectSession,labels
       if(archivedSwitch)archivedSwitch.disabled=!archived;
     }
     if(!dialog.open)dialog.showModal();
-    render();input.focus();onOpen?.(mode);
+    render();startPosition();input.focus();onOpen?.(mode);
     return true;
   }
   // Run now as well as from the dialog's own close event: the event is queued, and a palette reopened
@@ -345,7 +359,7 @@ export function setupPalettes({$,state=()=>({}),handlers={},selectSession,labels
   for(const tab of tabs)tab.onclick=()=>show(tab.id==='palette-mode-sessions'?'sessions':'actions');
   input.addEventListener('input',()=>{active=0;render();});
   // Flipping the switch keeps the query and hands the keyboard back to the search box.
-  archivedSwitch?.addEventListener('change',()=>{active=0;render();input.focus();});
+  archivedSwitch?.addEventListener('change',()=>{active=0;render();startPosition();input.focus();});
   input.addEventListener('keydown',event=>{
     if(event.isComposing)return;
     // Only vertical keys are claimed: horizontal keys, Home/End and Tab keep their normal text-editing and

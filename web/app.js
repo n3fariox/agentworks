@@ -14,7 +14,7 @@ import {setupImageViewer} from './image-viewer.js';
 import {setupChatReferences,renderUserReferences} from './chat-references.js';
 import {createWorkspace} from './workspace.js';
 import {setupCommunication} from './communication.js';
-import {setupPalettes} from './palettes.js';
+import {setupPalettes,rememberVisit} from './palettes.js';
 import {enhanceMermaid} from './mermaid.js';
 import {setupMarkdownComposer} from './markdown-composer.bundle.js';
 import {setupDisplayPreferences} from './display-preferences.js';
@@ -834,6 +834,7 @@ function selectSession(s) {
   clearTimeout(retryTimer);generation++;socket?.close();socket=null;connected=false;
   active=s;storedEvents=[];older={mode:'none',loading:false,error:''};currentUserSeq=null;promptRecovery.render();status=s.status;modelConfig=null;permissionModes=null;sessionConfig=null;availableCommands=[];commandsOpen=false;renderCommands();mentions.close();taskMentions.close();taskMentions.refresh();composerMenu.close();sessionMenu.close();resetTranscript();usageStatus.reset();inputQueue.reset();
   localStorage.setItem('agentworks-session',s.id);$('welcome').hidden=true;$('conversation').hidden=false;
+  try{localStorage.setItem('agentworks-recent-sessions',JSON.stringify(rememberVisit(readStorage(localStorage,'agentworks-recent-sessions',[]),s.id)));}catch{}
   github.sessionChanged();refreshCommunicates(s.id);
   setTitle(s.title);$('provider-label').textContent=labels[s.provider];$('project-path').textContent=s.cwd;showPlace();
   $('session-notice').hidden=true;document.body.classList.remove('menu-open');sidebarPin.close();sidebar();updateControls();connect(generation);
@@ -2133,7 +2134,7 @@ function usageCommand(){return availableCommands.find(c=>c.name===(active?.provi
 setupPalettes({
   $,labels,selectSession,
   fallbackFocus:()=>active?$('prompt'):null,
-  state:()=>({active,orchestrator:!!active&&active.id===orchestratorId,status,connected,sessions,projects,hosts,commands:availableCommands,
+  state:()=>({active,recent:readStorage(localStorage,'agentworks-recent-sessions',[]),orchestrator:!!active&&active.id===orchestratorId,status,connected,sessions,projects,hosts,commands:availableCommands,
     usageAvailable:!!active&&(active.provider==='antigravity'||['claude','claude-rust','codex','codex-rust'].includes(active.provider)&&!!usageCommand()),
     views:{files:()=>$('nav-files').click(),automations:()=>$('nav-automations').click()}}),
   handlers:{

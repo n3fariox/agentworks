@@ -3,7 +3,7 @@ import {test,expect} from '@playwright/test';
 import {spawn} from 'node:child_process';
 import {mkdtemp,mkdir,rm,readdir,readFile} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
-import {fuzzyScore,rankItems,sessionItems,sessionRanking,actionItems,commandText,statusLabel} from '../web/palettes.js';
+import {fuzzyScore,rankItems,sessionItems,sessionRanking,rememberVisit,actionItems,commandText,statusLabel} from '../web/palettes.js';
 
 // Own server, SQLite store, catalog, demo state and roots: never the live service or the shared verify port.
 const base='http://127.0.0.1:4431';
@@ -198,12 +198,13 @@ test('archived sessions are listed only on request, marked and kept after live w
   ];
   const context={labels:{demo:'Demo agent'},hosts:[{id:'local',name:'Local'}],activeId:'here'};
   // Off by default; the current session stays listed even when it is archived.
-  expect(sessionItems(sessions,context).map(i=>i.id)).toEqual(['live','here']);
+  expect(sessionItems(sessions,context).map(i=>i.id)).toEqual(['here','live']);
   expect(sessionItems(sessions,{...context,activeId:null}).map(i=>i.id)).toEqual(['live']);
   const all=sessionItems(sessions,{...context,includeArchived:true});
-  expect(all.map(i=>i.id)).toEqual(['live','old','here']);
-  expect(all[1].detail).toBe('Archived · Demo agent · Local · old');
-  expect(all[2].detail).toBe('Current · Archived · Demo agent · Local · here');
+  // The current session leads even when archived; other archived sessions follow live ones.
+  expect(all.map(i=>i.id)).toEqual(['here','live','old']);
+  expect(all[2].detail).toBe('Archived · Demo agent · Local · old');
+  expect(all[0].detail).toBe('Current · Archived · Demo agent · Local · here');
   // An archived session that still reports a busy status stays after idle live sessions; busy-first holds within each group.
   const mixed=[
     {id:'arch-idle',title:'A',provider:'demo',status:'idle',cwd:'/a',hostId:'local',archived:true},
@@ -212,6 +213,29 @@ test('archived sessions are listed only on request, marked and kept after live w
     {id:'live-busy',title:'D',provider:'demo',status:'waiting',cwd:'/d',hostId:'local'},
   ];
   expect(sessionItems(mixed,{...context,activeId:null,includeArchived:true}).map(i=>i.id)).toEqual(['live-busy','live-idle','arch-busy','arch-idle']);
+});
+
+test('unprompted session lists open on the current session, then recent visits, then live work by state',()=>{
+  const sessions=[
+    {id:'parked',title:'Parked',provider:'demo',status:'suspended',cwd:'/p',hostId:'local'},
+    {id:'ready',title:'Ready',provider:'demo',status:'idle',cwd:'/r',hostId:'local'},
+    {id:'busy',title:'Busy',provider:'demo',status:'running',cwd:'/b',hostId:'local'},
+    {id:'here',title:'Here',provider:'demo',status:'idle',cwd:'/h',hostId:'local'},
+    {id:'older',title:'Older',provider:'demo',status:'suspended',cwd:'/o',hostId:'local'},
+    {id:'gone',title:'Gone',provider:'demo',status:'idle',cwd:'/g',hostId:'local',archived:true},
+  ];
+  const context={labels:{demo:'Demo agent'},hosts:[{id:'local',name:'Local'}],activeId:'here'};
+  // Without visits, ready sessions come before suspended ones even when the suspended one is newer.
+  expect(sessionItems(sessions,context).map(i=>i.id)).toEqual(['here','busy','ready','parked','older']);
+  // Visits outrank state, most recent first; an unknown or archived id changes nothing.
+  const recent=['here','older','missing','parked','gone'];
+  expect(sessionItems(sessions,{...context,recent}).map(i=>i.id)).toEqual(['here','older','parked','busy','ready']);
+  expect(sessionItems(sessions,{...context,recent,includeArchived:true}).map(i=>i.id)).toEqual(['here','older','parked','busy','ready','gone']);
+  // A typed query still ranks by match; equal matches keep the recency order.
+  expect(sessionRanking('demo',sessionItems(sessions,{...context,recent})).map(i=>i.id)).toEqual(['here','older','parked','busy','ready']);
+  expect(rememberVisit(['a','b','c'],'b')).toEqual(['b','a','c']);
+  expect(rememberVisit(null,'a')).toEqual(['a']);
+  expect(rememberVisit(['1','2','3','4','5','6','7','8','9','10'],'new')).toHaveLength(10);
 });
 
 test('actions expose existing UI work and refuse commands until the session is ready',()=>{
@@ -482,6 +506,18 @@ test('desktop: shortcuts, fuzzy session switching, drafts, running turns and com
   await page.locator('#prompt-editor .cm-content').fill('');
   await page.keyboard.press('Control+p');
   await page.locator('#palette-input').fill('omega');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#header-title')).toHaveText('Beta chat');
+  await expect(page.locator('#prompt')).toHaveValue('draft for omega');
+  // With nothing typed, the previously visited session is highlighted, so Ctrl+P then Enter flips back and forth.
+  await page.keyboard.press('Control+p');
+  await expect(page.locator('#palette-list [role=option]').first()).toContainText('Current');
+  await expect(page.locator('#palette-list [aria-selected=true]')).toContainText('Alpha chat');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#header-title')).toHaveText('Alpha chat');
+  await page.keyboard.press('Control+p');
+  await expect(page.locator('#palette-list [aria-selected=true]')).toContainText('Beta chat');
+  await expect(page.locator('#palette-list [aria-selected=true]')).toContainText('omega');
   await page.keyboard.press('Enter');
   await expect(page.locator('#header-title')).toHaveText('Beta chat');
   await expect(page.locator('#prompt')).toHaveValue('draft for omega');
