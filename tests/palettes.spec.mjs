@@ -230,6 +230,9 @@ test('unprompted session lists open on the current session, then recent visits, 
   // Visits outrank state, most recent first; an unknown or archived id changes nothing.
   const recent=['here','older','missing','parked','gone'];
   expect(sessionItems(sessions,{...context,recent}).map(i=>i.id)).toEqual(['here','older','parked','busy','ready']);
+  // Only recent-visit rows are marked, so the palette preselects a real previous visit and nothing else.
+  expect(sessionItems(sessions,{...context,recent}).map(i=>!!i.visited)).toEqual([false,true,true,false,false]);
+  expect(sessionItems(sessions,{...context,recent:['here']}).some(i=>i.visited)).toBe(false);
   expect(sessionItems(sessions,{...context,recent,includeArchived:true}).map(i=>i.id)).toEqual(['here','older','parked','busy','ready','gone']);
   // A typed query still ranks by match; equal matches keep the recency order.
   expect(sessionRanking('demo',sessionItems(sessions,{...context,recent})).map(i=>i.id)).toEqual(['here','older','parked','busy','ready']);
@@ -482,6 +485,9 @@ test('desktop: shortcuts, fuzzy session switching, drafts, running turns and com
   // Ctrl+P is a separate session palette that matches title, project, host and directory.
   await page.keyboard.press('Control+p');
   await expect(page.locator('#palette-title')).toHaveText('Switch session');
+  await expect(page.locator('#palette-list [role=option]')).toHaveCount(3);
+  // Before any earlier visit, nothing else is preselected: the highlight stays on the first row.
+  await expect(page.locator('#palette-list [role=option]').first()).toHaveAttribute('aria-selected','true');
   await expect(page.locator('#palette-list [role=option]')).toHaveCount(3);
   await expect(page.locator('#palette-list')).toContainText('Palette project');
   await expect(page.locator('#palette-list')).toContainText('Second project');

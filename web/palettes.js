@@ -136,8 +136,10 @@ export function sessionItems(sessions,{labels={},hosts=[],projects=[],activeId=n
   const busy=item=>['running','waiting','starting','resuming','configuring','cancelling'].includes(item.status);
   const visited=new Map((recent||[]).map((id,index)=>[id,index]));
   const tier=item=>item.current?0:item.session.archived?(busy(item)?5:6):visited.has(item.id)?1:busy(item)?2:item.status==='idle'?3:4;
+  // `visited` marks the recent-visit rows so the palette can preselect the previous one, and nothing else.
   return items.map((item,index)=>({item,index,tier:tier(item),seen:visited.get(item.id)??0}))
-    .sort((a,b)=>a.tier-b.tier||(a.tier===1?a.seen-b.seen:0)||a.index-b.index).map(entry=>entry.item);
+    .sort((a,b)=>a.tier-b.tier||(a.tier===1?a.seen-b.seen:0)||a.index-b.index)
+    .map(entry=>entry.tier===1?{...entry.item,visited:true}:entry.item);
 }
 
 // Most recent first, without repeats, capped so the stored list stays small.
@@ -287,9 +289,9 @@ export function setupPalettes({$,state=()=>({}),handlers={},selectSession,labels
     paint();
   }
   // With nothing typed, the session list highlights the session visited before this one, so Ctrl/Cmd+P then
-  // Enter flips back to it.
+  // Enter flips back to it. Without such a visit the highlight stays on the current session.
   function startPosition(){
-    if(mode!=='sessions'||input.value.trim()||!ranked[0]?.current||ranked.length<2)return;
+    if(mode!=='sessions'||input.value.trim()||!ranked[0]?.current||!ranked[1]?.visited)return;
     active=1;paint();
   }
   function paint(){
