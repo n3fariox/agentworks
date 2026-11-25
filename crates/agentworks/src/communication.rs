@@ -295,16 +295,30 @@ pub fn actor_orchestrates(app: &App, a: &Actor) -> bool {
     a.session.as_ref().is_some_and(|s| orchestrates(app, s))
 }
 static ORCHESTRATOR_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-/// Server-owned, empty working directory for the orchestrator, next to the catalog. It is
-/// not an allowed root (so no project or agent can pick it); `checked_cwd` admits exactly it.
-pub fn init_orchestrator_dir(catalog: &std::path::Path) -> std::io::Result<()> {
-    let dir = catalog
-        .parent()
-        .unwrap_or(std::path::Path::new("."))
-        .join("orchestrator");
+/// Server-owned, empty working directory for the orchestrator: `~/.agentworks/orchestrator`,
+/// or `AGENTWORKS_ORCHESTRATOR_DIR`. It must sit outside every allowed root, so no project
+/// session can work in it or write instruction files into it; `checked_cwd` rejects it and
+/// everything below it, and the slot refuses to start while a root contains it.
+pub fn init_orchestrator_dir() -> std::io::Result<()> {
+    let dir = match std::env::var_os("AGENTWORKS_ORCHESTRATOR_DIR") {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => std::env::home_dir()
+            .ok_or_else(|| std::io::Error::other("HOME is not set"))?
+            .join(".agentworks/orchestrator"),
+    };
     std::fs::create_dir_all(&dir)?;
     let _ = ORCHESTRATOR_DIR.set(std::fs::canonicalize(dir)?);
     Ok(())
+}
+/// Whether `path` is the orchestrator directory or inside it.
+pub fn in_orchestrator_dir(path: &std::path::Path) -> bool {
+    orchestrator_dir().is_some_and(|dir| path.starts_with(dir))
+}
+/// An allowed root that contains the orchestrator directory, which would let project
+/// sessions reach it.
+pub fn root_over_orchestrator_dir(roots: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    let dir = orchestrator_dir()?;
+    roots.iter().find(|r| dir.starts_with(r)).cloned()
 }
 pub fn orchestrator_dir() -> Option<&'static std::path::Path> {
     ORCHESTRATOR_DIR.get().map(|p| p.as_path())
@@ -329,8 +343,8 @@ pub fn not_slotted(app: &App, s: &Session, action: &str) -> Result<()> {
     }
     Ok(())
 }
-/// A session's own working directory is still usable: inside the allowed roots, or the
-/// orchestrator directory for the slotted orchestrator only.
+/// A session's own working directory is still usable: inside the allowed roots (never the
+/// orchestrator directory), or the orchestrator directory for the slotted orchestrator only.
 pub fn session_cwd_ok(app: &App, s: &Session) -> bool {
     let cwd = s.cwd();
     if orchestrator_dir() == Some(cwd.as_path()) {

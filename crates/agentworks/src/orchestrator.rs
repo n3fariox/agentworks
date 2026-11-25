@@ -2,10 +2,11 @@
 //! routes and manages work across every project and never codes itself.
 //!
 //! Sessions never move in or out of the slot. The slot creates its own session in a
-//! server-owned directory (`New orchestrator`), replaces it with a fork on another harness
-//! (the old one is deleted), or is cleared (its session is deleted). The slotted session
-//! cannot be archived, deleted, forked, moved or regrouped through the ordinary endpoints,
-//! and the slot is locked while its turn runs.
+//! server-owned directory outside every allowed root (`New orchestrator`), replaces it with a
+//! fork on another harness (the old one is deleted), or is cleared (its session is deleted,
+//! which empties the slot). Routing never picks the slot's own harness. The slotted session
+//! cannot be archived, deleted, forked, moved or regrouped through the ordinary endpoints, and
+//! fork and clear are refused while its turn runs.
 use crate::{ApiResult, App, communication as mail, fail};
 use axum::{Json, extract::State, http::StatusCode};
 use serde::Deserialize;
@@ -72,6 +73,20 @@ fn save_slot(app: &App, id: Option<String>) -> Result<(), (StatusCode, String)> 
             )
         })
 }
+/// Refuses while an allowed root contains the orchestrator directory: project sessions
+/// could then write instruction files where the orchestrator runs.
+fn roots_clear(app: &App) -> Result<(), (StatusCode, String)> {
+    match mail::root_over_orchestrator_dir(&crate::effective_roots(app)) {
+        Some(root) => Err(fail(
+            StatusCode::CONFLICT,
+            format!(
+                "The allowed root {} contains the orchestrator directory; remove that root or set AGENTWORKS_ORCHESTRATOR_DIR elsewhere",
+                root.display()
+            ),
+        )),
+        None => Ok(()),
+    }
+}
 fn role(provider: &str) -> Option<String> {
     crate::roles::supported(provider).then(|| "orchestrator".to_owned())
 }
@@ -98,6 +113,7 @@ pub async fn create(State(app): State<App>, Json(req): Json<NewOrchestrator>) ->
             ),
         ));
     }
+    roots_clear(&app)?;
     let provider = req.provider.trim().to_owned();
     if provider.is_empty() || provider == "auto" {
         return Err(fail(
@@ -133,9 +149,13 @@ pub async fn create(State(app): State<App>, Json(req): Json<NewOrchestrator>) ->
 /// session is deleted.
 pub async fn fork(State(app): State<App>, Json(req): Json<ForkOrchestrator>) -> ApiResult {
     let _gate = app.communication_lock.lock().await;
+    // Turns start under run_lock, so holding it from the check through the delete keeps
+    // a new turn from starting on the orchestrator being replaced.
+    let _run = app.run_lock.lock().await;
     let old = current(&app)
         .ok_or_else(|| fail(StatusCode::NOT_FOUND, "There is no orchestrator to fork"))?;
     between_turns(&old)?;
+    roots_clear(&app)?;
     let provider = req.provider.trim().to_owned();
     if provider.is_empty() || provider == "auto" {
         return Err(fail(
@@ -143,7 +163,7 @@ pub async fn fork(State(app): State<App>, Json(req): Json<ForkOrchestrator>) -> 
             "Choose a harness for the orchestrator",
         ));
     }
-    let child = crate::fork_session_inner(
+    let child = crate::fork_session_locked(
         &app,
         &old.id,
         crate::Fork {
@@ -168,7 +188,7 @@ pub async fn fork(State(app): State<App>, Json(req): Json<ForkOrchestrator>) -> 
     .0;
     save_slot(&app, child["id"].as_str().map(str::to_owned))?;
     // The replaced orchestrator is tossed, not kept as a regular session.
-    if let Err((_, error)) = crate::delete_session_unlocked(&app, &old).await {
+    if let Err((_, error)) = crate::delete_slot_session(&app, &old).await {
         tracing::warn!(session = %old.id, %error, "Could not delete the replaced orchestrator");
         return Ok(Json(
             json!({"session":child,"warning":format!("The fork is the orchestrator, but the old session could not be deleted: {error}")}),
@@ -178,14 +198,16 @@ pub async fn fork(State(app): State<App>, Json(req): Json<ForkOrchestrator>) -> 
 }
 
 /// Clears the slot and deletes its session.
+/// Clears the slot by deleting its session; deletion empties the slot.
 pub async fn clear(State(app): State<App>) -> ApiResult {
     let _gate = app.communication_lock.lock().await;
+    let _run = app.run_lock.lock().await;
     let Some(old) = current(&app) else {
+        // A stale ID left by a session that no longer exists.
         save_slot(&app, None)?;
         return Ok(Json(json!({"cleared":true})));
     };
     between_turns(&old)?;
-    save_slot(&app, None)?;
-    crate::delete_session_unlocked(&app, &old).await?;
+    crate::delete_slot_session(&app, &old).await?;
     Ok(Json(json!({"cleared":true})))
 }

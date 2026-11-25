@@ -175,6 +175,8 @@ function toast(message,tone='error') {
 function el(tag,className,text) {const node=document.createElement(tag);if(className)node.className=className;if(text!==undefined)node.textContent=text;return node;}
 function basename(path) {return path.replaceAll('\\','/').split('/').filter(Boolean).at(-1)||path;}
 function effectiveSessionRouting(projectId=$('create-project')?.value||null){
+  // The orchestrator's own harness is the human's choice; the sessions it starts are still routed.
+  if(slotIntent)return {mode:'off'};
   const global=config?.sessionRouting||{mode:'off',approach:'quota_round_robin',candidates:[]};
   if((global.mode||'off')==='off')return {...global,mode:'off'};
   const project=projectId?projects.find(p=>p.id===projectId)?.sessionRouting:null;
@@ -697,19 +699,17 @@ function sidebar(){
   area.scrollTop=scroll;updateProjectControls();github.refreshBadges();updateNotificationIndicators();
 }
 // The orchestrator slot: one ungrouped session that routes and manages work across
-// every project. It can be cleared (archiving it), started fresh, or forked to another
-// harness, which moves the slot to the fork.
+// every project. It can be started fresh, forked to another harness (the fork takes the
+// slot and the old session is deleted), or cleared (its session is deleted).
 let closeSlotMenu=null;
+$('new-orchestrator').onclick=()=>openCreate({orchestrator:true,projectId:null,title:'Orchestrator'});
 function renderOrchestratorSlot(){
   closeSlotMenu?.();
   const area=$('orchestrator-slot');area.replaceChildren();
   const s=sessions.find(x=>x.id===orchestratorId);
-  if(!s){
-    const start=el('button','orchestrator-empty','＋ New orchestrator');start.type='button';
-    start.title='Start a session that routes and manages work across every project';
-    start.onclick=()=>openCreate({orchestrator:true,projectId:null,title:'Orchestrator'});
-    area.append(start);return;
-  }
+  // An empty slot takes no row: the ◇ button in the section header starts one.
+  $('new-orchestrator').hidden=!!s;area.hidden=!s;
+  if(!s)return;
   const row=sessionButton(s);row.classList.add('orchestrator-item');
   row.querySelector('small').textContent=`Orchestrator · ${labels[s.provider]||s.provider}${s.model?' · '+s.model:''}`;
   const more=el('button','group-action orchestrator-more','⋯');more.type='button';more.setAttribute('aria-label','Orchestrator actions');more.setAttribute('aria-haspopup','menu');
@@ -1281,7 +1281,7 @@ function updateControls(){
   $('delete-provider-history').hidden=!active?.providerCapabilities?.delete;
   // The slotted orchestrator is managed only through its slot.
   const slotted=!!active&&active.id===orchestratorId;
-  for(const id of ['fork-session','change-directory','additional-directories','archive-session','close-session','session-project'])$(id).hidden=slotted;
+  for(const id of ['fork-session','change-directory','additional-directories','archive-session','close-session','session-project','session-files','session-diff'])$(id).hidden=slotted;
   $('session-project').previousElementSibling.hidden=slotted;
   if(slotted)$('delete-provider-history').hidden=true;
   renderSessionConfig();
@@ -1703,6 +1703,7 @@ $('model-picker').onchange=async event=>{
   try{await api(`/api/sessions/${active.id}/model`,{method:'POST',body:JSON.stringify({model:event.target.value})});}
   catch(error){toast(error.message);event.target.value=modelConfig.currentValue;}
 };
+$('create-dialog').addEventListener('close',()=>{slotIntent=false;});
 $('create-form').onsubmit=async event=>{
   event.preventDefault();if(creating||worktrees.blocked())return;creating=true;providerNote();$('create-error').textContent='';
   const fork=forkSource,githubPr=githubCreate,slot=slotIntent;

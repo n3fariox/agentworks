@@ -13,7 +13,7 @@ const port=process.env.AGENTWORKS_ORCHESTRATOR_PORT||'4377',base=`http://127.0.0
 let server;
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 async function api(path,body,method=body===undefined?'GET':'POST',code=200){const r=await fetch(base+path,{method,headers:{Origin:base,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});const text=await r.text();assert.equal(r.status,code,text);return code===200?JSON.parse(text):text;}
-async function start(){server=spawn(resolve('target/debug/agentworks'),[],{env:{...process.env,AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:port,AGENTWORKS_CATALOG_PATH:dir+'/catalog.json',AGENTWORKS_DB_PATH:dir+'/sessions.sqlite3',AGENTWORKS_DEMO_STATE_DIR:dir+'/demo',AGENTWORKS_ROOTS:dir+'/root'},stdio:['ignore','inherit','inherit']});for(let i=0;i<80;i++){try{if((await fetch(base+'/api/status')).ok)return;}catch{}await delay(100);}throw new Error('Startup failed');}
+async function start(){server=spawn(resolve('target/debug/agentworks'),[],{env:{...process.env,AGENTWORKS_BIND:'127.0.0.1',AGENTWORKS_PORT:port,AGENTWORKS_CATALOG_PATH:dir+'/catalog.json',AGENTWORKS_DB_PATH:dir+'/sessions.sqlite3',AGENTWORKS_DEMO_STATE_DIR:dir+'/demo',AGENTWORKS_ROOTS:dir+'/root',AGENTWORKS_ORCHESTRATOR_DIR:dir+'/orchestrator'},stdio:['ignore','inherit','inherit']});for(let i=0;i<80;i++){try{if((await fetch(base+'/api/status')).ok)return;}catch{}await delay(100);}throw new Error('Startup failed');}
 async function stop(){const exit=once(server,'exit');server.kill('SIGINT');await exit;server=null;}
 async function idle(id){for(let i=0;i<200;i++){const s=await api(`/api/sessions/${id}`);if(s.session.status==='idle')return s;assert.notEqual(s.session.status,'error',JSON.stringify(s));await delay(100);}const last=await api(`/api/sessions/${id}`);throw new Error('Idle timed out '+id+' '+last.session.status+' '+JSON.stringify(last.events.slice(-6).map(e=>[e.kind,JSON.stringify(e.data).slice(0,200)])));}
 async function call(id,name,args={}){await idle(id);const old=await api(`/api/sessions/${id}`);await api(`/api/sessions/${id}/prompt`,{text:`mcp ${name} ${JSON.stringify(args)}`,requestId:crypto.randomUUID()});const s=await idle(id);const result=s.events.filter(e=>e.seq>old.seq&&e.kind==='acp'&&e.data.sessionUpdate==='tool_call_update').at(-1)?.data.rawOutput;assert(result,'Missing MCP result '+name+' '+JSON.stringify(s.events.filter(e=>e.seq>old.seq).map(e=>[e.kind,JSON.stringify(e.data).slice(0,300)])));return result;}
@@ -146,8 +146,22 @@ try{
   if(process.env.SCREENSHOT){
     const {chromium}=await import('playwright');const browser=await chromium.launch();
     const page=await browser.newPage({viewport:{width:1280,height:900}});await page.goto(base);
-    await page.click('.orchestrator-empty');await page.waitForSelector('#create-dialog[open]');await delay(300);
+    await page.click('#new-orchestrator');await page.waitForSelector('#create-dialog[open]');await delay(300);
     await page.screenshot({path:`${process.env.SCREENSHOT}/orchestrator-new-dialog.png`});await browser.close();
   }
-  console.log('PASS: orchestrator slot create/fork/clear, slot-only directory, guards, mid-turn lock, cross-project and ungrouped reach, grant-gated visibility');
+  // A root above the orchestrator directory: nobody may work there, and no slot starts.
+  const settings=await api('/api/settings');
+  await api('/api/settings',{...settings,roots:[dir]},'PUT');
+  await api('/api/sessions',{provider:'demo',cwd:home,title:'Under a root',projectId:alpha.id},'POST',403);
+  await api('/api/sessions',{provider:'demo',cwd:home+'/below',title:'Below, under a root',projectId:alpha.id},'POST',403);
+  denied(await call(coord.id,'start_session',{provider:'demo',cwd:home,requestId:'under-root'}));
+  await api('/api/orchestrator',{provider:'demo',requestId:'covered'},'POST',409);
+  await api('/api/settings',{...settings,roots:[resolve(dir,'root')]},'PUT');
+  // "Always" routing never picks the orchestrator's own harness.
+  await api('/api/settings',{...settings,roots:[resolve(dir,'root')],sessionRouting:{...(settings.sessionRouting||{}),mode:'always'}},'PUT');
+  assert.equal((await api('/api/settings')).sessionRouting?.mode,'always');
+  const routed=await api('/api/orchestrator',{provider:'demo',requestId:'always'});
+  assert.equal(routed.provider,'demo');assert(!routed.routing,'slot session was routed');
+  await idle(routed.id);await api('/api/orchestrator',undefined,'DELETE');
+  console.log('PASS: orchestrator slot create/fork/clear, slot-only directory, guards, mid-turn lock, cross-project and ungrouped reach, grant-gated visibility, directory outside roots, routing skipped for the slot');
 }finally{if(server)await stop();await removeFixture(dir);}

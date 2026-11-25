@@ -8,7 +8,6 @@ mod codex_oauth;
 mod codex_transcript;
 mod communication;
 mod completion;
-mod orchestrator;
 mod controllers;
 mod diff;
 mod directories;
@@ -35,6 +34,7 @@ mod model_providers;
 mod model_viewer;
 mod native_rename;
 mod notifications;
+mod orchestrator;
 mod pam;
 mod permission_modes;
 mod recovery;
@@ -822,7 +822,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = catalog_path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
-    communication::init_orchestrator_dir(&catalog_path)?;
+    communication::init_orchestrator_dir()?;
     let _catalog_lock = store::exclusive(
         &catalog_path.with_extension("json.lock"),
         "Another Agentworks process is already using this catalog",
@@ -2059,6 +2059,14 @@ fn checked_cwd(app: &App, path: &str) -> Result<PathBuf, (StatusCode, String)> {
             "Choose an existing project directory",
         )
     })?;
+    // The orchestrator directory is never a working directory for anyone else, even
+    // under a root; only the slot creates sessions there, bypassing this check.
+    if communication::in_orchestrator_dir(&cwd) {
+        return Err(fail(
+            StatusCode::FORBIDDEN,
+            "That directory belongs to the orchestrator",
+        ));
+    }
     if !cwd.is_dir() || !effective_roots(app).iter().any(|r| cwd.starts_with(r)) {
         return Err(fail(
             StatusCode::FORBIDDEN,
@@ -2956,15 +2964,14 @@ async fn fork_session(
     fork_session_inner(&app, &id, req, false).await
 }
 /// `orchestrator_slot` is set only by the orchestrator slot's own fork.
-async fn fork_session_inner(
-    app: &App,
-    id: &str,
-    req: Fork,
-    orchestrator_slot: bool,
-) -> ApiResult {
+async fn fork_session_inner(app: &App, id: &str, req: Fork, orchestrator_slot: bool) -> ApiResult {
+    let _run = app.run_lock.lock().await;
+    fork_session_locked(app, id, req, orchestrator_slot).await
+}
+/// The caller holds `run_lock`.
+async fn fork_session_locked(app: &App, id: &str, req: Fork, orchestrator_slot: bool) -> ApiResult {
     let app = app.clone();
     let id = id.to_owned();
-    let _run = app.run_lock.lock().await;
     service_restart::allow_start(&app)?;
     limit_resume::new_policy(req.resume_policy.clone())?;
     // Read-only: the parent's transcript is snapshotted without sending anything, so
@@ -3037,7 +3044,7 @@ async fn fork_session_inner(
     let routing_mode = routing::effective_mode(&app, project_id.as_deref());
     let requested_provider = req.provider.as_deref().unwrap_or("");
     let (provider, model_provider, routed_model, already_routed) =
-        if routing::should_route(routing_mode, requested_provider, false) {
+        if !orchestrator_slot && routing::should_route(routing_mode, requested_provider, false) {
             let decision = routing::route(
                 &app,
                 &routing::RouteInput {
@@ -3254,7 +3261,9 @@ async fn create_session_inner(app: &App, mut req: Create, creation_key: Option<&
     let routing_mode = routing::effective_mode(app, req.project_id.as_deref());
     let routing_decision = if let Some(decision) = req.already_routed.take() {
         Some(decision)
-    } else if routing::should_route(routing_mode, &req.provider, req.external_id.is_some()) {
+    } else if !req.orchestrator_slot
+        && routing::should_route(routing_mode, &req.provider, req.external_id.is_some())
+    {
         let requested_role = if let Some(role) = &req.inherited_role {
             Some((role.name.clone(), None))
         } else if let Some(role_id) = req.role.as_deref().filter(|r| !r.is_empty()) {
@@ -4153,10 +4162,9 @@ async fn delete_session(
     delete_session_locked(&app, &s).await?;
     Ok(Json(json!({"ok":true})))
 }
-/// Deletes a session the orchestrator slot has already released. The caller holds the
-/// communication lock; this takes the run lock and stops the harness first.
-async fn delete_session_unlocked(app: &App, s: &Session) -> Result<(), (StatusCode, String)> {
-    let _run = app.run_lock.lock().await;
+/// Deletes the orchestrator for its slot. The caller holds the communication and run locks;
+/// this stops the harness first, and deletion empties the slot.
+async fn delete_slot_session(app: &App, s: &Session) -> Result<(), (StatusCode, String)> {
     inbox_delivery::drop_from_sender(app, s, "Sender deleted")?;
     let _ = lifecycle::suspend_locked(s).await?;
     git_settings::exit(app, s, "delete", &[]).await?;
@@ -4177,6 +4185,20 @@ async fn delete_session_locked(app: &App, s: &Session) -> Result<(), (StatusCode
     app.sessions.lock().unwrap().remove(&s.id);
     app.scripts.forget(&s.id);
     s.status("closed");
+    // Deleting the orchestrator empties its slot.
+    let slotted = app.catalog.lock().unwrap().data.orchestrator.as_deref() == Some(&s.id);
+    if slotted {
+        app.catalog
+            .lock()
+            .unwrap()
+            .set_orchestrator(None)
+            .map_err(|_| {
+                fail(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "The session was deleted, but the orchestrator slot could not be emptied",
+                )
+            })?;
+    }
     Ok(())
 }
 #[derive(Deserialize)]
